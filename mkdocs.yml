@@ -1,0 +1,138 @@
+site_name: Rhapsody - Runtime for HPC-AI Scientific Workflows
+site_description: Runtime system for executing heterogeneous HPC-AI workflows with dynamic task graphs on high-performance computing infrastructures.
+site_url: https://stride-research.github.io/rhapsody
+repo_url: https://github.com/stride-research/rhapsody
+repo_name: stride-research/rhapsody
+
+theme:
+  name: material
+  palette:
+    # Palette toggle for light mode
+    - scheme: default
+      primary: blue
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Palette toggle for dark mode
+    - scheme: slate
+      primary: blue
+      accent: blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+
+plugins:
+  - search
+  # - mkdocs-jupyter:
+  #     execute: false
+  #     allow_errors: false
+  #     include_requirejs: true
+  #     include_source: true
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            show_root_toc_entry: true
+            merge_init_into_class: true
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path: docs/examples
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - getting-started/index.md
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quick-start.md
+    - API Overview: getting-started/api-overview.md
+    - Configuration: getting-started/configuration.md
+  - Examples:
+    - examples/index.md
+  - Guides:
+    - Development Guide: guides/development.md
+    - Performance Tuning: guides/performance-tuning.md
+    - Troubleshooting: guides/troubleshooting.md
+  - Tools:
+    - CLI Reference: tools/cli-reference.md
+    - Benchmarking: tools/benchmark.md
+  - API Reference:
+    - reference/index.md
+    - Configuration: reference/configuration.md
+    - Logging: reference/logging.md
+    - Tracing: reference/tracing.md
+    - Metrics: reference/metrics.md
+    - Exporters: reference/exporters.md
+    - Formatters: reference/formatters.md
+    - Utils: reference/utils.md
+    - Serialization: reference/serialization.md
+    - API: reference/api.md
+    - Decorators: reference/decorators.md
+    - Routing: reference/routing.md
+    - Writers: reference/writers.md
+  - Development:
+    - Architecture: dev/architecture.md
+    - API Design: dev/api.md
+    - Development: dev/development.md
+    - Implementation Strategy: dev/implementation-strategy.md
+    - Project Status: dev/project-status.md
+    - Roadmap: dev/roadmap.md
+    - Maturity Matrix: dev/maturity-matrix.md
+    - Debug Guide: dev/debug.md
+  - Architecture Decisions:
+    - adr/README.md
+    - Unified Architecture: adr/001-unified-observability-architecture.md
+    - Component Separation: adr/002-component-separation.md
+    - Flexible API: adr/003-flexible-legacy-api.md
+    - Multi-Middleware: adr/004-multi-middleware-architecture.md
+    - AsyncFlow Integration: adr/005-asyncflow-integration.md
+    - Use Cases: adr/006-use-cases-scenarios.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/stride-research/observe
+
+extra_css:
+  - stylesheets/extra.css
+
+extra_javascript:
+  - https://unpkg.com/mermaid@10.6.1/dist/mermaid.min.js
+  - javascripts/mermaid-init.js

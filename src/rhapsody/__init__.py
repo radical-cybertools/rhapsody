@@ -1,3 +1,0 @@
-
-NAMESPACE_SHORT = 'rr'
-
