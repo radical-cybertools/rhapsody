@@ -8,8 +8,6 @@ import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from typing import Dict
-from typing import List
 
 import pytest
 

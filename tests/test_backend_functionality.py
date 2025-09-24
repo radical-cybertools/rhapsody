@@ -10,8 +10,6 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
-from typing import Dict
-from typing import List
 
 import pytest
 

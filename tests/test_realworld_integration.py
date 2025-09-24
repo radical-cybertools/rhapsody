@@ -13,8 +13,6 @@ from dataclasses import asdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from typing import Dict
-from typing import List
 from typing import Optional
 
 import pytest
@@ -30,11 +28,11 @@ class AsyncFlowTask:
     uid: str
     name: str
     executable: str
-    arguments: List[str]
-    dependencies: List[str] = None
-    input_files: List[str] = None
-    output_files: List[str] = None
-    environment: Dict[str, str] = None
+    arguments: list[str]
+    dependencies: list[str] | None = None
+    input_files: list[str] | None = None
+    output_files: list[str] | None = None
+    environment: dict[str, str] | None = None
     working_directory: str = None
     state: TasksMainStates = TasksMainStates.RUNNING
     exit_code: Optional[int] = None
@@ -53,7 +51,7 @@ class AsyncFlowTask:
         if self.environment is None:
             self.environment = {}
 
-    def to_backend_dict(self) -> Dict[str, Any]:
+    def to_backend_dict(self) -> dict[str, Any]:
         """Convert to format expected by backends."""
         return {
             "uid": self.uid,
@@ -68,12 +66,12 @@ class AsyncFlowTask:
 class AsyncFlowWorkflowSimulator:
     """Simulates AsyncFlow workflow execution using Rhapsody backends."""
 
-    def __init__(self, backend_name: str = "concurrent", resources: Dict[str, Any] = None):
+    def __init__(self, backend_name: str = "concurrent", resources: dict[str, Any] | None = None):
         self.backend_name = backend_name
         self.resources = resources or {"max_workers": 4}
-        self.tasks: Dict[str, AsyncFlowTask] = {}
+        self.tasks: dict[str, AsyncFlowTask] = {}
         self.backend = None
-        self.execution_order: List[str] = []
+        self.execution_order: list[str] = []
         self.work_dir = None
 
     async def initialize(self):
@@ -242,7 +240,7 @@ class AsyncFlowWorkflowSimulator:
             )
         )
 
-    def get_ready_tasks(self) -> List[AsyncFlowTask]:
+    def get_ready_tasks(self) -> list[AsyncFlowTask]:
         """Get tasks that are ready to execute (dependencies satisfied)."""
         ready = []
 
@@ -263,7 +261,7 @@ class AsyncFlowWorkflowSimulator:
 
         return ready
 
-    async def execute_workflow(self) -> Dict[str, Any]:
+    async def execute_workflow(self) -> dict[str, Any]:
         """Execute the workflow with dependency resolution."""
         if not self.backend:
             await self.initialize()

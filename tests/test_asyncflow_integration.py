@@ -6,10 +6,6 @@ how AsyncFlow will use Rhapsody backends for task execution.
 
 import asyncio
 from typing import Any
-from typing import Dict
-from typing import List
-from unittest.mock import AsyncMock
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -21,7 +17,7 @@ from rhapsody.backends.constants import TasksMainStates
 class MockAsyncFlowTask:
     """Mock AsyncFlow task for testing."""
 
-    def __init__(self, task_id: str, executable: str, arguments: List[str] = None):
+    def __init__(self, task_id: str, executable: str, arguments: list[str] | None = None):
         self.uid = task_id
         self.executable = executable
         self.arguments = arguments or []
@@ -30,7 +26,7 @@ class MockAsyncFlowTask:
         self.stdout = ""
         self.stderr = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert task to dictionary format expected by backends."""
         return {
             "uid": self.uid,
@@ -46,10 +42,10 @@ class MockAsyncFlowTask:
 class MockAsyncFlowWorkflow:
     """Mock AsyncFlow workflow for integration testing."""
 
-    def __init__(self, backend_name: str = "noop", resources: Dict[str, Any] = None):
+    def __init__(self, backend_name: str = "noop", resources: dict[str, Any] | None = None):
         self.backend_name = backend_name
         self.resources = resources or {}
-        self.tasks: List[MockAsyncFlowTask] = []
+        self.tasks: list[MockAsyncFlowTask] = []
         self.backend: BaseExecutionBackend = None
 
     async def initialize_backend(self):
@@ -63,13 +59,13 @@ class MockAsyncFlowWorkflow:
         else:
             self.backend = rhapsody.get_backend(self.backend_name)
 
-    def add_task(self, task_id: str, executable: str, arguments: List[str] = None):
+    def add_task(self, task_id: str, executable: str, arguments: list[str] | None = None):
         """Add a task to the workflow."""
         task = MockAsyncFlowTask(task_id, executable, arguments)
         self.tasks.append(task)
         return task
 
-    async def execute_workflow(self) -> Dict[str, Any]:
+    async def execute_workflow(self) -> dict[str, Any]:
         """Execute the workflow using the Rhapsody backend."""
         if not self.backend:
             await self.initialize_backend()
@@ -289,8 +285,6 @@ class TestAsyncFlowIntegration:
         assert callable(noop_backend.get_task_states_map)
 
         # Test basic state enumeration exists
-        from rhapsody.backends.constants import TasksMainStates
-
         assert hasattr(TasksMainStates, "DONE")
         assert hasattr(TasksMainStates, "FAILED")
         assert hasattr(TasksMainStates, "CANCELED")
