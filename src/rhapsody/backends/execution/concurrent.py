@@ -14,8 +14,8 @@ import subprocess
 from concurrent.futures import Executor
 from typing import Any, Callable, Optional
 
-from ..constants import StateMapper
 from ..base import BaseExecutionBackend, Session
+from ..constants import StateMapper
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
                 stderr=asyncio.subprocess.PIPE,
                 close_fds=True
             )
-            
+
             # Communicate and get results
             stdout, stderr = await process.communicate()
             exit_code = process.returncode
@@ -209,16 +209,16 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
     async def shutdown(self) -> None:
         """Shutdown the executor with proper resource cleanup."""
         await self.cancel_all_tasks()
-        
+
         # Give time for tasks to complete cleanup
         await asyncio.sleep(0.1)
-        
+
         # Shutdown executor
         self.executor.shutdown(wait=True)
-        
+
         # Force garbage collection to clean up any remaining resources
         gc.collect()
-        
+
         logger.info("Concurrent execution backend shutdown complete")
 
     def build_task(self, uid, task_desc, task_specific_kwargs):
@@ -259,5 +259,7 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
         Returns:
             Fully initialized ConcurrentExecutionBackend instance.
         """
+        backend = cls(executor)
+        return await backend        """
         backend = cls(executor)
         return await backend
