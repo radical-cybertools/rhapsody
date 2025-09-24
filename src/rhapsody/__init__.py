@@ -8,7 +8,9 @@ and distributed computing systems.
 
 from __future__ import annotations
 
-from .backends import get_backend, discover_backends, BackendRegistry
+from .backends import BackendRegistry
+from .backends import discover_backends
+from .backends import get_backend
 
 __version__ = "0.1.0"
 

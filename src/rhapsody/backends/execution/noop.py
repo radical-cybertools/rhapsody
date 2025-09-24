@@ -1,31 +1,31 @@
-"""
-No-operation execution backend for testing and development.
+"""No-operation execution backend for testing and development.
 
-This module provides a no-op backend that simulates task execution without
-actually running any tasks.
+This module provides a no-op backend that simulates task execution without actually running any
+tasks.
 """
 
 from __future__ import annotations
 
 from typing import Callable
 
+from ..base import BaseExecutionBackend
+from ..base import Session
 from ..constants import StateMapper
-from ..base import BaseExecutionBackend, Session
 
 
 class NoopExecutionBackend(BaseExecutionBackend):
     """A no-operation execution backend for testing and development purposes.
 
-    This backend simulates task execution without actually running any tasks.
-    All submitted tasks immediately return dummy output and transition to DONE state.
-    Useful for testing workflow logic without computational overhead.
+    This backend simulates task execution without actually running any tasks. All submitted tasks
+    immediately return dummy output and transition to DONE state. Useful for testing workflow logic
+    without computational overhead.
     """
 
     def __init__(self):
         """Initialize the no-op execution backend.
 
-        Sets up dummy task storage, session, and default callback function.
-        Registers backend states and confirms successful initialization.
+        Sets up dummy task storage, session, and default callback function. Registers backend states
+        and confirms successful initialization.
         """
         self.tasks = {}
         self.session = Session()
@@ -100,9 +100,7 @@ class NoopExecutionBackend(BaseExecutionBackend):
             task["return_value"] = "Dummy Output"
             self._callback_func(task, "DONE")
 
-    def link_explicit_data_deps(
-        self, src_task=None, dst_task=None, file_name=None, file_path=None
-    ):
+    def link_explicit_data_deps(self, src_task=None, dst_task=None, file_name=None, file_path=None):
         """Handle explicit data dependencies between tasks.
 
         Args:
@@ -131,7 +129,7 @@ class NoopExecutionBackend(BaseExecutionBackend):
     async def shutdown(self) -> None:
         """Shutdown the no-op execution backend.
 
-        Performs cleanup operations. Since this is a no-op backend, no actual
-        resources need to be cleaned up.
+        Performs cleanup operations. Since this is a no-op backend, no actual resources need to be
+        cleaned up.
         """
         pass

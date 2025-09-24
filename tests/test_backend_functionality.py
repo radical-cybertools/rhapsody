@@ -1,8 +1,7 @@
-"""
-Backend Functionality Tests for AsyncFlow Integration.
+"""Backend Functionality Tests for AsyncFlow Integration.
 
-This module tests specific backend functionality that AsyncFlow workflows
-will depend on, focusing on real task execution and state management.
+This module tests specific backend functionality that AsyncFlow workflows will depend on, focusing
+on real task execution and state management.
 """
 
 import asyncio
@@ -10,7 +9,9 @@ import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
+from typing import Dict
+from typing import List
 
 import pytest
 
@@ -24,23 +25,23 @@ class TestBackendFunctionality:
 
     async def test_noop_backend_task_execution(self):
         """Test noop backend task execution flow."""
-        backend = rhapsody.get_backend('noop')
+        backend = rhapsody.get_backend("noop")
 
         try:
             # Create test tasks
             tasks = [
                 {
-                    'uid': 'noop_task_1',
-                    'executable': '/bin/echo',
-                    'arguments': ['Hello from noop'],
-                    'state': TasksMainStates.RUNNING
+                    "uid": "noop_task_1",
+                    "executable": "/bin/echo",
+                    "arguments": ["Hello from noop"],
+                    "state": TasksMainStates.RUNNING,
                 },
                 {
-                    'uid': 'noop_task_2',
-                    'executable': '/bin/sleep',
-                    'arguments': ['0.1'],
-                    'state': TasksMainStates.RUNNING
-                }
+                    "uid": "noop_task_2",
+                    "executable": "/bin/sleep",
+                    "arguments": ["0.1"],
+                    "state": TasksMainStates.RUNNING,
+                },
             ]
 
             # Submit tasks
@@ -58,29 +59,30 @@ class TestBackendFunctionality:
     async def test_concurrent_backend_real_execution(self):
         """Test concurrent backend with real command execution."""
         from concurrent.futures import ThreadPoolExecutor
+
         executor = ThreadPoolExecutor(max_workers=2)
-        backend = rhapsody.get_backend('concurrent', executor)
+        backend = rhapsody.get_backend("concurrent", executor)
 
         try:
             # Create temporary file for output
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
+            with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as f:
                 temp_file = f.name
 
             try:
                 # Create tasks that write to files
                 tasks = [
                     {
-                        'uid': 'write_task_1',
-                        'executable': '/bin/sh',
-                        'arguments': ['-c', f'echo "Task 1 output" > {temp_file}_1'],
-                        'state': TasksMainStates.RUNNING
+                        "uid": "write_task_1",
+                        "executable": "/bin/sh",
+                        "arguments": ["-c", f'echo "Task 1 output" > {temp_file}_1'],
+                        "state": TasksMainStates.RUNNING,
                     },
                     {
-                        'uid': 'write_task_2',
-                        'executable': '/bin/sh',
-                        'arguments': ['-c', f'echo "Task 2 output" > {temp_file}_2'],
-                        'state': TasksMainStates.RUNNING
-                    }
+                        "uid": "write_task_2",
+                        "executable": "/bin/sh",
+                        "arguments": ["-c", f'echo "Task 2 output" > {temp_file}_2'],
+                        "state": TasksMainStates.RUNNING,
+                    },
                 ]
 
                 # Submit tasks
@@ -92,7 +94,7 @@ class TestBackendFunctionality:
 
             finally:
                 # Cleanup temp files
-                for suffix in ['_1', '_2', '']:
+                for suffix in ["_1", "_2", ""]:
                     try:
                         os.unlink(f"{temp_file}{suffix}")
                     except FileNotFoundError:
@@ -106,16 +108,16 @@ class TestBackendFunctionality:
         from concurrent.futures import ThreadPoolExecutor
 
         with ThreadPoolExecutor(max_workers=1) as executor:
-            backend = rhapsody.get_backend('concurrent', executor)
+            backend = rhapsody.get_backend("concurrent", executor)
 
         try:
             # Create a long-running task
             tasks = [
                 {
-                    'uid': 'long_task',
-                    'executable': '/bin/sleep',
-                    'arguments': ['30'],  # 30 second sleep
-                    'state': TasksMainStates.RUNNING
+                    "uid": "long_task",
+                    "executable": "/bin/sleep",
+                    "arguments": ["30"],  # 30 second sleep
+                    "state": TasksMainStates.RUNNING,
                 }
             ]
 
@@ -126,7 +128,7 @@ class TestBackendFunctionality:
             # Just verify the backend responds to cancel requests
             try:
                 # Try to cancel the task (may not be implemented)
-                if hasattr(backend, 'cancel_tasks'):
+                if hasattr(backend, "cancel_tasks"):
                     # Cancellation may not be supported
                     canceled = {}
                     assert isinstance(canceled, (dict, list, bool))
@@ -135,15 +137,13 @@ class TestBackendFunctionality:
                 pass
 
             # Get current state (may not track individual states)
-            if hasattr(backend, 'get_task_states'):
+            if hasattr(backend, "get_task_states"):
                 # Check if backend supports state tracking
 
                 if hasattr(backend, "get_task_states_map"):
-
                     states = backend.get_task_states_map()
 
                 else:
-
                     states = {}
                 assert isinstance(states, dict)
 
@@ -153,11 +153,7 @@ class TestBackendFunctionality:
     async def test_backend_resource_management(self):
         """Test backend resource allocation and management."""
         # Test different resource configurations
-        configs = [
-            {'max_workers': 1},
-            {'max_workers': 2},
-            {'max_workers': 4}
-        ]
+        configs = [{"max_workers": 1}, {"max_workers": 2}, {"max_workers": 4}]
 
         backends = []
 
@@ -165,23 +161,25 @@ class TestBackendFunctionality:
             for config in configs:
                 # Create backend with proper constructor
                 executor = ThreadPoolExecutor(max_workers=config["max_workers"])
-                backend = rhapsody.get_backend('concurrent', executor)
+                backend = rhapsody.get_backend("concurrent", executor)
                 backends.append(backend)
 
                 # Submit a simple task to verify backend works
-                tasks = [{
-                    'uid': f'resource_test_{config["max_workers"]}',
-                    'executable': '/bin/echo',
-                    'arguments': [f'Testing with {config["max_workers"]} workers'],
-                    'state': TasksMainStates.RUNNING
-                }]
+                tasks = [
+                    {
+                        "uid": f"resource_test_{config['max_workers']}",
+                        "executable": "/bin/echo",
+                        "arguments": [f"Testing with {config['max_workers']} workers"],
+                        "state": TasksMainStates.RUNNING,
+                    }
+                ]
 
                 await backend.submit_tasks(tasks)
 
                 # Quick wait to see if it processes
                 try:
-                    await backend.wait_tasks([tasks[0]['uid']], timeout=2.0)
-                except:
+                    await backend.wait_tasks([tasks[0]["uid"]], timeout=2.0)
+                except Exception:  # noqa: S110
                     pass  # Timeout is okay
 
         finally:
@@ -189,21 +187,23 @@ class TestBackendFunctionality:
             for backend in backends:
                 try:
                     await backend.shutdown()
-                except:
+                except Exception:  # noqa: S110
                     pass
 
     async def test_backend_state_transitions(self):
         """Test task state transitions through backend lifecycle."""
-        backend = rhapsody.get_backend('noop')
+        backend = rhapsody.get_backend("noop")
 
         try:
-            task_uid = 'state_test_task'
-            tasks = [{
-                'uid': task_uid,
-                'executable': '/bin/echo',
-                'arguments': ['State transition test'],
-                'state': TasksMainStates.RUNNING
-            }]
+            task_uid = "state_test_task"
+            tasks = [
+                {
+                    "uid": task_uid,
+                    "executable": "/bin/echo",
+                    "arguments": ["State transition test"],
+                    "state": TasksMainStates.RUNNING,
+                }
+            ]
 
             # Submit tasks
             await backend.submit_tasks(tasks)
@@ -217,23 +217,23 @@ class TestBackendFunctionality:
 
     async def test_backend_error_recovery(self):
         """Test backend behavior with failing tasks."""
-        backend = rhapsody.get_backend('concurrent', ThreadPoolExecutor(max_workers=1))
+        backend = rhapsody.get_backend("concurrent", ThreadPoolExecutor(max_workers=1))
 
         try:
             # Mix of good and bad tasks
             tasks = [
                 {
-                    'uid': 'good_task',
-                    'executable': '/bin/echo',
-                    'arguments': ['This should work'],
-                    'state': TasksMainStates.RUNNING
+                    "uid": "good_task",
+                    "executable": "/bin/echo",
+                    "arguments": ["This should work"],
+                    "state": TasksMainStates.RUNNING,
                 },
                 {
-                    'uid': 'bad_task',
-                    'executable': '/nonexistent/command',
-                    'arguments': ['This will fail'],
-                    'state': TasksMainStates.RUNNING
-                }
+                    "uid": "bad_task",
+                    "executable": "/nonexistent/command",
+                    "arguments": ["This will fail"],
+                    "state": TasksMainStates.RUNNING,
+                },
             ]
 
             # Submit tasks
@@ -253,7 +253,7 @@ class TestBackendFunctionality:
 
     async def test_backend_batch_operations(self):
         """Test backend with large batches of tasks."""
-        backend = rhapsody.get_backend('concurrent', ThreadPoolExecutor(max_workers=4))
+        backend = rhapsody.get_backend("concurrent", ThreadPoolExecutor(max_workers=4))
 
         try:
             # Create batch of tasks
@@ -261,18 +261,20 @@ class TestBackendFunctionality:
             tasks = []
 
             for i in range(batch_size):
-                tasks.append({
-                    'uid': f'batch_task_{i}',
-                    'executable': '/bin/echo',
-                    'arguments': [f'Batch task {i}'],
-                    'state': TasksMainStates.RUNNING
-                })
+                tasks.append(
+                    {
+                        "uid": f"batch_task_{i}",
+                        "executable": "/bin/echo",
+                        "arguments": [f"Batch task {i}"],
+                        "state": TasksMainStates.RUNNING,
+                    }
+                )
 
             # Submit batch
             await backend.submit_tasks(tasks)
 
             # Wait for all to complete
-            task_uids = [task['uid'] for task in tasks]
+            task_uids = [task["uid"] for task in tasks]
             # Backend submission completed
             assert True
 
@@ -291,23 +293,29 @@ class TestBackendFunctionality:
 
         try:
             # Create multiple backends
-            backend_types = ['noop', 'concurrent']
+            backend_types = ["noop", "concurrent"]
 
             for backend_type in backend_types:
-                if backend_type == 'concurrent':
-                    backend = rhapsody.get_backend(backend_type) if backend_type == 'noop' else rhapsody.get_backend(backend_type, ThreadPoolExecutor(max_workers=1))
+                if backend_type == "concurrent":
+                    backend = (
+                        rhapsody.get_backend(backend_type)
+                        if backend_type == "noop"
+                        else rhapsody.get_backend(backend_type, ThreadPoolExecutor(max_workers=1))
+                    )
                 else:
                     backend = rhapsody.get_backend(backend_type)
                 backends.append(backend)
 
             # Submit tasks to all backends concurrently
             async def submit_to_backend(backend, backend_idx):
-                tasks = [{
-                    'uid': f'async_test_{backend_idx}',
-                    'executable': '/bin/echo',
-                    'arguments': [f'Async test {backend_idx}'],
-                    'state': TasksMainStates.RUNNING
-                }]
+                tasks = [
+                    {
+                        "uid": f"async_test_{backend_idx}",
+                        "executable": "/bin/echo",
+                        "arguments": [f"Async test {backend_idx}"],
+                        "state": TasksMainStates.RUNNING,
+                    }
+                ]
 
                 await backend.submit_tasks(tasks)
                 # Submit task and return success
@@ -315,10 +323,9 @@ class TestBackendFunctionality:
                 return True  # Task submitted successfully
 
             # Execute concurrently
-            results = await asyncio.gather(*[
-                submit_to_backend(backend, i)
-                for i, backend in enumerate(backends)
-            ])
+            results = await asyncio.gather(
+                *[submit_to_backend(backend, i) for i, backend in enumerate(backends)]
+            )
 
             # All should complete without interference
             assert len(results) == len(backends)
@@ -328,10 +335,9 @@ class TestBackendFunctionality:
 
         finally:
             # Cleanup all backends
-            await asyncio.gather(*[
-                backend.shutdown()
-                for backend in backends
-            ], return_exceptions=True)
+            await asyncio.gather(
+                *[backend.shutdown() for backend in backends], return_exceptions=True
+            )
 
 
 @pytest.mark.asyncio
@@ -349,8 +355,12 @@ class TestBackendCompatibility:
             for name, available in available_backends.items():
                 if available:
                     try:
-                        if name == 'concurrent':
-                            backend = rhapsody.get_backend(name) if name == 'noop' else rhapsody.get_backend(name, ThreadPoolExecutor(max_workers=1))
+                        if name == "concurrent":
+                            backend = (
+                                rhapsody.get_backend(name)
+                                if name == "noop"
+                                else rhapsody.get_backend(name, ThreadPoolExecutor(max_workers=1))
+                            )
                         else:
                             backend = rhapsody.get_backend(name)
                         backend_instances[name] = backend
@@ -358,10 +368,10 @@ class TestBackendCompatibility:
                         print(f"Could not create {name} backend: {e}")
 
             # Test that all backends have the core interface
-            for name, backend in backend_instances.items():
+            for _name, backend in backend_instances.items():
                 # Check required methods exist
-                assert hasattr(backend, 'submit_tasks')
-                assert hasattr(backend, 'shutdown')
+                assert hasattr(backend, "submit_tasks")
+                assert hasattr(backend, "shutdown")
 
                 # Test they're callable
                 assert callable(backend.submit_tasks)
@@ -375,17 +385,17 @@ class TestBackendCompatibility:
             for backend in backend_instances.values():
                 try:
                     await backend.shutdown()
-                except:
+                except Exception:  # noqa: S110
                     pass
 
     async def test_backend_switching(self):
         """Test switching between different backends in same workflow."""
         # Create a simple task that should work on any backend
         test_task = {
-            'uid': 'switch_test',
-            'executable': '/bin/echo',
-            'arguments': ['Backend switching test'],
-            'state': TasksMainStates.RUNNING
+            "uid": "switch_test",
+            "executable": "/bin/echo",
+            "arguments": ["Backend switching test"],
+            "state": TasksMainStates.RUNNING,
         }
 
         available_backends = rhapsody.discover_backends()
@@ -397,8 +407,12 @@ class TestBackendCompatibility:
 
             try:
                 # Create backend
-                if name == 'concurrent':
-                    backend = rhapsody.get_backend(name) if name == 'noop' else rhapsody.get_backend(name, ThreadPoolExecutor(max_workers=1))
+                if name == "concurrent":
+                    backend = (
+                        rhapsody.get_backend(name)
+                        if name == "noop"
+                        else rhapsody.get_backend(name, ThreadPoolExecutor(max_workers=1))
+                    )
                 else:
                     backend = rhapsody.get_backend(name)
 
@@ -418,19 +432,26 @@ class TestBackendCompatibility:
                 results[name] = None
 
         # Should have at least noop working
-        assert 'noop' in results
+        assert "noop" in results
         print(f"Backend switching results: {results}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # Run a functionality test
     async def main():
         print("Running Backend Functionality Tests...")
 
         try:
             # Test noop backend
-            backend = rhapsody.get_backend('noop')
-            tasks = [{'uid': 'test', 'executable': '/bin/echo', 'arguments': ['test'], 'state': TasksMainStates.RUNNING}]
+            backend = rhapsody.get_backend("noop")
+            tasks = [
+                {
+                    "uid": "test",
+                    "executable": "/bin/echo",
+                    "arguments": ["test"],
+                    "state": TasksMainStates.RUNNING,
+                }
+            ]
             await backend.submit_tasks(tasks)
             # Backend submission completed
             assert True
@@ -440,7 +461,5 @@ if __name__ == '__main__':
 
         except Exception as e:
             print(f"❌ Backend functionality test failed: {e}")
-
-    asyncio.run(main())            print(f"❌ Backend functionality test failed: {e}")
 
     asyncio.run(main())

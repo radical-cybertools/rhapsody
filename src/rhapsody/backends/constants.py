@@ -1,14 +1,13 @@
-"""
-Constants and state management for Rhapsody execution backends.
+"""Constants and state management for Rhapsody execution backends.
 
-This module defines task states, state mapping utilities, and other constants
-used across different execution backends.
+This module defines task states, state mapping utilities, and other constants used across different
+execution backends.
 """
 
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Optional, Union
+from typing import Any
 
 
 class TasksMainStates(Enum):
@@ -31,8 +30,7 @@ class TasksMainStates(Enum):
 
 
 class StateMapper:
-    """Unified interface for mapping task states between main workflow and
-       backend systems.
+    """Unified interface for mapping task states between main workflow and backend systems.
 
     StateMapper provides a centralized mechanism for translating task states between
     the main workflow system and various backend execution systems
@@ -81,7 +79,7 @@ class StateMapper:
 
     _backend_registry: dict[str, dict[TasksMainStates, Any]] = {}
 
-    def __init__(self, backend: Union[str, Any]):
+    def __init__(self, backend: str | Any):
         """Initialize StateMapper with a specific backend.
 
         Creates a StateMapper instance configured for the specified backend.
@@ -102,7 +100,7 @@ class StateMapper:
             register_backend_states_with_defaults() before initialization.
         """
         self.backend_name: str
-        self.backend_module: Optional[Any] = None
+        self.backend_module: Any | None = None
 
         if isinstance(backend, str):
             self.backend_name = backend.lower()
@@ -162,9 +160,7 @@ class StateMapper:
                     timeout='TIMEOUT'
                 )
         """
-        additional_mapped = {
-            TasksMainStates[k.upper()]: v for k, v in additional_states.items()
-        }
+        additional_mapped = {TasksMainStates[k.upper()]: v for k, v in additional_states.items()}
         cls._backend_registry[backend] = {
             TasksMainStates.DONE: done_state,
             TasksMainStates.FAILED: failed_state,
@@ -256,9 +252,7 @@ class StateMapper:
             main_state = TasksMainStates[name]
             return self._state_map[main_state]
         except KeyError:
-            raise AttributeError(
-                f"'{self.__class__.__name__}' has no state '{name}'"
-            ) from None
+            raise AttributeError(f"'{self.__class__.__name__}' has no state '{name}'") from None
 
     def to_main_state(self, backend_state: Any) -> TasksMainStates:
         """Convert backend-specific state to main state.
@@ -286,7 +280,7 @@ class StateMapper:
         except KeyError:
             raise ValueError(f"Unknown backend state: {backend_state}") from None
 
-    def get_backend_state(self, main_state: Union[TasksMainStates, str]) -> Any:
+    def get_backend_state(self, main_state: TasksMainStates | str) -> Any:
         """Get backend-specific state for a main state.
 
         Retrieves the backend-specific state value that corresponds to the

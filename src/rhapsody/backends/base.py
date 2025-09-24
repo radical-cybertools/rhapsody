@@ -1,22 +1,21 @@
-"""
-Base classes and interfaces for Rhapsody execution backends.
+"""Base classes and interfaces for Rhapsody execution backends.
 
-This module defines the abstract base class and core interfaces that all
-execution backends must implement.
+This module defines the abstract base class and core interfaces that all execution backends must
+implement.
 """
 
 from __future__ import annotations
 
 import os
-from abc import ABC, abstractmethod
+from abc import ABC
+from abc import abstractmethod
 
 
 class BaseExecutionBackend(ABC):
     """Abstract base class for execution backends that manage task execution and state.
 
-    This class defines the interface for execution backends that handle task submission,
-    state management, and dependency linking in a distributed or parallel execution
-    environment.
+    This class defines the interface for execution backends that handle task submission, state
+    management, and dependency linking in a distributed or parallel execution environment.
     """
 
     @abstractmethod
@@ -34,8 +33,8 @@ class BaseExecutionBackend(ABC):
     async def shutdown(self) -> None:
         """Gracefully shutdown the execution backend.
 
-        This method should clean up resources, terminate running tasks if necessary,
-        and prepare the backend for termination.
+        This method should clean up resources, terminate running tasks if necessary, and prepare the
+        backend for termination.
         """
         pass
 
@@ -104,9 +103,7 @@ class BaseExecutionBackend(ABC):
         pass
 
     @abstractmethod
-    def link_explicit_data_deps(
-        self, src_task=None, dst_task=None, file_name=None, file_path=None
-    ):
+    def link_explicit_data_deps(self, src_task=None, dst_task=None, file_name=None, file_path=None):
         """Link explicit data dependencies between tasks or files.
 
         Creates explicit dependency relationships based on specified file names
@@ -122,8 +119,7 @@ class BaseExecutionBackend(ABC):
 
     @abstractmethod
     async def cancel_task(self, uid: str) -> bool:
-        """
-        Cancel a task in the execution backend.
+        """Cancel a task in the execution backend.
 
         Args:
             uid: Task identifier
@@ -137,14 +133,13 @@ class BaseExecutionBackend(ABC):
 class Session:
     """Manages execution session state and working directory.
 
-    This class maintains session-specific information including the current
-    working directory path for task execution.
+    This class maintains session-specific information including the current working directory path
+    for task execution.
     """
 
     def __init__(self):
         """Initialize a new session with the current working directory.
 
-        Sets the session path to the current working directory at the time
-        of initialization.
+        Sets the session path to the current working directory at the time of initialization.
         """
         self.path = os.getcwd()

@@ -1,8 +1,7 @@
-"""
-Dask distributed execution backend for parallel and distributed computing.
+"""Dask distributed execution backend for parallel and distributed computing.
 
-This module provides a backend that executes tasks on Dask clusters,
-supporting both local and distributed execution environments.
+This module provides a backend that executes tasks on Dask clusters, supporting both local and
+distributed execution environments.
 """
 
 from __future__ import annotations
@@ -10,12 +9,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from functools import wraps
-from typing import Any, Callable, Optional
+from typing import Any
+from typing import Callable
 
 import typeguard
 
+from ..base import BaseExecutionBackend
+from ..base import Session
 from ..constants import StateMapper
-from ..base import BaseExecutionBackend, Session
 
 try:
     import dask.distributed as dask
@@ -40,7 +41,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
     """
 
     @typeguard.typechecked
-    def __init__(self, resources: Optional[dict] = None):
+    def __init__(self, resources: dict | None = None):
         """Initialize the Dask execution backend (non-async setup only).
 
         Args:
@@ -163,9 +164,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
             self.tasks[task["uid"]] = task
 
             # Filter out future objects as they are not picklable
-            filtered_args = [
-                arg for arg in task["args"] if not isinstance(arg, asyncio.Future)
-            ]
+            filtered_args = [arg for arg in task["args"] if not isinstance(arg, asyncio.Future)]
             task["args"] = tuple(filtered_args)
             try:
                 await self._submit_async_function(task)
@@ -201,9 +200,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
                 if task_uid in self.tasks:
                     del self.tasks[task_uid]
 
-        dask_future = self._client.submit(
-            fn, *args, **task["task_backend_specific_kwargs"]
-        )
+        dask_future = self._client.submit(fn, *args, **task["task_backend_specific_kwargs"])
 
         # Store the future for potential cancellation
         self.tasks[task["uid"]]["future"] = dask_future
@@ -244,9 +241,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
 
         return cancelled_count
 
-    def link_explicit_data_deps(
-        self, src_task=None, dst_task=None, file_name=None, file_path=None
-    ):
+    def link_explicit_data_deps(self, src_task=None, dst_task=None, file_name=None, file_path=None):
         """Handle explicit data dependencies between tasks.
 
         Args:
@@ -303,8 +298,8 @@ class DaskExecutionBackend(BaseExecutionBackend):
     async def shutdown(self) -> None:
         """Shutdown the Dask client and clean up resources.
 
-        Closes the Dask client connection, clears task storage, and handles
-        any cleanup exceptions gracefully.
+        Closes the Dask client connection, clears task storage, and handles any cleanup exceptions
+        gracefully.
         """
         if self._client is not None:
             try:
@@ -342,7 +337,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
 
     # Class method for cleaner instantiation (optional alternative pattern)
     @classmethod
-    async def create(cls, resources: Optional[dict] = None):
+    async def create(cls, resources: dict | None = None):
         """Alternative factory method for creating initialized backend.
 
         Args:

@@ -1,8 +1,7 @@
-"""
-Concurrent execution backend using Python's concurrent.futures.
+"""Concurrent execution backend using Python's concurrent.futures.
 
-This module provides a backend that executes tasks using ThreadPoolExecutor
-or ProcessPoolExecutor from the concurrent.futures module.
+This module provides a backend that executes tasks using ThreadPoolExecutor or ProcessPoolExecutor
+from the concurrent.futures module.
 """
 
 from __future__ import annotations
@@ -12,9 +11,11 @@ import gc
 import logging
 import subprocess
 from concurrent.futures import Executor
-from typing import Any, Callable, Optional
+from typing import Any
+from typing import Callable
 
-from ..base import BaseExecutionBackend, Session
+from ..base import BaseExecutionBackend
+from ..base import Session
 from ..constants import StateMapper
 
 logger = logging.getLogger(__name__)
@@ -31,7 +32,7 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
         self.executor = executor
         self.tasks: dict[str, asyncio.Task] = {}
         self.session = Session()
-        self._callback_func: Optional[Callable] = None
+        self._callback_func: Callable | None = None
         self._initialized = False
 
     def __await__(self):
@@ -97,7 +98,7 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
                 cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                close_fds=True
+                close_fds=True,
             )
 
             # Communicate and get results
@@ -124,12 +125,12 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
         except Exception:
             # Fallback to thread executor with proper subprocess configuration
             def run_subprocess():
-                result = subprocess.run(
+                result = subprocess.run(  # noqa: S602
                     cmd,
                     shell=True,
                     capture_output=True,
                     text=True,
-                    close_fds=True
+                    close_fds=True,
                 )
                 return result
 
@@ -153,8 +154,9 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
                 except asyncio.TimeoutError:
                     process.kill()
                     await process.wait()
-                except Exception:
-                    pass  # Ignore cleanup errors
+                except Exception as e:
+                    # Log cleanup errors but don't fail the task
+                    logger.debug(f"Process cleanup error: {e}")
 
         state = "DONE" if task["exit_code"] == 0 else "FAILED"
         return task, state
@@ -224,9 +226,7 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
     def build_task(self, uid, task_desc, task_specific_kwargs):
         pass
 
-    def link_explicit_data_deps(
-        self, src_task=None, dst_task=None, file_name=None, file_path=None
-    ):
+    def link_explicit_data_deps(self, src_task=None, dst_task=None, file_name=None, file_path=None):
         pass
 
     def link_implicit_data_deps(self, src_task, dst_task):
@@ -259,7 +259,5 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
         Returns:
             Fully initialized ConcurrentExecutionBackend instance.
         """
-        backend = cls(executor)
-        return await backend        """
         backend = cls(executor)
         return await backend

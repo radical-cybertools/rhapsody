@@ -1,14 +1,12 @@
-"""
-Backend discovery and factory functions for Rhapsody.
+"""Backend discovery and factory functions for Rhapsody.
 
-This module provides utilities for discovering available backends
-and creating backend instances dynamically.
+This module provides utilities for discovering available backends and creating backend instances
+dynamically.
 """
 
 from __future__ import annotations
 
 import importlib
-from typing import Dict, Type, Optional, Any
 
 from .base import BaseExecutionBackend
 
@@ -16,15 +14,15 @@ from .base import BaseExecutionBackend
 class BackendRegistry:
     """Registry for managing available execution backends."""
 
-    _backends: Dict[str, str] = {
-        'noop': 'rhapsody.backends.execution.noop.NoopExecutionBackend',
-        'concurrent': 'rhapsody.backends.execution.concurrent.ConcurrentExecutionBackend',
-        'dask': 'rhapsody.backends.execution.dask_parallel.DaskExecutionBackend',
-        'radical_pilot': 'rhapsody.backends.execution.radical_pilot.RadicalExecutionBackend',
+    _backends: dict[str, str] = {
+        "noop": "rhapsody.backends.execution.noop.NoopExecutionBackend",
+        "concurrent": "rhapsody.backends.execution.concurrent.ConcurrentExecutionBackend",
+        "dask": "rhapsody.backends.execution.dask_parallel.DaskExecutionBackend",
+        "radical_pilot": "rhapsody.backends.execution.radical_pilot.RadicalExecutionBackend",
     }
 
     @classmethod
-    def get_backend_class(cls, backend_name: str) -> Type[BaseExecutionBackend]:
+    def get_backend_class(cls, backend_name: str) -> type[BaseExecutionBackend]:
         """Get backend class by name.
 
         Args:
@@ -42,7 +40,7 @@ class BackendRegistry:
             raise ValueError(f"Backend '{backend_name}' not found. Available: {available}")
 
         module_path = cls._backends[backend_name]
-        module_name, class_name = module_path.rsplit('.', 1)
+        module_name, class_name = module_path.rsplit(".", 1)
 
         try:
             module = importlib.import_module(module_name)
@@ -89,7 +87,7 @@ def get_backend(backend_name: str, *args, **kwargs) -> BaseExecutionBackend:
     return backend_class(*args, **kwargs)
 
 
-def discover_backends() -> Dict[str, bool]:
+def discover_backends() -> dict[str, bool]:
     """Discover which backends are available based on optional dependencies.
 
     Returns:

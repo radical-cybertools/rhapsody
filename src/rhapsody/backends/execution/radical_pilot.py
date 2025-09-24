@@ -1,8 +1,7 @@
-"""
-RADICAL-Pilot execution backend for large-scale HPC computing.
+"""RADICAL-Pilot execution backend for large-scale HPC computing.
 
-This module provides a backend that executes tasks using RADICAL-Pilot,
-supporting various HPC resource management systems and distributed computing.
+This module provides a backend that executes tasks using RADICAL-Pilot, supporting various HPC
+resource management systems and distributed computing.
 """
 
 from __future__ import annotations
@@ -11,12 +10,12 @@ import asyncio
 import copy
 import logging
 import threading
-from typing import Callable, Optional
+from typing import Callable
 
 import typeguard
 
-from ..constants import StateMapper
 from ..base import BaseExecutionBackend
+from ..constants import StateMapper
 
 try:
     import radical.pilot as rp
@@ -119,7 +118,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
     """
 
     @typeguard.typechecked
-    def __init__(self, resources: dict, raptor_config: Optional[dict] = None) -> None:
+    def __init__(self, resources: dict, raptor_config: dict | None = None) -> None:
         """Initialize the RadicalExecutionBackend with resources.
 
         Creates a new Radical Pilot session, initializes task and pilot managers,
@@ -151,8 +150,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
 
         if rp is None or ru is None:
             raise ImportError(
-                "Radical.Pilot and Radical.utils are required for "
-                "RadicalExecutionBackend."
+                "Radical.Pilot and Radical.utils are required for RadicalExecutionBackend."
             )
 
         self.resources = resources
@@ -175,9 +173,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         try:
             self.tasks = {}
             self.raptor_mode = False
-            self.session = rp.Session(
-                uid=ru.generate_id("rhapsody.session", mode=ru.ID_PRIVATE)
-            )
+            self.session = rp.Session(uid=ru.generate_id("rhapsody.session", mode=ru.ID_PRIVATE))
             self.task_manager = rp.TaskManager(self.session)
             self.pilot_manager = rp.PilotManager(self.session)
             self.resource_pilot = self.pilot_manager.submit_pilots(
@@ -360,7 +356,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
 
     def build_task(
         self, uid: str, task_desc: dict, task_backend_specific_kwargs: dict
-    ) -> Optional[object]:
+    ) -> object | None:
         """Build a RadicalPilot task description from workflow task parameters.
 
         Converts a workflow task description into a RadicalPilot TaskDescription,
@@ -407,9 +403,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
             rp_task.executable = task_desc["executable"]
         elif task_desc["function"]:
             if is_service:
-                error_msg = (
-                    "RadicalExecutionBackend does not support function service tasks"
-                )
+                error_msg = "RadicalExecutionBackend does not support function service tasks"
                 rp_task["exception"] = ValueError(error_msg)
                 self._callback_func(rp_task, rp.FAILED)
                 return None
@@ -438,10 +432,10 @@ class RadicalExecutionBackend(BaseExecutionBackend):
 
     def link_explicit_data_deps(
         self,
-        src_task: Optional[dict] = None,
-        dst_task: Optional[dict] = None,
-        file_name: Optional[str] = None,
-        file_path: Optional[str] = None,
+        src_task: dict | None = None,
+        dst_task: dict | None = None,
+        file_name: str | None = None,
+        file_path: str | None = None,
     ) -> dict:
         """Link explicit data dependencies between tasks or from external sources.
 
@@ -618,7 +612,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
             return True
         return False
 
-    def get_nodelist(self) -> Optional[object]:
+    def get_nodelist(self) -> object | None:
         """Get information about allocated compute nodes.
 
         Retrieves the nodelist from the active resource pilot, providing
@@ -673,7 +667,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         await self.shutdown()
 
     @classmethod
-    async def create(cls, resources: dict, raptor_config: Optional[dict] = None):
+    async def create(cls, resources: dict, raptor_config: dict | None = None):
         """Create initialized backend.
 
         Args:
