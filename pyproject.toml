@@ -38,9 +38,16 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "pydantic>=2.0.0",
+    "typeguard>=4.0.0",
+    "requests>=2.25.0",
 ]
 
 [project.optional-dependencies]
+# Backend-specific dependencies
+dask = ["dask[distributed]>=2023.0.0"]
+radical_pilot = ["radical.pilot>=1.30.0"]
+
+# Development and testing
 dev = [
     "ruff>=0.8.0",
     "pytest>=7.0.0",
@@ -57,7 +64,6 @@ docs = [
     "mkdocs>=1.5.0",
     "mkdocs-material>=9.0.0",
     "mkdocstrings[python]>=0.24.0",
-    "radical.asyncflow>=0.1.0",  # For AsyncFlow workflow examples
 ]
 ci = [
     "tox>=4.0.0",
@@ -67,11 +73,17 @@ ci = [
     "psutil>=5.9.0",
 ]
 examples = [
-    "radical.asyncflow>=0.1.0",  # For AsyncFlow examples
+    # Examples may use different backends
+    "rhapsody[dask]",
+]
+
+# Complete installation with all backends
+backends = [
+    "rhapsody[dask,radical_pilot]"
 ]
 
 all = [
-    "rhapsody[dev,docs,ci,examples]"
+    "rhapsody[dev,docs,ci,examples,backends]"
 ]
 
 [project.urls]
@@ -81,6 +93,13 @@ Issues = "https://github.com/stride-research/rhapsody/issues"
 
 [project.scripts]
 rhapsody-test-ci = "rhapsody.cli.test_ci:main"
+
+# Entry points for backend discovery
+[project.entry-points."rhapsody.backends"]
+noop = "rhapsody.backends.execution.noop:NoopExecutionBackend"
+concurrent = "rhapsody.backends.execution.concurrent:ConcurrentExecutionBackend"
+dask = "rhapsody.backends.execution.dask_parallel:DaskExecutionBackend"
+radical_pilot = "rhapsody.backends.execution.radical_pilot:RadicalExecutionBackend"
 
 [tool.setuptools.packages.find]
 where = ["src"]
