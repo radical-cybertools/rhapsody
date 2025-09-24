@@ -1,255 +1,533 @@
-# OBSERVE
+# RHAPSODY
 
-[![CI](https://github.com/stride-research/observe/workflows/CI/badge.svg)](https://github.com/stride-research/observe/actions/workflows/ci.yml)
-[![Examples](https://github.com/stride-research/observe/workflows/Examples/badge.svg)](https://github.com/stride-research/observe/actions/workflows/examples-nightly.yml)
-[![Deploy Documentation](https://github.com/stride-research/observe/workflows/Deploy%20Documentation/badge.svg)](https://github.com/stride-research/observe/actions/workflows/docs.yml)
-[![PyPI version](https://badge.fury.io/py/observe.svg)](https://badge.fury.io/py/observe)
-[![Python versions](https://img.shields.io/pypi/pyversions/observe.svg)](https://pypi.org/project/observe/)
-[![Downloads](https://pepy.tech/badge/observe)](https://pepy.tech/project/observe)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![Security: Bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
-[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit)](https://github.com/pre-commit/pre-commit)
+[![Build Status](https://github.com/radical-cybertools/rhapsody/actions/workflows/ci.yml/badge.svg)](https://github.com/radical-cybertools/rhapsody/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/radical-cybertools/rhapsody/branch/devel/graph/badge.svg)](https://codecov.io/gh/radical-cybertools/rhapsody)
+[![Python Version](https://img.shields.io/pypi/pyversions/rhapsody.svg)](https://pypi.org/project/rhapsody/)
+[![PyPI Version](https://img.shields.io/pypi/v/rhapsody.svg)](https://pypi.org/project/rhapsody/)
+[![License](https://img.shields.io/pypi/l/rhapsody.svg)](https://github.com/radical-cybertools/rhapsody/blob/main/LICENSE.md)
 
-**O**bservability for **B**uilding **S**cientific **E**xperiments with **R**untime **V**isibility across **E**cosystems
+**RHAPSODY** – **R**untime for **H**eterogeneous **AP**plications, **S**ervice **O**rchestration and **DY**namism
 
-A comprehensive observability Python package providing structured logging, distributed tracing, metrics collection, and high-performance serialization designed for scientific computing, HPC environments, and production systems.
+RHAPSODY is a high-performance runtime system designed for executing heterogeneous HPC-AI workflows with dynamic task graphs on high-performance computing infrastructures. It provides seamless integration between different computational paradigms, enabling efficient orchestration of complex scientific workloads.
 
-## Features
+## Key Features
 
-- **Unified Async API**: Single async interface for all observability components (logging, tracing, metrics)
-- **Environment-Aware Configuration**: Automatic optimization for HPC, development, production, and testing environments
-- **High-Performance Serialization**: Multiple formats (JSON, Parquet, MessagePack, CSV) with intelligent batching and async writes
-- **Structured Logging**: JSON logging with correlation IDs and automatic context propagation
-- **Distributed Tracing**: Complete trace collection with span management and export capabilities
-- **Comprehensive Metrics**: Counters, gauges, histograms with automatic collection and export
-- **Flexible Output Strategies**: Support for workflow-based, component-based, and time-based data organization
-- **Async-First Design**: Built for high-performance concurrent operations in scientific and production environments
-- **CLI Tools**: Built-in CI testing and development utilities
+- **Heterogeneous Execution**: Support for mixed CPU/GPU workloads and diverse computational frameworks
+- **Dynamic Task Graphs**: Runtime adaptation of workflow structures based on execution results
+- **Multiple Backend Support**: Pluggable execution backends including concurrent, Dask, and RADICAL-Pilot
+- **HPC-Optimized**: Designed for large-scale scientific computing on supercomputing clusters
+- **AsyncFlow Integration**: Full compatibility with AsyncFlow workflow management
+- **Platform Abstraction**: Unified interface across different HPC platforms and resource managers
+- **Fault Tolerance**: Robust error handling and recovery mechanisms
+- **Real-time Monitoring**: Comprehensive logging and state tracking capabilities
 
-## Quick Start
+## Table of Contents
 
-```python
-import asyncio
-from observe import initialize_observability, record_log, record_trace, record_metric, flush_all_data
-
-async def main():
-    # Initialize observability (auto-detects environment and optimizes settings)
-    config = await initialize_observability("my_application")
-
-    # Record structured logs with automatic context
-    await record_log("Processing started", level="INFO",
-                     extra={"batch_size": 1000, "algorithm": "fft"})
-
-    # Record distributed traces
-    await record_trace("data_analysis", duration=2.5,
-                       attributes={"data_points": 10000, "result_size": 150})
-
-    # Record metrics
-    await record_metric("analyses_completed", value=1, metric_type="counter")
-    await record_metric("analysis_duration_seconds", value=2.5, metric_type="histogram")
-
-    await record_log("Analysis completed", level="INFO",
-                     extra={"result_count": 150})
-
-    # Ensure all data is written
-    await flush_all_data()
-
-# Run the async application
-asyncio.run(main())
-```
-
-### Component-Based Usage
-
-```python
-import asyncio
-from observe import initialize_observability, create_logger, create_tracer, create_metrics
-
-async def main():
-    # Initialize observability
-    config = await initialize_observability("protein_folding_study")
-
-    # Create components for different purposes
-    logger = create_logger("data_processor")
-    tracer = create_tracer("analysis_service")
-    metrics = create_metrics("scientific_app")
-
-    # Use components with async operations
-    await logger.info("Starting molecular dynamics simulation")
-
-    # Async metric operations
-    counter = await metrics.counter("simulations_completed")
-    await counter.inc()
-
-    # Ensure all data is flushed
-    from observe import flush_all_data
-    await flush_all_data()
-
-asyncio.run(main())
-```
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Core Concepts](#core-concepts)
+- [Execution Backends](#execution-backends)
+- [Platform Support](#platform-support)
+- [Examples](#examples)
+- [API Reference](#api-reference)
+- [Development](#development)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Installation
 
+### Basic Installation
+
 ```bash
-# Basic installation
-pip install observe
+pip install rhapsody
+```
 
-# With development tools
-pip install observe[dev]
+### Development Installation
 
-# With documentation tools
-pip install observe[docs]
+```bash
+git clone https://github.com/radical-cybertools/rhapsody.git
+cd rhapsody
+pip install -e .
+```
 
-# With high-performance serialization
-pip install observe[serialization]
+### Backend-Specific Dependencies
 
-# Everything (recommended for development)
-pip install observe[all]
+For specific execution backends, install additional dependencies:
+
+```bash
+# For Dask backend
+pip install "rhapsody[dask]"
+
+# For RADICAL-Pilot backend
+pip install "rhapsody[radical_pilot]"
+
+# For development
+pip install "rhapsody[dev]"
+```
+
+## Quick Start
+
+### Basic Usage
+
+```python
+import asyncio
+import rhapsody
+
+async def main():
+    # Create a session
+    session = rhapsody.Session()
+
+    # Get a backend (concurrent backend by default)
+    backend = rhapsody.get_backend("concurrent")
+
+    # Define tasks
+    tasks = [
+        {
+            "uid": "task_1",
+            "executable": "echo",
+            "arguments": ["Hello, RHAPSODY!"]
+        },
+        {
+            "uid": "task_2",
+            "executable": "python",
+            "arguments": ["-c", "print('Task 2 complete')"]
+        }
+    ]
+
+    # Submit and execute tasks
+    await backend.submit_tasks(tasks)
+
+    # Wait for completion
+    while not all(task["state"] == "DONE" for task in tasks):
+        await asyncio.sleep(0.1)
+
+    # Cleanup
+    await backend.shutdown()
+    session.close()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### AsyncFlow Integration
+
+```python
+import asyncio
+from rhapsody.backends import ConcurrentExecutionBackend
+
+# AsyncFlow workflow compatibility
+async def run_asyncflow_workflow():
+    backend = ConcurrentExecutionBackend()
+
+    # Define AsyncFlow-compatible tasks
+    workflow_tasks = [
+        {
+            "uid": "data_prep",
+            "executable": "python",
+            "arguments": ["prep_data.py", "--input", "dataset.csv"]
+        },
+        {
+            "uid": "analysis",
+            "executable": "python",
+            "arguments": ["analyze.py", "--input", "prepared_data.csv"],
+            "dependencies": ["data_prep"]
+        }
+    ]
+
+    # Execute workflow
+    futures = await backend.submit_tasks(workflow_tasks)
+
+    # Monitor progress
+    for task_uid, future in futures.items():
+        result = await future
+        print(f"Task {task_uid}: {result['state']}")
+
+    await backend.shutdown()
+
+asyncio.run(run_asyncflow_workflow())
 ```
 
 ## Core Concepts
 
-### Environment Detection
-
-Observe automatically detects your environment and optimizes settings:
-
-- **Development**: Human-readable JSON output, immediate flushing, verbose logging
-- **HPC**: High-performance Parquet format, large batches, optimized for shared filesystems
-- **Production**: Minimal overhead, efficient formats, reduced sampling rates
-- **Testing**: Fast startup, minimal output, synchronous writes for predictable tests
-
-### Output Strategies
-
-Choose how observability data is organized:
-
-- **workflow_based**: Organize by workflow/session (default for scientific computing)
-- **component_based**: Separate directories for logs, traces, metrics
-- **time_based**: Organize by timestamp for time-series analysis
-- **flat**: Single directory for simple cases
-
-### High-Performance Serialization
+### Sessions
+Sessions provide the execution context and resource management for RHAPSODY workflows:
 
 ```python
-import asyncio
-from observe import initialize_observability, record_log
-
-async def main():
-    # Configure for your use case
-    config = await initialize_observability(
-        "my_application",
-        output_format="parquet",       # parquet, json, msgpack, csv
-        compression_level="balanced",   # none, fast, balanced
-        batch_size=5000,               # Optimize for throughput
-        flush_interval=30.0            # Async flush interval
-    )
-
-    # Record data with automatic batching
-    await record_log("computation_finished",
-                     level="INFO",
-                     extra={"duration": 15.2, "memory_usage": "2.1GB"})
-
-    # Ensure data is written
-    from observe import flush_all_data
-    await flush_all_data()
-
-asyncio.run(main())
+session = rhapsody.Session()
+session.proxy_start()  # Start communication proxy
+session.registry_start()  # Start service registry
 ```
 
-## CLI Tools
+### Tasks and Workloads
+Tasks represent individual computational units with flexible execution models:
 
-Observe includes command-line tools for development and CI testing:
+```python
+task = {
+    "uid": "unique_task_id",
+    "executable": "/path/to/executable",
+    "arguments": ["arg1", "arg2"],
+    "environment": {"VAR": "value"},
+    "working_directory": "/work/dir",
+    "dependencies": ["parent_task_id"]
+}
+```
 
-### Local CI Testing
+### State Management
+RHAPSODY provides comprehensive task state tracking:
 
-Test your changes locally before pushing to GitHub Actions:
+- `NEW`: Task created but not scheduled
+- `SCHEDULING_PENDING`: Awaiting resource allocation
+- `EXECUTING_PENDING`: Resources allocated, waiting to execute
+- `EXECUTING`: Currently running
+- `DONE`: Completed successfully
+- `FAILED`: Terminated with error
+- `CANCELLED`: Manually terminated
 
-```bash
-# Quick validation (available now)
-observe-test-ci
+## Execution Backends
 
-# Test specific environments
-observe-test-ci --environments lint format type
+RHAPSODY supports multiple execution backends for different use cases:
 
-# Run with fail-fast mode
-observe-test-ci --fail-fast
+### Concurrent Backend (Default)
+High-performance local execution using Python's concurrent.futures:
+
+```python
+from rhapsody.backends.execution import ConcurrentExecutionBackend
+
+backend = ConcurrentExecutionBackend()
 ```
 
 **Features:**
+- Multi-threaded task execution
+- Process-based isolation
+- Automatic resource management
+- Subprocess cleanup and monitoring
 
-- **Comprehensive testing** - All tox environments, Python matrix, integration tests
-- **Failure detection** - Catch CI issues before GitHub Actions
-- **Act integration** - Local GitHub Actions workflow testing
-- **Flexible configuration** - Skip specific tests, fail-fast mode, custom environments
+### NoOp Backend
+Lightweight backend for testing and development:
 
-### Benchmarks (Development)
-
-Performance benchmarks for API, components, and serialization formats:
-
-```bash
-# Format performance benchmarks
-python -m observe.cli.benchmarks.formats
-
-# API performance benchmarks
-python -m observe.cli.benchmarks.api
-
-# Component performance benchmarks
-python -m observe.cli.benchmarks.components
+```python
+backend = rhapsody.get_backend("noop")
 ```
 
-**Available Benchmarks:**
+### Dask Backend (Optional)
+Distributed computing with Dask:
 
-- **Format Benchmarks**: Compare serialization performance, compression ratios, and memory usage across JSON, Parquet, MessagePack, and CSV formats
-- **API Benchmarks**: Measure initialization overhead, component creation speed, and high-level API performance
-- **Component Benchmarks**: Test individual logger, tracer, and metrics performance under different loads
-
-**Future CLI Tools (v0.2.0):**
-
-```bash
-# Will be available as console commands
-observe-benchmark-formats
-observe-benchmark-api
-observe-benchmark-components
+```python
+# Requires: pip install "rhapsody[dask]"
+backend = rhapsody.get_backend("dask")
 ```
 
-## Next Steps
+### RADICAL-Pilot Backend (Optional)
+HPC-optimized execution on supercomputing resources:
 
-Ready to dive deeper? Check out our comprehensive documentation:
+```python
+# Requires: pip install "rhapsody[radical_pilot]"
+backend = rhapsody.get_backend("radical_pilot")
+```
 
-📚 **[Full Documentation](https://stride-research.github.io/observe/)**
+## Platform Support
 
-### Quick Links
+RHAPSODY provides platform abstraction for major HPC systems:
 
-- **[Getting Started Guide](docs/getting-started/)** - Installation, configuration, and first steps
-- **[API Reference](docs/reference/)** - Complete API documentation
-- **[Examples](docs/examples/)** - Working examples for different use cases:
-  - [Scientific Computing](docs/examples/scientific_computing_demo.py) - Decorators for computational tasks
-  - [Web Services](docs/examples/web_service_scientific_api.py) - FastAPI with observability
-  - [HPC Workflows](docs/examples/hpc_cluster_simulation.py) - Large-scale distributed computing
-- **[Configuration Guide](docs/getting-started/configuration.md)** - Environment variables and advanced setup
-- **[Development Guide](docs/dev/development.md)** - Contributing and development setup
+### Supported Platforms
 
-### Current Status: v0.2.0 (Async-First Release)
+#### TACC Frontera
+```python
+from rhapsody.platforms import frontera
 
-**Available Now:** Unified async API, environment-aware config, high-performance serialization, CLI tools, comprehensive observability components
+# Platform automatically configured for Frontera
+platform = frontera
+print(f"Cores per node: {platform.cores_per_node}")  # 56
+print(f"Resource manager: {platform.resource_manager}")  # SLURM
+```
 
-**Coming in v0.3.0:** Advanced workflow integrations, enhanced benchmarking tools, observability stack management
+### Resource Managers
+
+- **SLURM**: Full support with automatic resource detection
+- **PBS**: Planned support
+- **LSF**: Planned support
+
+### Custom Platforms
+```python
+from rhapsody.platforms import PlatformDescription, ResourceManager
+
+custom_platform = PlatformDescription(
+    resource_manager=ResourceManager.SLURM,
+    cores_per_node=64,
+    gpus_per_node=4,
+    partition="gpu",
+    work_dir="$SCRATCH",
+    env_setup=[
+        "module load python/3.9",
+        "module load cuda/11.7"
+    ]
+)
+```
+
+## Examples
+
+### Data Processing Pipeline
+
+```python
+import asyncio
+import rhapsody
+
+async def data_pipeline():
+    backend = rhapsody.get_backend("concurrent")
+
+    # Stage 1: Data ingestion
+    ingest_tasks = []
+    for i in range(4):
+        task = {
+            "uid": f"ingest_{i}",
+            "executable": "python",
+            "arguments": ["ingest.py", f"--shard={i}"]
+        }
+        ingest_tasks.append(task)
+
+    # Stage 2: Data processing (depends on ingestion)
+    process_task = {
+        "uid": "process_all",
+        "executable": "python",
+        "arguments": ["process.py", "--parallel=4"],
+        "dependencies": [f"ingest_{i}" for i in range(4)]
+    }
+
+    # Stage 3: Analysis
+    analyze_task = {
+        "uid": "analyze",
+        "executable": "python",
+        "arguments": ["analyze.py", "--output=results.json"],
+        "dependencies": ["process_all"]
+    }
+
+    # Execute pipeline
+    all_tasks = ingest_tasks + [process_task, analyze_task]
+    futures = await backend.submit_tasks(all_tasks)
+
+    # Wait for completion
+    for task_id, future in futures.items():
+        result = await future
+        print(f"Task {task_id}: {result['state']}")
+
+    await backend.shutdown()
+
+asyncio.run(data_pipeline())
+```
+
+### HPC Workflow with GPU Tasks
+
+```python
+import asyncio
+from rhapsody.platforms import PlatformDescription, ResourceManager
+
+async def gpu_workflow():
+    # Configure platform
+    platform = PlatformDescription(
+        resource_manager=ResourceManager.SLURM,
+        partition="gpu",
+        cores_per_node=32,
+        gpus_per_node=4,
+        env_setup=["module load cuda/11.7", "module load python/3.9"]
+    )
+
+    # Set up backend
+    backend = rhapsody.get_backend("concurrent")
+
+    # GPU-accelerated tasks
+    gpu_tasks = [
+        {
+            "uid": "training",
+            "executable": "python",
+            "arguments": ["train_model.py", "--gpu", "--epochs=100"],
+            "environment": {"CUDA_VISIBLE_DEVICES": "0"}
+        },
+        {
+            "uid": "inference",
+            "executable": "python",
+            "arguments": ["inference.py", "--model=trained_model.pth"],
+            "dependencies": ["training"],
+            "environment": {"CUDA_VISIBLE_DEVICES": "1"}
+        }
+    ]
+
+    # Execute workflow
+    futures = await backend.submit_tasks(gpu_tasks)
+
+    # Monitor execution
+    for task_id, future in futures.items():
+        try:
+            result = await future
+            print(f"✅ Task {task_id}: {result['state']}")
+        except Exception as e:
+            print(f"❌ Task {task_id} failed: {e}")
+
+    await backend.shutdown()
+
+asyncio.run(gpu_workflow())
+```
+
+## API Reference
+
+### Core Classes
+
+#### `Session`
+Main entry point for RHAPSODY workflows.
+
+```python
+class Session:
+    def __init__(self, uid: str = None, load: bool = False)
+    def proxy_start(self) -> None
+    def registry_start(self) -> None
+    def close(self) -> None
+```
+
+#### `BaseExecutionBackend`
+Abstract base class for execution backends.
+
+```python
+class BaseExecutionBackend:
+    async def submit_tasks(self, tasks: List[Dict]) -> List[asyncio.Task]
+    async def shutdown(self) -> None
+    def get_task_states_map(self) -> StateMapper
+```
+
+### Utility Functions
+
+```python
+# Get available backends
+rhapsody.get_backend(name: str) -> BaseExecutionBackend
+rhapsody.list_backends() -> List[str]
+
+# Platform management
+rhapsody.get_platform(name: str) -> PlatformDescription
+```
+
+### Task State Management
+
+```python
+from rhapsody.task import TaskState
+
+# Available states
+TaskState.NEW
+TaskState.SCHEDULING_PENDING
+TaskState.EXECUTING
+TaskState.DONE
+TaskState.FAILED
+TaskState.CANCELLED
+```
+
+## 🔧 Development
+
+### Setting Up Development Environment
+
+```bash
+# Clone repository
+git clone https://github.com/radical-cybertools/rhapsody.git
+cd rhapsody
+
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install in development mode
+pip install -e ".[dev]"
+
+# Install pre-commit hooks
+pre-commit install
+```
+
+### Running Tests
+
+```bash
+# Run all tests
+pytest
+
+# Run specific test suites
+pytest tests/test_asyncflow_integration.py
+pytest tests/test_backend_functionality.py
+pytest tests/test_realworld_integration.py
+
+# Run with coverage
+pytest --cov=rhapsody --cov-report=html
+```
+
+### Code Quality
+
+```bash
+# Format code
+ruff format
+
+# Lint code
+ruff check --fix
+
+# Type checking
+mypy src/rhapsody
+
+# Run pre-commit on all files
+pre-commit run --all-files
+```
+
+### Performance Testing
+
+```bash
+# Backend performance tests
+pytest tests/test_backend_performance.py -v
+
+# Real-world integration tests
+pytest tests/test_realworld_integration.py -v
+```
 
 ## Contributing
 
-We welcome contributions! See our [development guide](docs/dev/development.md) for setup instructions.
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
 
-```bash
-# Quick development setup
-git clone https://github.com/stride-research/observe.git
-cd observe
-pip install -e .[dev]
-observe-test-ci  # Run tests locally
-```
+### Development Workflow
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Make your changes
+4. Add tests for new functionality
+5. Ensure all tests pass (`pytest`)
+6. Run code quality checks (`pre-commit run --all-files`)
+7. Commit your changes (`git commit -m 'Add amazing feature'`)
+8. Push to the branch (`git push origin feature/amazing-feature`)
+9. Open a Pull Request
+
+### Reporting Issues
+
+Please use the [GitHub issue tracker](https://github.com/radical-cybertools/rhapsody/issues) to report bugs or request features.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+RHAPSODY is licensed under the [MIT License](LICENSE.md).
 
----
+## Acknowledgments
 
-[Stride Research](https://stride-research.org) develops **Observe** for the scientific computing and HPC community. If you use Observe in your research, please cite our work and let us know about your use case!
+RHAPSODY is developed by the [RADICAL Research Group](http://radical.rutgers.edu/) at Rutgers University.
+
+### Related Projects
+
+- [AsyncFlow](https://github.com/radical-cybertools/asyncflow): Asynchronous workflow management
+- [RADICAL-Utils](https://github.com/radical-cybertools/radical.utils): Utility library
+- [RADICAL-Pilot](https://github.com/radical-cybertools/radical.pilot): Pilot-based runtime system
+
+### Citations
+
+If you use RHAPSODY in your research, please cite:
+
+```bibtex
+@software{rhapsody2024,
+  title={RHAPSODY: Runtime for Heterogeneous Applications, Service Orchestration and Dynamism},
+  author={RADICAL Research Team},
+  year={2024},
+  url={https://github.com/radical-cybertools/rhapsody},
+  version={0.1.0}
+}
+```
+
+## Support
+
+- **Documentation**: https://rhapsody.readthedocs.io/
+- **Issues**: https://github.com/radical-cybertools/rhapsody/issues
+- **Discussions**: https://github.com/radical-cybertools/rhapsody/discussions
