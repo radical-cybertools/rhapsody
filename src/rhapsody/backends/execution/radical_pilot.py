@@ -565,7 +565,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         else:
             dst_kwargs["pre_exec"] = commands
 
-    async def submit_tasks(self, tasks: list) -> None:
+    async def submit_tasks(self, tasks: list) -> list:
         """Submit a list of tasks for execution.
 
         Processes a list of workflow tasks, builds RadicalPilot task descriptions,
@@ -579,7 +579,8 @@ class RadicalExecutionBackend(BaseExecutionBackend):
                 - Other task description fields
 
         Returns:
-            The result of task_manager.submit_tasks() with successfully built tasks.
+            Empty list since RadicalPilot manages tasks internally and doesn't
+            return asyncio.Task objects.
 
         Note:
             - Failed task builds are skipped (build_task returns None)
@@ -596,7 +597,8 @@ class RadicalExecutionBackend(BaseExecutionBackend):
                 continue
             _tasks.append(task_to_submit)
 
-        return self.task_manager.submit_tasks(_tasks)
+        self.task_manager.submit_tasks(_tasks)
+        return []
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a task.

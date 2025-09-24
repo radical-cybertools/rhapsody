@@ -12,13 +12,21 @@ repos:
         language_version: python3.13
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.12.11
+    rev: v0.13.1
     hooks:
       - id: ruff
         args: ["--fix", "--exit-non-zero-on-fix"]
         language_version: python3.13
       - id: ruff-format
         language_version: python3.13
+
+  # - repo: https://github.com/pre-commit/mirrors-mypy
+  #   rev: v1.14.0
+  #   hooks:
+  #     - id: mypy
+  #       language_version: python3.13
+  #       additional_dependencies: [types-requests]
+  #       args: ["--config-file=pyproject.toml"]
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -40,13 +48,13 @@ repos:
         args: ["-config-file", ".github/actionlint.yaml"]
 
   - repo: https://github.com/python-jsonschema/check-jsonschema
-    rev: 0.33.3
+    rev: 0.34.0
     hooks:
       - id: check-github-workflows
         files: ^\.github/workflows/.*\.ya?ml$
 
   - repo: https://github.com/crate-ci/typos
-    rev: v1.35.6
+    rev: v1
     hooks:
       - id: typos
         args: ["--config", "_typos.toml"]

@@ -72,13 +72,21 @@ pip install "rhapsody[dev]"
 ```python
 import asyncio
 import rhapsody
+from rhapsody.backends import Session
 
 async def main():
     # Create a session
-    session = rhapsody.Session()
+    session = Session()
 
     # Get a backend (concurrent backend by default)
     backend = rhapsody.get_backend("concurrent")
+
+    # Set up a callback to track task results
+    results = []
+    def callback(task, state):
+        results.append((task["uid"], state))
+
+    backend.register_callback(callback)
 
     # Define tasks
     tasks = [
@@ -95,11 +103,14 @@ async def main():
     ]
 
     # Submit and execute tasks
-    await backend.submit_tasks(tasks)
+    task_futures = await backend.submit_tasks(tasks)
 
-    # Wait for completion
-    while not all(task["state"] == "DONE" for task in tasks):
-        await asyncio.sleep(0.1)
+    # Wait for all tasks to complete
+    await asyncio.gather(*task_futures)
+
+    # Check results
+    for task_uid, state in results:
+        print(f"Task {task_uid}: {state}")
 
     # Cleanup
     await backend.shutdown()
@@ -113,11 +124,18 @@ if __name__ == "__main__":
 
 ```python
 import asyncio
-from rhapsody.backends import ConcurrentExecutionBackend
+from rhapsody.backends.execution import ConcurrentExecutionBackend
 
 # AsyncFlow workflow compatibility
 async def run_asyncflow_workflow():
     backend = ConcurrentExecutionBackend()
+
+    # Set up callback to track results
+    results = []
+    def callback(task, state):
+        results.append((task["uid"], state))
+
+    backend.register_callback(callback)
 
     # Define AsyncFlow-compatible tasks
     workflow_tasks = [
@@ -135,12 +153,14 @@ async def run_asyncflow_workflow():
     ]
 
     # Execute workflow
-    futures = await backend.submit_tasks(workflow_tasks)
+    task_futures = await backend.submit_tasks(workflow_tasks)
 
-    # Monitor progress
-    for task_uid, future in futures.items():
-        result = await future
-        print(f"Task {task_uid}: {result['state']}")
+    # Wait for all tasks to complete
+    await asyncio.gather(*task_futures)
+
+    # Check results
+    for task_uid, state in results:
+        print(f"Task {task_uid}: {state}")
 
     await backend.shutdown()
 
@@ -376,10 +396,7 @@ Main entry point for RHAPSODY workflows.
 
 ```python
 class Session:
-    def __init__(self, uid: str = None, load: bool = False)
-    def proxy_start(self) -> None
-    def registry_start(self) -> None
-    def close(self) -> None
+    def __init__(self)
 ```
 
 #### `BaseExecutionBackend`
@@ -387,9 +404,9 @@ Abstract base class for execution backends.
 
 ```python
 class BaseExecutionBackend:
-    async def submit_tasks(self, tasks: List[Dict]) -> List[asyncio.Task]
+    async def submit_tasks(self, tasks: List[Dict]) -> List
     async def shutdown(self) -> None
-    def get_task_states_map(self) -> StateMapper
+    def state(self) -> str
 ```
 
 ### Utility Functions
@@ -397,24 +414,28 @@ class BaseExecutionBackend:
 ```python
 # Get available backends
 rhapsody.get_backend(name: str) -> BaseExecutionBackend
-rhapsody.list_backends() -> List[str]
-
-# Platform management
-rhapsody.get_platform(name: str) -> PlatformDescription
+rhapsody.discover_backends() -> Dict[str, bool]
 ```
 
 ### Task State Management
 
 ```python
-from rhapsody.task import TaskState
+from rhapsody.backends.constants import TasksMainStates
 
 # Available states
-TaskState.NEW
-TaskState.SCHEDULING_PENDING
-TaskState.EXECUTING
-TaskState.DONE
-TaskState.FAILED
-TaskState.CANCELLED
+TasksMainStates.DONE
+TasksMainStates.FAILED
+TasksMainStates.CANCELED
+TasksMainStates.RUNNING
+```
+
+### State Mapping
+
+```python
+from rhapsody.backends.constants import StateMapper
+
+# Create a state mapper for a backend
+mapper = StateMapper(backend='concurrent')
 ```
 
 ## 🔧 Development

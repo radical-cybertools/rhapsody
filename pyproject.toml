@@ -91,9 +91,6 @@ Homepage = "https://github.com/stride-research/rhapsody"
 Repository = "https://github.com/stride-research/rhapsody"
 Issues = "https://github.com/stride-research/rhapsody/issues"
 
-[project.scripts]
-rhapsody-test-ci = "rhapsody.cli.test_ci:main"
-
 # Entry points for backend discovery
 [project.entry-points."rhapsody.backends"]
 noop = "rhapsody.backends.execution.noop:NoopExecutionBackend"
@@ -119,7 +116,7 @@ markers = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py38"
+target-version = "py39"
 
 [tool.ruff.lint]
 select = [
@@ -152,13 +149,10 @@ ignore = [
 "tests/*" = ["F401", "F841", "F811", "S", "T20", "PT", "B017"]  # Allow unused imports, variables, redefinitions, security, prints, pytest style, broad exceptions in tests
 "docs/*" = ["E402", "F841", "E722", "F401", "T20", "S", "B007"]  # More lenient for docs/examples, allow unused loop variables
 "examples/*" = ["E402", "F841", "E722", "F401", "T20", "S", "B007"]  # More lenient for examples
-"docs/tutorials/*" = ["E402", "F841", "E722", "F401", "T20", "S", "B007"]  # Allow notebook-style code, unused loop variables
-"src/observe/serialization/formats/handlers/*" = ["F401"]  # Allow imports for availability checking
-"src/observe/cli/*" = ["T20"]  # Allow print statements in CLI tools
 
 [tool.ruff.lint.isort]
 force-single-line = true
-known-first-party = ["observe"]
+known-first-party = ["rhapsody"]
 
 [tool.ruff.format]
 quote-style = "double"
