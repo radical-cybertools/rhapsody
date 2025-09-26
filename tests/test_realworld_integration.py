@@ -29,10 +29,10 @@ class AsyncFlowTask:
     name: str
     executable: str
     arguments: list[str]
-    dependencies: list[str] | None = None
-    input_files: list[str] | None = None
-    output_files: list[str] | None = None
-    environment: dict[str, str] | None = None
+    dependencies: Optional[list[str]] = None
+    input_files: Optional[list[str]] = None
+    output_files: Optional[list[str]] = None
+    environment: Optional[dict[str, str]] = None
     working_directory: str = None
     state: TasksMainStates = TasksMainStates.RUNNING
     exit_code: Optional[int] = None
@@ -66,7 +66,11 @@ class AsyncFlowTask:
 class AsyncFlowWorkflowSimulator:
     """Simulates AsyncFlow workflow execution using Rhapsody backends."""
 
-    def __init__(self, backend_name: str = "concurrent", resources: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        backend_name: str = "concurrent",
+        resources: Optional[dict[str, Any]] = None,
+    ):
         self.backend_name = backend_name
         self.resources = resources or {"max_workers": 4}
         self.tasks: dict[str, AsyncFlowTask] = {}

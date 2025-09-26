@@ -6,6 +6,7 @@ how AsyncFlow will use Rhapsody backends for task execution.
 
 import asyncio
 from typing import Any
+from typing import Optional
 
 import pytest
 
@@ -17,7 +18,12 @@ from rhapsody.backends.constants import TasksMainStates
 class MockAsyncFlowTask:
     """Mock AsyncFlow task for testing."""
 
-    def __init__(self, task_id: str, executable: str, arguments: list[str] | None = None):
+    def __init__(
+        self,
+        task_id: str,
+        executable: str,
+        arguments: Optional[list[str]] = None,
+    ):
         self.uid = task_id
         self.executable = executable
         self.arguments = arguments or []
@@ -42,7 +48,11 @@ class MockAsyncFlowTask:
 class MockAsyncFlowWorkflow:
     """Mock AsyncFlow workflow for integration testing."""
 
-    def __init__(self, backend_name: str = "noop", resources: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        backend_name: str = "noop",
+        resources: Optional[dict[str, Any]] = None,
+    ):
         self.backend_name = backend_name
         self.resources = resources or {}
         self.tasks: list[MockAsyncFlowTask] = []
@@ -59,7 +69,12 @@ class MockAsyncFlowWorkflow:
         else:
             self.backend = rhapsody.get_backend(self.backend_name)
 
-    def add_task(self, task_id: str, executable: str, arguments: list[str] | None = None):
+    def add_task(
+        self,
+        task_id: str,
+        executable: str,
+        arguments: Optional[list[str]] = None,
+    ):
         """Add a task to the workflow."""
         task = MockAsyncFlowTask(task_id, executable, arguments)
         self.tasks.append(task)
