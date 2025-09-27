@@ -9,10 +9,6 @@ from __future__ import annotations
 import os
 from abc import ABC
 from abc import abstractmethod
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from rhapsody.backends.constants import StateMapper
 
 
 class BaseExecutionBackend(ABC):
@@ -23,18 +19,13 @@ class BaseExecutionBackend(ABC):
     """
 
     @abstractmethod
-    async def submit_tasks(self, tasks: list[dict]) -> list:
+    async def submit_tasks(self, tasks: list[dict]) -> None:
         """Submit a list of tasks for execution.
 
         Args:
             tasks: A list of dictionaries containing task definitions and metadata.
                 Each task dictionary should contain the necessary information for
                 task execution.
-
-        Returns:
-            A list of asyncio.Task objects or other awaitable objects that can be
-            used to track task completion. Backends that don't naturally return
-            asyncio tasks can return an empty list.
         """
         pass
 
@@ -79,11 +70,11 @@ class BaseExecutionBackend(ABC):
         pass
 
     @abstractmethod
-    def get_task_states_map(self) -> StateMapper:
+    def get_task_states_map(self) -> None:
         """Retrieve a mapping of task IDs to their current states.
 
         Returns:
-            A StateMapper instance mapping task identifiers to their current execution states.
+            A dictionary mapping task identifiers to their current execution states.
         """
         pass
 

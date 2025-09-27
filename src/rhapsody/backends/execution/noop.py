@@ -52,7 +52,7 @@ class NoopExecutionBackend(BaseExecutionBackend):
         """
         pass
 
-    def get_task_states_map(self) -> StateMapper:
+    def get_task_states_map(self):
         """Retrieve a mapping of task IDs to their current states.
 
         Returns:
@@ -69,16 +69,18 @@ class NoopExecutionBackend(BaseExecutionBackend):
         """
         self._callback_func = func
 
-    def build_task(self, task: dict) -> None:
+    def build_task(self, uid, task_desc, task_specific_kwargs):
         """Build or prepare a task for execution.
 
         Args:
-            task: Dictionary containing task definition, parameters, and metadata
-                required for task construction.
+            uid: Unique identifier for the task.
+            task_desc: Dictionary containing task description and metadata.
+            task_specific_kwargs: Backend-specific keyword arguments for the task.
 
         Note:
             This is a no-op implementation that performs no actual task building.
         """
+        pass
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a task by its UID.
@@ -92,7 +94,7 @@ class NoopExecutionBackend(BaseExecutionBackend):
         """
         return False
 
-    async def submit_tasks(self, tasks):
+    async def submit_tasks(self, tasks) -> None:
         """Submit tasks for mock execution.
 
         Immediately marks all tasks as completed with dummy output without
@@ -101,24 +103,13 @@ class NoopExecutionBackend(BaseExecutionBackend):
         Args:
             tasks: List of task dictionaries to be processed. Each task will
                 receive dummy stdout and return_value before being marked as DONE.
-
-        Returns:
-            Empty list since noop backend doesn't create actual asyncio tasks.
         """
         for task in tasks:
             task["stdout"] = "Dummy Output"
             task["return_value"] = "Dummy Output"
             self._callback_func(task, "DONE")
 
-        return []
-
-    def link_explicit_data_deps(
-        self,
-        src_task=None,
-        dst_task=None,
-        file_name=None,
-        file_path=None,
-    ):
+    def link_explicit_data_deps(self, src_task=None, dst_task=None, file_name=None, file_path=None):
         """Handle explicit data dependencies between tasks.
 
         Args:

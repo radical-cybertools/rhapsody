@@ -111,6 +111,10 @@ addopts = "--tb=short"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 asyncio_default_test_loop_scope = "function"
+filterwarnings = [
+    "ignore:Exception ignored.*BaseSubprocessTransport:pytest.PytestUnraisableExceptionWarning",
+    "ignore:Exception ignored.*:pytest.PytestUnraisableExceptionWarning"
+]
 markers = [
     "slow: marks tests as slow-running"
 ]

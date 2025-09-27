@@ -167,18 +167,13 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
 
         self._callback_func(result_task, state)
 
-    async def submit_tasks(self, tasks: list[dict[str, Any]]) -> list[asyncio.Task]:
+    async def submit_tasks(self, tasks: list[dict[str, Any]]) -> None:
         """Submit tasks for execution."""
-        submitted_tasks = []
-
         for task in tasks:
             future = asyncio.create_task(self._handle_task(task))
-            submitted_tasks.append(future)
 
             self.tasks[task["uid"]] = task
             self.tasks[task["uid"]]["future"] = future
-
-        return submitted_tasks
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a task by its UID.

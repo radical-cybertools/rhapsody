@@ -94,27 +94,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
         """
         self._callback_func = callback
 
-    def state(self) -> str:
-        """Get the current state of the execution backend.
-
-        Returns:
-            A string representing the current state of the backend.
-        """
-        if hasattr(self, "_client") and self._client:
-            return "RUNNING"
-        return "IDLE"
-
-    def task_state_cb(self, task: dict, state: str) -> None:
-        """Callback function invoked when a task's state changes.
-
-        Args:
-            task: Dictionary containing task information and metadata.
-            state: The new state of the task.
-        """
-        if self._callback_func:
-            self._callback_func(task, state)
-
-    def get_task_states_map(self) -> StateMapper:
+    def get_task_states_map(self):
         """Retrieve a mapping of task IDs to their current states.
 
         Returns:
@@ -140,7 +120,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
                 return await future.cancel()
         return False
 
-    async def submit_tasks(self, tasks: list[dict[str, Any]]) -> list:
+    async def submit_tasks(self, tasks: list[dict[str, Any]]) -> None:
         """Submit async tasks to Dask cluster.
 
         Processes a list of tasks and submits them to the Dask cluster for execution.
@@ -155,10 +135,6 @@ class DaskExecutionBackend(BaseExecutionBackend):
                 - kwargs: Keyword arguments
                 - executable: Optional executable path (not supported)
                 - task_backend_specific_kwargs: Backend-specific parameters
-
-        Returns:
-            Empty list since Dask manages futures internally and doesn't expose
-            them as asyncio.Task objects.
 
         Note:
             Executable tasks are not supported and will result in FAILED state.
@@ -195,8 +171,6 @@ class DaskExecutionBackend(BaseExecutionBackend):
             except Exception as e:
                 task["exception"] = e
                 self._callback_func(task, "FAILED")
-
-        return []
 
     async def _submit_to_dask(self, task: dict[str, Any], fn: Callable, *args) -> None:
         """Submit function to Dask and register completion callback.
@@ -287,7 +261,32 @@ class DaskExecutionBackend(BaseExecutionBackend):
         """
         pass
 
-    def build_task(self, task: dict) -> None:
+    async def state(self) -> str:
+        """Get the current state of the Dask execution backend.
+
+        Returns:
+            Current state of the backend as a string.
+        """
+        if not self._initialized or self._client is None:
+            return "DISCONNECTED"
+
+        try:
+            # Check if client is still connected
+            await self._client.scheduler_info()
+            return "CONNECTED"
+        except Exception:
+            return "DISCONNECTED"
+
+    async def task_state_cb(self, task: dict, state: str) -> None:
+        """Callback function invoked when a task's state changes.
+
+        Args:
+            task: Dictionary containing task information and metadata.
+            state: The new state of the task.
+        """
+        pass
+
+    async def build_task(self, task: dict) -> None:
         """Build or prepare a task for execution.
 
         Args:
