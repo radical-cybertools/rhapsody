@@ -120,7 +120,7 @@ class StateMapper:
     @classmethod
     def register_backend_states(
         cls,
-        backend: Any,
+        backend: str | Any,
         done_state: Any,
         failed_state: Any,
         canceled_state: Any,
@@ -134,7 +134,7 @@ class StateMapper:
         Supports additional custom state mappings beyond the four core states.
 
         Args:
-            backend (Any): The identifier for the backend to register. Can be
+            backend (Union[str, Any]): The identifier for the backend to register. Can be
                 a string, module, or any hashable object.
             done_state (Any): Backend's representation of the DONE state.
             failed_state (Any): Backend's representation of the FAILED state.
@@ -160,8 +160,20 @@ class StateMapper:
                     timeout='TIMEOUT'
                 )
         """
+        # Convert backend to string key for consistent lookup
+        if isinstance(backend, str):
+            backend_key = backend.lower()
+        else:
+            # Detect backend name from object for consistent key
+            if hasattr(backend, "__name__"):
+                backend_key = backend.__name__.lower()
+            elif hasattr(backend, "__class__"):
+                backend_key = backend.__class__.__name__.lower()
+            else:
+                raise ValueError(f"Could not detect backend name from {backend}")
+
         additional_mapped = {TasksMainStates[k.upper()]: v for k, v in additional_states.items()}
-        cls._backend_registry[backend] = {
+        cls._backend_registry[backend_key] = {
             TasksMainStates.DONE: done_state,
             TasksMainStates.FAILED: failed_state,
             TasksMainStates.CANCELED: canceled_state,
@@ -170,7 +182,7 @@ class StateMapper:
         }
 
     @classmethod
-    def register_backend_states_with_defaults(cls, backend: Any):
+    def register_backend_states_with_defaults(cls, backend: str | Any):
         """Register a backend using default main state values.
 
         Convenience method that registers a backend where the backend-specific
@@ -178,7 +190,7 @@ class StateMapper:
         of the TasksMainStates enum).
 
         Args:
-            backend (Any): The backend identifier to register.
+            backend (Union[str, Any]): The backend identifier to register.
 
         Returns:
             The result of register_backend_states() with default values.
