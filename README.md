@@ -537,8 +537,6 @@ RHAPSODY is developed by the [RADICAL Research Group](http://radical.rutgers.edu
 
 RHAPSODY is supported by the National Science Foundation (NSF) under Award ID [2103986](https://www.nsf.gov/awardsearch/showAward?AWD_ID=2103986). This collaborative project aims to advance the state-of-the-art in heterogeneous workflow execution for scientific computing.
 
-[Learn More About the Project →](project/nsf-award.md){ .md-button }
-
 ### Citations
 
 If you use RHAPSODY in your research, please cite:
