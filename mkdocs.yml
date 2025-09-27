@@ -1,8 +1,8 @@
-site_name: Rhapsody - Runtime for HPC-AI Scientific Workflows
-site_description: Runtime system for executing heterogeneous HPC-AI workflows with dynamic task graphs on high-performance computing infrastructures.
-site_url: https://stride-research.github.io/rhapsody
-repo_url: https://github.com/stride-research/rhapsody
-repo_name: stride-research/rhapsody
+site_name: RHAPSODY - Runtime for Heterogeneous Applications, Service Orchestration and Dynamism
+site_description: High-performance runtime system for executing heterogeneous HPC-AI workflows with dynamic task graphs on high-performance computing infrastructures.
+site_url: https://radical-cybertools.github.io/rhapsody
+repo_url: https://github.com/radical-cybertools/rhapsody
+repo_name: radical-cybertools/rhapsody
 
 theme:
   name: material
@@ -78,57 +78,59 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - About: about.md
   - Getting Started:
     - getting-started/index.md
     - Installation: getting-started/installation.md
     - Quick Start: getting-started/quick-start.md
-    - API Overview: getting-started/api-overview.md
+    - First Workflow: getting-started/first-workflow.md
     - Configuration: getting-started/configuration.md
+  - User Guide:
+    - user-guide/index.md
+    - Core Concepts: user-guide/core-concepts.md
+    - Execution Backends: user-guide/backends.md
+    - Task Definition: user-guide/task-definition.md
+    - Workflow Orchestration: user-guide/orchestration.md
+    - Platform Support: user-guide/platforms.md
+    - AsyncFlow Integration: user-guide/asyncflow-integration.md
+    - Troubleshooting: user-guide/troubleshooting.md
   - Examples:
     - examples/index.md
-  - Guides:
-    - Development Guide: guides/development.md
-    - Performance Tuning: guides/performance-tuning.md
-    - Troubleshooting: guides/troubleshooting.md
-  - Tools:
-    - CLI Reference: tools/cli-reference.md
-    - Benchmarking: tools/benchmark.md
+    - Basic Examples: examples/basic.md
+    - HPC Workflows: examples/hpc.md
+    - AI/ML Pipelines: examples/ai-ml.md
+    - Heterogeneous Computing: examples/heterogeneous.md
   - API Reference:
     - reference/index.md
+    - Core API: reference/core.md
+    - Backends: reference/backends.md
+    - Session Management: reference/session.md
+    - Task Management: reference/task.md
     - Configuration: reference/configuration.md
-    - Logging: reference/logging.md
-    - Tracing: reference/tracing.md
-    - Metrics: reference/metrics.md
-    - Exporters: reference/exporters.md
-    - Formatters: reference/formatters.md
-    - Utils: reference/utils.md
-    - Serialization: reference/serialization.md
-    - API: reference/api.md
-    - Decorators: reference/decorators.md
-    - Routing: reference/routing.md
-    - Writers: reference/writers.md
+    - Utilities: reference/utilities.md
   - Development:
-    - Architecture: dev/architecture.md
-    - API Design: dev/api.md
-    - Development: dev/development.md
-    - Implementation Strategy: dev/implementation-strategy.md
-    - Project Status: dev/project-status.md
-    - Roadmap: dev/roadmap.md
-    - Maturity Matrix: dev/maturity-matrix.md
-    - Debug Guide: dev/debug.md
-  - Architecture Decisions:
-    - adr/README.md
-    - Unified Architecture: adr/001-unified-observability-architecture.md
-    - Component Separation: adr/002-component-separation.md
-    - Flexible API: adr/003-flexible-legacy-api.md
-    - Multi-Middleware: adr/004-multi-middleware-architecture.md
-    - AsyncFlow Integration: adr/005-asyncflow-integration.md
-    - Use Cases: adr/006-use-cases-scenarios.md
+    - development/index.md
+    - Contributing: development/contributing.md
+    - Architecture: development/architecture.md
+    - Backend Development: development/backend-dev.md
+    - Testing: development/testing.md
+    - Performance: development/performance.md
+  - Project:
+    - project/index.md
+    - NSF Award: project/nsf-award.md
+    - Roadmap: project/roadmap.md
+    - Publications: project/publications.md
+    - Team: project/team.md
 
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/stride-research/observe
+      link: https://github.com/radical-cybertools/rhapsody
+    - icon: fontawesome/solid/globe
+      link: https://radical.rutgers.edu/
+  analytics:
+    provider: google
+    property: !ENV GOOGLE_ANALYTICS_KEY
 
 extra_css:
   - stylesheets/extra.css
