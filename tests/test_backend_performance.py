@@ -27,7 +27,8 @@ async def get_available_backend():
 
     # Initialize backend with proper resources
     if backend_name == "radical_pilot":
-        backend = rhapsody.get_backend(backend_name, resources={})
+        test_resources = {"resource": "local.localhost", "runtime": 1, "cores": 1}
+        backend = rhapsody.get_backend(backend_name, test_resources)
     else:
         backend = rhapsody.get_backend(backend_name)
 
@@ -109,13 +110,7 @@ class TestBackendPerformance:
 
     async def test_task_submission_throughput(self):
         """Test task submission throughput."""
-        available_backends = rhapsody.discover_backends()
-        backend_names = [name for name, avail in available_backends.items() if avail]
-
-        if not backend_names:
-            pytest.skip("No backends available for testing")
-
-        backend = rhapsody.get_backend(backend_names[0])
+        backend = await get_available_backend()
 
         try:
             # Create large batch of tasks
@@ -162,13 +157,7 @@ class TestBackendPerformance:
 
     async def test_available_backend_load(self):
         """Test available backend under load."""
-        available_backends = rhapsody.discover_backends()
-        backend_names = [name for name, avail in available_backends.items() if avail]
-
-        if not backend_names:
-            pytest.skip("No backends available for testing")
-
-        backend = rhapsody.get_backend(backend_names[0])
+        backend = await get_available_backend()
 
         try:
             # Create many quick tasks
