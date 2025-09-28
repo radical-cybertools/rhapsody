@@ -68,7 +68,7 @@ class AsyncFlowWorkflowSimulator:
 
     def __init__(
         self,
-        backend_name: str = "concurrent",
+        backend_name: str = "",
         resources: Optional[dict[str, Any]] = None,
     ):
         self.backend_name = backend_name
@@ -84,14 +84,34 @@ class AsyncFlowWorkflowSimulator:
         self.work_dir = tempfile.mkdtemp(prefix="asyncflow_test_")
 
         # Initialize backend
-        if self.backend_name == "concurrent":
-            from concurrent.futures import ThreadPoolExecutor
+        if not self.backend_name:
+            # Use first available backend, skip radical_pilot due to initialization complexity
+            available_backends = rhapsody.discover_backends()
+            backend_names = [
+                name
+                for name, avail in available_backends.items()
+                if avail and name != "radical_pilot"
+            ]
+            if not backend_names:
+                pytest.skip("No suitable backends available for real-world integration testing")
+            self.backend_name = backend_names[0]
 
-            max_workers = self.resources.get("max_workers", 4)
-            executor = ThreadPoolExecutor(max_workers=max_workers)
-            self.backend = rhapsody.get_backend(self.backend_name, executor)
-        else:
-            self.backend = rhapsody.get_backend(self.backend_name)
+        # Initialize backend properly
+        self.backend = rhapsody.get_backend(self.backend_name)
+
+        # Handle async initialization for backends that need it
+        try:
+            self.backend = await self.backend  # type: ignore[misc]
+        except TypeError:
+            # Backend doesn't support await, that's fine
+            pass
+
+        # Register a callback function
+        def task_callback(task: dict, state: str) -> None:
+            # Simple callback that does nothing but satisfies the interface
+            pass
+
+        self.backend.register_callback(task_callback)
 
     def add_task(self, task: AsyncFlowTask):
         """Add a task to the workflow."""
@@ -370,9 +390,7 @@ class TestRealWorldIntegration:
 
     async def test_data_processing_workflow(self):
         """Test a realistic data processing workflow."""
-        simulator = AsyncFlowWorkflowSimulator(
-            backend_name="concurrent", resources={"max_workers": 3}
-        )
+        simulator = AsyncFlowWorkflowSimulator(resources={})
 
         try:
             await simulator.initialize()
@@ -411,9 +429,7 @@ class TestRealWorldIntegration:
 
     async def test_computational_workflow(self):
         """Test a computational workflow."""
-        simulator = AsyncFlowWorkflowSimulator(
-            backend_name="concurrent", resources={"max_workers": 2}
-        )
+        simulator = AsyncFlowWorkflowSimulator(resources={})
 
         try:
             await simulator.initialize()
@@ -448,9 +464,7 @@ class TestRealWorldIntegration:
 
     async def test_workflow_with_failures(self):
         """Test workflow behavior with failing tasks."""
-        simulator = AsyncFlowWorkflowSimulator(
-            backend_name="concurrent", resources={"max_workers": 2}
-        )
+        simulator = AsyncFlowWorkflowSimulator(resources={})
 
         try:
             await simulator.initialize()
@@ -501,9 +515,7 @@ class TestRealWorldIntegration:
 
     async def test_large_workflow_scalability(self):
         """Test scalability with larger workflows."""
-        simulator = AsyncFlowWorkflowSimulator(
-            backend_name="concurrent", resources={"max_workers": 6}
-        )
+        simulator = AsyncFlowWorkflowSimulator(resources={})
 
         try:
             await simulator.initialize()
@@ -549,9 +561,7 @@ class TestRealWorldIntegration:
 
     async def test_workflow_dependency_validation(self):
         """Test complex dependency validation."""
-        simulator = AsyncFlowWorkflowSimulator(
-            backend_name="concurrent", resources={"max_workers": 4}
-        )
+        simulator = AsyncFlowWorkflowSimulator(resources={})
 
         try:
             await simulator.initialize()
@@ -635,14 +645,15 @@ class TestBackendComparison:
 
     async def test_backend_performance_comparison(self):
         """Compare performance of different backends."""
-        backends_to_test = ["noop", "concurrent"]
+        backends_to_test = []
+        available_backends = rhapsody.discover_backends()
+        for name, available in available_backends.items():
+            if available:
+                backends_to_test.append(name)
         results = {}
 
         for backend_name in backends_to_test:
-            simulator = AsyncFlowWorkflowSimulator(
-                backend_name=backend_name,
-                resources={"max_workers": 4} if backend_name == "concurrent" else {},
-            )
+            simulator = AsyncFlowWorkflowSimulator(backend_name=backend_name, resources={})
 
             try:
                 await simulator.initialize()
@@ -690,7 +701,7 @@ if __name__ == "__main__":
     async def main():
         print("Running Real-World AsyncFlow Integration Test...")
 
-        simulator = AsyncFlowWorkflowSimulator(backend_name="concurrent")
+        simulator = AsyncFlowWorkflowSimulator()
 
         try:
             await simulator.initialize()

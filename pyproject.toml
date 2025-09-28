@@ -94,8 +94,6 @@ Issues = "https://github.com/stride-research/rhapsody/issues"
 
 # Entry points for backend discovery
 [project.entry-points."rhapsody.backends"]
-noop = "rhapsody.backends.execution.noop:NoopExecutionBackend"
-concurrent = "rhapsody.backends.execution.concurrent:ConcurrentExecutionBackend"
 dask = "rhapsody.backends.execution.dask_parallel:DaskExecutionBackend"
 radical_pilot = "rhapsody.backends.execution.radical_pilot:RadicalExecutionBackend"
 

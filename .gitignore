@@ -221,3 +221,6 @@ pip-audit.json
 
 # Codacy
 .codacy/
+
+# GitHub instructions
+.github/instructions
