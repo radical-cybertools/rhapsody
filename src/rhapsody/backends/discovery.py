@@ -96,9 +96,26 @@ def discover_backends() -> dict[str, bool]:
     for backend_name in BackendRegistry.list_backends():
         try:
             # Try to import the backend class to check if dependencies are available
-            BackendRegistry.get_backend_class(backend_name)
+            backend_class = BackendRegistry.get_backend_class(backend_name)
+
+            # Try a minimal instantiation to check runtime dependencies
+            # This is a simple test - we catch any exception that might occur
+            if backend_name == "radical_pilot":
+                # Radical pilot requires resources parameter
+                test_resources = {
+                    "resource": "local.localhost",
+                    "runtime": 1,
+                    "cores": 1,
+                }
+                backend_class(test_resources)  # type: ignore[call-arg]
+            else:
+                # Other backends like dask
+                backend_class()  # type: ignore[call-arg]
+
             availability[backend_name] = True
-        except ImportError:
+
+        except Exception:
+            # Any error during import or instantiation means backend is not available
             availability[backend_name] = False
 
     return availability

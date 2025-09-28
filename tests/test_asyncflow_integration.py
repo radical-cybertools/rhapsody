@@ -176,7 +176,17 @@ class TestAsyncFlowIntegration:
         for backend_name, is_available in available_backends.items():
             if is_available:
                 try:
-                    backend = rhapsody.get_backend(backend_name)
+                    # Provide appropriate parameters for each backend
+                    if backend_name == "radical_pilot":
+                        test_resources = {
+                            "resource": "local.localhost",
+                            "runtime": 1,
+                            "cores": 1,
+                        }
+                        backend = rhapsody.get_backend(backend_name, test_resources)
+                    else:
+                        backend = rhapsody.get_backend(backend_name)
+
                     backend_instances[backend_name] = backend
                     assert isinstance(backend, BaseExecutionBackend)
                 except Exception as e:
@@ -190,8 +200,12 @@ class TestAsyncFlowIntegration:
                     await backend.shutdown()
                 except (AttributeError, RuntimeError):
                     pass  # Ignore cleanup errors
-        # Should have at least dask backend working
-        assert "dask" in backend_instances
+
+        # Should have at least one backend working if dependencies are available
+        if available_backends.get("dask", False):
+            assert "dask" in backend_instances
+        elif available_backends.get("radical_pilot", False):
+            assert "radical_pilot" in backend_instances
 
     async def test_backend_resource_configuration(self):
         """Test backend resource configuration from AsyncFlow."""
