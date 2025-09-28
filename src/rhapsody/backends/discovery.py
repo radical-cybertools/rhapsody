@@ -114,8 +114,14 @@ def discover_backends() -> dict[str, bool]:
 
             availability[backend_name] = True
 
-        except Exception:
-            # Any error during import or instantiation means backend is not available
+        except ImportError:
+            # Import error means dependencies are not available
             availability[backend_name] = False
+        except Exception as e:
+            # For now, let's be more permissive and only fail on ImportError
+            # Other exceptions might be configuration issues but backend could work
+            # TODO: Investigate specific exceptions and handle them appropriately
+            print(f"Warning: Backend {backend_name} had non-import error: {e}")
+            availability[backend_name] = True
 
     return availability
