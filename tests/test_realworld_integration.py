@@ -60,6 +60,7 @@ class AsyncFlowTask:
             "environment": self.environment,
             "working_directory": self.working_directory,
             "state": self.state,
+            "task_backend_specific_kwargs": {},  # Required by backends
         }
 
 
