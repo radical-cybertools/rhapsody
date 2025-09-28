@@ -97,7 +97,15 @@ class AsyncFlowWorkflowSimulator:
             self.backend_name = backend_names[0]
 
         # Initialize backend properly
-        self.backend = rhapsody.get_backend(self.backend_name)
+        if self.backend_name == "radical_pilot":
+            test_resources = {
+                "resource": "local.localhost",
+                "runtime": 1,
+                "cores": 1,
+            }
+            self.backend = rhapsody.get_backend(self.backend_name, test_resources)
+        else:
+            self.backend = rhapsody.get_backend(self.backend_name)
 
         # Handle async initialization for backends that need it
         try:
@@ -653,7 +661,19 @@ class TestBackendComparison:
         results = {}
 
         for backend_name in backends_to_test:
-            simulator = AsyncFlowWorkflowSimulator(backend_name=backend_name, resources={})
+            # Use proper resources for radical_pilot backend
+            if backend_name == "radical_pilot":
+                simulator_resources = {
+                    "resource": "local.localhost",
+                    "runtime": 1,
+                    "cores": 1,
+                }
+            else:
+                simulator_resources = {}
+
+            simulator = AsyncFlowWorkflowSimulator(
+                backend_name=backend_name, resources=simulator_resources
+            )
 
             try:
                 await simulator.initialize()
