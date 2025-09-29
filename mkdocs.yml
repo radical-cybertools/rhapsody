@@ -85,21 +85,21 @@ nav:
     - Quick Start: getting-started/quick-start.md
     - First Workflow: getting-started/first-workflow.md
     - Configuration: getting-started/configuration.md
-  - User Guide:
-    - user-guide/index.md
-    - Core Concepts: user-guide/core-concepts.md
-    - Execution Backends: user-guide/backends.md
-    - Task Definition: user-guide/task-definition.md
-    - Workflow Orchestration: user-guide/orchestration.md
-    - Platform Support: user-guide/platforms.md
-    - AsyncFlow Integration: user-guide/asyncflow-integration.md
-    - Troubleshooting: user-guide/troubleshooting.md
-  - Examples:
-    - examples/index.md
-    - Basic Examples: examples/basic.md
-    - HPC Workflows: examples/hpc.md
-    - AI/ML Pipelines: examples/ai-ml.md
-    - Heterogeneous Computing: examples/heterogeneous.md
+  # - User Guide:
+  #   - user-guide/index.md
+  #   - Core Concepts: user-guide/core-concepts.md
+  #   - Execution Backends: user-guide/backends.md
+  #   - Task Definition: user-guide/task-definition.md
+  #   - Workflow Orchestration: user-guide/orchestration.md
+  #   - Platform Support: user-guide/platforms.md
+  #   - AsyncFlow Integration: user-guide/asyncflow-integration.md
+  #   - Troubleshooting: user-guide/troubleshooting.md
+  # - Examples:
+  #   - examples/index.md
+  #   - Basic Examples: examples/basic.md
+  #   - HPC Workflows: examples/hpc.md
+  #   - AI/ML Pipelines: examples/ai-ml.md
+  #   - Heterogeneous Computing: examples/heterogeneous.md
   - API Reference:
     - reference/index.md
     - Core API: reference/core.md
@@ -108,13 +108,13 @@ nav:
     - Task Management: reference/task.md
     - Configuration: reference/configuration.md
     - Utilities: reference/utilities.md
-  - Development:
-    - development/index.md
-    - Contributing: development/contributing.md
-    - Architecture: development/architecture.md
-    - Backend Development: development/backend-dev.md
-    - Testing: development/testing.md
-    - Performance: development/performance.md
+  # - Development:
+  #   - development/index.md
+  #   - Contributing: development/contributing.md
+  #   - Architecture: development/architecture.md
+  #   - Backend Development: development/backend-dev.md
+  #   - Testing: development/testing.md
+  #   - Performance: development/performance.md
   - Project:
     - project/index.md
     - NSF Award: project/nsf-award.md
