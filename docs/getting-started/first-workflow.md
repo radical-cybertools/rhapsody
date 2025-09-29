@@ -400,9 +400,8 @@ Try these modifications to learn more:
 
 Now that you've built your first workflow, explore:
 
-1. **Different Backends**: Try the [Dask](../user-guide/backends.md#dask-backend) or [RADICAL-Pilot](../user-guide/backends.md#radical-pilot-backend) backends
-2. **Advanced Patterns**: Learn about [workflow orchestration](../user-guide/orchestration.md) patterns
-3. **Real Examples**: Check out domain-specific examples in the [Examples](../examples/index.md) section
-4. **Configuration**: Explore [configuration options](configuration.md) for different environments
+1. **Different Backends**: Learn about the Dask and RADICAL-Pilot backends in the [API Reference](../reference/backends.md)
+2. **Configuration**: Explore [configuration options](configuration.md) for different environments
+3. **API Reference**: Dive deeper into the [complete API documentation](../reference/index.md)
 
 Congratulations on completing your first RHAPSODY workflow!

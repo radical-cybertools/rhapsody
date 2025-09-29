@@ -212,9 +212,8 @@ backend = await rhapsody.get_backend("radical_pilot", hpc_resources)
 
 Now that you understand the basics, you can:
 
-1. **Explore different backends**: Try the [Dask](../user-guide/backends.md#dask-backend) or [RADICAL-Pilot](../user-guide/backends.md#radical-pilot-backend) backends
-2. **Build complex workflows**: Learn about [workflow orchestration](../user-guide/orchestration.md)
-3. **See real examples**: Check out the [Examples](../examples/index.md) section
-4. **Create your first workflow**: Follow the [First Workflow](first-workflow.md) tutorial
+1. **Explore different backends**: Learn about backends in the [API Reference](../reference/backends.md)
+2. **Create your first workflow**: Follow the [First Workflow](first-workflow.md) tutorial
+3. **Learn about configuration**: Check out the [Configuration Guide](configuration.md)
 
 Ready to build something more substantial? Continue with the [First Workflow](first-workflow.md) tutorial.

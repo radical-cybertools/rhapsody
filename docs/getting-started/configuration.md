@@ -402,4 +402,4 @@ print(rhapsody.list_backends())
 # pip install "rhapsody[dask]" for Dask backend
 ```
 
-For more configuration examples, see the [Examples](../examples/index.md) section.
+For more detailed information about RHAPSODY's configuration options, refer to the [API Reference](../reference/configuration.md).

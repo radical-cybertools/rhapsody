@@ -1,7 +1,5 @@
 # RHAPSODY
 
-![RHAPSODY Logo](assets/rhapsody-banner.png){ align=center }
-
 **RHAPSODY** – **R**untime for **H**eterogeneous **AP**plications, **S**ervice **O**rchestration and **DY**namism
 
 RHAPSODY is a high-performance runtime system designed for executing heterogeneous HPC-AI workflows with dynamic task graphs on high-performance computing infrastructures. It provides seamless integration between different computational paradigms, enabling efficient orchestration of complex scientific workloads.
@@ -47,7 +45,6 @@ asyncio.run(main())
 ```
 
 [Get Started →](getting-started/index.md){ .md-button .md-button--primary }
-[View Examples →](examples/index.md){ .md-button }
 
 ## Documentation Sections
 
@@ -60,22 +57,6 @@ asyncio.run(main())
     Quick installation guide, tutorials, and your first RHAPSODY workflow
 
     [:octicons-arrow-right-24: Getting Started](getting-started/index.md)
-
--   :material-book-open-variant:{ .lg .middle } **User Guide**
-
-    ---
-
-    Comprehensive guide covering core concepts, backends, and advanced features
-
-    [:octicons-arrow-right-24: User Guide](user-guide/index.md)
-
--   :material-code-tags:{ .lg .middle } **Examples**
-
-    ---
-
-    Real-world examples from basic workflows to complex HPC-AI pipelines
-
-    [:octicons-arrow-right-24: Examples](examples/index.md)
 
 -   :material-api:{ .lg .middle } **API Reference**
 
@@ -97,7 +78,7 @@ RHAPSODY is supported by the National Science Foundation (NSF) under Award ID [2
 
 RHAPSODY is an open-source project and we welcome contributions from the community! Whether you're reporting bugs, suggesting features, or contributing code, your help is appreciated.
 
-[Contributing Guide →](development/contributing.md){ .md-button }
+Check out our [GitHub repository](https://github.com/radical-cybertools/rhapsody) to get involved.
 
 ## License
 

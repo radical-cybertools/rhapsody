@@ -223,9 +223,8 @@ Backend loaded: DaskExecutionBackend
 
 If you encounter installation issues:
 
-1. Check the [troubleshooting guide](../user-guide/troubleshooting.md)
-2. Search existing [GitHub issues](https://github.com/radical-cybertools/rhapsody/issues)
-3. Create a new issue with:
+1. Search existing [GitHub issues](https://github.com/radical-cybertools/rhapsody/issues)
+2. Create a new issue with:
    - Operating system and version
    - Python version (`python --version`)
    - Installation command used

@@ -61,17 +61,12 @@ Callbacks provide real-time monitoring and response to task state changes during
 
 If you encounter issues or have questions:
 
-- **Documentation**: Browse the comprehensive [User Guide](../user-guide/index.md)
-- **Examples**: Check out the [Examples](../examples/index.md) section
 - **API Reference**: Consult the detailed [API Reference](../reference/index.md)
 - **Issues**: Report bugs or ask questions on [GitHub Issues](https://github.com/radical-cybertools/rhapsody/issues)
+- **Community**: Join our community discussions on GitHub
 
 ## Next Steps
 
 Ready to begin? Start with the [Installation Guide](installation.md) to set up RHAPSODY on your system.
 
-Once you're comfortable with the basics, explore:
-
-- [User Guide](../user-guide/index.md) for comprehensive coverage of RHAPSODY features
-- [Examples](../examples/index.md) for real-world use cases
-- [Development](../development/index.md) for contributing to RHAPSODY
+Once you're comfortable with the basics, explore the [API Reference](../reference/index.md) for detailed documentation of all available functions and classes.

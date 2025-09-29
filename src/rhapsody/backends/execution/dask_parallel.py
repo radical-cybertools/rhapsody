@@ -94,7 +94,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
         """
         self._callback_func = func
 
-    def get_task_states_map(self):
+    def get_task_states_map(self) -> StateMapper:
         """Retrieve a mapping of task IDs to their current states.
 
         Returns:
@@ -241,7 +241,13 @@ class DaskExecutionBackend(BaseExecutionBackend):
 
         return cancelled_count
 
-    def link_explicit_data_deps(self, src_task=None, dst_task=None, file_name=None, file_path=None):
+    def link_explicit_data_deps(
+        self,
+        src_task: dict[str, Any] | None = None,
+        dst_task: dict[str, Any] | None = None,
+        file_name: str | None = None,
+        file_path: str | None = None,
+    ) -> None:
         """Handle explicit data dependencies between tasks.
 
         Args:
@@ -252,7 +258,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
         """
         pass
 
-    def link_implicit_data_deps(self, src_task, dst_task):
+    def link_implicit_data_deps(self, src_task: dict[str, Any], dst_task: dict[str, Any]) -> None:
         """Handle implicit data dependencies for a task.
 
         Args:
@@ -337,7 +343,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
 
     # Class method for cleaner instantiation (optional alternative pattern)
     @classmethod
-    async def create(cls, resources: dict | None = None):
+    async def create(cls, resources: dict | None = None) -> DaskExecutionBackend:
         """Alternative factory method for creating initialized backend.
 
         Args:

@@ -96,23 +96,23 @@ backend.register_callback(monitor_progress)
 
 ### Functions
 
-- [`get_backend()`](core/#rhapsody.get_backend) - Get a backend instance
-- [`register_backend()`](core/#rhapsody.BackendRegistry.register_backend) - Register a custom backend
-- [`list_backends()`](core/#rhapsody.list_backends) - List available backends
+- [`get_backend()`](core.md) - Get a backend instance
+- [`register_backend()`](core.md) - Register a custom backend
+- [`list_backends()`](core.md) - List available backends
 
 ### Classes
 
-- [`Session`](session/#rhapsody.session.Session) - Workflow session management
-- [`BaseExecutionBackend`](backends/#rhapsody.backends.base.BaseExecutionBackend) - Base backend interface
-- [`DaskExecutionBackend`](backends/#rhapsody.backends.execution.dask_parallel.DaskExecutionBackend) - Dask-based distributed execution
-- [`RadicalExecutionBackend`](backends/#rhapsody.backends.execution.radical_pilot.RadicalExecutionBackend) - RADICAL-Pilot HPC execution
+- [`Session`](session.md) - Workflow session management
+- [`BaseExecutionBackend`](backends.md) - Base backend interface
+- [`DaskExecutionBackend`](backends.md) - Dask-based distributed execution
+- [`RadicalExecutionBackend`](backends.md) - RADICAL-Pilot HPC execution
 
 ### Exceptions
 
-- [`RhapsodyError`](utilities/#rhapsody.exceptions.RhapsodyError) - Base exception class
-- [`BackendError`](utilities/#rhapsody.exceptions.BackendError) - Backend-specific errors
-- [`TaskError`](utilities/#rhapsody.exceptions.TaskError) - Task execution errors
-- [`ConfigurationError`](utilities/#rhapsody.exceptions.ConfigurationError) - Configuration errors
+- [`RhapsodyError`](utilities.md) - Base exception class
+- [`BackendError`](utilities.md) - Backend-specific errors
+- [`TaskError`](utilities.md) - Task execution errors
+- [`ConfigurationError`](utilities.md) - Configuration errors
 
 ## Type Definitions
 
@@ -160,7 +160,6 @@ task:
 
 ## Need Help?
 
-- :octicons-book-16: [User Guide](../user-guide/index.md) - Comprehensive usage guide
-- :octicons-code-16: [Examples](../examples/index.md) - Working code examples
+- :octicons-book-16: [Getting Started](../getting-started/index.md) - Quick start guide and tutorials
 - :octicons-issue-opened-16: [GitHub Issues](https://github.com/radical-cybertools/rhapsody/issues) - Bug reports and questions
 - :octicons-comment-discussion-16: [Discussions](https://github.com/radical-cybertools/rhapsody/discussions) - Community forum
