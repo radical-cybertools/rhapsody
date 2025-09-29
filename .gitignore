@@ -222,5 +222,5 @@ pip-audit.json
 # Codacy
 .codacy/
 
-#Ignore GitHub instructions
+# GitHub instructions
 .github/instructions

@@ -28,25 +28,11 @@ def test_discover_backends():
     """Test backend discovery."""
     available = rhapsody.discover_backends()
 
-    # These should always be available (no optional deps)
-    assert "noop" in available
-    assert "concurrent" in available
-
-    # These depend on optional packages
+    # These should always be available
     assert "dask" in available  # May be True or False
     assert "radical_pilot" in available  # May be True or False
 
     print(f"Available backends: {available}")
-
-
-def test_noop_backend():
-    """Test that noop backend can be created."""
-    backend = rhapsody.get_backend("noop")
-
-    # Should be able to create without error
-    assert backend is not None
-    assert hasattr(backend, "submit_tasks")
-    assert hasattr(backend, "shutdown")
 
 
 def test_backend_registry():
@@ -54,48 +40,22 @@ def test_backend_registry():
     registry = rhapsody.BackendRegistry
 
     backends = registry.list_backends()
-    assert len(backends) >= 2  # At least noop and concurrent
+    assert len(backends) >= 2  # At least dask and radical_pilot
 
-    # Test getting a backend class
-    noop_class = registry.get_backend_class("noop")
-    assert noop_class is not None
+    # Test getting a backend class for each available backend
+    for backend_name in backends:
+        backend_class = registry.get_backend_class(backend_name)
+        assert backend_class is not None
 
     # Test error on invalid backend
     with pytest.raises(ValueError):
         registry.get_backend_class("nonexistent")
 
 
-@pytest.mark.asyncio
-async def test_noop_backend_basic_usage():
-    """Test basic noop backend usage."""
-    backend = rhapsody.get_backend("noop")
-
-    # Set up a simple callback
-    results = []
-
-    def callback(task, state):
-        results.append((task["uid"], state))
-
-    backend.register_callback(callback)
-
-    # Submit a simple task
-    tasks = [{"uid": "test_task_001", "executable": "/bin/echo", "args": ["hello", "world"]}]
-
-    await backend.submit_tasks(tasks)
-
-    # Noop backend should immediately mark task as done
-    assert len(results) == 1
-    assert results[0][0] == "test_task_001"
-    assert results[0][1] == "DONE"
-
-    await backend.shutdown()
-
-
 if __name__ == "__main__":
     # Run basic tests
     test_basic_imports()
     test_discover_backends()
-    test_noop_backend()
     test_backend_registry()
 
     print("All basic tests passed!")

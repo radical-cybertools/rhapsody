@@ -50,7 +50,7 @@ class MockAsyncFlowWorkflow:
 
     def __init__(
         self,
-        backend_name: str = "noop",
+        backend_name: str = "dask",
         resources: Optional[dict[str, Any]] = None,
     ):
         self.backend_name = backend_name
@@ -60,14 +60,25 @@ class MockAsyncFlowWorkflow:
 
     async def initialize_backend(self):
         """Initialize the Rhapsody backend."""
-        if self.backend_name == "concurrent":
-            from concurrent.futures import ThreadPoolExecutor
+        try:
+            self.backend = rhapsody.get_backend(self.backend_name, **self.resources)
 
-            max_workers = self.resources.get("max_workers", 2)
-            executor = ThreadPoolExecutor(max_workers=max_workers)
-            self.backend = await rhapsody.get_backend(self.backend_name, executor)
-        else:
-            self.backend = rhapsody.get_backend(self.backend_name)
+            # Handle async initialization for backends that need it
+            try:
+                self.backend = await self.backend  # type: ignore[misc]
+            except TypeError:
+                # Backend doesn't support await, that's fine
+                pass
+
+            # Register a callback function
+            def task_callback(task: dict, state: str) -> None:
+                # Simple callback that does nothing but satisfies the interface
+                pass
+
+            self.backend.register_callback(task_callback)
+        except ImportError:
+            # If backend dependencies are not available, skip the test
+            pytest.skip(f"Backend '{self.backend_name}' dependencies not available")
 
     def add_task(
         self,
@@ -91,15 +102,15 @@ class MockAsyncFlowWorkflow:
         # Submit tasks to backend
         await self.backend.submit_tasks(backend_tasks)
 
-        # For noop backend, tasks are immediately completed
-        # For real backends, we'd need to poll or use callbacks
-        completed_count = len(backend_tasks)  # Assume all submitted complete
+        # For most backends, tasks need time to complete
+        # For this integration test, we assume all submitted complete
+        completed_count = len(backend_tasks)
 
         # Update task states (simplified for integration test)
         for task in self.tasks:
-            # Noop backend immediately marks tasks as done
+            # Mark tasks as done for testing purposes
             task.state = TasksMainStates.DONE
-            task.stdout = "Dummy Output"  # Noop backend sets this
+            task.stdout = "Test Output"
 
         return {
             "total_tasks": len(self.tasks),
@@ -123,69 +134,23 @@ class TestAsyncFlowIntegration:
         available_backends = rhapsody.discover_backends()
 
         assert isinstance(available_backends, dict)
-        assert "noop" in available_backends
-        assert "concurrent" in available_backends
+        assert "dask" in available_backends
+        assert "radical_pilot" in available_backends
 
         # Check that backends can be listed
         backend_list = rhapsody.BackendRegistry.list_backends()
         assert isinstance(backend_list, list)
-        assert len(backend_list) >= 2  # At least noop and concurrent
-
-    async def test_noop_backend_integration(self):
-        """Test AsyncFlow workflow with noop backend."""
-        workflow = MockAsyncFlowWorkflow(backend_name="noop")
-
-        try:
-            # Add some tasks
-            workflow.add_task("task_1", "/bin/echo", ["Hello, World!"])
-            workflow.add_task("task_2", "/bin/echo", ["Testing Rhapsody"])
-            workflow.add_task("task_3", "/usr/bin/env", ["python", "-c", 'print("Python task")'])
-
-            # Execute workflow
-            results = await workflow.execute_workflow()
-
-            # Verify results
-            assert results["total_tasks"] == 3
-            assert results["completed_tasks"] >= 0  # Noop might complete or not
-            assert 0.0 <= results["success_rate"] <= 1.0
-
-            # Verify backend was properly initialized
-            assert workflow.backend is not None
-            assert isinstance(workflow.backend, BaseExecutionBackend)
-
-        finally:
-            await workflow.cleanup()
-
-    async def test_concurrent_backend_integration(self):
-        """Test AsyncFlow workflow with concurrent backend."""
-        from concurrent.futures import ThreadPoolExecutor
-
-        executor = ThreadPoolExecutor(max_workers=2)
-        workflow = MockAsyncFlowWorkflow(backend_name="concurrent", resources={"max_workers": 2})
-        workflow.backend = await rhapsody.get_backend("concurrent", executor)
-
-        try:
-            # Add some real executable tasks
-            workflow.add_task("echo_1", "/bin/echo", ["Concurrent test 1"])
-            workflow.add_task("echo_2", "/bin/echo", ["Concurrent test 2"])
-            workflow.add_task("sleep_1", "/bin/sleep", ["1"])  # Quick sleep
-
-            # Execute workflow
-            results = await workflow.execute_workflow()
-
-            # Verify results
-            assert results["total_tasks"] == 3
-
-            # Concurrent backend should actually execute tasks
-            if results["completed_tasks"] > 0:
-                assert results["success_rate"] > 0.0
-
-        finally:
-            await workflow.cleanup()
+        assert len(backend_list) >= 2  # At least dask and radical_pilot
 
     async def test_backend_error_handling(self):
         """Test error handling in backend integration."""
-        workflow = MockAsyncFlowWorkflow(backend_name="noop")
+        # Use dask backend for error testing (will skip if not available)
+        try:
+            backend = rhapsody.get_backend("dask")
+        except ImportError:
+            pytest.skip("Dask backend not available")
+
+        workflow = MockAsyncFlowWorkflow(backend_name="dask")
 
         try:
             # Add a task that would fail
@@ -211,13 +176,7 @@ class TestAsyncFlowIntegration:
         for backend_name, is_available in available_backends.items():
             if is_available:
                 try:
-                    if backend_name == "concurrent":
-                        from concurrent.futures import ThreadPoolExecutor
-
-                        executor = ThreadPoolExecutor(max_workers=1)
-                        backend = await rhapsody.get_backend(backend_name, executor)
-                    else:
-                        backend = rhapsody.get_backend(backend_name)
+                    backend = rhapsody.get_backend(backend_name)
                     backend_instances[backend_name] = backend
                     assert isinstance(backend, BaseExecutionBackend)
                 except Exception as e:
@@ -230,30 +189,41 @@ class TestAsyncFlowIntegration:
                 try:
                     await backend.shutdown()
                 except (AttributeError, RuntimeError):
-                    pass  # Ignore cleanup errors        # Should have at least noop backend working
-        assert "noop" in backend_instances
+                    pass  # Ignore cleanup errors
+        # Should have at least dask backend working
+        assert "dask" in backend_instances
 
     async def test_backend_resource_configuration(self):
         """Test backend resource configuration from AsyncFlow."""
-        # Test with different resource configurations
+        # Test with simple configuration that doesn't require special parameters
         test_configs = [
-            {"backend": "noop", "resources": {}},
+            {"backend": "dask"},  # Use default configuration for dask
         ]
 
         backends = []
 
         try:
             for config in test_configs:
-                if config["backend"] == "concurrent":
-                    from concurrent.futures import ThreadPoolExecutor
-
-                    max_workers = config["resources"].get("max_workers", 1)
-                    executor = ThreadPoolExecutor(max_workers=max_workers)
-                    backend = await rhapsody.get_backend(config["backend"], executor)
-                else:
+                try:
                     backend = rhapsody.get_backend(config["backend"])
-                backends.append(backend)
-                assert isinstance(backend, BaseExecutionBackend)
+
+                    # Handle async initialization for backends that need it
+                    try:
+                        backend = await backend  # type: ignore[misc]
+                    except TypeError:
+                        # Backend doesn't support await, that's fine
+                        pass
+
+                    # Register a callback function
+                    def task_callback(task: dict, state: str) -> None:
+                        # Simple callback that does nothing but satisfies the interface
+                        pass
+
+                    backend.register_callback(task_callback)
+                    backends.append(backend)
+                    assert isinstance(backend, BaseExecutionBackend)
+                except ImportError:
+                    pytest.skip(f"Backend '{config['backend']}' not available")
 
         finally:
             # Cleanup
@@ -265,7 +235,11 @@ class TestAsyncFlowIntegration:
 
     async def test_asyncflow_task_lifecycle(self):
         """Test complete task lifecycle as AsyncFlow would use it."""
-        workflow = MockAsyncFlowWorkflow(backend_name="noop")
+        # Skip test if dask not available
+        try:
+            workflow = MockAsyncFlowWorkflow(backend_name="dask")
+        except ImportError:
+            pytest.skip("Dask backend not available")
 
         try:
             # Create a task
@@ -293,11 +267,16 @@ class TestAsyncFlowIntegration:
         """Test state mapping between backends and AsyncFlow."""
 
         # Create a backend first to register its states
-        noop_backend = rhapsody.get_backend("noop")
+        available_backends = rhapsody.discover_backends()
+        backend_name = next(name for name, available in available_backends.items() if available)
+        try:
+            test_backend = rhapsody.get_backend(backend_name)
+        except ImportError:
+            pytest.skip(f"Backend '{backend_name}' not available")
 
         # Test that backends have the required state management methods
-        assert hasattr(noop_backend, "get_task_states_map")
-        assert callable(noop_backend.get_task_states_map)
+        assert hasattr(test_backend, "get_task_states_map")
+        assert callable(test_backend.get_task_states_map)
 
         # Test basic state enumeration exists
         assert hasattr(TasksMainStates, "DONE")
@@ -306,7 +285,7 @@ class TestAsyncFlowIntegration:
         assert hasattr(TasksMainStates, "RUNNING")
 
         # Cleanup
-        await noop_backend.shutdown()
+        await test_backend.shutdown()
 
 
 if __name__ == "__main__":
@@ -315,7 +294,9 @@ if __name__ == "__main__":
         print("Running AsyncFlow Integration Test...")
 
         # Test basic functionality
-        workflow = MockAsyncFlowWorkflow(backend_name="noop")
+        available_backends = rhapsody.discover_backends()
+        backend_name = next(name for name, available in available_backends.items() if available)
+        workflow = MockAsyncFlowWorkflow(backend_name=backend_name)
         workflow.add_task("test_task", "/bin/echo", ["Integration test working!"])
 
         try:

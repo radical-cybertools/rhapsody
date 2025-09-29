@@ -15,13 +15,54 @@ import rhapsody
 from rhapsody.backends.constants import TasksMainStates
 
 
+async def get_available_backend():
+    """Helper to get and initialize the first available backend."""
+    available_backends = rhapsody.discover_backends()
+    backend_names = [name for name, avail in available_backends.items() if avail]
+
+    if not backend_names:
+        pytest.skip("No backends available for testing")
+
+    backend_name = backend_names[0]
+
+    # Initialize backend with proper resources
+    if backend_name == "radical_pilot":
+        backend = rhapsody.get_backend(backend_name, resources={})
+    else:
+        backend = rhapsody.get_backend(backend_name)
+
+    # Handle async initialization for backends that need it
+    try:
+        backend = await backend  # type: ignore[misc]
+    except TypeError:
+        # Backend doesn't support await, that's fine
+        pass
+
+    # Register a callback function
+    def task_callback(task: dict, state: str) -> None:
+        # Simple callback that does nothing but satisfies the interface
+        pass
+
+    backend.register_callback(task_callback)
+    return backend
+
+
 @pytest.mark.asyncio
 class TestBackendPerformance:
     """Performance tests for backend implementations."""
 
     async def test_backend_creation_performance(self):
         """Test how quickly backends can be created and destroyed."""
-        backend_types = ["noop", "concurrent"]
+        # Test available backends, skip radical_pilot due to initialization complexity
+        available_backends = rhapsody.discover_backends()
+        backend_types = [
+            name
+            for name, available in available_backends.items()
+            if available and name != "radical_pilot"
+        ]
+
+        if not backend_types:
+            pytest.skip("No suitable backends available for performance testing")
 
         for backend_type in backend_types:
             # Time backend creation
@@ -29,12 +70,26 @@ class TestBackendPerformance:
 
             backends = []
             for _ in range(5):  # Create 5 backends
-                if backend_type == "concurrent":
-                    executor = ThreadPoolExecutor(max_workers=1)
-                    backend = rhapsody.get_backend(backend_type, executor)
-                else:
+                try:
+                    # Only dask backend should reach here due to filtering above
                     backend = rhapsody.get_backend(backend_type)
-                backends.append(backend)
+
+                    # Handle async initialization for backends that need it
+                    try:
+                        backend = await backend  # type: ignore[misc]
+                    except TypeError:
+                        # Backend doesn't support await, that's fine
+                        pass
+
+                    # Register a callback function
+                    def task_callback(task: dict, state: str) -> None:
+                        # Simple callback that does nothing but satisfies the interface
+                        pass
+
+                    backend.register_callback(task_callback)
+                    backends.append(backend)
+                except ImportError:
+                    continue  # Skip unavailable backends
 
             creation_time = time.time() - start_time
 
@@ -54,8 +109,13 @@ class TestBackendPerformance:
 
     async def test_task_submission_throughput(self):
         """Test task submission throughput."""
-        executor = ThreadPoolExecutor(max_workers=4)
-        backend = rhapsody.get_backend("concurrent", executor)
+        available_backends = rhapsody.discover_backends()
+        backend_names = [name for name, avail in available_backends.items() if avail]
+
+        if not backend_names:
+            pytest.skip("No backends available for testing")
+
+        backend = rhapsody.get_backend(backend_names[0])
 
         try:
             # Create large batch of tasks
@@ -100,10 +160,15 @@ class TestBackendPerformance:
         finally:
             await backend.shutdown()
 
-    async def test_concurrent_backend_load(self):
-        """Test concurrent backend under load."""
-        executor = ThreadPoolExecutor(max_workers=8)
-        backend = rhapsody.get_backend("concurrent", executor)
+    async def test_available_backend_load(self):
+        """Test available backend under load."""
+        available_backends = rhapsody.discover_backends()
+        backend_names = [name for name, avail in available_backends.items() if avail]
+
+        if not backend_names:
+            pytest.skip("No backends available for testing")
+
+        backend = rhapsody.get_backend(backend_names[0])
 
         try:
             # Create many quick tasks
@@ -158,8 +223,7 @@ class TestBackendPerformance:
         # # process = psutil.Process(os.getpid())  # Requires psutil
         # # initial_memory = process.memory_info().rss / 1024 / 1024  # MB
 
-        executor = ThreadPoolExecutor(max_workers=4)
-        backend = rhapsody.get_backend("concurrent", executor)
+        backend = await get_available_backend()
 
         try:
             # Submit many tasks in batches
@@ -198,9 +262,7 @@ class TestBackendPerformance:
 
     async def test_backend_parallel_operations(self):
         """Test multiple parallel operations on same backend."""
-        executor = ThreadPoolExecutor(max_workers=4)
-
-        backend = rhapsody.get_backend("concurrent", executor)
+        backend = await get_available_backend()
 
         try:
 
@@ -243,9 +305,7 @@ class TestBackendPerformance:
         results = {}
 
         for workers in worker_counts:
-            executor = ThreadPoolExecutor(max_workers=workers)
-
-            backend = rhapsody.get_backend("concurrent", executor)
+            backend = await get_available_backend()
 
             try:
                 # Submit fixed number of tasks
@@ -301,9 +361,7 @@ class TestBackendStressTests:
 
     async def test_backend_error_handling_under_load(self):
         """Test backend error handling with many failing tasks."""
-        executor = ThreadPoolExecutor(max_workers=4)
-
-        backend = rhapsody.get_backend("concurrent", executor)
+        backend = await get_available_backend()
 
         try:
             # Mix of good and bad tasks
@@ -356,9 +414,7 @@ class TestBackendStressTests:
     async def test_backend_rapid_shutdown_restart(self):
         """Test rapid backend shutdown and restart cycles."""
         for cycle in range(3):
-            executor = ThreadPoolExecutor(max_workers=2)
-
-            backend = rhapsody.get_backend("concurrent", executor)
+            backend = await get_available_backend()
 
             try:
                 # Submit quick task
@@ -386,9 +442,8 @@ class TestBackendStressTests:
 
     async def test_backend_timeout_handling(self):
         """Test backend behavior with various timeout scenarios."""
-        executor = ThreadPoolExecutor(max_workers=2)
 
-        backend = rhapsody.get_backend("concurrent", executor)
+        backend = await get_available_backend()
 
         try:
             # Submit long-running task
@@ -424,9 +479,8 @@ if __name__ == "__main__":
 
         try:
             # Test concurrent backend performance
-            executor = ThreadPoolExecutor(max_workers=4)
 
-            backend = rhapsody.get_backend("concurrent", executor)
+            backend = await get_available_backend()
 
             tasks = []
             for i in range(10):

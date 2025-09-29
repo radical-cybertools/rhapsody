@@ -6,15 +6,7 @@ environments.
 
 from __future__ import annotations
 
-from .concurrent import ConcurrentExecutionBackend
-
-# Import backends that are always available (no optional deps)
-from .noop import NoopExecutionBackend
-
-__all__ = [
-    "NoopExecutionBackend",
-    "ConcurrentExecutionBackend",
-]
+__all__ = []
 
 # Try to import optional backends
 try:

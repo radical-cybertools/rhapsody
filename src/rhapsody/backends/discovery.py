@@ -15,8 +15,6 @@ class BackendRegistry:
     """Registry for managing available execution backends."""
 
     _backends: dict[str, str] = {
-        "noop": "rhapsody.backends.execution.noop.NoopExecutionBackend",
-        "concurrent": "rhapsody.backends.execution.concurrent.ConcurrentExecutionBackend",
         "dask": "rhapsody.backends.execution.dask_parallel.DaskExecutionBackend",
         "radical_pilot": "rhapsody.backends.execution.radical_pilot.RadicalExecutionBackend",
     }
@@ -77,11 +75,11 @@ def get_backend(backend_name: str, *args, **kwargs) -> BaseExecutionBackend:
         Backend instance (may need to be awaited for async backends)
 
     Example:
-        # Synchronous backend
-        backend = get_backend('noop')
+        # Dask backend
+        backend = get_backend('dask', resources={'threads': 4})
 
-        # Async backend (needs await)
-        backend = await get_backend('dask', resources={'threads': 4})
+        # RADICAL-Pilot backend
+        backend = get_backend('radical_pilot')
     """
     backend_class = BackendRegistry.get_backend_class(backend_name)
     return backend_class(*args, **kwargs)
