@@ -114,7 +114,8 @@ filterwarnings = [
     "ignore:Exception ignored.*:pytest.PytestUnraisableExceptionWarning"
 ]
 markers = [
-    "slow: marks tests as slow-running"
+    "slow: marks tests as slow-running",
+    "radical_pilot: marks tests that use RADICAL-Pilot backend"
 ]
 
 [tool.ruff]
