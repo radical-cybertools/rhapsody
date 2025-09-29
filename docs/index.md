@@ -46,7 +46,7 @@ asyncio.run(main())
 
 [Get Started →](getting-started/index.md){ .md-button .md-button--primary }
 
-## Documentation Sections
+## Documentation
 
 <div class="grid cards" markdown>
 

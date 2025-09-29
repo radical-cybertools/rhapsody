@@ -51,7 +51,7 @@ The system supports multiple execution backends, each optimized for different sc
 
 ### AsyncFlow Integration
 
-Full compatibility with the [AsyncFlow](https://github.com/asyncflow/asyncflow) workflow management system, providing:
+Full compatibility with the [AsyncFlow](https://github.com/radical-cybertools/radical.asyncflow) workflow management system, providing:
 
 - Standardized workflow descriptions
 - Tool interoperability

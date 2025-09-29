@@ -8,8 +8,7 @@ RHAPSODY is supported by the National Science Foundation (NSF) under Award ID [2
 
 - **Program**: Office of Advanced Cyberinfrastructure (OAC)
 - **Award Title**: "Collaborative Research: Framework: Software: RADICAL-Cybertools - A Suite of Middleware Software for Advanced Science Computing Infrastructure"
-- **Award Period**: September 1, 2021 - August 31, 2025
-- **Total Award Amount**: $3,000,000 (collaborative project)
+- **Award Period**: September 1, 2021 - August 31, 2026
 
 ### Project Abstract
 
