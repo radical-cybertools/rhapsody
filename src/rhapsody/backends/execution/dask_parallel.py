@@ -85,14 +85,14 @@ class DaskExecutionBackend(BaseExecutionBackend):
             logger.exception(f"Failed to initialize Dask client: {str(e)}")
             raise
 
-    def register_callback(self, callback: Callable) -> None:
+    def register_callback(self, func: Callable) -> None:
         """Register a callback for task state changes.
 
         Args:
-            callback: Function to be called when task states change. Should accept
+            func: Function to be called when task states change. Should accept
                 task and state parameters.
         """
-        self._callback_func = callback
+        self._callback_func = func
 
     def get_task_states_map(self):
         """Retrieve a mapping of task IDs to their current states.
