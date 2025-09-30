@@ -319,9 +319,11 @@ class DaskExecutionBackend(BaseExecutionBackend):
                 logger.exception(f"Error during shutdown: {str(e)}")
             finally:
                 self._client = None
-                self.tasks.clear()
-                self._initialized = False
                 logger.info("Dask execution backend shutdown complete")
+
+        # Always clean up state regardless of client presence
+        self.tasks.clear()
+        self._initialized = False
 
     def _ensure_initialized(self):
         """Ensure the backend has been properly initialized."""

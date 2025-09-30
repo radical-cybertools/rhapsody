@@ -386,32 +386,33 @@ class TestBackendCompatibility:
         print(f"Backend switching results: {results}")
 
 
+async def main():
+    """Run a functionality test."""
+    print("Running Backend Functionality Tests...")
+
+    try:
+        # Test first available backend
+        available_backends = rhapsody.discover_backends()
+        backend_name = next(name for name, avail in available_backends.items() if avail)
+        backend = rhapsody.get_backend(backend_name)
+        tasks = [
+            {
+                "uid": "test",
+                "executable": "/bin/echo",
+                "arguments": ["test"],
+                "state": TasksMainStates.RUNNING,
+            }
+        ]
+        await backend.submit_tasks(tasks)
+        # Backend submission completed
+        assert True
+        await backend.shutdown()
+
+        print("✅ Backend functionality test passed!")
+
+    except Exception as e:
+        print(f"❌ Backend functionality test failed: {e}")
+
+
 if __name__ == "__main__":
-    # Run a functionality test
-    async def main():
-        print("Running Backend Functionality Tests...")
-
-        try:
-            # Test first available backend
-            available_backends = rhapsody.discover_backends()
-            backend_name = next(name for name, avail in available_backends.items() if avail)
-            backend = rhapsody.get_backend(backend_name)
-            tasks = [
-                {
-                    "uid": "test",
-                    "executable": "/bin/echo",
-                    "arguments": ["test"],
-                    "state": TasksMainStates.RUNNING,
-                }
-            ]
-            await backend.submit_tasks(tasks)
-            # Backend submission completed
-            assert True
-            await backend.shutdown()
-
-            print("✅ Backend functionality test passed!")
-
-        except Exception as e:
-            print(f"❌ Backend functionality test failed: {e}")
-
     asyncio.run(main())

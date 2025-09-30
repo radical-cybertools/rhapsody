@@ -651,8 +651,15 @@ class RadicalExecutionBackend(BaseExecutionBackend):
             - Ensures graceful termination of all backend resources
             - Prints confirmation message when shutdown is triggered
         """
-        self.session.close(download=True)
-        logger.info("Radical Pilot backend shutdown complete")
+        try:
+            if hasattr(self, "session") and self.session is not None:
+                self.session.close(download=True)
+                logger.info("Radical Pilot backend shutdown complete")
+            else:
+                logger.info("Radical Pilot backend shutdown (no active session)")
+        except Exception as e:
+            logger.warning(f"Error during Radical Pilot shutdown: {e}")
+            logger.info("Radical Pilot backend shutdown attempted")
 
     async def __aenter__(self):
         """Async context manager entry."""
