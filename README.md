@@ -1,7 +1,7 @@
 # RHAPSODY
 
 [![Build Status](https://github.com/radical-cybertools/rhapsody/actions/workflows/ci.yml/badge.svg)](https://github.com/radical-cybertools/rhapsody/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/radical-cybertools/rhapsody/branch/devel/graph/badge.svg)](https://codecov.io/gh/radical-cybertools/rhapsody)
+[![Docs](https://img.shields.io/badge/docs-latest-brightgreen.svg)](https://radical-cybertools.github.io/rhapsody/)
 [![Python Version](https://img.shields.io/pypi/pyversions/rhapsody.svg)](https://pypi.org/project/rhapsody/)
 [![PyPI Version](https://img.shields.io/pypi/v/rhapsody.svg)](https://pypi.org/project/rhapsody/)
 [![License](https://img.shields.io/pypi/l/rhapsody.svg)](https://github.com/radical-cybertools/rhapsody/blob/main/LICENSE.md)
@@ -553,6 +553,6 @@ If you use RHAPSODY in your research, please cite:
 
 ## Support
 
-- **Documentation**: https://rhapsody.readthedocs.io/
+- **Documentation**: https://radical-cybertools.github.io/rhapsody/
 - **Issues**: https://github.com/radical-cybertools/rhapsody/issues
 - **Discussions**: https://github.com/radical-cybertools/rhapsody/discussions
