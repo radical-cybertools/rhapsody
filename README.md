@@ -533,6 +533,10 @@ RHAPSODY is developed by the [RADICAL Research Group](http://radical.rutgers.edu
 - [RADICAL-Utils](https://github.com/radical-cybertools/radical.utils): Utility library
 - [RADICAL-Pilot](https://github.com/radical-cybertools/radical.pilot): Pilot-based runtime system
 
+## NSF-Funded Project
+
+RHAPSODY is supported by the National Science Foundation (NSF) under Award ID [2103986](https://www.nsf.gov/awardsearch/showAward?AWD_ID=2103986). This collaborative project aims to advance the state-of-the-art in heterogeneous workflow execution for scientific computing.
+
 ### Citations
 
 If you use RHAPSODY in your research, please cite:

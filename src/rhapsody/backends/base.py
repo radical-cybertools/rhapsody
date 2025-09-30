@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 from abc import ABC
 from abc import abstractmethod
+from typing import Any
+from typing import Callable
 
 
 class BaseExecutionBackend(ABC):
@@ -60,7 +62,7 @@ class BaseExecutionBackend(ABC):
         pass
 
     @abstractmethod
-    def register_callback(self, func) -> None:
+    def register_callback(self, func: Callable[[dict[str, Any], str], None]) -> None:
         """Register a callback function for task state changes.
 
         Args:
@@ -70,7 +72,7 @@ class BaseExecutionBackend(ABC):
         pass
 
     @abstractmethod
-    def get_task_states_map(self) -> None:
+    def get_task_states_map(self) -> Any:
         """Retrieve a mapping of task IDs to their current states.
 
         Returns:
@@ -89,7 +91,7 @@ class BaseExecutionBackend(ABC):
         pass
 
     @abstractmethod
-    def link_implicit_data_deps(self, src_task, dst_task):
+    def link_implicit_data_deps(self, src_task: dict[str, Any], dst_task: dict[str, Any]) -> None:
         """Link implicit data dependencies between two tasks.
 
         Creates a dependency relationship where the destination task depends on
@@ -103,7 +105,13 @@ class BaseExecutionBackend(ABC):
         pass
 
     @abstractmethod
-    def link_explicit_data_deps(self, src_task=None, dst_task=None, file_name=None, file_path=None):
+    def link_explicit_data_deps(
+        self,
+        src_task: dict[str, Any] | None = None,
+        dst_task: dict[str, Any] | None = None,
+        file_name: str | None = None,
+        file_path: str | None = None,
+    ) -> None:
         """Link explicit data dependencies between tasks or files.
 
         Creates explicit dependency relationships based on specified file names

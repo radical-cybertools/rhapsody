@@ -125,7 +125,7 @@ class StateMapper:
         failed_state: Any,
         canceled_state: Any,
         running_state: Any,
-        **additional_states,
+        **additional_states: Any,
     ) -> None:
         """Register state mappings for a new backend.
 
@@ -182,7 +182,7 @@ class StateMapper:
         }
 
     @classmethod
-    def register_backend_states_with_defaults(cls, backend: str | Any):
+    def register_backend_states_with_defaults(cls, backend: str | Any) -> None:
         """Register a backend using default main state values.
 
         Convenience method that registers a backend where the backend-specific

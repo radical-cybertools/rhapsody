@@ -7,6 +7,7 @@ dynamically.
 from __future__ import annotations
 
 import importlib
+from typing import Any
 
 from .base import BaseExecutionBackend
 
@@ -63,7 +64,7 @@ class BackendRegistry:
         cls._backends[name] = import_path
 
 
-def get_backend(backend_name: str, *args, **kwargs) -> BaseExecutionBackend:
+def get_backend(backend_name: str, *args: Any, **kwargs: Any) -> BaseExecutionBackend:
     """Factory function to create backend instances.
 
     Args:

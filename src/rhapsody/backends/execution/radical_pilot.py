@@ -10,6 +10,7 @@ import asyncio
 import copy
 import logging
 import threading
+from collections.abc import Generator
 from typing import Callable
 
 import typeguard
@@ -290,7 +291,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
                 )
                 self.workers.append(worker)
 
-    def select_master(self):
+    def select_master(self) -> Generator[str, None, None]:
         """Create a generator for load balancing task submission across masters.
 
         Provides a round-robin generator that cycles through available master
@@ -527,7 +528,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         Args:
             src_task (Dict): Source task dictionary containing 'uid' key.
             dst_task (Dict): Destination task dictionary with
-            'task_backend_specific_kwargs'.
+                'task_backend_specific_kwargs' for pre_exec commands.
 
         Note:
             - Links all files from source sandbox except the task UID file itself
@@ -671,7 +672,9 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         await self.shutdown()
 
     @classmethod
-    async def create(cls, resources: dict, raptor_config: dict | None = None):
+    async def create(
+        cls, resources: dict, raptor_config: dict | None = None
+    ) -> RadicalExecutionBackend:
         """Create initialized backend.
 
         Args:
