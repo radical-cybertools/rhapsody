@@ -12,7 +12,7 @@ from .backends import BackendRegistry
 from .backends import discover_backends
 from .backends import get_backend
 
-from .resource_manager import ResourceManager
+from .resource_manager import ResourceManager, RMConfig, RMInfo
 
 __version__ = "0.1.0"
 

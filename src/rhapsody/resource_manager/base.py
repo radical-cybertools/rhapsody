@@ -167,23 +167,13 @@ class ResourceManager(object):
 
     # --------------------------------------------------------------------------
     #
-    def __init__(self):
+    def __init__(self, cfg: Optional[RMConfig] = None) -> None:
 
         self.name  = type(self).__name__
         logger.error('=== configuring RM %s', self.name)
 
-        # FIXME RHAPSODY: get from API
-        sys_arch = dict()
-        cfg = {
-            'backup_nodes'    : sys_arch.get('backup_nodes'  , 0),
-            'requested_nodes' : sys_arch.get('nodes'         , 1),
-            'fake_resources'  : sys_arch.get('fake_resources', False),
-            'exact'           : sys_arch.get('exclusive'     , False),
-            'oversubscribe'   : sys_arch.get('oversubscribe' , False),
-            'network'         : sys_arch.get('iface'         , None),
-            'blocked_cores'   : sys_arch.get('blocked_cores' , []),
-            'blocked_gpus'    : sys_arch.get('blocked_gpus'  , []),
-        }
+        if cfg is None:
+            cfg = RMConfig()
 
         logger.debug('RM init from scratch: %s', cfg)
 
@@ -213,7 +203,9 @@ class ResourceManager(object):
     # ResourceManager.
     #
     @classmethod
-    def get_instance(cls, name=None):
+    def get_instance(cls, name=None, cfg: Optional[RMConfig] = None):
+
+        cfg = RMConfig(cfg)
 
         # Make sure that we are the base-class!
         if cls != ResourceManager:
@@ -242,7 +234,7 @@ class ResourceManager(object):
                 if rm_name == name:
                     try:
                         logger.debug('create RM %s', rm_name)
-                        return rm_impl()
+                        return rm_impl(cfg)
                     except Exception as e:
                         logger.exception('RM %s creation failed', rm_name)
 
@@ -255,7 +247,7 @@ class ResourceManager(object):
                 try:
                     logger.debug('check for RM %s', rm_name)
                     if rm_impl.check():
-                        rm = rm_impl()
+                        rm = rm_impl(cfg)
 
                 except Exception as e:
                     logger.exception('RM %s check failed: %s', rm_name, e)
