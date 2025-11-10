@@ -12,6 +12,8 @@ from .backends import BackendRegistry
 from .backends import discover_backends
 from .backends import get_backend
 
+from .resource_manager import ResourceManager
+
 __version__ = "0.1.0"
 
 __all__ = [
