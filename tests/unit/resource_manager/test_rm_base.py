@@ -1,15 +1,18 @@
-# these are unit tests for the 'ResourceManager' base class
+#!/usr/bin/env python3
 
 import pytest
-
 import rhapsody
 
-def test_rm_fork():
+
+def test_rm_base():
 
     cfg = {'requested_nodes' : 3,
            'fake_resources'  : True}
-    rm  = rhapsody.ResourceManager.get_instance(name='FORK', cfg=cfg)
+    with pytest.raises(NotImplementedError):
+        rm = rhapsody.ResourceManager(cfg=cfg)
 
-    assert len(rm.nodelist) == 3
 
+if __name__ == '__main__':
+
+    test_rm_base()
 

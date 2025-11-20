@@ -8,7 +8,6 @@ import os
 from rc.process import Process
 from typing     import Optional, List, Tuple, Dict, Any
 
-T_NODES     = List[Tuple[str, int]]
 T_NODE_LIST = List[Dict[str, Any]]
 
 
@@ -51,7 +50,7 @@ class RMConfig(ru.TypedDict):
 
     _defaults = {
             'backup_nodes'    : 0,
-            'requested_nodes' : 1,
+            'requested_nodes' : 0,
             'oversubscribe'   : False,
             'fake_resources'  : False,
             'exact'           : False,
@@ -169,16 +168,14 @@ class ResourceManager(object):
     #
     def __init__(self, cfg: Optional[RMConfig] = None) -> None:
 
-        self.name  = type(self).__name__
-        logger.error('=== configuring RM %s', self.name)
+        self.name = type(self).__name__
+        logger.debug('configuring RM %s', self.name)
 
         if cfg is None:
             cfg = RMConfig()
 
         logger.debug('RM init from scratch: %s', cfg)
 
-        # let the base class collect some data, then let the impl take over
-        # FIXME: pass some API config settings
         self._init_from_scratch(cfg)
         self._rm_info.verify()
 
@@ -230,15 +227,16 @@ class ResourceManager(object):
         ]
 
         if name:
-            for rm_name, rm_impl in rms:
-                if rm_name == name:
-                    try:
+            try:
+                for rm_name, rm_impl in rms:
+                    if rm_name == name:
                         logger.debug('create RM %s', rm_name)
                         return rm_impl(cfg)
-                    except Exception as e:
-                        logger.exception('RM %s creation failed', rm_name)
 
-            raise RuntimeError('no such ResourceManager: %s' % name)
+                raise RuntimeError('no such ResourceManager: %s' % name)
+
+            except Exception as e:
+                raise RuntimeError('RM %s creation failed' % name) from e
 
         else:
             rm = None
@@ -267,7 +265,7 @@ class ResourceManager(object):
 
 
     @property
-    def nodelist(self):
+    def node_list(self):
 
         return self._rm_info.node_list
 
@@ -382,15 +380,16 @@ class ResourceManager(object):
             if not ok:
                 raise RuntimeError('no accessible nodes found')
 
-            # limit the nodelist to the requested number of nodes
+            # limit the node list to the requested number of nodes
             rm_info.node_list = ok
 
-
-        # reduce the nodelist to the requested size
+        # reduce the node list to the requested size
         rm_info.backup_list = list()
-        if len(rm_info.node_list) > rm_info.cfg.requested_nodes:
+        if rm_info.cfg.requested_nodes and \
+           len(rm_info.node_list) > rm_info.cfg.requested_nodes:
+
             logger.debug('reduce %d nodes to %d', len(rm_info.node_list),
-                                                        rm_info.cfg.requested_nodes)
+                                                      rm_info.cfg.requested_nodes)
             rm_info.node_list   = rm_info.node_list[:rm_info.cfg.requested_nodes]
             rm_info.backup_list = rm_info.node_list[rm_info.cfg.requested_nodes:]
 
@@ -411,7 +410,7 @@ class ResourceManager(object):
             service_nodes += 1
 
         # Check if the ResourceManager implementation reserved agent nodes.
-        # If not, pick the first couple of nodes from the nodelist as fallback.
+        # If not, pick the first couple of nodes from the node list as fallback.
         if agent_nodes:
 
             if not rm_info.agent_node_list:
@@ -542,7 +541,7 @@ class ResourceManager(object):
     #
     def _parse_nodefile(self, fname: str,
                               cpn  : Optional[int] = 0,
-                              smt  : Optional[int] = 1) -> T_NODES:
+                              smt  : Optional[int] = 1) -> list:
         '''
         parse the given nodefile and return a list of tuples of the form
 
@@ -583,7 +582,7 @@ class ResourceManager(object):
                     nodes[node] = cpn
 
             # convert node dict into tuple list
-            return [(node, cpn * smt) for node, cpn in nodes.items()]
+            return list(nodes.keys())
 
         except Exception:
             return []
@@ -591,7 +590,7 @@ class ResourceManager(object):
 
     # --------------------------------------------------------------------------
     #
-    def _get_cores_per_node(self, nodes: T_NODES) -> Optional[int]:
+    def _get_cores_per_node(self, nodes: list[str]) -> Optional[int]:
         '''
         From a node dict as returned by `self._parse_nodefile()`, determine the
         number of cores per node.  To do so, we check if all nodes have the same
@@ -612,7 +611,7 @@ class ResourceManager(object):
 
     # --------------------------------------------------------------------------
     #
-    def _get_node_list(self, nodes  : T_NODES,
+    def _get_node_list(self, nodes  : list[str],
                              rm_info: RMInfo) -> T_NODE_LIST:
         '''
         From a node dict as returned by `self._parse_nodefile()`, and from
@@ -620,11 +619,11 @@ class ResourceManager(object):
         as required for rm_info.
         '''
 
+
         # keep nodes to be indexed (node_index)
-        # (required for jsrun ERF spec files and expanded to all other RMs)
-        node_list = [{'name'  : node[0],
+        node_list = [{'name'  : node,
                       'index' : idx,
-                      'cores' : [RM_STATUS_FREE] * node[1],
+                      'cores' : [RM_STATUS_FREE] * rm_info.cores_per_node,
                       'gpus'  : [RM_STATUS_FREE] * rm_info.gpus_per_node,
                       'lfs'   : rm_info.lfs_per_node,
                       'mem'   : rm_info.mem_per_node}

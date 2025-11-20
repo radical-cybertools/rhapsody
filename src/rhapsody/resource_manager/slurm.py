@@ -1,8 +1,11 @@
 
-__copyright__ = 'Copyright 2016-2023, The RADICAL-Cybertools Team'
+__copyright__ = 'Copyright 2016-2025, The RADICAL-Cybertools Team'
 __license__   = 'MIT'
 
 import os
+
+import logging
+logger = logging.getLogger(__name__)
 
 import radical.utils as ru
 
@@ -16,25 +19,26 @@ class Slurm(ResourceManager):
     # --------------------------------------------------------------------------
     #
     @staticmethod
-    def batch_started():
-
+    def check() -> bool:
+        # check if we are executed in a SLURM job context
         return bool(os.getenv('SLURM_JOB_ID'))
+
 
     # --------------------------------------------------------------------------
     #
-    def init_from_scratch(self, rm_info: RMInfo) -> RMInfo:
+    def init_from_scratch(self) -> RMInfo:
 
-        ru.write_json(rm_info, 'rm_info.json')
+        rm_info = self._rm_info
+        rm_cfg  = rm_info.cfg
 
-        nodelist = os.environ.get('SLURM_NODELIST') or \
+        node_list = os.environ.get('SLURM_NODELIST') or \
                    os.environ.get('SLURM_JOB_NODELIST')
-        if nodelist is None:
+        if node_list is None:
             raise RuntimeError('$SLURM_*NODELIST not set')
 
         # Parse SLURM nodefile environment variable
-        node_names = ru.get_hostlist(nodelist)
-        self._log.info('found nodelist %s. Expanded to: %s',
-                       nodelist, node_names)
+        node_names = ru.get_hostlist(node_list)
+        logger.debug('found node list %s. Expanded: %s', node_list, node_names)
 
         if not rm_info.cores_per_node:
             # $SLURM_CPUS_ON_NODE = Number of physical cores per node
@@ -59,8 +63,6 @@ class Slurm(ResourceManager):
         nodes = [(node, rm_info.cores_per_node) for node in node_names]
 
         rm_info.node_list = self._get_node_list(nodes, rm_info)
-
-        return rm_info
 
 
 # ------------------------------------------------------------------------------
