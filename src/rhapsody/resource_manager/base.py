@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 import radical.utils as ru
 
+# FIXME: proper enums
 # 'enum' for resource manager types
 RM_NAME_FORK        = 'FORK'
 RM_NAME_CCM         = 'CCM'
@@ -68,16 +69,12 @@ class RMConfig(ru.TypedDict):
 class RMInfo(ru.TypedDict):
     '''
     Each resource manager instance must gather provide the information defined
-    in this class.  Additional attributes can be attached, but should then only
-    be evaluated by launch methods which are tightly bound to the resource
-    manager type ('friends' in C++ speak).
+    in this class.
     '''
 
     _schema = {
             'node_list'            : [None],        # tuples of node uids and names
             'backup_list'          : [None],        # list of backup nodes
-            'agent_node_list'      : [None],        # nodes reserved for sub-agents
-            'service_node_list'    : [None],        # nodes reserved for services
 
             'cores_per_node'       : int,           # number of cores per node
             'threads_per_core'     : int,           # number of threads per core
@@ -91,17 +88,15 @@ class RMInfo(ru.TypedDict):
             'mem_per_node'         : int,           # memory per node (MB)
 
             'cfg'                  : RMConfig,      # resource manager config
-            'details'              : {None: None},  # dict of launch method info
-            'launch_methods'       : {str : None},  # dict of launch method cfgs
 
             'numa_domain_map'      : {int: None},   # resources per numa domain
     }
 
     _defaults = {
+            'cfg'                  : RMConfig(),
+
             'node_list'            : list(),
             'backup_list'          : list(),
-            'agent_node_list'      : list(),
-            'service_node_list'    : list(),
 
             'cores_per_node'       : 0,
             'threads_per_core'     : 0,
@@ -114,10 +109,6 @@ class RMInfo(ru.TypedDict):
             'lfs_path'             : '/tmp/',
             'mem_per_node'         : 0,
 
-            'cfg'                  : RMConfig(),
-            'details'              : dict(),
-            'launch_methods'       : dict(),
-
             'numa_domain_map'      : dict(),
     }
 
@@ -127,9 +118,6 @@ class RMInfo(ru.TypedDict):
     def _verify(self):
 
         assert self['node_list'        ]
-        assert self['agent_node_list'  ] is not None
-        assert self['service_node_list'] is not None
-
         assert self['cores_per_node'   ]
         assert self['gpus_per_node'    ] is not None
         assert self['threads_per_core' ] is not None
@@ -145,7 +133,6 @@ class ResourceManager(object):
     `self.info` (see `RMInfo` class definition).
 
       ResourceManager.node_list      : list of nodes names and uids
-      ResourceManager.agent_node_list: list of nodes reserved for agent procs
       ResourceManager.cores_per_node : number of cores each node has available
       ResourceManager.gpus_per_node  : number of gpus  each node has available
 
@@ -153,15 +140,6 @@ class ResourceManager(object):
     ResourceManager incarnation may have additional information available -- but
     schedulers relying on those are invariably bound to the specific
     ResourceManager.
-
-    The ResourceManager will reserve nodes for the agent execution, by deriving
-    the respectively required node count from the config's 'agents' section.
-    Those nodes will be listed in ResourceManager.agent_node_list. Schedulers
-    MUST NOT use the agent_node_list to place tasks -- Tasks are limited
-    to the nodes in ResourceManager.node_list.
-
-    Last but not least, the RM will initialize launch methods and ensure that
-    the executor (or any other component really) finds them ready to use.
     '''
 
     # --------------------------------------------------------------------------
@@ -176,22 +154,16 @@ class ResourceManager(object):
 
         logger.debug('RM init from scratch: %s', cfg)
 
-        self._init_from_scratch(cfg)
+        self._init_info(cfg)
         self._rm_info.verify()
 
-        #  FIXME RHAPSODY
+        #  FIXME RHAPSODY: where to put this?
       # # immediately set the network interface if it was configured
       # # NOTE: setting this here implies that no ZMQ connectio was set up
       # #       before the ResourceManager got created!
       # if rm_info.details.get('network'):
       #     rc_cfg = ru.config.DefaultConfig()
       #     rc_cfg.iface = rm_info.details['network']
-
-        # FIXME RHAPSODY: transfer launch methods?
-      # # set up launch methods even when initialized from registry info.  In
-      # # that case, the LM *SHOULD NOT* be re-initialized, but only pick up
-      # # information from rm_info.
-      # self._prepare_launch_methods()
 
 
     # --------------------------------------------------------------------------
@@ -243,12 +215,11 @@ class ResourceManager(object):
             for rm_name, rm_impl in rms:
 
                 try:
-                    logger.debug('check for RM %s', rm_name)
-                    if rm_impl.check():
-                        rm = rm_impl(cfg)
+                    logger.debug('try RM %s', rm_name)
+                    rm = rm_impl(cfg)
 
                 except Exception as e:
-                    logger.exception('RM %s check failed: %s', rm_name, e)
+                    logger.exception('RM %s failed: %s', rm_name, e)
 
             if not rm:
                 raise RuntimeError('no ResourceManager detected')
@@ -272,10 +243,10 @@ class ResourceManager(object):
 
     # --------------------------------------------------------------------------
     #
-    def init_from_scratch(self) -> None:
+    def _initialize(self) -> None:
         '''
         This method MUST be overloaded by any RM implementation.  It will be
-        called during `init_from_scratch` and is expected to check and correct
+        called during `_initialize` and is expected to check and correct
         or complete node information, such as `cores_per_node`, `gpus_per_node`
         etc., and to provide `rm_info.node_list` of the following form:
 
@@ -292,15 +263,15 @@ class ResourceManager(object):
             ]
 
         The node entries can be augmented with additional information which may
-        be interpreted by the specific agent scheduler instance.
+        be interpreted by the specific scheduler instance.
         '''
 
-        raise NotImplementedError('init_from_scratch is not implemented')
+        raise NotImplementedError('_initialize is not implemented')
 
 
     # --------------------------------------------------------------------------
     #
-    def _init_from_scratch(self, cfg):
+    def _init_info(self, cfg):
 
         rm_info = RMInfo()
         rm_info.cfg = ru.Config(cfg)
@@ -308,11 +279,21 @@ class ResourceManager(object):
         self._rm_info = rm_info
 
         # let the RM implementation gather resource information
-        self.init_from_scratch()
+        self._initialize()
 
         # we expect to have a valid node list now
         logger.info('node list: %s', rm_info.node_list)
 
+        self._filter_nodes()
+
+
+    # --------------------------------------------------------------------------
+    #
+    def _filter_nodes(self, check_nodes: bool = False) -> None:
+
+        rm_info = self._rm_info
+
+        # ensure that blocked resources are marked as down
         blocked_cores = rm_info.cfg.get('blocked_cores', [])
         blocked_gpus  = rm_info.cfg.get('blocked_gpus' , [])
 
@@ -333,21 +314,9 @@ class ResourceManager(object):
 
         assert rm_info.cfg.requested_nodes <= len(rm_info.node_list)
 
-        self._filter_nodes()
-
-        # add launch method information to rm_info
-        # FIXME RHAPSODY
-      # rm_info.launch_methods = self._rcfg.launch_methods
-
-
-    # --------------------------------------------------------------------------
-    #
-    def _filter_nodes(self, check_nodes: bool = False) -> None:
-
-        rm_info = self._rm_info
 
         # if requested, check all nodes for accessibility via ssh
-        # FIXME: needs a configurable to limit number of concurrent ssh procs?
+        # FIXME: add configurable to limit number of concurrent ssh procs
         if check_nodes:
             procs = list()
             for node in rm_info.node_list:
@@ -393,148 +362,9 @@ class ResourceManager(object):
             rm_info.node_list   = rm_info.node_list[:rm_info.cfg.requested_nodes]
             rm_info.backup_list = rm_info.node_list[rm_info.cfg.requested_nodes:]
 
-        # The ResourceManager may need to reserve nodes for sub agents and
-        # service, according to the agent layout and pilot config.  We dig out
-        # the respective requirements from the node list and complain on
-        # insufficient resources
-        agent_nodes   = 0
-        service_nodes = 0
-
-        agents = rm_info.cfg.get('agents', {})
-
-        for agent, acfg in agents.items():
-            if acfg.get('target') == 'node':
-                agent_nodes += 1
-
-        if os.path.isfile('./services'):
-            service_nodes += 1
-
-        # Check if the ResourceManager implementation reserved agent nodes.
-        # If not, pick the first couple of nodes from the node list as fallback.
-        if agent_nodes:
-
-            if not rm_info.agent_node_list:
-                for _ in range(agent_nodes):
-                    rm_info.agent_node_list.append(rm_info.node_list.pop())
-
-            assert agent_nodes == len(rm_info.agent_node_list)
-
-        if service_nodes:
-
-            if not rm_info.service_node_list:
-                for _ in range(service_nodes):
-                    rm_info.service_node_list.append(rm_info.node_list.pop())
-
-            assert service_nodes == len(rm_info.service_node_list)
-
-        logger.info('compute nodes: %s' % len(rm_info.node_list))
-        logger.info('agent   nodes: %s' % len(rm_info.agent_node_list))
-        logger.info('service nodes: %s' % len(rm_info.service_node_list))
-
         # check if we can do any work
         if not rm_info.node_list:
             raise RuntimeError('ResourceManager has no nodes left to run tasks')
-
-
-    # --------------------------------------------------------------------------
-    #
-    def _prepare_launch_methods(self):
-
-        launch_methods     = self._rm_info.launch_methods
-        self._launchers    = {}
-        self._launch_order = launch_methods.get('order') or list(launch_methods)
-
-        for lm_name in list(self._launch_order):
-
-            lm_cfg = ru.Config(from_dict=launch_methods[lm_name])
-
-            try:
-                logger.debug('prepare lm %s', lm_name)
-                lm_cfg.pid           = self._cfg.pid
-                lm_cfg.reg_addr      = self._cfg.reg_addr
-                lm_cfg.resource      = self._cfg.resource
-                # FIXME RHAPSODY
-                self._launchers[lm_name] = None
-              # self._launchers[lm_name] = rpa.LaunchMethod.create(
-              #     lm_name, lm_cfg, self._rm_info, logger, None)
-
-            except Exception:
-                logger.exception('skip lm %s', lm_name)
-                self._launch_order.remove(lm_name)
-
-        logger.info('launch methods: %s', self._launch_order)
-
-        if not self._launchers:
-            raise RuntimeError('no valid launch methods found')
-
-
-    # --------------------------------------------------------------------------
-    #
-    def get_partition_ids(self):
-
-        # TODO: this implies unique partition IDs across all launchers
-
-        partition_ids = list()
-        for lname in self._launchers:
-            partition_ids += self._launchers[lname].get_partition_ids()
-
-        return partition_ids
-
-
-    # --------------------------------------------------------------------------
-    #
-    @staticmethod
-    def batch_started():
-        '''
-        Method determines from where it was called:
-        either from the batch job or from outside (e.g., login node).
-        '''
-
-        return False
-
-
-    # --------------------------------------------------------------------------
-    #
-    def stop(self):
-
-        # clean up launch methods
-        for name in self._launchers:
-            try:    self._launchers[name].finalize()
-            except: logger.exception('LM %s finalize failed', name)
-
-
-    # --------------------------------------------------------------------------
-    #
-    def find_launcher(self, task):
-
-        errors = list()
-        for name in self._launch_order:
-
-            launcher = self._launchers[name]
-            lm_can_launch, err_message = launcher.can_launch(task)
-            logger.debug('can launch %s with %s: %s',
-                            task['uid'], name, lm_can_launch)
-
-            if lm_can_launch:
-                return launcher, name
-            else:
-                errors.append([name, err_message])
-
-        logger.error('no launch method for task %s:', task['uid'])
-        for name, error in errors:
-            logger.debug('    %s: %s', name, error)
-
-        return None, None
-
-
-    # --------------------------------------------------------------------------
-    #
-    def get_launcher(self, lname):
-
-        if lname not in self._launchers:
-            raise ValueError('no such launcher %s' % lname)
-
-        return self._launchers[lname]
 
 
     # --------------------------------------------------------------------------
@@ -619,7 +449,7 @@ class ResourceManager(object):
         as required for rm_info.
         '''
 
-
+        # FIXME: use proper data structures for nodes and resources
         # keep nodes to be indexed (node_index)
         node_list = [{'name'  : node,
                       'index' : idx,

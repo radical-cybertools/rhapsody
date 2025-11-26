@@ -18,15 +18,11 @@ class Slurm(ResourceManager):
 
     # --------------------------------------------------------------------------
     #
-    @staticmethod
-    def check() -> bool:
-        # check if we are executed in a SLURM job context
-        return bool(os.getenv('SLURM_JOB_ID'))
+    def _initialize(self) -> RMInfo:
 
-
-    # --------------------------------------------------------------------------
-    #
-    def init_from_scratch(self) -> RMInfo:
+        # ensure we run in a SLURM environment
+        if 'SLURM_JOB_ID' not in os.environ:
+            raise RuntimeError('not running in a SLURM job')
 
         rm_info = self._rm_info
         rm_cfg  = rm_info.cfg

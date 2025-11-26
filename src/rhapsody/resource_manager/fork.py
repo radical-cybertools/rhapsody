@@ -14,17 +14,10 @@ from .base import RMInfo, ResourceManager
 #
 class Fork(ResourceManager):
 
-    # --------------------------------------------------------------------------
-    #
-    @staticmethod
-    def check() -> bool:
-        # this RM is always available
-        return True
-
 
     # --------------------------------------------------------------------------
     #
-    def init_from_scratch(self) -> RMInfo:
+    def _initialize(self) -> RMInfo:
 
         rm_info = self._rm_info
         rm_cfg  = rm_info.cfg
