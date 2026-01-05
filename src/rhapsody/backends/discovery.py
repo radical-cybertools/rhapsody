@@ -17,6 +17,7 @@ class BackendRegistry:
 
     _backends: dict[str, str] = {
         "dask": "rhapsody.backends.execution.dask_parallel.DaskExecutionBackend",
+        "concurrent": "rhapsody.backends.execution.ConcurrentExecutionBackend",
         "radical_pilot": "rhapsody.backends.execution.radical_pilot.RadicalExecutionBackend",
     }
 

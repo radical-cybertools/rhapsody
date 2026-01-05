@@ -11,7 +11,7 @@ import copy
 import logging
 import threading
 from collections.abc import Generator
-from typing import Callable
+from typing import Callable, Optional, Union, List
 
 import typeguard
 
@@ -119,7 +119,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
     """
 
     @typeguard.typechecked
-    def __init__(self, resources: dict, raptor_config: dict | None = None) -> None:
+    def __init__(self, resources: dict, raptor_config: Optional[dict] = None) -> None:
         """Initialize the RadicalExecutionBackend with resources.
 
         Creates a new Radical Pilot session, initializes task and pilot managers,
@@ -151,12 +151,18 @@ class RadicalExecutionBackend(BaseExecutionBackend):
 
         if rp is None or ru is None:
             raise ImportError(
-                "Radical.Pilot and Radical.utils are required for RadicalExecutionBackend."
+                "Radical.Pilot and Radical.utils are required for "
+                "RadicalExecutionBackend."
             )
 
         self.resources = resources
         self.raptor_config = raptor_config or {}
         self._initialized = False
+
+        # This will allow us to have better control
+        # on the error coming from the pilot object
+        if "exit_on_error" not in self.resources:
+            self.resources["exit_on_error"] = False
 
     def __await__(self):
         """Make RadicalExecutionBackend awaitable."""
@@ -174,12 +180,16 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         try:
             self.tasks = {}
             self.raptor_mode = False
-            self.session = rp.Session(uid=ru.generate_id("rhapsody.session", mode=ru.ID_PRIVATE))
+            self.session = rp.Session(
+                uid=ru.generate_id("rhapsody.session", mode=ru.ID_PRIVATE)
+            )
             self.task_manager = rp.TaskManager(self.session)
             self.pilot_manager = rp.PilotManager(self.session)
             self.resource_pilot = self.pilot_manager.submit_pilots(
                 rp.PilotDescription(self.resources)
             )
+            self.pilot_manager.register_callback(self.handle_pilot_state_callback)
+
             self.task_manager.add_pilots(self.resource_pilot)
             self._callback_func: Callable[[asyncio.Future], None] = lambda f: None
 
@@ -196,14 +206,14 @@ class RadicalExecutionBackend(BaseExecutionBackend):
                 running_state=rp.AGENT_EXECUTING,
             )
 
-            logger.info("RadicalPilot execution backend started successfully\n")
+            logger.info("RadicalPilot execution backend started successfully")
 
-        except Exception:
-            logger.exception("RadicalPilot backend failed to start, terminating\n")
+        except Exception as e:
+            logger.exception(f"RadicalPilot execution backend failed: {e}, terminating")
             raise
 
         except (KeyboardInterrupt, SystemExit) as e:
-            msg = f"Radical backend failed, check {self.session.path}"
+            msg = f"Radical execution backend failed: {e}, check {self.session.path}"
             raise SystemExit(msg) from e
 
     def get_task_states_map(self) -> StateMapper:
@@ -318,6 +328,33 @@ class RadicalExecutionBackend(BaseExecutionBackend):
             yield masters_uids[current_master]
             current_master = (current_master + 1) % len(self.masters)
 
+    def handle_pilot_state_callback(self, pilot, state) -> None:
+        """Handle pilot state changes and ensure task callbacks are fired."""
+        # For some reason radical.pilot reports
+        # twice that the pilot has failed
+        if state == rp.FAILED:
+            if hasattr(self, "_pilot_failed"):
+                return
+
+            logger.error(f"{pilot.uid} has failed: {pilot}")
+            self._pilot_failed = True
+
+            try:
+                # Get actual task objects from task manager
+                tasks_ids = list(self.tasks.keys())
+                rp_tasks = self.task_manager.get_tasks(tasks_ids)
+
+                if not rp_tasks:
+                    return
+
+                # Fire callbacks for all non-DONE tasks
+                # This ensures WorkflowEngine is notified
+                for task in rp_tasks:
+                    if task.state != rp.DONE:
+                        self._callback_func(task, rp.FAILED)
+            except Exception as e:
+                logger.exception(f"Error handling pilot failure: {e}")
+
     def register_callback(self, func: Callable) -> None:
         """Register a callback function for task state changes.
 
@@ -404,7 +441,9 @@ class RadicalExecutionBackend(BaseExecutionBackend):
             rp_task.executable = task_desc["executable"]
         elif task_desc["function"]:
             if is_service:
-                error_msg = "RadicalExecutionBackend does not support function service tasks"
+                error_msg = (
+                    "RadicalExecutionBackend does not support function service tasks"
+                )
                 rp_task["exception"] = ValueError(error_msg)
                 self._callback_func(rp_task, rp.FAILED)
                 return None
@@ -433,10 +472,10 @@ class RadicalExecutionBackend(BaseExecutionBackend):
 
     def link_explicit_data_deps(
         self,
-        src_task: dict | None = None,
-        dst_task: dict | None = None,
-        file_name: str | None = None,
-        file_path: str | None = None,
+        src_task: Optional[dict] = None,
+        dst_task: Optional[dict] = None,
+        file_name: Optional[str] = None,
+        file_path: Optional[str] = None,
     ) -> dict:
         """Link explicit data dependencies between tasks or from external sources.
 
@@ -528,7 +567,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         Args:
             src_task (Dict): Source task dictionary containing 'uid' key.
             dst_task (Dict): Destination task dictionary with
-                'task_backend_specific_kwargs' for pre_exec commands.
+            'task_backend_specific_kwargs' for pre_exec commands.
 
         Note:
             - Links all files from source sandbox except the task UID file itself
@@ -566,7 +605,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         else:
             dst_kwargs["pre_exec"] = commands
 
-    async def submit_tasks(self, tasks: list) -> None:
+    async def submit_tasks(self, tasks: list) -> "Union[List[rp.Task], rp.Task]":
         """Submit a list of tasks for execution.
 
         Processes a list of workflow tasks, builds RadicalPilot task descriptions,
@@ -578,6 +617,9 @@ class RadicalExecutionBackend(BaseExecutionBackend):
                 - uid: Unique task identifier
                 - task_backend_specific_kwargs: RadicalPilot-specific parameters
                 - Other task description fields
+
+        Returns:
+            The result of task_manager.submit_tasks() with successfully built tasks.
 
         Note:
             - Failed task builds are skipped (build_task returns None)
@@ -594,7 +636,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
                 continue
             _tasks.append(task_to_submit)
 
-        self.task_manager.submit_tasks(_tasks)
+        return self.task_manager.submit_tasks(_tasks)
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a task.
@@ -610,7 +652,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
             return True
         return False
 
-    def get_nodelist(self) -> object | None:
+    def get_nodelist(self) -> "Optional[rp.NodeList]":
         """Get information about allocated compute nodes.
 
         Retrieves the nodelist from the active resource pilot, providing
@@ -651,15 +693,8 @@ class RadicalExecutionBackend(BaseExecutionBackend):
             - Ensures graceful termination of all backend resources
             - Prints confirmation message when shutdown is triggered
         """
-        try:
-            if hasattr(self, "session") and self.session is not None:
-                self.session.close(download=True)
-                logger.info("Radical Pilot backend shutdown complete")
-            else:
-                logger.info("Radical Pilot backend shutdown (no active session)")
-        except Exception as e:
-            logger.warning(f"Error during Radical Pilot shutdown: {e}")
-            logger.info("Radical Pilot backend shutdown attempted")
+        self.session.close(download=True)
+        logger.info("Radical Pilot backend shutdown complete")
 
     async def __aenter__(self):
         """Async context manager entry."""
@@ -673,7 +708,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
 
     @classmethod
     async def create(
-        cls, resources: dict, raptor_config: dict | None = None
+        cls, resources: dict, raptor_config: Optional[dict] = None
     ) -> RadicalExecutionBackend:
         """Create initialized backend.
 

@@ -5,8 +5,9 @@ environments.
 """
 
 from __future__ import annotations
+from .concurrent import ConcurrentExecutionBackend # noqa: F401
 
-__all__ = []
+__all__ = ["ConcurrentExecutionBackend"]
 
 # Try to import optional backends
 try:
@@ -22,3 +23,5 @@ try:
     __all__.append("RadicalExecutionBackend")
 except ImportError:
     pass
+
+
