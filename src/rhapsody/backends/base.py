@@ -143,12 +143,11 @@ class BaseExecutionBackend(ABC):
 
     @staticmethod
     async def wait_tasks(
-        results: List[Tuple[str, str]],
+        results: List[Tuple[Dict[str, Any], str]],
         num_tasks: int,
         timeout: Optional[float] = None,
         sleep_interval: float = 0.1,
-        verbose: bool = True
-    ) -> Dict[str, str]:
+    ) -> Dict[str, Dict[str, Any]]:
         """Wait for tasks to complete by monitoring callback results.
 
         This is a utility method for backends that use callback patterns.
@@ -156,17 +155,20 @@ class BaseExecutionBackend(ABC):
         until all tasks reach terminal states.
 
         Args:
-            results: List of (task_uid, state) tuples populated by callbacks.
+            results: List of (task, state) tuples populated by callbacks.
+                     Each task is a dict containing 'uid', and optionally 'stdout',
+                     'stderr', 'return_value', 'exception', etc.
                      This list is mutated by the callback function registered
                      via backend.register_callback().
             num_tasks: Expected number of tasks to wait for.
             timeout: Optional timeout in seconds. If None, waits indefinitely.
                     Raises asyncio.TimeoutError if timeout is reached.
             sleep_interval: Seconds to sleep when no progress is detected (default: 0.1).
-            verbose: If True, prints task completion messages (default: True).
 
         Returns:
-            Dictionary mapping task UIDs to their final states.
+            Dictionary mapping task UIDs to their complete task objects (dicts).
+            Each task dict contains 'uid', 'state', and optionally 'stdout',
+            'stderr', 'return_value', 'exception', etc.
 
         Raises:
             asyncio.TimeoutError: If timeout is specified and exceeded.
@@ -175,16 +177,23 @@ class BaseExecutionBackend(ABC):
         Example:
             results = []
             def callback(task, state):
-                results.append((task["uid"], state))
+                results.append((task, state))
 
             backend.register_callback(callback)
             await backend.submit_tasks(tasks)
 
             # Wait for all tasks to complete
-            final_states = await backend.wait_tasks(results, len(tasks))
+            completed_tasks = await backend.wait_tasks(results, len(tasks))
 
-            # Check for failures
-            failed = [uid for uid, state in final_states.items() if state == 'FAILED']
+            # Access task results
+            for uid, task in completed_tasks.items():
+                print(f"Task {uid}: {task['state']}")
+                if task['state'] == 'DONE':
+                    print(f"  Output: {task.get('stdout', '')}")
+                    print(f"  Return: {task.get('return_value', None)}")
+                elif task['state'] == 'FAILED':
+                    print(f"  Error: {task.get('stderr', '')}")
+                    print(f"  Exception: {task.get('exception', None)}")
         """
         import asyncio
 
@@ -195,7 +204,7 @@ class BaseExecutionBackend(ABC):
         # Terminal states (support both CANCELED spellings)
         TERMINAL_STATES = {'DONE', 'FAILED', 'CANCELED', 'CANCELLED'}
 
-        # Track finished tasks: uid -> final_state
+        # Track finished tasks: uid -> task_dict (with state added)
         finished_tasks = {}
 
         # Track processed result indices to avoid re-processing
@@ -216,16 +225,19 @@ class BaseExecutionBackend(ABC):
             # Process new results only (from processed_index onwards)
             made_progress = False
             while processed_index < len(results):
-                task_uid, state = results[processed_index]
+                task, state = results[processed_index]
                 processed_index += 1
+
+                # Extract task UID
+                task_uid = task.get('uid') if isinstance(task, dict) else str(task)
 
                 # Only process terminal states and avoid duplicates
                 if state in TERMINAL_STATES and task_uid not in finished_tasks:
-                    finished_tasks[task_uid] = state
+                    # Store complete task object with state
+                    task_with_state = task.copy() if isinstance(task, dict) else {'uid': task_uid}
+                    task_with_state['state'] = state
+                    finished_tasks[task_uid] = task_with_state
                     made_progress = True
-
-                    if verbose:
-                        print(f"Task {task_uid}: {state}")
 
             # Sleep only if no progress was made
             if not made_progress and len(finished_tasks) < num_tasks:

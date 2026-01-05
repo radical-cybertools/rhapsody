@@ -1,6 +1,6 @@
 import asyncio
 from rhapsody.backends import Session
-from rhapsody.backends.execution.dask_parallel import DaskExecutionBackend
+from rhapsody.backends.execution.concurrent import ConcurrentExecutionBackend
 
 
 async def main():
@@ -9,12 +9,12 @@ async def main():
     session = Session()
 
     # Get a backend (concurrent backend by default)
-    backend = await DaskExecutionBackend()
+    backend = await ConcurrentExecutionBackend()
 
     # Set up a callback to track task results
     results = []
     def callback(task, state):
-        results.append((task["uid"], state))
+        results.append((task, state))
 
     backend.register_callback(callback)
 
@@ -34,12 +34,12 @@ async def main():
     await backend.submit_tasks(tasks)
 
     # Wait for all tasks to complete
-    final_states = await backend.wait_tasks(results, len(tasks))
+    completed_tasks = await backend.wait_tasks(results, len(tasks))
 
-    # Optional: Check for failures
-    failed_tasks = [uid for uid, state in final_states.items() if state == 'FAILED']
-    if failed_tasks:
-        print(f"Warning: {len(failed_tasks)} task(s) failed: {failed_tasks}")
+    # Access task results
+    for uid, task in completed_tasks.items():
+        print(f"Task {uid}:")
+        print(f"State: {task['state']}")
 
     # Cleanup
     await backend.shutdown()

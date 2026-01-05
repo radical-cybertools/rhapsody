@@ -110,21 +110,33 @@ async def test_wait_tasks_basic_functionality():
     """Test that wait_tasks correctly waits for all tasks to complete."""
     from rhapsody.backends.base import BaseExecutionBackend
 
-    # Simulate callback results
+    # Simulate callback results with full task objects
     results = [
-        ("task_1", "DONE"),
-        ("task_2", "DONE"),
-        ("task_3", "FAILED"),
+        ({"uid": "task_1", "stdout": "output1", "return_value": 0}, "DONE"),
+        ({"uid": "task_2", "stdout": "output2", "return_value": 42}, "DONE"),
+        ({"uid": "task_3", "stderr": "error", "exception": Exception("failed")}, "FAILED"),
     ]
 
     # Wait for 3 tasks
-    final_states = await BaseExecutionBackend.wait_tasks(results, 3, verbose=False)
+    completed_tasks = await BaseExecutionBackend.wait_tasks(results, 3, verbose=False)
 
     # Verify all tasks are tracked
-    assert len(final_states) == 3
-    assert final_states["task_1"] == "DONE"
-    assert final_states["task_2"] == "DONE"
-    assert final_states["task_3"] == "FAILED"
+    assert len(completed_tasks) == 3
+
+    # Verify task_1
+    assert completed_tasks["task_1"]["state"] == "DONE"
+    assert completed_tasks["task_1"]["stdout"] == "output1"
+    assert completed_tasks["task_1"]["return_value"] == 0
+
+    # Verify task_2
+    assert completed_tasks["task_2"]["state"] == "DONE"
+    assert completed_tasks["task_2"]["stdout"] == "output2"
+    assert completed_tasks["task_2"]["return_value"] == 42
+
+    # Verify task_3
+    assert completed_tasks["task_3"]["state"] == "FAILED"
+    assert completed_tasks["task_3"]["stderr"] == "error"
+    assert "exception" in completed_tasks["task_3"]
 
 
 @pytest.mark.asyncio
@@ -139,20 +151,20 @@ async def test_wait_tasks_deduplication_and_terminal_states():
     # Simulate async task completion in background
     async def simulate_task_completion():
         await asyncio.sleep(0.05)
-        results.append(("task_1", "RUNNING"))  # Non-terminal state
+        results.append(({"uid": "task_1"}, "RUNNING"))  # Non-terminal state
         await asyncio.sleep(0.05)
-        results.append(("task_1", "DONE"))  # Terminal state
-        results.append(("task_1", "DONE"))  # Duplicate - should be ignored
+        results.append(({"uid": "task_1", "stdout": "done", "return_value": 0}, "DONE"))  # Terminal state
+        results.append(({"uid": "task_1", "stdout": "done", "return_value": 0}, "DONE"))  # Duplicate - should be ignored
         await asyncio.sleep(0.05)
-        results.append(("task_2", "CANCELED"))  # Different spelling
+        results.append(({"uid": "task_2", "stdout": "canceled"}, "CANCELED"))  # Different spelling
         await asyncio.sleep(0.05)
-        results.append(("task_3", "CANCELLED"))  # Alternative spelling
+        results.append(({"uid": "task_3", "stdout": "cancelled"}, "CANCELLED"))  # Alternative spelling
 
     # Start background task
     completion_task = asyncio.create_task(simulate_task_completion())
 
     # Wait for tasks to complete
-    final_states = await BaseExecutionBackend.wait_tasks(
+    completed_tasks = await BaseExecutionBackend.wait_tasks(
         results, 3, timeout=5.0, sleep_interval=0.05, verbose=False
     )
 
@@ -160,12 +172,16 @@ async def test_wait_tasks_deduplication_and_terminal_states():
     await completion_task
 
     # Verify deduplication and correct final states
-    assert len(final_states) == 3, "Should have exactly 3 unique tasks"
-    assert final_states["task_1"] == "DONE"
-    assert final_states["task_2"] == "CANCELED"
-    assert final_states["task_3"] == "CANCELLED"
+    assert len(completed_tasks) == 3, "Should have exactly 3 unique tasks"
+    assert completed_tasks["task_1"]["state"] == "DONE"
+    assert completed_tasks["task_1"]["stdout"] == "done"
+    assert completed_tasks["task_1"]["return_value"] == 0
+    assert completed_tasks["task_2"]["state"] == "CANCELED"
+    assert completed_tasks["task_2"]["stdout"] == "canceled"
+    assert completed_tasks["task_3"]["state"] == "CANCELLED"
+    assert completed_tasks["task_3"]["stdout"] == "cancelled"
 
     # Verify duplicates were ignored (only 3 tasks despite multiple entries for task_1)
-    task_1_count = sum(1 for uid, _ in results if uid == "task_1")
+    task_1_count = sum(1 for task, _ in results if task.get("uid") == "task_1")
     assert task_1_count >= 2, "Should have multiple entries for task_1 in results"
-    assert len(final_states) == 3, "But only 3 unique tasks in final_states"
+    assert len(completed_tasks) == 3, "But only 3 unique tasks in completed_tasks"
