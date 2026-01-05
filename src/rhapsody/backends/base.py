@@ -11,6 +11,10 @@ from abc import ABC
 from abc import abstractmethod
 from typing import Any
 from typing import Callable
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Tuple
 
 
 class BaseExecutionBackend(ABC):
@@ -136,6 +140,98 @@ class BaseExecutionBackend(ABC):
             NotImplementedError: If the backend doesn't support cancellation
         """
         raise NotImplementedError("Not implemented in the base backend")
+
+    @staticmethod
+    async def wait_tasks(
+        results: List[Tuple[str, str]],
+        num_tasks: int,
+        timeout: Optional[float] = None,
+        sleep_interval: float = 0.1,
+        verbose: bool = True
+    ) -> Dict[str, str]:
+        """Wait for tasks to complete by monitoring callback results.
+
+        This is a utility method for backends that use callback patterns.
+        It monitors a results list populated by registered callbacks and waits
+        until all tasks reach terminal states.
+
+        Args:
+            results: List of (task_uid, state) tuples populated by callbacks.
+                     This list is mutated by the callback function registered
+                     via backend.register_callback().
+            num_tasks: Expected number of tasks to wait for.
+            timeout: Optional timeout in seconds. If None, waits indefinitely.
+                    Raises asyncio.TimeoutError if timeout is reached.
+            sleep_interval: Seconds to sleep when no progress is detected (default: 0.1).
+            verbose: If True, prints task completion messages (default: True).
+
+        Returns:
+            Dictionary mapping task UIDs to their final states.
+
+        Raises:
+            asyncio.TimeoutError: If timeout is specified and exceeded.
+            ValueError: If num_tasks is less than 1.
+
+        Example:
+            results = []
+            def callback(task, state):
+                results.append((task["uid"], state))
+
+            backend.register_callback(callback)
+            await backend.submit_tasks(tasks)
+
+            # Wait for all tasks to complete
+            final_states = await backend.wait_tasks(results, len(tasks))
+
+            # Check for failures
+            failed = [uid for uid, state in final_states.items() if state == 'FAILED']
+        """
+        import asyncio
+
+        # Validation
+        if num_tasks < 1:
+            raise ValueError(f"num_tasks must be >= 1, got {num_tasks}")
+
+        # Terminal states (support both CANCELED spellings)
+        TERMINAL_STATES = {'DONE', 'FAILED', 'CANCELED', 'CANCELLED'}
+
+        # Track finished tasks: uid -> final_state
+        finished_tasks = {}
+
+        # Track processed result indices to avoid re-processing
+        processed_index = 0
+
+        # Timeout handling
+        start_time = asyncio.get_event_loop().time() if timeout else None
+
+        while len(finished_tasks) < num_tasks:
+            # Check timeout
+            if timeout is not None:
+                elapsed = asyncio.get_event_loop().time() - start_time
+                if elapsed >= timeout:
+                    raise asyncio.TimeoutError(
+                        f"Timeout after {timeout}s: {len(finished_tasks)}/{num_tasks} tasks completed"
+                    )
+
+            # Process new results only (from processed_index onwards)
+            made_progress = False
+            while processed_index < len(results):
+                task_uid, state = results[processed_index]
+                processed_index += 1
+
+                # Only process terminal states and avoid duplicates
+                if state in TERMINAL_STATES and task_uid not in finished_tasks:
+                    finished_tasks[task_uid] = state
+                    made_progress = True
+
+                    if verbose:
+                        print(f"Task {task_uid}: {state}")
+
+            # Sleep only if no progress was made
+            if not made_progress and len(finished_tasks) < num_tasks:
+                await asyncio.sleep(sleep_interval)
+
+        return finished_tasks
 
 
 class Session:

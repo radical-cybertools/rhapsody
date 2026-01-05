@@ -103,3 +103,69 @@ def test_base_execution_backend_method_signatures():
     cancel_task_sig = inspect.signature(BaseExecutionBackend.cancel_task)
     assert len(cancel_task_sig.parameters) == 2  # self, uid
     assert "uid" in cancel_task_sig.parameters
+
+
+@pytest.mark.asyncio
+async def test_wait_tasks_basic_functionality():
+    """Test that wait_tasks correctly waits for all tasks to complete."""
+    from rhapsody.backends.base import BaseExecutionBackend
+
+    # Simulate callback results
+    results = [
+        ("task_1", "DONE"),
+        ("task_2", "DONE"),
+        ("task_3", "FAILED"),
+    ]
+
+    # Wait for 3 tasks
+    final_states = await BaseExecutionBackend.wait_tasks(results, 3, verbose=False)
+
+    # Verify all tasks are tracked
+    assert len(final_states) == 3
+    assert final_states["task_1"] == "DONE"
+    assert final_states["task_2"] == "DONE"
+    assert final_states["task_3"] == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_wait_tasks_deduplication_and_terminal_states():
+    """Test that wait_tasks deduplicates tasks and handles terminal states correctly."""
+    import asyncio
+    from rhapsody.backends.base import BaseExecutionBackend
+
+    # Simulate results list that gets populated over time
+    results = []
+
+    # Simulate async task completion in background
+    async def simulate_task_completion():
+        await asyncio.sleep(0.05)
+        results.append(("task_1", "RUNNING"))  # Non-terminal state
+        await asyncio.sleep(0.05)
+        results.append(("task_1", "DONE"))  # Terminal state
+        results.append(("task_1", "DONE"))  # Duplicate - should be ignored
+        await asyncio.sleep(0.05)
+        results.append(("task_2", "CANCELED"))  # Different spelling
+        await asyncio.sleep(0.05)
+        results.append(("task_3", "CANCELLED"))  # Alternative spelling
+
+    # Start background task
+    completion_task = asyncio.create_task(simulate_task_completion())
+
+    # Wait for tasks to complete
+    final_states = await BaseExecutionBackend.wait_tasks(
+        results, 3, timeout=5.0, sleep_interval=0.05, verbose=False
+    )
+
+    # Wait for background task
+    await completion_task
+
+    # Verify deduplication and correct final states
+    assert len(final_states) == 3, "Should have exactly 3 unique tasks"
+    assert final_states["task_1"] == "DONE"
+    assert final_states["task_2"] == "CANCELED"
+    assert final_states["task_3"] == "CANCELLED"
+
+    # Verify duplicates were ignored (only 3 tasks despite multiple entries for task_1)
+    task_1_count = sum(1 for uid, _ in results if uid == "task_1")
+    assert task_1_count >= 2, "Should have multiple entries for task_1 in results"
+    assert len(final_states) == 3, "But only 3 unique tasks in final_states"
