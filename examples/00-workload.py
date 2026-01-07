@@ -11,13 +11,6 @@ async def main():
     # Get a backend (concurrent backend by default)
     backend = await ConcurrentExecutionBackend()
 
-    # Set up a callback to track task results
-    results = []
-    def callback(task, state):
-        results.append((task, state))
-
-    backend.register_callback(callback)
-
     # Define tasks
     tasks = [
         {
@@ -30,16 +23,20 @@ async def main():
         }
     ]
 
-    # Submit and execute tasks
+    # Submit tasks
     await backend.submit_tasks(tasks)
 
-    # Wait for all tasks to complete
-    completed_tasks = await backend.wait_tasks(results, len(tasks))
+    # Wait for all tasks to complete (no manual callback needed!)
+    completed_tasks = await backend.wait_tasks(tasks)
 
     # Access task results
     for uid, task in completed_tasks.items():
         print(f"Task {uid}:")
         print(f"State: {task['state']}")
+        if task['state'] == 'DONE':
+            print(f"Output: {task.get('stdout', '').strip()}")
+        else:
+            print(f"Output: {task.get('stderr', '').strip()}")
 
     # Cleanup
     await backend.shutdown()
