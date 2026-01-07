@@ -52,6 +52,8 @@ class DaskExecutionBackend(BaseExecutionBackend):
         if dask is None:
             raise ImportError("Dask is required for DaskExecutionBackend.")
 
+        super().__init__()
+
         self.tasks = {}
         self._client = None
         self.session = Session()

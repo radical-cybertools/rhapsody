@@ -154,6 +154,8 @@ class RadicalExecutionBackend(BaseExecutionBackend):
                 "Radical.Pilot and Radical.utils are required for "
                 "RadicalExecutionBackend."
             )
+        
+        super().__init__()
 
         self.resources = resources
         self.raptor_config = raptor_config or {}

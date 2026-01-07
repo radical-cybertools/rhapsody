@@ -1578,6 +1578,8 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
         if System is None:
             raise ImportError("Dragon System is required for this backend version.")
 
+        super().__init__()
+
         self.tasks: dict[str, dict[str, Any]] = {}
         self.session = Session()
         self._callback_func: Callable = None
@@ -2097,6 +2099,8 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
     def __init__(self, resources: Optional[dict] = None, ddict: Optional[DDict] = None):
         if dragon is None:
             raise ImportError("Dragon is required for DragonExecutionBackendV2.")
+
+        super().__init__()
 
         self.tasks: dict[str, dict[str, Any]] = {}
         self.session = Session()
@@ -2814,6 +2818,8 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
     ):
         if not Batch:
             raise RuntimeError("Dragon Batch not available")
+
+        super().__init__()
 
         self.batch = Batch(
             num_workers=num_workers or 0,
