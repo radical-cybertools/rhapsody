@@ -62,16 +62,16 @@ except ImportError:  # pragma: no cover - environment without Dragon
 
 logger = logging.getLogger(__name__)
 
-DRAGON_DEFAULT_REF_THRESHOLD = int(
-    os.environ.get("DRAGON_DEFAULT_REF_THRESHOLD", 1024 * 1024)
-)
+DRAGON_DEFAULT_REF_THRESHOLD = int(os.environ.get("DRAGON_DEFAULT_REF_THRESHOLD", 1024 * 1024))
 
 # ============================================================================
 # V1 Integration Helper classes
 # ============================================================================
 
+
 class TaskTypeV1(Enum):
     """Enumeration of supported task types."""
+
     SINGLE_FUNCTION = "single_function"
     SINGLE_EXECUTABLE = "single_executable"
     MULTI_FUNCTION = "multi_function"
@@ -79,9 +79,11 @@ class TaskTypeV1(Enum):
     MPI_FUNCTION = "mpi_function"
     MPI_EXECUTABLE = "mpi_executable"
 
+
 @dataclass
 class TaskInfoV1:
     """Container for task runtime information."""
+
     task_type: TaskTypeV1
     ranks: int
     start_time: float
@@ -89,9 +91,11 @@ class TaskInfoV1:
     process: Optional[Process] = None
     group: Optional[ProcessGroup] = None
 
+
 @dataclass
 class ExecutableTaskCompletionV1:
     """Task completion data from executable process."""
+
     task_uid: str
     rank: int
     process_id: int
@@ -107,12 +111,16 @@ class ExecutableTaskCompletionV1:
             "stderr": self.stderr,
             "exit_code": self.exit_code,
             "return_value": None,
-            "exception": None if self.exit_code == 0 else f"Process exited with code {self.exit_code}"
+            "exception": None
+            if self.exit_code == 0
+            else f"Process exited with code {self.exit_code}",
         }
+
 
 @dataclass
 class FunctionTaskCompletionV1:
     """Task completion data from function process - sent via queue."""
+
     task_uid: str
     rank: int
     process_id: int
@@ -134,8 +142,9 @@ class FunctionTaskCompletionV1:
             "exit_code": self.exit_code,
             "return_value": self.return_value,
             "exception": self.exception,
-            "success": self.success
+            "success": self.success,
         }
+
 
 class DataReferenceV1:
     """Zero-copy reference to function results stored in DDict.
@@ -190,6 +199,7 @@ class DataReferenceV1:
 
     def __repr__(self) -> str:
         return f"DataReferenceV1(task_uid='{self._task_uid}', ranks={self._ranks}, backend_id='{self._backend_id}')"
+
 
 class SharedMemoryManagerV1:
     """Manages optional DDict storage for large function results."""
@@ -254,10 +264,16 @@ class SharedMemoryManagerV1:
         except Exception as e:
             self.logger.warning(f"Error clearing DDict data: {e}")
 
+
 class ResultCollectorV1:
     """Unified queue-based result collection for both executable and function tasks."""
 
-    def __init__(self, shared_memory_manager: SharedMemoryManagerV1, result_queue: Queue, logger: logging.Logger):
+    def __init__(
+        self,
+        shared_memory_manager: SharedMemoryManagerV1,
+        result_queue: Queue,
+        logger: logging.Logger,
+    ):
         self.shared_memory = shared_memory_manager
         self.ddict = shared_memory_manager.ddict
         self.result_queue = result_queue
@@ -265,7 +281,7 @@ class ResultCollectorV1:
 
         # Track completion for all task types
         self.completion_counts: Dict[str, int] = {}  # task_uid -> received_count
-        self.expected_counts: Dict[str, int] = {}   # task_uid -> expected_count
+        self.expected_counts: Dict[str, int] = {}  # task_uid -> expected_count
         self.aggregated_results: Dict[str, List] = {}  # task_uid -> [completions]
 
     def register_task(self, task_uid: str, ranks: int):
@@ -333,7 +349,9 @@ class ResultCollectorV1:
         self.cleanup_task(task_uid)
         return result_data
 
-    def _aggregate_function_results(self, task_uid: str, results: List[FunctionTaskCompletionV1]) -> dict:
+    def _aggregate_function_results(
+        self, task_uid: str, results: List[FunctionTaskCompletionV1]
+    ) -> dict:
         """Aggregate function task results."""
         if len(results) == 1:
             # Single rank - return as-is
@@ -344,7 +362,7 @@ class ResultCollectorV1:
                 "exit_code": result.exit_code,
                 "return_value": result.return_value,
                 "exception": result.exception,
-                "success": result.success
+                "success": result.success,
             }
         else:
             # Multi-rank - aggregate
@@ -367,10 +385,10 @@ class ResultCollectorV1:
                 "stderr": "\n".join(stderr_parts),
                 "exit_code": max_exit_code,
                 "return_value": return_value,
-                "exception": None if all_successful else "; ".join(
-                    str(r.exception) for r in results if not r.success
-                ),
-                "success": all_successful
+                "exception": None
+                if all_successful
+                else "; ".join(str(r.exception) for r in results if not r.success),
+                "success": all_successful,
             }
 
     def _aggregate_executable_results(self, results: List[ExecutableTaskCompletionV1]) -> dict:
@@ -387,7 +405,7 @@ class ResultCollectorV1:
                 "stderr": "\n".join(stderr_parts),
                 "exit_code": max_exit_code,
                 "return_value": None,
-                "exception": None if max_exit_code == 0 else f"One or more processes failed"
+                "exception": None if max_exit_code == 0 else f"One or more processes failed",
             }
 
     def cleanup_task(self, task_uid: str):
@@ -404,6 +422,7 @@ class ResultCollectorV1:
         expected = self.expected_counts[task_uid]
         received = self.completion_counts.get(task_uid, 0)
         return received >= expected
+
 
 class TaskLauncherV1:
     """Unified task launching for all task types."""
@@ -426,7 +445,7 @@ class TaskLauncherV1:
     def _determine_task_type(self, task: dict) -> TaskTypeV1:
         """Determine task type based on task configuration."""
         is_function = bool(task.get("function"))
-        backend_kwargs = task.get('task_backend_specific_kwargs', {})
+        backend_kwargs = task.get("task_backend_specific_kwargs", {})
         ranks = int(backend_kwargs.get("ranks", 1))
         mpi = backend_kwargs.get("pmi", None)
 
@@ -451,17 +470,12 @@ class TaskLauncherV1:
         process.start()
         self.logger.debug(f"Started single-rank Dragon process for task {uid}")
 
-        return TaskInfoV1(
-            task_type=task_type,
-            ranks=1,
-            start_time=time.time(),
-            process=process
-        )
+        return TaskInfoV1(task_type=task_type, ranks=1, start_time=time.time(), process=process)
 
     async def _launch_group_task(self, task: dict, task_type: TaskTypeV1) -> TaskInfoV1:
         """Launch multi-rank or MPI task."""
         uid = task["uid"]
-        backend_kwargs = task.get('task_backend_specific_kwargs', {})
+        backend_kwargs = task.get("task_backend_specific_kwargs", {})
         ranks = int(backend_kwargs.get("ranks", 2))
 
         if task_type.name.startswith("MPI_"):
@@ -485,21 +499,16 @@ class TaskLauncherV1:
 
         self.logger.debug(f"Started group task {uid} with {ranks} ranks")
 
-        return TaskInfoV1(
-            task_type=task_type,
-            ranks=ranks,
-            start_time=time.time(),
-            group=group
-        )
+        return TaskInfoV1(task_type=task_type, ranks=ranks, start_time=time.time(), group=group)
 
     async def _create_function_process(self, task: dict, rank: int) -> Process:
         """Create a single function process."""
-        backend_kwargs = task.get('task_backend_specific_kwargs', {})
-        use_ddict_storage = backend_kwargs.get('use_ddict_storage', False)
+        backend_kwargs = task.get("task_backend_specific_kwargs", {})
+        use_ddict_storage = backend_kwargs.get("use_ddict_storage", False)
 
         return Process(
             target=_function_wrapper_v1,
-            args=(self.result_queue, self.ddict, task, rank, use_ddict_storage)
+            args=(self.result_queue, self.ddict, task, rank, use_ddict_storage),
         )
 
     def _create_executable_process(self, task: dict, rank: int) -> Process:
@@ -510,14 +519,16 @@ class TaskLauncherV1:
 
         return Process(
             target=_executable_wrapper_v1,
-            args=(self.result_queue, executable, args, uid, rank, self.working_dir)
+            args=(self.result_queue, executable, args, uid, rank, self.working_dir),
         )
 
-    async def _add_function_processes_to_group(self, group: ProcessGroup, task: dict, ranks: int) -> None:
+    async def _add_function_processes_to_group(
+        self, group: ProcessGroup, task: dict, ranks: int
+    ) -> None:
         """Add function processes to process group."""
         uid = task["uid"]
-        backend_kwargs = task.get('task_backend_specific_kwargs', {})
-        use_ddict_storage = backend_kwargs.get('use_ddict_storage', False)
+        backend_kwargs = task.get("task_backend_specific_kwargs", {})
+        use_ddict_storage = backend_kwargs.get("use_ddict_storage", False)
 
         for rank in range(ranks):
             env = os.environ.copy()
@@ -534,7 +545,9 @@ class TaskLauncherV1:
             )
             group.add_process(nproc=1, template=template)
 
-    def _add_executable_processes_to_group(self, group: ProcessGroup, task: dict, ranks: int) -> None:
+    def _add_executable_processes_to_group(
+        self, group: ProcessGroup, task: dict, ranks: int
+    ) -> None:
         """Add executable processes to process group."""
         executable = task["executable"]
         args = list(task.get("args", []))
@@ -553,7 +566,9 @@ class TaskLauncherV1:
             group.add_process(nproc=1, template=template)
 
 
-def _executable_wrapper_v1(result_queue: Queue, executable: str, args: list, task_uid: str, rank: int, working_dir: str):
+def _executable_wrapper_v1(
+    result_queue: Queue, executable: str, args: list, task_uid: str, rank: int, working_dir: str
+):
     """wrapper function that executes executable and pushes completion to queue."""
     import subprocess
     import time
@@ -566,7 +581,7 @@ def _executable_wrapper_v1(result_queue: Queue, executable: str, args: list, tas
             capture_output=True,
             shell=True,
             text=True,
-            timeout=3600  # 1 hour timeout
+            timeout=3600,  # 1 hour timeout
         )
 
         # Create completion object
@@ -577,7 +592,7 @@ def _executable_wrapper_v1(result_queue: Queue, executable: str, args: list, tas
             stdout=result.stdout,
             stderr=result.stderr,
             exit_code=result.returncode,
-            timestamp=time.time()
+            timestamp=time.time(),
         )
 
         # Push completion directly to queue
@@ -591,7 +606,7 @@ def _executable_wrapper_v1(result_queue: Queue, executable: str, args: list, tas
             stdout="",
             stderr="Process timed out",
             exit_code=124,
-            timestamp=time.time()
+            timestamp=time.time(),
         )
         result_queue.put(completion, block=True)
 
@@ -603,12 +618,14 @@ def _executable_wrapper_v1(result_queue: Queue, executable: str, args: list, tas
             stdout="",
             stderr=f"Execution error: {str(e)}",
             exit_code=1,
-            timestamp=time.time()
+            timestamp=time.time(),
         )
         result_queue.put(completion, block=True)
 
 
-def _function_wrapper_v1(result_queue: Queue, ddict: DDict, task: dict, rank: int, use_ddict_storage: bool):
+def _function_wrapper_v1(
+    result_queue: Queue, ddict: DDict, task: dict, rank: int, use_ddict_storage: bool
+):
     """wrapper function that executes user functions and pushes completion to queue.
 
     DDict is only used when user explicitly sets use_ddict_storage=True.
@@ -636,7 +653,7 @@ def _function_wrapper_v1(result_queue: Queue, ddict: DDict, task: dict, rank: in
         if asyncio.iscoroutinefunction(function):
             result = asyncio.run(function(*args, **kwargs))
         else:
-            raise RuntimeError('Sync functions are not supported, please define it as async')
+            raise RuntimeError("Sync functions are not supported, please define it as async")
 
         # Store in DDict only if user requested
         stored_in_ddict = False
@@ -661,7 +678,7 @@ def _function_wrapper_v1(result_queue: Queue, ddict: DDict, task: dict, rank: in
             exception=None,
             traceback=None,
             return_value=return_value_for_queue,
-            stored_in_ddict=stored_in_ddict
+            stored_in_ddict=stored_in_ddict,
         )
 
     except Exception as e:
@@ -678,7 +695,7 @@ def _function_wrapper_v1(result_queue: Queue, ddict: DDict, task: dict, rank: in
             exception=str(e),
             traceback=traceback.format_exc(),
             return_value=None,
-            stored_in_ddict=False
+            stored_in_ddict=False,
         )
 
     finally:
@@ -702,26 +719,34 @@ def _function_wrapper_v1(result_queue: Queue, ddict: DDict, task: dict, rank: in
 # V2 Integration Helper Classes
 # ============================================================================
 
+
 class TaskTypeV2(Enum):
     """Enumeration of supported task types."""
+
     FUNCTION = "function"
     EXECUTABLE = "executable"
 
+
 class WorkerPinningPolicyV2(Enum):
     """Worker pinning policy for task assignment."""
-    STRICT = "strict"      # Wait indefinitely for hinted worker
-    SOFT = "soft"          # Wait N seconds, then fallback to any worker
+
+    STRICT = "strict"  # Wait indefinitely for hinted worker
+    SOFT = "soft"  # Wait N seconds, then fallback to any worker
     AFFINITY = "affinity"  # Prefer hinted worker, use others if not immediately available
-    EXCLUSIVE = "exclusive" # Only hinted worker can run, reject if insufficient capacity
+    EXCLUSIVE = "exclusive"  # Only hinted worker can run, reject if insufficient capacity
+
 
 class WorkerTypeV2(Enum):
     """Worker type enumeration."""
+
     COMPUTE = "compute"
     TRAINING = "training"
+
 
 @dataclass
 class WorkerRequestV2:
     """Request sent to worker pool."""
+
     task_uid: str
     task_type: TaskTypeV2
     rank: int
@@ -741,9 +766,11 @@ class WorkerRequestV2:
         if self.exec_args is None:
             self.exec_args = []
 
+
 @dataclass
 class WorkerResponseV2:
     """Response from worker."""
+
     task_uid: str
     rank: int
     success: bool
@@ -757,9 +784,11 @@ class WorkerResponseV2:
     exit_code: int = 0
     timestamp: float = 0.0
 
+
 @dataclass
 class TaskInfoV2:
     """Container for task runtime information."""
+
     task_type: TaskTypeV2
     ranks: int
     start_time: float
@@ -768,6 +797,7 @@ class TaskInfoV2:
     canceled: bool = False
     completed_ranks: int = 0
 
+
 @dataclass
 class PolicyConfigV2:
     """Configuration for a single policy.
@@ -775,9 +805,11 @@ class PolicyConfigV2:
     For COMPUTE workers: nprocs MUST be specified
     For TRAINING workers: nprocs MUST be None (omitted)
     """
+
     policy: Optional[Policy] = None
     nprocs: Optional[int] = None
     ngpus: int = 0
+
 
 @dataclass
 class WorkerGroupConfigV2:
@@ -805,6 +837,7 @@ class WorkerGroupConfigV2:
             kwargs={'nprocs': 2, 'ppn': 32}
         )
     """
+
     name: str
     worker_type: WorkerTypeV2 = WorkerTypeV2.COMPUTE
     policies: List[PolicyConfigV2] = field(default_factory=list)
@@ -828,8 +861,8 @@ class WorkerGroupConfigV2:
     def total_slots(self) -> int:
         """Total CPU slots."""
         if self.worker_type == WorkerTypeV2.TRAINING:
-            if 'nprocs' in self.kwargs:
-                return int(self.kwargs['nprocs'])
+            if "nprocs" in self.kwargs:
+                return int(self.kwargs["nprocs"])
             return len(self.policies)
         else:
             return sum(p.nprocs for p in self.policies)
@@ -841,10 +874,13 @@ class WorkerGroupConfigV2:
         else:
             return sum(p.ngpus for p in self.policies)
 
+
 class DataReferenceV2:
     """Reference to data stored in Cross Node Distributed Dict."""
 
-    def __init__(self, ref_id: str, backend_id: str, ddict: DDict, rank_info: Optional[Dict] = None):
+    def __init__(
+        self, ref_id: str, backend_id: str, ddict: DDict, rank_info: Optional[Dict] = None
+    ):
         self._ref_id = ref_id
         self._backend_id = backend_id
         self._ddict = ddict
@@ -884,11 +920,17 @@ class DataReferenceV2:
             return f"DataReferenceV2(ref_id='{self._ref_id}', backend_id='{self._backend_id}', ranks={len(self._rank_info['rank_keys'])})"
         return f"DataReferenceV2(ref_id='{self._ref_id}', backend_id='{self._backend_id}')"
 
+
 class SharedMemoryManagerV2:
     """Manages data storage using DDict."""
 
-    def __init__(self, ddict: DDict, system: System, logger: logging.Logger,
-                 reference_threshold: int = DRAGON_DEFAULT_REF_THRESHOLD):
+    def __init__(
+        self,
+        ddict: DDict,
+        system: System,
+        logger: logging.Logger,
+        reference_threshold: int = DRAGON_DEFAULT_REF_THRESHOLD,
+    ):
         self.ddict = ddict
         self.system = system
         self.logger = logger
@@ -897,7 +939,9 @@ class SharedMemoryManagerV2:
 
     async def initialize(self):
         """Initialize storage manager."""
-        self.logger.debug(f"SharedMemoryManagerV2 initialized (threshold: {self.reference_threshold} bytes)")
+        self.logger.debug(
+            f"SharedMemoryManagerV2 initialized (threshold: {self.reference_threshold} bytes)"
+        )
 
     async def store_data(self, data: Any, node_id: int = 0) -> DataReferenceV2:
         """Store data in DDict and return reference."""
@@ -913,10 +957,7 @@ class SharedMemoryManagerV2:
     def _store_in_ddict(self, ref_id: str, data: Any):
         """Store data in DDict."""
         self.ddict.pput(f"data_{ref_id}", data)
-        self.ddict.pput(f"meta_{ref_id}", {
-            'backend_id': self.backend_id,
-            'stored_at': time.time()
-        })
+        self.ddict.pput(f"meta_{ref_id}", {"backend_id": self.backend_id, "stored_at": time.time()})
 
     def cleanup_reference(self, ref: DataReferenceV2):
         """Clean up reference data."""
@@ -928,8 +969,14 @@ class SharedMemoryManagerV2:
             self.logger.warning(f"Error cleaning up reference {ref.ref_id}: {e}")
 
 
-def _worker_loop_v2(worker_id: int, worker_name: str, input_queue: Queue, output_queue: Queue,
-                 ddict: DDict, working_dir: str) -> None:
+def _worker_loop_v2(
+    worker_id: int,
+    worker_name: str,
+    input_queue: Queue,
+    output_queue: Queue,
+    ddict: DDict,
+    working_dir: str,
+) -> None:
     """Persistent worker that processes tasks from queue.
 
     Handles both function and executable tasks:
@@ -985,7 +1032,7 @@ def _worker_loop_v2(worker_id: int, worker_name: str, input_queue: Queue, output
                 rank=request.rank,
                 worker_name=worker_name,
                 success=False,
-                timestamp=time.time()
+                timestamp=time.time(),
             )
 
             try:
@@ -1007,15 +1054,17 @@ def _worker_loop_v2(worker_id: int, worker_name: str, input_queue: Queue, output
                             ref_key = f"return_{request.task_uid}_rank_{request.rank}"
                             try:
                                 ddict.pput(f"data_{ref_key}", result)
-                                ddict.pput(f"meta_{ref_key}", {
-                                    'backend_id': backend_id,
-                                    'stored_at': time.time()
-                                })
+                                ddict.pput(
+                                    f"meta_{ref_key}",
+                                    {"backend_id": backend_id, "stored_at": time.time()},
+                                )
                                 response.stored_ref_key = ref_key
                                 response.is_reference = True
                                 response.return_value = None
                             except Exception as store_error:
-                                raise RuntimeError(f"Failed to store return value in DDict: {store_error}")
+                                raise RuntimeError(
+                                    f"Failed to store return value in DDict: {store_error}"
+                                )
                         else:
                             response.return_value = result
                             response.is_reference = False
@@ -1042,10 +1091,10 @@ def _worker_loop_v2(worker_id: int, worker_name: str, input_queue: Queue, output
                         capture_output=True,
                         text=True,
                         shell=True,
-                        timeout=3600 # FIXME: should be user defined
+                        timeout=3600,  # FIXME: should be user defined
                     )
 
-                    response.success = (result.returncode == 0)
+                    response.success = result.returncode == 0
                     response.stdout = result.stdout
                     response.stderr = result.stderr
                     response.exit_code = result.returncode
@@ -1084,8 +1133,15 @@ class WorkerPoolV2:
     - Tasks are assigned to workers with sufficient free slots
     """
 
-    def __init__(self, worker_configs: List[WorkerGroupConfigV2], ddict: DDict,
-                 working_dir: str, logger: logging.Logger, system: System, backend_id: str):
+    def __init__(
+        self,
+        worker_configs: List[WorkerGroupConfigV2],
+        ddict: DDict,
+        working_dir: str,
+        logger: logging.Logger,
+        system: System,
+        backend_id: str,
+    ):
         self.worker_configs = worker_configs
         self.ddict = ddict
         self.working_dir = working_dir
@@ -1146,13 +1202,21 @@ class WorkerPoolV2:
                     # Training worker: extract policies and pass kwargs to configure_training_group
                     config_kwargs = {
                         "training_fn": _worker_loop_v2,
-                        "training_args": (worker_id, worker_name, input_queue, self.output_queue,
-                                        self.ddict, self.working_dir),
-                        "policies": [pc.policy for pc in worker_config.policies]
+                        "training_args": (
+                            worker_id,
+                            worker_name,
+                            input_queue,
+                            self.output_queue,
+                            self.ddict,
+                            self.working_dir,
+                        ),
+                        "policies": [pc.policy for pc in worker_config.policies],
                     }
                     config_kwargs.update(worker_config.kwargs)
 
-                    self.logger.info(f"Creating training worker '{worker_name}' with {total_worker_slots} slots")
+                    self.logger.info(
+                        f"Creating training worker '{worker_name}' with {total_worker_slots} slots"
+                    )
 
                     process_group = ProcessGroup.configure_training_group(**config_kwargs)
                     process_group.init()
@@ -1171,11 +1235,17 @@ class WorkerPoolV2:
 
                         template = ProcessTemplate(
                             target=_worker_loop_v2,
-                            args=(worker_id, worker_name, input_queue, self.output_queue,
-                                  self.ddict, self.working_dir),
+                            args=(
+                                worker_id,
+                                worker_name,
+                                input_queue,
+                                self.output_queue,
+                                self.ddict,
+                                self.working_dir,
+                            ),
                             env=env,
                             cwd=self.working_dir,
-                            policy=policy_config.policy
+                            policy=policy_config.policy,
                         )
 
                         process_group.add_process(nproc=policy_config.nprocs, template=template)
@@ -1190,7 +1260,9 @@ class WorkerPoolV2:
 
             config_summary = []
             for cfg in self.worker_configs:
-                config_summary.append(f"{cfg.name} ({cfg.worker_type.value}): {cfg.total_slots()} slots, {cfg.total_gpus()} GPUs")
+                config_summary.append(
+                    f"{cfg.name} ({cfg.worker_type.value}): {cfg.total_slots()} slots, {cfg.total_gpus()} GPUs"
+                )
 
             self.logger.info(
                 f"Worker pool initialized: {self.total_workers} workers, "
@@ -1202,9 +1274,13 @@ class WorkerPoolV2:
             self.logger.exception(f"Failed to initialize worker pool: {e}")
             raise
 
-    def find_worker_for_task(self, ranks: int, gpus_per_rank: int = 0,
-                            preferred_worker: Optional[str] = None,
-                            worker_type_hint: Optional[str] = None) -> Optional[str]:
+    def find_worker_for_task(
+        self,
+        ranks: int,
+        gpus_per_rank: int = 0,
+        preferred_worker: Optional[str] = None,
+        worker_type_hint: Optional[str] = None,
+    ) -> Optional[str]:
         """Find worker with sufficient capacity using least-loaded strategy."""
         total_gpus_needed = ranks * gpus_per_rank
 
@@ -1215,8 +1291,10 @@ class WorkerPoolV2:
                 if self.worker_free_slots[preferred_worker] >= ranks:
                     return preferred_worker
             else:
-                if (self.worker_free_slots[preferred_worker] >= ranks and
-                    len(self.worker_free_gpus[preferred_worker]) >= total_gpus_needed):
+                if (
+                    self.worker_free_slots[preferred_worker] >= ranks
+                    and len(self.worker_free_gpus[preferred_worker]) >= total_gpus_needed
+                ):
                     return preferred_worker
 
         # Find all eligible workers and pick the least loaded one
@@ -1239,8 +1317,10 @@ class WorkerPoolV2:
                 if self.worker_free_slots[worker_name] >= ranks:
                     eligible_workers.append((worker_name, self.worker_free_slots[worker_name]))
             else:
-                if (self.worker_free_slots[worker_name] >= ranks and
-                    len(self.worker_free_gpus[worker_name]) >= total_gpus_needed):
+                if (
+                    self.worker_free_slots[worker_name] >= ranks
+                    and len(self.worker_free_gpus[worker_name]) >= total_gpus_needed
+                ):
                     eligible_workers.append((worker_name, self.worker_free_slots[worker_name]))
 
         # Return the worker with the most free slots (least loaded)
@@ -1261,14 +1341,18 @@ class WorkerPoolV2:
             return self.worker_free_slots[worker_name] >= ranks
 
         total_gpus_needed = ranks * gpus_per_rank
-        return (self.worker_free_slots[worker_name] >= ranks and
-                len(self.worker_free_gpus[worker_name]) >= total_gpus_needed)
+        return (
+            self.worker_free_slots[worker_name] >= ranks
+            and len(self.worker_free_gpus[worker_name]) >= total_gpus_needed
+        )
 
     def worker_exists(self, worker_name: str) -> bool:
         """Check if worker exists."""
         return worker_name in self.worker_slots
 
-    async def reserve_resources(self, worker_name: str, ranks: int, gpus_per_rank: int = 0) -> Tuple[bool, Dict[int, List[int]]]:
+    async def reserve_resources(
+        self, worker_name: str, ranks: int, gpus_per_rank: int = 0
+    ) -> Tuple[bool, Dict[int, List[int]]]:
         """Reserve resources (thread-safe)."""
         async with self._resource_lock:
             if worker_name not in self.worker_free_slots:
@@ -1284,8 +1368,10 @@ class WorkerPoolV2:
                 return True, {}
 
             total_gpus_needed = ranks * gpus_per_rank
-            if (self.worker_free_slots[worker_name] < ranks or
-                len(self.worker_free_gpus[worker_name]) < total_gpus_needed):
+            if (
+                self.worker_free_slots[worker_name] < ranks
+                or len(self.worker_free_gpus[worker_name]) < total_gpus_needed
+            ):
                 return False, {}
 
             self.worker_free_slots[worker_name] -= ranks
@@ -1301,7 +1387,9 @@ class WorkerPoolV2:
 
             return True, gpu_allocations
 
-    async def release_resources(self, worker_name: str, ranks: int, gpu_allocations: Dict[int, List[int]]):
+    async def release_resources(
+        self, worker_name: str, ranks: int, gpu_allocations: Dict[int, List[int]]
+    ):
         """Release resources (thread-safe)."""
         async with self._resource_lock:
             if worker_name in self.worker_free_slots:
@@ -1373,7 +1461,9 @@ class WorkerPoolV2:
                         process_group.stop()
                         self.logger.debug(f"ProcessGroup {idx} stopped")
                     except Exception as e:
-                        self.logger.debug(f"ProcessGroup {idx} stop error (may already be stopped): {e}")
+                        self.logger.debug(
+                            f"ProcessGroup {idx} stop error (may already be stopped): {e}"
+                        )
 
                     try:
                         process_group.close()
@@ -1442,7 +1532,7 @@ class ResultCollectorV2:
                 final_return = DataReferenceV2(
                     ref_id=r.stored_ref_key,
                     backend_id=self.shared_memory.backend_id,
-                    ddict=self.shared_memory.ddict
+                    ddict=self.shared_memory.ddict,
                 )
             else:
                 final_return = r.return_value
@@ -1452,7 +1542,7 @@ class ResultCollectorV2:
                 "stderr": r.stderr,
                 "exit_code": r.exit_code,
                 "return_value": final_return,
-                "exception": r.exception
+                "exception": r.exception,
             }
         else:
             stdout_parts = [f"Rank {r.rank}: {r.stdout}" for r in responses]
@@ -1474,10 +1564,7 @@ class ResultCollectorV2:
                     ref_id=f"unified_{task_uid}",
                     backend_id=self.shared_memory.backend_id,
                     ddict=self.shared_memory.ddict,
-                    rank_info={
-                        "task_uid": task_uid,
-                        "rank_keys": rank_keys
-                    }
+                    rank_info={"task_uid": task_uid, "rank_keys": rank_keys},
                 )
             else:
                 return_values = [r.return_value for r in responses]
@@ -1488,9 +1575,9 @@ class ResultCollectorV2:
                 "stderr": "\n".join(stderr_parts),
                 "exit_code": max_exit_code,
                 "return_value": final_return,
-                "exception": None if all_successful else "; ".join(
-                    r.exception for r in responses if r.exception
-                )
+                "exception": None
+                if all_successful
+                else "; ".join(r.exception for r in responses if r.exception),
             }
 
         # Cleanup
@@ -1507,6 +1594,7 @@ class ResultCollectorV2:
 # V3 Integration Helper Classes
 # ============================================================================
 
+
 class TaskStateMapperV3:
     PENDING = "PENDING"
     RUNNING = "RUNNING"
@@ -1522,6 +1610,7 @@ class TaskStateMapperV3:
 # V2 Integrates with Dragon API and builds Compute and Training Workers
 # V3 Integrates with Dragon.Batch API (Most performant)
 # ============================================================================
+
 
 class DragonExecutionBackendV1(BaseExecutionBackend):
     """Dragon execution backend with unified queue-based architecture
@@ -1620,7 +1709,9 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
                 logger.debug("Starting Dragon backend V1 async initialization...")
                 await self._initialize()
                 self._initialized = True
-                logger.debug("Dragon backend V1 initialization completed, registering with StateMapper...")
+                logger.debug(
+                    "Dragon backend V1 initialization completed, registering with StateMapper..."
+                )
                 StateMapper.register_backend_states_with_defaults(backend=self)
                 logger.debug("Dragon backend V1 fully initialized")
             except Exception as e:
@@ -1648,7 +1739,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
                     total_mem=nnodes * int(4 * 1024 * 1024 * 1024),  # 4GB per node
                     wait_for_keys=True,
                     working_set_size=4,
-                    timeout=200
+                    timeout=200,
                 )
             logger.debug("DDict created successfully")
 
@@ -1658,20 +1749,15 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
             logger.debug("Result queue created successfully")
 
             # Initialize shared memory manager
-            self._shared_memory = SharedMemoryManagerV1(
-                self._ddict,
-                self._system_alloc,
-                logger
-            )
+            self._shared_memory = SharedMemoryManagerV1(self._ddict, self._system_alloc, logger)
             await self._shared_memory.initialize()
 
             # Initialize utilities
-            self._result_collector = ResultCollectorV1(self._shared_memory, self._result_queue, logger)
+            self._result_collector = ResultCollectorV1(
+                self._shared_memory, self._result_queue, logger
+            )
             self._task_launcher = TaskLauncherV1(
-                self._ddict,
-                self._result_queue,
-                self._working_dir,
-                logger
+                self._ddict, self._result_queue, self._working_dir, logger
             )
 
             # Start task monitoring
@@ -1726,7 +1812,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
     async def _submit_task(self, task: dict[str, Any]) -> None:
         """Submit a single task for execution."""
         uid = task["uid"]
-        backend_kwargs = task.get('task_backend_specific_kwargs', {})
+        backend_kwargs = task.get("task_backend_specific_kwargs", {})
         ranks = int(backend_kwargs.get("ranks", 1))
 
         # Wait for available slots
@@ -1832,9 +1918,11 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
 
         if proc:
             if proc.is_alive:
-                proc.terminate(); proc.join(2.0)
+                proc.terminate()
+                proc.join(2.0)
                 if proc.is_alive:
-                    proc.kill(); proc.join(1.0)
+                    proc.kill()
+                    proc.join(1.0)
             return True
 
         if group and not group.inactive_puids:
@@ -1876,7 +1964,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
         if function and not callable(function):
             return False, "Task 'function' must be callable"
 
-        backend_kwargs = task.get('task_backend_specific_kwargs', {})
+        backend_kwargs = task.get("task_backend_specific_kwargs", {})
         ranks = backend_kwargs.get("ranks", 1)
 
         try:
@@ -2145,7 +2233,9 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         if "workers" in resources:
             workers = resources["workers"]
             if not isinstance(workers, list):
-                raise TypeError("resources['workers'] must be a list of WorkerGroupConfigV2 objects")
+                raise TypeError(
+                    "resources['workers'] must be a list of WorkerGroupConfigV2 objects"
+                )
 
             if not workers:
                 raise ValueError("resources['workers'] cannot be empty")
@@ -2162,11 +2252,13 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
             # No workers specified - create default compute worker
             slots = int(resources.get("slots", mp.cpu_count() or 1))
             logger.info(f"No workers specified, creating default compute worker with {slots} slots")
-            return [WorkerGroupConfigV2(
-                name="default_worker",
-                worker_type=WorkerTypeV2.COMPUTE,
-                policies=[PolicyConfigV2(nprocs=slots, policy=None, ngpus=0)]
-            )]
+            return [
+                WorkerGroupConfigV2(
+                    name="default_worker",
+                    worker_type=WorkerTypeV2.COMPUTE,
+                    policies=[PolicyConfigV2(nprocs=slots, policy=None, ngpus=0)],
+                )
+            ]
 
     def __await__(self):
         return self._async_init().__await__()
@@ -2206,7 +2298,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                     total_mem=nnodes * int(4 * 1024 * 1024 * 1024),
                     wait_for_keys=True,
                     working_set_size=4,
-                    timeout=200
+                    timeout=200,
                 )
             logger.debug("DDict initialized")
 
@@ -2221,8 +2313,12 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
             # Initialize worker pool with per-worker queues
             self._worker_pool = WorkerPoolV2(
-                self._worker_configs, self._ddict, self._working_dir, logger,
-                self._system_alloc, self._backend_id
+                self._worker_configs,
+                self._ddict,
+                self._working_dir,
+                logger,
+                self._system_alloc,
+                self._backend_id,
             )
             await self._worker_pool.initialize()
 
@@ -2279,15 +2375,12 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
             while not self._shutdown_event.is_set():
                 try:
                     try:
-                        task = await asyncio.wait_for(
-                            self._pending_tasks.get(),
-                            timeout=0.1
-                        )
+                        task = await asyncio.wait_for(self._pending_tasks.get(), timeout=0.1)
                     except asyncio.TimeoutError:
                         continue
 
                     uid = task["uid"]
-                    backend_kwargs = task.get('task_backend_specific_kwargs', {})
+                    backend_kwargs = task.get("task_backend_specific_kwargs", {})
                     ranks = int(backend_kwargs.get("ranks", 1))
                     gpus_per_rank = int(backend_kwargs.get("gpus_per_rank", 0))
                     worker_hint = backend_kwargs.get("worker_hint")
@@ -2295,15 +2388,24 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
                     pinning_policy_str = backend_kwargs.get("pinning_policy", "").lower()
                     try:
-                        pinning_policy = WorkerPinningPolicyV2(pinning_policy_str) if pinning_policy_str else None
+                        pinning_policy = (
+                            WorkerPinningPolicyV2(pinning_policy_str)
+                            if pinning_policy_str
+                            else None
+                        )
                     except ValueError:
                         pinning_policy = None
 
                     pinning_timeout = float(backend_kwargs.get("pinning_timeout", 30.0))
 
                     worker_name = await self._apply_pinning_policy(
-                        task, ranks, gpus_per_rank, worker_hint, worker_type_hint,
-                        pinning_policy, pinning_timeout
+                        task,
+                        ranks,
+                        gpus_per_rank,
+                        worker_hint,
+                        worker_type_hint,
+                        pinning_policy,
+                        pinning_timeout,
                     )
 
                     if not worker_name:
@@ -2335,7 +2437,9 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                         tasks_processed += 1
 
                     except Exception as e:
-                        await self._worker_pool.release_resources(worker_name, ranks, gpu_allocations)
+                        await self._worker_pool.release_resources(
+                            worker_name, ranks, gpu_allocations
+                        )
                         task["exception"] = e
                         self._callback_func(task, "FAILED")
 
@@ -2343,7 +2447,9 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                     logger.exception(f"Scheduler worker {worker_id}: Unexpected error: {e}")
                     await asyncio.sleep(0.1)
 
-            logger.debug(f"Scheduler worker {worker_id} shutting down (processed {tasks_processed} tasks)")
+            logger.debug(
+                f"Scheduler worker {worker_id} shutting down (processed {tasks_processed} tasks)"
+            )
 
         scheduler_tasks = []
         for worker_id in range(num_scheduler_workers):
@@ -2358,8 +2464,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
         try:
             await asyncio.wait_for(
-                asyncio.gather(*scheduler_tasks, return_exceptions=True),
-                timeout=10.0
+                asyncio.gather(*scheduler_tasks, return_exceptions=True), timeout=10.0
             )
         except asyncio.TimeoutError:
             logger.warning("Scheduler workers did not complete within timeout, canceling...")
@@ -2379,15 +2484,19 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         worker_hint: Optional[str],
         worker_type_hint: Optional[str],
         pinning_policy: Optional[WorkerPinningPolicyV2],
-        timeout: float
+        timeout: float,
     ) -> Optional[str]:
         """Apply worker pinning policy to find appropriate worker."""
 
         if not worker_hint or not pinning_policy:
-            worker_name = self._worker_pool.find_worker_for_task(ranks, gpus_per_rank, worker_type_hint=worker_type_hint)
+            worker_name = self._worker_pool.find_worker_for_task(
+                ranks, gpus_per_rank, worker_type_hint=worker_type_hint
+            )
             while not worker_name and not self._shutdown_event.is_set():
                 await asyncio.sleep(0.01)
-                worker_name = self._worker_pool.find_worker_for_task(ranks, gpus_per_rank, worker_type_hint=worker_type_hint)
+                worker_name = self._worker_pool.find_worker_for_task(
+                    ranks, gpus_per_rank, worker_type_hint=worker_type_hint
+                )
             return worker_name
 
         if not self._worker_pool.worker_exists(worker_hint):
@@ -2399,44 +2508,60 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
         if pinning_policy == WorkerPinningPolicyV2.AFFINITY:
             if self._worker_pool.worker_has_capacity(worker_hint, ranks, gpus_per_rank):
-                logger.debug(f"Task {task['uid']}: AFFINITY policy - using preferred worker {worker_hint}")
+                logger.debug(
+                    f"Task {task['uid']}: AFFINITY policy - using preferred worker {worker_hint}"
+                )
                 return worker_hint
             else:
-                worker_name = self._worker_pool.find_worker_for_task(ranks, gpus_per_rank, worker_type_hint=worker_type_hint)
+                worker_name = self._worker_pool.find_worker_for_task(
+                    ranks, gpus_per_rank, worker_type_hint=worker_type_hint
+                )
                 if worker_name:
                     logger.debug(f"Task {task['uid']}: AFFINITY policy - fallback to {worker_name}")
                     return worker_name
                 while not worker_name and not self._shutdown_event.is_set():
                     await asyncio.sleep(0.01)
-                    worker_name = self._worker_pool.find_worker_for_task(ranks, gpus_per_rank, worker_type_hint=worker_type_hint)
+                    worker_name = self._worker_pool.find_worker_for_task(
+                        ranks, gpus_per_rank, worker_type_hint=worker_type_hint
+                    )
                 return worker_name
 
         elif pinning_policy == WorkerPinningPolicyV2.STRICT:
             logger.debug(f"Task {task['uid']}: STRICT policy - waiting for worker {worker_hint}")
             while not self._shutdown_event.is_set():
                 if self._worker_pool.worker_has_capacity(worker_hint, ranks, gpus_per_rank):
-                    logger.debug(f"Task {task['uid']}: STRICT policy - worker {worker_hint} now available")
+                    logger.debug(
+                        f"Task {task['uid']}: STRICT policy - worker {worker_hint} now available"
+                    )
                     return worker_hint
                 await asyncio.sleep(0.01)
             return None
 
         elif pinning_policy == WorkerPinningPolicyV2.SOFT:
-            logger.debug(f"Task {task['uid']}: SOFT policy - waiting {timeout}s for worker {worker_hint}")
+            logger.debug(
+                f"Task {task['uid']}: SOFT policy - waiting {timeout}s for worker {worker_hint}"
+            )
             start_time = time.time()
 
             while time.time() - start_time < timeout:
                 if self._worker_pool.worker_has_capacity(worker_hint, ranks, gpus_per_rank):
-                    logger.debug(f"Task {task['uid']}: SOFT policy - worker {worker_hint} available")
+                    logger.debug(
+                        f"Task {task['uid']}: SOFT policy - worker {worker_hint} available"
+                    )
                     return worker_hint
                 await asyncio.sleep(0.01)
                 if self._shutdown_event.is_set():
                     return None
 
             logger.debug(f"Task {task['uid']}: SOFT policy - timeout reached, using fallback")
-            worker_name = self._worker_pool.find_worker_for_task(ranks, gpus_per_rank, worker_type_hint=worker_type_hint)
+            worker_name = self._worker_pool.find_worker_for_task(
+                ranks, gpus_per_rank, worker_type_hint=worker_type_hint
+            )
             while not worker_name and not self._shutdown_event.is_set():
                 await asyncio.sleep(0.01)
-                worker_name = self._worker_pool.find_worker_for_task(ranks, gpus_per_rank, worker_type_hint=worker_type_hint)
+                worker_name = self._worker_pool.find_worker_for_task(
+                    ranks, gpus_per_rank, worker_type_hint=worker_type_hint
+                )
 
             if worker_name:
                 logger.debug(f"Task {task['uid']}: SOFT policy - fallback to {worker_name}")
@@ -2470,8 +2595,13 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
         return None
 
-    async def _submit_task_to_worker(self, task: dict[str, Any], worker_name: str,
-                                     ranks: int, gpu_allocations: Dict[int, List[int]]) -> None:
+    async def _submit_task_to_worker(
+        self,
+        task: dict[str, Any],
+        worker_name: str,
+        ranks: int,
+        gpu_allocations: Dict[int, List[int]],
+    ) -> None:
         """Submit task to specific worker."""
         uid = task["uid"]
 
@@ -2483,8 +2613,8 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
             is_function = bool(task.get("function"))
             task_type = TaskTypeV2.FUNCTION if is_function else TaskTypeV2.EXECUTABLE
 
-            backend_kwargs = task.get('task_backend_specific_kwargs', {})
-            use_ddict_storage = backend_kwargs.get('use_ddict_storage', False)
+            backend_kwargs = task.get("task_backend_specific_kwargs", {})
+            use_ddict_storage = backend_kwargs.get("use_ddict_storage", False)
 
             for rank in range(ranks):
                 gpu_ids = gpu_allocations.get(rank, [])
@@ -2499,7 +2629,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                         use_ddict_storage=use_ddict_storage,
                         function=task["function"],
                         args=task.get("args", ()),
-                        kwargs=task.get("kwargs", {})
+                        kwargs=task.get("kwargs", {}),
                     )
                 else:
                     request = WorkerRequestV2(
@@ -2511,7 +2641,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                         use_ddict_storage=False,
                         executable=task["executable"],
                         exec_args=list(task.get("args", [])),
-                        working_dir=self._working_dir
+                        working_dir=self._working_dir,
                     )
 
                 # Submit to specific worker's queue
@@ -2523,7 +2653,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                 ranks=ranks,
                 worker_name=worker_name,
                 gpu_allocations=gpu_allocations,
-                start_time=time.time()
+                start_time=time.time(),
             )
 
             self._callback_func(task, "RUNNING")
@@ -2545,7 +2675,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                             completed_tasks.append(completed_uid)
                     else:
                         break
-                
+
                 for uid in completed_tasks:
                     # Check if task was canceled
                     if uid in self._canceled_tasks:
@@ -2560,33 +2690,31 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                     if not task_info:
                         # Already processed or never tracked
                         continue
-                    
+
                     if task_info.canceled:
                         # Redundant check, but safe
                         logger.debug(f"Skipping already-canceled task {uid}")
                         self._result_collector.cleanup_task(uid)
                         self._running_tasks.pop(uid, None)
                         continue
-                    
+
                     # Normal task completion processing
                     task = self.tasks.get(uid)
                     if task:
                         result = await self._result_collector.get_task_result(uid)
                         if result:
                             task.update(result)
-                        
+
                         await self._worker_pool.release_resources(
-                            task_info.worker_name,
-                            task_info.ranks,
-                            task_info.gpu_allocations
+                            task_info.worker_name, task_info.ranks, task_info.gpu_allocations
                         )
-                        
+
                         # Send appropriate callback
                         if task.get("exception") or task.get("exit_code", 0) != 0:
                             self._callback_func(task, "FAILED")
                         else:
                             self._callback_func(task, "DONE")
-                    
+
                     self._running_tasks.pop(uid, None)
 
                 await asyncio.sleep(0.001)
@@ -2606,7 +2734,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         # Mark as canceled FIRST
         task_info.canceled = True
         self._canceled_tasks.add(uid)  # Track it
-        
+
         # Update task dict with canceled flag
         if uid in self.tasks:
             self.tasks[uid]["canceled"] = True
@@ -2618,9 +2746,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
         # Release resources
         await self._worker_pool.release_resources(
-            task_info.worker_name,
-            task_info.ranks,
-            task_info.gpu_allocations
+            task_info.worker_name, task_info.ranks, task_info.gpu_allocations
         )
 
         # Remove from running tasks
@@ -2654,7 +2780,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         if function and not callable(function):
             return False, "Task 'function' must be callable"
 
-        backend_kwargs = task.get('task_backend_specific_kwargs', {})
+        backend_kwargs = task.get("task_backend_specific_kwargs", {})
         ranks = backend_kwargs.get("ranks", 1)
 
         try:
@@ -2678,7 +2804,10 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                 WorkerPinningPolicyV2(pinning_policy)
             except ValueError:
                 valid_policies = [p.value for p in WorkerPinningPolicyV2]
-                return False, f"Invalid pinning_policy '{pinning_policy}'. Must be one of: {valid_policies}"
+                return (
+                    False,
+                    f"Invalid pinning_policy '{pinning_policy}'. Must be one of: {valid_policies}",
+                )
 
         worker_hint = backend_kwargs.get("worker_hint")
         if worker_hint and not isinstance(worker_hint, str):
@@ -2840,8 +2969,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
 
         # Thread pool for waiting on batches
         self._wait_executor = ThreadPoolExecutor(
-            max_workers=max(8, mp.cpu_count() // 8),
-            thread_name_prefix="dragon_batch_wait"
+            max_workers=max(8, mp.cpu_count() // 8), thread_name_prefix="dragon_batch_wait"
         )
 
         self._shutdown_event = threading.Event()
@@ -2859,7 +2987,9 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
             try:
                 logger.debug("Starting Dragon backend V3 async initialization...")
                 self._initialized = True
-                logger.debug("Dragon backend V3 initialization completed, registering with StateMapper...")
+                logger.debug(
+                    "Dragon backend V3 initialization completed, registering with StateMapper..."
+                )
                 StateMapper.register_backend_states_with_defaults(backend=self)
                 logger.debug("Dragon backend V3 fully initialized")
             except Exception as e:
@@ -2907,27 +3037,27 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
                     logger.debug(f"Skipping cancelled task {uid}")
                     continue
 
-                batch_task = task_info['batch_task']
-                task_desc = task_info['description']
+                batch_task = task_info["batch_task"]
+                task_desc = task_info["description"]
 
                 try:
                     logger.debug(f"Getting stdout for task {uid}")
                     # Always try to get stdout first (success/failure)
                     # May be None for failed Python functions
                     stdout = batch_task.stdout.get()
-                    task_desc['stdout'] = stdout if stdout is not None else ""
+                    task_desc["stdout"] = stdout if stdout is not None else ""
 
                     logger.debug(f"Getting result for task {uid}")
                     # This raises if task failed
                     result = batch_task.result.get()
-                    task_desc['return_value'] = result
+                    task_desc["return_value"] = result
                     logger.debug(f"Task {uid} completed successfully")
-                    self._callback(task_desc, 'DONE')
+                    self._callback(task_desc, "DONE")
 
                 except Exception as e:
                     # Task failed - result.get() raised
                     logger.exception(f"Task {uid} failed with exception: {e}")
-                    task_desc['exception'] = e
+                    task_desc["exception"] = e
 
                     # Try to get stderr, but may be None for failed tasks
                     stderr = batch_task.stderr.get()
@@ -2936,8 +3066,8 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
                         # Extract it for better error reporting
                         stderr = str(e)
 
-                    task_desc['stderr'] = stderr
-                    self._callback(task_desc, 'FAILED')
+                    task_desc["stderr"] = stderr
+                    self._callback(task_desc, "FAILED")
 
         except Exception as e:
             # Batch-level failure (wait() failed or catastrophic error)
@@ -2946,9 +3076,9 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
             for uid in task_uids:
                 task_info = self._task_registry.get(uid)
                 if task_info:
-                    task_info['description']['exception'] = e
-                    task_info['description']['stderr'] = str(e)
-                    self._callback(task_info['description'], 'FAILED')
+                    task_info["description"]["exception"] = e
+                    task_info["description"]["stderr"] = str(e)
+                    self._callback(task_info["description"], "FAILED")
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
         """Submit a batch of tasks and start a wait thread for them."""
@@ -2967,10 +3097,10 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
                 batch_tasks.append(batch_task)
             except Exception as e:
                 logger.error(f"Failed to create task {task.get('uid')}: {e}", exc_info=True)
-                task['exception'] = e
-                self._callback(task, 'FAILED')
+                task["exception"] = e
+                self._callback(task, "FAILED")
 
-            task_uids.append(task['uid'])
+            task_uids.append(task["uid"])
 
         if not batch_tasks:
             return
@@ -2984,11 +3114,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         logger.info(f"Submitted batch of {len(batch_tasks)} tasks for execution")
 
         # Launch thread to wait for completion
-        self._wait_executor.submit(
-            self._wait_for_batch,
-            compiled_tasks,
-            task_uids
-        )
+        self._wait_executor.submit(self._wait_for_batch, compiled_tasks, task_uids)
 
     async def build_task(self, task: dict):
         """
@@ -3010,14 +3136,14 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
 
         """
         # Fast path: extract everything upfront
-        uid = task['uid']
+        uid = task["uid"]
         is_function = bool(task.get("function"))
-        target = task.get('function' if is_function else 'executable')
+        target = task.get("function" if is_function else "executable")
         backend_kwargs = task.get("task_backend_specific_kwargs", {})
-        name = task.get('name', uid)
-        task_args = task.get('args', [])
-        task_kwargs = task.get('kwargs', {})
-        timeout = backend_kwargs.get('timeout', 1000000000.0)
+        name = task.get("name", uid)
+        task_args = task.get("args", [])
+        task_kwargs = task.get("kwargs", {})
+        timeout = backend_kwargs.get("timeout", 1000000000.0)
 
         # Handle async functions
         if is_function and asyncio.iscoroutinefunction(target):
@@ -3025,8 +3151,8 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
             target = lambda *a, **kw: asyncio.run(original_target(*a, **kw))
 
         # Get template configs once
-        process_templates_config = backend_kwargs.get('process_templates')
-        process_template_config = backend_kwargs.get('process_template')
+        process_templates_config = backend_kwargs.get("process_templates")
+        process_template_config = backend_kwargs.get("process_template")
 
         if not is_function:
             task_kwargs = None
@@ -3038,46 +3164,61 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         if process_templates_config:
             # Priority 1: Job with user templates
             process_templates = [
-                (nranks, ProcessTemplate(target, **{**tc, 'args': task_args, 'kwargs': task_kwargs}))
+                (
+                    nranks,
+                    ProcessTemplate(target, **{**tc, "args": task_args, "kwargs": task_kwargs}),
+                )
                 for nranks, tc in process_templates_config
             ]
             batch_task = self.batch.job(process_templates, name=name, timeout=timeout)
-            execution_mode = 'job'
+            execution_mode = "job"
 
         elif process_template_config:
             # Priority 2: Process with user template
             batch_task = self.batch.process(
-                ProcessTemplate(target, **{**process_template_config, 'args': task_args, 'kwargs': task_kwargs}),
-                name=name, timeout=timeout
+                ProcessTemplate(
+                    target, **{**process_template_config, "args": task_args, "kwargs": task_kwargs}
+                ),
+                name=name,
+                timeout=timeout,
             )
-            execution_mode = 'process'
+            execution_mode = "process"
 
-        elif backend_kwargs.get('type') == 'mpi':
+        elif backend_kwargs.get("type") == "mpi":
             # Priority 3: Job auto-build
             batch_task = self.batch.job(
-                [(backend_kwargs.get('ranks', 1), ProcessTemplate(target, args=task_args, kwargs=task_kwargs))],
-                name=name, timeout=timeout
+                [
+                    (
+                        backend_kwargs.get("ranks", 1),
+                        ProcessTemplate(target, args=task_args, kwargs=task_kwargs),
+                    )
+                ],
+                name=name,
+                timeout=timeout,
             )
-            execution_mode = 'job'
+            execution_mode = "job"
 
         elif is_function:
             # Priority 4: Function native
-            batch_task = self.batch.function(target, *task_args, name=name, timeout=timeout, **task_kwargs)
-            execution_mode = 'function'
+            batch_task = self.batch.function(
+                target, *task_args, name=name, timeout=timeout, **task_kwargs
+            )
+            execution_mode = "function"
 
         else:
             # Priority 5: Executable process auto-build
             batch_task = self.batch.process(
                 ProcessTemplate(target, args=task_args, kwargs=task_kwargs),
-                name=name, timeout=timeout
+                name=name,
+                timeout=timeout,
             )
-            execution_mode = 'process'
+            execution_mode = "process"
 
         # Register and return
         self._task_registry[uid] = {
-            'uid': uid,
-            'description': task.copy(),
-            'batch_task': batch_task,
+            "uid": uid,
+            "description": task.copy(),
+            "batch_task": batch_task,
         }
 
         logger.debug(f"Created {execution_mode} task: {uid}")
@@ -3109,7 +3250,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         # NOTE: dragon.batch does not expose nor support
         # process/function/job cancellation, we just notify
         # the asyncflow that the task is cancelled so not to block the flow
-        self._callback(self._task_registry[uid]['description'], 'CANCELED')
+        self._callback(self._task_registry[uid]["description"], "CANCELED")
         self._cancelled_tasks.append(uid)
 
         return True
@@ -3174,7 +3315,6 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         return await backend
 
 
-
 class DragonTelemetryCollector:
     """
     Telemetry collection class that spawns one collector process per node to monitor
@@ -3226,7 +3366,7 @@ class DragonTelemetryCollector:
         enable_cpu: bool = True,
         enable_gpu: bool = True,
         enable_memory: bool = True,
-        metric_prefix: str = "user"
+        metric_prefix: str = "user",
     ):
         """Initialize the DragonTelemetryCollector.
 
@@ -3250,10 +3390,10 @@ class DragonTelemetryCollector:
 
         if not Telemetry:
             raise RuntimeError("Dragon Telemetry not available")
-        
+
         if not AccVendor:
             raise RuntimeError("Dragon AccVendor not available")
-        
+
         if not find_accelerators:
             raise RuntimeError("Dragon find_accelerators not available")
 
@@ -3314,10 +3454,10 @@ class DragonTelemetryCollector:
                         self._enable_cpu,
                         self._enable_gpu,
                         self._enable_memory,
-                        self._metric_prefix
+                        self._metric_prefix,
                     ),
-                    policy=policy
-                )
+                    policy=policy,
+                ),
             )
 
         # Initialize and start
@@ -3372,11 +3512,9 @@ class DragonTelemetryCollector:
             raise RuntimeError("Collector not started. Call start() first.")
 
         # Broadcast to all collector processes
-        self._custom_metric_queue.put({
-            "metric_name": metric_name,
-            "value": value,
-            "timestamp": int(time.time())
-        })
+        self._custom_metric_queue.put(
+            {"metric_name": metric_name, "value": value, "timestamp": int(time.time())}
+        )
 
     @staticmethod
     def _collector_main(
@@ -3389,7 +3527,7 @@ class DragonTelemetryCollector:
         enable_cpu,
         enable_gpu,
         enable_memory,
-        metric_prefix
+        metric_prefix,
     ):
         """Main collector process - runs on each node.
 
@@ -3415,9 +3553,9 @@ class DragonTelemetryCollector:
                 checkpoint_dir,
                 checkpoint_count,
                 collection_rate,
-                metric_prefix
+                metric_prefix,
             ),
-            daemon=True
+            daemon=True,
         )
         checkpoint_thread.start()
 
@@ -3443,7 +3581,7 @@ class DragonTelemetryCollector:
                             dt.add_data(
                                 ts_metric_name=f"{metric_prefix}.{metric_name}",
                                 ts_data=value,
-                                timestamp=timestamp
+                                timestamp=timestamp,
                             )
                     except Exception as e:
                         print(f"Warning: Failed to collect CPU metrics on {hostname}: {e}")
@@ -3457,7 +3595,7 @@ class DragonTelemetryCollector:
                             dt.add_data(
                                 ts_metric_name=f"{metric_prefix}.{metric_name}",
                                 ts_data=value,
-                                timestamp=timestamp
+                                timestamp=timestamp,
                             )
                     except Exception as e:
                         print(f"Warning: Failed to collect memory metrics on {hostname}: {e}")
@@ -3483,7 +3621,7 @@ class DragonTelemetryCollector:
                         dt.add_data(
                             ts_metric_name=f"{metric_prefix}.{metric_name}",
                             ts_data=value,
-                            timestamp=msg_timestamp
+                            timestamp=msg_timestamp,
                         )
                         metrics_collected[metric_name] = value
                 except queue.Empty:
@@ -3493,11 +3631,9 @@ class DragonTelemetryCollector:
 
                 # Store for checkpointing
                 with checkpoint_lock:
-                    all_metrics_history.append({
-                        "timestamp": timestamp,
-                        "hostname": hostname,
-                        "metrics": metrics_collected
-                    })
+                    all_metrics_history.append(
+                        {"timestamp": timestamp, "hostname": hostname, "metrics": metrics_collected}
+                    )
 
                 last_collection = current_time
 
@@ -3575,7 +3711,7 @@ class DragonTelemetryCollector:
                                 ts_data=value,
                                 timestamp=timestamp,
                                 tagk="gpu",
-                                tagv=str(i)
+                                tagv=str(i),
                             )
                             gpu_metrics[f"gpu_{i}_{metric_name}"] = value
                     except Exception as e:
@@ -3591,7 +3727,7 @@ class DragonTelemetryCollector:
                                 ts_data=value,
                                 timestamp=timestamp,
                                 tagk="gpu",
-                                tagv=str(i)
+                                tagv=str(i),
                             )
                             gpu_metrics[f"gpu_{i}_{metric_name}"] = value
                     except Exception as e:
@@ -3607,7 +3743,7 @@ class DragonTelemetryCollector:
                                 ts_data=value,
                                 timestamp=timestamp,
                                 tagk="gpu",
-                                tagv=str(gpu_id)
+                                tagv=str(gpu_id),
                             )
                             gpu_metrics[f"gpu_{gpu_id}_{metric_name}"] = value
                 except Exception as e:
@@ -3634,6 +3770,7 @@ class DragonTelemetryCollector:
 
             if vendor == AccVendor.NVIDIA:
                 import pynvml
+
                 pynvml.nvmlInit()
                 count = pynvml.nvmlDeviceGetCount()
                 pynvml.nvmlShutdown()
@@ -3641,9 +3778,13 @@ class DragonTelemetryCollector:
 
             elif vendor == AccVendor.AMD:
                 import sys
-                rocm_path = os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm/"), "libexec/rocm_smi")
+
+                rocm_path = os.path.join(
+                    os.environ.get("ROCM_PATH", "/opt/rocm/"), "libexec/rocm_smi"
+                )
                 sys.path.append(rocm_path)
                 import rocm_smi
+
                 rocm_smi.initializeRsmi()
                 count = len(rocm_smi.listDevices())
                 return vendor, count
@@ -3707,6 +3848,7 @@ class DragonTelemetryCollector:
         :rtype: dict
         """
         import sys
+
         rocm_path = os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm/"), "libexec/rocm_smi")
         sys.path.append(rocm_path)
         import rocm_smi
@@ -3744,7 +3886,7 @@ class DragonTelemetryCollector:
         output = subprocess.run(
             ["xpu-smi", "dump", "-d", "-1", "-m", "0,1,5", "-n", "1"],
             text=True,
-            capture_output=True
+            capture_output=True,
         )
         output_string = output.stdout
         output_lines = output_string.splitlines()
@@ -3778,7 +3920,7 @@ class DragonTelemetryCollector:
         checkpoint_dir,
         checkpoint_count,
         collection_rate,
-        metric_prefix
+        metric_prefix,
     ):
         """Background thread that periodically writes checkpoints.
 
@@ -3806,7 +3948,7 @@ class DragonTelemetryCollector:
                         checkpoint_dir,
                         checkpoint_count,
                         collection_rate,
-                        metric_prefix
+                        metric_prefix,
                     )
                     checkpoint_id += 1
 
@@ -3825,7 +3967,7 @@ class DragonTelemetryCollector:
                     checkpoint_dir,
                     checkpoint_count,
                     collection_rate,
-                    metric_prefix
+                    metric_prefix,
                 )
 
     @staticmethod
@@ -3836,7 +3978,7 @@ class DragonTelemetryCollector:
         checkpoint_dir,
         checkpoint_count,
         collection_rate,
-        metric_prefix
+        metric_prefix,
     ):
         """Write checkpoint to JSON file with atomic rename pattern.
 
@@ -3871,26 +4013,26 @@ class DragonTelemetryCollector:
                     "collection_rate": collection_rate,
                     "metric_prefix": metric_prefix,
                     "checkpoint_id": checkpoint_id,
-                    "num_samples": len(metrics_data)
+                    "num_samples": len(metrics_data),
                 },
-                "metrics": metrics_data
+                "metrics": metrics_data,
             }
 
             # Write to temp file first (atomic write pattern)
             temp_fd, temp_path = tempfile.mkstemp(
-                dir=checkpoint_dir,
-                prefix=f"tmp_checkpoint_{hostname}_",
-                suffix=".json"
+                dir=checkpoint_dir, prefix=f"tmp_checkpoint_{hostname}_", suffix=".json"
             )
 
             try:
-                with os.fdopen(temp_fd, 'w') as f:
+                with os.fdopen(temp_fd, "w") as f:
                     json.dump(checkpoint_data, f, indent=2)
 
                 # Atomic rename
                 os.rename(temp_path, filepath)
 
-                print(f"DragonTelemetryCollector: Wrote checkpoint {filepath} ({len(metrics_data)} samples)")
+                print(
+                    f"DragonTelemetryCollector: Wrote checkpoint {filepath} ({len(metrics_data)} samples)"
+                )
 
             except Exception as e:
                 # Clean up temp file on error

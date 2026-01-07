@@ -11,10 +11,6 @@ from abc import ABC
 from abc import abstractmethod
 from typing import Any
 from typing import Callable
-from typing import Dict
-from typing import List
-from typing import Optional
-from typing import Tuple
 
 
 class BaseExecutionBackend(ABC):
@@ -152,10 +148,10 @@ class BaseExecutionBackend(ABC):
 
     async def wait_tasks(
         self,
-        tasks: List[Dict[str, Any]],
-        timeout: Optional[float] = None,
+        tasks: list[dict[str, Any]],
+        timeout: float | None = None,
         sleep_interval: float = 0.1,
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> dict[str, dict[str, Any]]:
         """Wait for tasks to complete by monitoring internal callback results.
 
         This method automatically tracks task completion using internal callbacks.
@@ -205,20 +201,20 @@ class BaseExecutionBackend(ABC):
             self._callback_registered = True
 
         # Get terminal states once (cached after first call)
-        if not hasattr(self, '_terminal_states'):
+        if not hasattr(self, "_terminal_states"):
             state_mapper = self.get_task_states_map()
             self._terminal_states = set(state_mapper.terminal_states)
             # Also support string 'CANCELLED' variant for backward compatibility
-            self._terminal_states.add('CANCELLED')
+            self._terminal_states.add("CANCELLED")
 
         num_tasks = len(tasks)
 
         # Extract task UIDs for tracking
         task_uids = set()
         for task in tasks:
-            if 'uid' not in task:
+            if "uid" not in task:
                 raise ValueError(f"Task missing 'uid' field: {task}")
-            task_uids.add(task['uid'])
+            task_uids.add(task["uid"])
 
         # Track finished tasks: uid -> task_dict (with state added)
         finished_tasks = {}
@@ -245,15 +241,17 @@ class BaseExecutionBackend(ABC):
                 processed_index += 1
 
                 # Extract task UID
-                task_uid = task.get('uid') if isinstance(task, dict) else str(task)
+                task_uid = task.get("uid") if isinstance(task, dict) else str(task)
 
                 # Only process terminal states for tasks we're waiting for
-                if (state in self._terminal_states and
-                    task_uid in task_uids and
-                    task_uid not in finished_tasks):
+                if (
+                    state in self._terminal_states
+                    and task_uid in task_uids
+                    and task_uid not in finished_tasks
+                ):
                     # Store complete task object with state
-                    task_with_state = task.copy() if isinstance(task, dict) else {'uid': task_uid}
-                    task_with_state['state'] = state
+                    task_with_state = task.copy() if isinstance(task, dict) else {"uid": task_uid}
+                    task_with_state["state"] = state
                     finished_tasks[task_uid] = task_with_state
                     made_progress = True
 

@@ -2,12 +2,16 @@
 
 This module provides a backend that executes tasks on local or single node HPC resources.
 """
+
 import asyncio
 import logging
 import subprocess
-
-from concurrent.futures import Executor, ThreadPoolExecutor, ProcessPoolExecutor
-from typing import Any, Callable, Optional
+from concurrent.futures import Executor
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
+from typing import Callable
+from typing import Optional
 
 from ..base import BaseExecutionBackend
 from ..base import Session
@@ -24,12 +28,12 @@ logger = logging.getLogger(__name__)
 class ConcurrentExecutionBackend(BaseExecutionBackend):
     """Simple async-only concurrent execution backend."""
 
-    def __init__(self, executor: Executor=None):
+    def __init__(self, executor: Executor = None):
         super().__init__()
 
         if not executor:
             executor = ThreadPoolExecutor()
-            logger.info('No executor was provided. Falling back to default ThreadPoolExecutor')
+            logger.info("No executor was provided. Falling back to default ThreadPoolExecutor")
 
         if not isinstance(executor, Executor):
             err = "Executor must be ThreadPoolExecutor or ProcessPoolExecutor"
@@ -144,9 +148,7 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
         except Exception:
             # Fallback to thread executor
             loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                self.executor, subprocess.run, cmd, True, True
-            )
+            result = await loop.run_in_executor(self.executor, subprocess.run, cmd, True, True)
 
             task.update(
                 {
@@ -215,9 +217,7 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
     def build_task(self, uid, task_desc, task_specific_kwargs):
         pass
 
-    def link_explicit_data_deps(
-        self, src_task=None, dst_task=None, file_name=None, file_path=None
-    ):
+    def link_explicit_data_deps(self, src_task=None, dst_task=None, file_name=None, file_path=None):
         pass
 
     def link_implicit_data_deps(self, src_task, dst_task):

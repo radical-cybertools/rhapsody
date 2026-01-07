@@ -2,17 +2,19 @@
 Dragon VLLM Inference Service with Request Batching
 Accumulates incoming requests and submits as batches to pipeline for efficiency
 """
-import copy
-import yaml
-import time
+
 import asyncio
-import multiprocessing as mp
-from typing import List, Dict, Any, Optional
-import socket
+import copy
 import logging
-from aiohttp import web
+import multiprocessing as mp
+import socket
+import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from dataclasses import field
+
+import yaml
+from aiohttp import web
 
 try:
     import dragon
@@ -31,7 +33,8 @@ _QUEUE_REGISTRY = {}
 @dataclass
 class PendingRequest:
     """Represents a pending inference request"""
-    prompts: List[str]
+
+    prompts: list[str]
     future: asyncio.Future
     timestamp: float = field(default_factory=time.time)
 
@@ -55,11 +58,19 @@ class DragonVllmInferenceBackend:
     This is MUCH more efficient than sending 1000 individual requests to pipeline!
     """
 
-    def __init__(self, config_file: str, model_name: str, offset: int = 0,
-                 num_nodes: int = 1, num_gpus: int = 1, tp_size: int = 1,
-                 port: int = 8000, use_service: bool = True,
-                 max_batch_size: int = 1024, max_batch_wait_ms: int = 500):
-
+    def __init__(
+        self,
+        config_file: str,
+        model_name: str,
+        offset: int = 0,
+        num_nodes: int = 1,
+        num_gpus: int = 1,
+        tp_size: int = 1,
+        port: int = 8000,
+        use_service: bool = True,
+        max_batch_size: int = 1024,
+        max_batch_wait_ms: int = 500,
+    ):
         if dragon is None:
             raise ImportError("Dragon is required for DragonVllmInferenceBackend.")
 
@@ -93,7 +104,7 @@ class DragonVllmInferenceBackend:
         self.site = None
 
         # Request batching
-        self._pending_requests: List[PendingRequest] = []
+        self._pending_requests: list[PendingRequest] = []
         self._batch_lock = asyncio.Lock()
         self._batch_processor_task = None
         self._new_request_event = asyncio.Event()  # Signal when requests arrive
@@ -101,32 +112,29 @@ class DragonVllmInferenceBackend:
     def update_config(self, base_config):
         """Update config with custom parameters"""
         config = copy.deepcopy(base_config)
-        config['required']['model_name'] = self.model_name
-        config['hardware']['num_nodes'] = self.num_nodes
-        config['hardware']['num_gpus'] = self.num_gpus
-        config['required']['tp_size'] = self.tp_size
-        config['input_batching']['toggle_on'] = True
-        config['input_batching']['type'] = 'pre-batch'
-        config['guardrails']['toggle_on'] = False
-        config['dynamic_inf_wrkr']['toggle_on'] = False
+        config["required"]["model_name"] = self.model_name
+        config["hardware"]["num_nodes"] = self.num_nodes
+        config["hardware"]["num_gpus"] = self.num_gpus
+        config["required"]["tp_size"] = self.tp_size
+        config["input_batching"]["toggle_on"] = True
+        config["input_batching"]["type"] = "pre-batch"
+        config["guardrails"]["toggle_on"] = False
+        config["dynamic_inf_wrkr"]["toggle_on"] = False
         return config
 
     def _get_or_create_queues(self):
         """Get queues from registry or create new ones"""
         if self._instance_id not in _QUEUE_REGISTRY:
-            _QUEUE_REGISTRY[self._instance_id] = {
-                'input': mp.Queue(),
-                'response': mp.Queue()
-            }
+            _QUEUE_REGISTRY[self._instance_id] = {"input": mp.Queue(), "response": mp.Queue()}
         return _QUEUE_REGISTRY[self._instance_id]
 
     def _get_input_queue(self):
         """Get input queue (lazy)"""
-        return self._get_or_create_queues()['input']
+        return self._get_or_create_queues()["input"]
 
     def _get_response_queue(self):
         """Get response queue (lazy)"""
-        return self._get_or_create_queues()['response']
+        return self._get_or_create_queues()["response"]
 
     async def initialize(self):
         """
@@ -139,10 +147,12 @@ class DragonVllmInferenceBackend:
 
         mode = "service" if self.use_service else "engine"
         logger.info(f"Initializing VLLM {mode} on {self.hostname}...")
-        logger.info(f"Batching: max_size={self.max_batch_size}, max_wait={self.max_batch_wait_ms}ms")
+        logger.info(
+            f"Batching: max_size={self.max_batch_size}, max_wait={self.max_batch_wait_ms}ms"
+        )
 
         # Load config
-        with open(self.config_file, 'r') as f:
+        with open(self.config_file) as f:
             base_config = yaml.safe_load(f)
 
         config = self.update_config(base_config)
@@ -154,7 +164,9 @@ class DragonVllmInferenceBackend:
         logger.info("Initializing VLLM pipeline...")
 
         def _init_pipeline():
-            self.inference_pipeline = DragonInference(config, self.num_nodes, self.offset, input_queue)
+            self.inference_pipeline = DragonInference(
+                config, self.num_nodes, self.offset, input_queue
+            )
             self.inference_pipeline.initialize()
 
         # Run in thread pool to avoid blocking
@@ -216,8 +228,8 @@ class DragonVllmInferenceBackend:
                         continue  # Race condition: all requests cancelled
 
                     # Take up to max_batch_size requests
-                    batch = self._pending_requests[:self.max_batch_size]
-                    self._pending_requests = self._pending_requests[self.max_batch_size:]
+                    batch = self._pending_requests[: self.max_batch_size]
+                    self._pending_requests = self._pending_requests[self.max_batch_size :]
 
                     # If there are still more pending, signal to process next batch
                     if self._pending_requests:
@@ -233,7 +245,9 @@ class DragonVllmInferenceBackend:
                 if not all_prompts:
                     continue
 
-                logger.info(f"Processing batch: {len(batch)} requests, {len(all_prompts)} total prompts")
+                logger.info(
+                    f"Processing batch: {len(batch)} requests, {len(all_prompts)} total prompts"
+                )
 
                 # Submit to pipeline
                 self.inference_pipeline.query((all_prompts, response_queue))
@@ -260,7 +274,7 @@ class DragonVllmInferenceBackend:
                 # Distribute results back to individual requests
                 offset = 0
                 for req, size in zip(batch, request_sizes):
-                    req_results = all_results[offset:offset + size]
+                    req_results = all_results[offset : offset + size]
                     if not req.future.done():
                         req.future.set_result(req_results)
                     offset += size
@@ -281,12 +295,12 @@ class DragonVllmInferenceBackend:
         self.app = web.Application()
 
         # Add routes
-        self.app.router.add_get('/health', self._handle_health)
-        self.app.router.add_post('/generate', self._handle_generate)
+        self.app.router.add_get("/health", self._handle_health)
+        self.app.router.add_post("/generate", self._handle_generate)
 
         # Ad OpenAI Client endpoints
-        self.app.router.add_post('/v1/chat/completions', self._handle_chat_completions)
-        self.app.router.add_get('/v1/models', self._handle_models)
+        self.app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
+        self.app.router.add_get("/v1/models", self._handle_models)
 
         # Start server
         self.runner = web.AppRunner(self.app)
@@ -296,13 +310,13 @@ class DragonVllmInferenceBackend:
 
         logger.info(f"HTTP server started on {self.hostname}:{self.port}")
 
-        logger.info(f"Available endpoints:")
-        logger.info(f"  GET  /health")
-        logger.info(f"  POST /generate")
-        logger.info(f"  POST /v1/chat/completions (OpenAI compatible)")
-        logger.info(f"  GET  /v1/models (OpenAI compatible)")
+        logger.info("Available endpoints:")
+        logger.info("GET  /health")
+        logger.info("POST /generate")
+        logger.info("POST /v1/chat/completions (OpenAI compatible)")
+        logger.info("GET  /v1/models (OpenAI compatible)")
 
-    async def generate(self, prompts: List[str], timeout: int = 300) -> List[str]:
+    async def generate(self, prompts: list[str], timeout: int = 300) -> list[str]:
         """
         Generate responses for given prompts.
         Queues request for batching instead of immediate submission.
@@ -317,7 +331,9 @@ class DragonVllmInferenceBackend:
         # Add to pending queue
         async with self._batch_lock:
             self._pending_requests.append(request)
-            logger.debug(f"Queued request with {len(prompts)} prompts. Queue size: {len(self._pending_requests)}")
+            logger.debug(
+                f"Queued request with {len(prompts)} prompts. Queue size: {len(self._pending_requests)}"
+            )
 
         # Signal batch processor that new request arrived
         self._new_request_event.set()
@@ -359,8 +375,8 @@ class DragonVllmInferenceBackend:
         # Clean up queues from registry
         if self._instance_id in _QUEUE_REGISTRY:
             queues = _QUEUE_REGISTRY[self._instance_id]
-            queues['input'].close()
-            queues['response'].close()
+            queues["input"].close()
+            queues["response"].close()
             del _QUEUE_REGISTRY[self._instance_id]
 
         self.is_initialized = False
@@ -373,96 +389,104 @@ class DragonVllmInferenceBackend:
         """
         try:
             data = await request.json()
-            
+
             # Extract OpenAI-style parameters
-            messages = data.get('messages', [])
-            max_tokens = data.get('max_tokens', 1000)
-            temperature = data.get('temperature', 0.7)
-            model = data.get('model', self.model_name)
-            
+            messages = data.get("messages", [])
+
+            # FIXME pass to self.generate() if DragonInference supports these params 
+            data.get("max_tokens", 1000)
+            data.get("temperature", 0.7)
+            model = data.get("model", self.model_name)
+
             # Convert messages to single prompt
             prompt_parts = []
             for msg in messages:
-                role = msg.get('role', 'user')
-                content = msg.get('content', '')
-                
-                if role == 'system':
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+
+                if role == "system":
                     prompt_parts.append(f"System: {content}")
-                elif role == 'user':
+                elif role == "user":
                     prompt_parts.append(f"User: {content}")
-                elif role == 'assistant':
+                elif role == "assistant":
                     prompt_parts.append(f"Assistant: {content}")
-            
+
             # Combine into single prompt
             prompt = "\n\n".join(prompt_parts) + "\n\nAssistant:"
-            
+
             # Call internal generate method
-            start_time = time.time()
+            time.time()
             results = await self.generate([prompt], timeout=300)
-            end_time = time.time()
-            
+            time.time()
+
             response_text = results[0] if results else ""
-            
+
             # FIX: Normalize response_text to handle dict or string
             def normalize_response(text):
                 """Handle both string and dict responses from vLLM."""
                 if isinstance(text, dict):
                     # Try common dict keys
-                    return text.get("text", text.get("content", text.get("generated_text", str(text))))
+                    return text.get(
+                        "text", text.get("content", text.get("generated_text", str(text)))
+                    )
                 return str(text) if text else ""
-            
+
             # Normalize the response
             response_text_normalized = normalize_response(response_text)
 
             # Return in OpenAI format to support integration with agentic frameworks
-            return web.json_response({
-                "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": response_text_normalized  # Use normalized version
-                        },
-                        "finish_reason": "stop"
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": len(prompt.split()),
-                    "completion_tokens": len(response_text_normalized.split()),  # Use normalized version
-                    "total_tokens": len(prompt.split()) + len(response_text_normalized.split())  # Use normalized version
+            return web.json_response(
+                {
+                    "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": response_text_normalized,  # Use normalized version
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": len(prompt.split()),
+                        "completion_tokens": len(
+                            response_text_normalized.split()
+                        ),  # Use normalized version
+                        "total_tokens": len(prompt.split())
+                        + len(response_text_normalized.split()),  # Use normalized version
+                    },
                 }
-            })
+            )
 
         except Exception as e:
             logger.error(f"Chat completions error: {e}", exc_info=True)
-            return web.json_response({
-                "error": {
-                    "message": str(e),
-                    "type": "internal_error",
-                    "code": "internal_error"
-                }
-            }, status=500)
+            return web.json_response(
+                {"error": {"message": str(e), "type": "internal_error", "code": "internal_error"}},
+                status=500,
+            )
 
     async def _handle_models(self, request):
         """OpenAI-compatible models list endpoint"""
-        return web.json_response({
-            "object": "list",
-            "data": [
-                {
-                    "id": self.model_name,
-                    "object": "model",
-                    "created": int(time.time()),
-                    "owned_by": "organization-owner",
-                    "permission": [],
-                    "root": self.model_name,
-                    "parent": None
-                }
-            ]
-        })
+        return web.json_response(
+            {
+                "object": "list",
+                "data": [
+                    {
+                        "id": self.model_name,
+                        "object": "model",
+                        "created": int(time.time()),
+                        "owned_by": "organization-owner",
+                        "permission": [],
+                        "root": self.model_name,
+                        "parent": None,
+                    }
+                ],
+            }
+        )
 
     # HTTP Handlers (only used if use_service=True)
     async def _handle_health(self, request):
@@ -470,52 +494,53 @@ class DragonVllmInferenceBackend:
         async with self._batch_lock:
             queue_size = len(self._pending_requests)
 
-        return web.json_response({
-            "status": "healthy",
-            "hostname": self.hostname,
-            "initialized": self.is_initialized,
-            "endpoint": f"http://{self.hostname}:{self.port}",
-            "mode": "service",
-            "batch_config": {
-                "max_batch_size": self.max_batch_size,
-                "max_batch_wait_ms": self.max_batch_wait_ms,
-                "pending_requests": queue_size
+        return web.json_response(
+            {
+                "status": "healthy",
+                "hostname": self.hostname,
+                "initialized": self.is_initialized,
+                "endpoint": f"http://{self.hostname}:{self.port}",
+                "mode": "service",
+                "batch_config": {
+                    "max_batch_size": self.max_batch_size,
+                    "max_batch_wait_ms": self.max_batch_wait_ms,
+                    "pending_requests": queue_size,
+                },
             }
-        })
+        )
 
     async def _handle_generate(self, request):
         """Generate responses via HTTP"""
         try:
             data = await request.json()
-            prompts = data.get('prompts', [])
-            timeout = data.get('timeout', 300)
+            prompts = data.get("prompts", [])
+            timeout = data.get("timeout", 300)
 
             if not prompts:
-                return web.json_response({
-                    "status": "error",
-                    "message": "No prompts provided"
-                }, status=400)
+                return web.json_response(
+                    {"status": "error", "message": "No prompts provided"}, status=400
+                )
 
             start_time = time.time()
             results = await self.generate(prompts, timeout)
             end_time = time.time()
 
-            return web.json_response({
-                "status": "success",
-                "hostname": self.hostname,
-                "results": results,
-                "num_prompts": len(prompts),
-                "total_time": end_time - start_time,
-                "avg_time_per_prompt": (end_time - start_time) / len(prompts)
-            })
+            return web.json_response(
+                {
+                    "status": "success",
+                    "hostname": self.hostname,
+                    "results": results,
+                    "num_prompts": len(prompts),
+                    "total_time": end_time - start_time,
+                    "avg_time_per_prompt": (end_time - start_time) / len(prompts),
+                }
+            )
 
         except Exception as e:
             logger.error(f"Generation error: {e}", exc_info=True)
-            return web.json_response({
-                "status": "error",
-                "message": str(e),
-                "hostname": self.hostname
-            }, status=500)
+            return web.json_response(
+                {"status": "error", "message": str(e), "hostname": self.hostname}, status=500
+            )
 
     def get_endpoint(self):
         """
@@ -541,14 +566,14 @@ class DragonVllmInferenceBackend:
         """Control pickling - exclude non-serializable objects"""
         state = self.__dict__.copy()
         # Remove non-serializable items
-        state['inference_pipeline'] = None
-        state['app'] = None
-        state['runner'] = None
-        state['site'] = None
-        state['_batch_processor_task'] = None
-        state['_pending_requests'] = []
-        state['_batch_lock'] = None
-        state['_new_request_event'] = None
+        state["inference_pipeline"] = None
+        state["app"] = None
+        state["runner"] = None
+        state["site"] = None
+        state["_batch_processor_task"] = None
+        state["_pending_requests"] = []
+        state["_batch_lock"] = None
+        state["_new_request_event"] = None
         return state
 
     def __setstate__(self, state):
