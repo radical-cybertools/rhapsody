@@ -438,6 +438,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         if task_desc["executable"]:
             rp_task.mode = rp.TASK_SERVICE if is_service else rp.TASK_EXECUTABLE
             rp_task.executable = task_desc["executable"]
+            rp_task.arguments = task_desc.get("arguments", [])
         elif task_desc["function"]:
             if is_service:
                 error_msg = "RadicalExecutionBackend does not support function service tasks"

@@ -5,13 +5,12 @@ This module provides a backend that executes tasks on local or single node HPC r
 
 import asyncio
 import logging
-import subprocess
+
 from concurrent.futures import Executor
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from typing import Callable
-from typing import Optional
 
 from ..base import BaseExecutionBackend
 from ..base import Session
@@ -48,7 +47,7 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
         self.executor = executor
         self.tasks: dict[str, asyncio.Task] = {}
         self.session = Session()
-        self._callback_func: Optional[Callable] = None
+        self._callback_func: Callable = self._internal_callback
         self._initialized = False
 
     def __await__(self):
@@ -66,9 +65,6 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
 
     def get_task_states_map(self):
         return StateMapper(backend=self)
-
-    def register_callback(self, func: Callable):
-        self._callback_func = func
 
     async def _execute_task(self, task: dict) -> tuple[dict, str]:
         """Execute a single task."""
@@ -129,34 +125,36 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
 
     async def _execute_command(self, task: dict) -> tuple[dict, str]:
         """Execute command task."""
-        cmd = " ".join([task["executable"]] + task.get("arguments", []))
+        executable = task["executable"]
+        arguments = task.get("arguments", [])
+        backend_kwargs = task.get("task_backend_specific_kwargs", {})
+        execute_in_shell = backend_kwargs.get("shell", False)
 
-        try:
+        if execute_in_shell:
+            # Shell mode: join executable and arguments into single command string
+            cmd = " ".join([executable] + arguments)
             process = await asyncio.create_subprocess_shell(
-                cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await process.communicate()
-
-            task.update(
-                {
-                    "stdout": stdout.decode(),
-                    "stderr": stderr.decode(),
-                    "exit_code": process.returncode,
-                }
+        else:
+            # Exec mode: pass executable and arguments separately (no shell)
+            process = await asyncio.create_subprocess_exec(
+                executable,
+                *arguments,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+        stdout, stderr = await process.communicate()
 
-        except Exception:
-            # Fallback to thread executor
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(self.executor, subprocess.run, cmd, True, True)
-
-            task.update(
-                {
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                    "exit_code": result.returncode,
-                }
-            )
+        task.update(
+            {
+                "stdout": stdout.decode(),
+                "stderr": stderr.decode(),
+                "exit_code": process.returncode,
+            }
+        )
 
         state = "DONE" if task["exit_code"] == 0 else "FAILED"
         return task, state

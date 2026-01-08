@@ -15,11 +15,14 @@ async def main():
     tasks = [
         {
             "uid": "task_1",
-            "executable": "/bin/bash -c 'echo $HOSTNAME'"
+            "executable": "echo",
+            "arguments": ["Hello from task 1 - $HOSTNAME"],
+            "task_backend_specific_kwargs": {"shell": True}
         },
         {
             "uid": "task_2",
-            "executable": "/bin/bash -c 'echo $HOSTNAME'"
+            "executable": "/bin/echo",
+            "arguments": ["Hello", "from", "task", "2"]
         }
     ]
 

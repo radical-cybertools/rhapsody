@@ -13,7 +13,7 @@ async def main():
     async def task1(*args):
         # Simulate lightweight data generation (e.g., creating a list of numbers)
         print("Task 1: Generating data")
-        await asyncio.sleep(1)  # Reduced sleep to make it lighter
+
         data = list(range(1000))
         return sum(data)  # Simple computation: sum of numbers
 
@@ -22,7 +22,7 @@ async def main():
         # Simulate processing data from task1 (e.g., filtering even numbers)
         input_data = args[0]
         print(f"Task 2: Processing data from Task 1, input sum: {input_data}")
-        await asyncio.sleep(1)
+
         return [x for x in range(1000) if x % 2 == 0]  # Return list of even numbers
 
     @flow.function_task
@@ -31,7 +31,6 @@ async def main():
         sum_data, even_numbers = args
         print(f"Task 3: Aggregating, sum: {sum_data},"
               f"even count: {len(even_numbers)}")
-        await asyncio.sleep(1)
         # Aggregate results
         return {"total_sum": sum_data, "even_count": len(even_numbers)}
 
@@ -44,7 +43,7 @@ async def main():
         print(f'Workflow {wf_id} completed at {time.time()}, result: {result}')
 
     # Run workflows concurrently
-    await asyncio.gather(*[run_wf(i) for i in range(10)])
+    await asyncio.gather(*[run_wf(i) for i in range(1024)])
 
     await flow.shutdown()
 

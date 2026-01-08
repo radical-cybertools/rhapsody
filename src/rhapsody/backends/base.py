@@ -23,7 +23,6 @@ class BaseExecutionBackend(ABC):
     def __init__(self):
         """Initialize the backend with internal result tracking."""
         self._internal_results = []
-        self._callback_registered = False
 
     @abstractmethod
     async def submit_tasks(self, tasks: list[dict]) -> None:
@@ -66,15 +65,23 @@ class BaseExecutionBackend(ABC):
         """
         pass
 
-    @abstractmethod
     def register_callback(self, func: Callable[[dict[str, Any], str], None]) -> None:
         """Register a callback function for task state changes.
+
+        This chains the user's callback with the internal callback used by wait_tasks().
+        Both callbacks will be invoked on every state change.
 
         Args:
             func: A callable that will be invoked when task states change.
                 The function should accept task and state parameters.
         """
-        pass
+        internal = self._internal_callback
+
+        def chained_callback(task, state):
+            internal(task, state)  # Always track for wait_tasks()
+            func(task, state)      # User's callback
+
+        self._callback_func = chained_callback
 
     @abstractmethod
     def get_task_states_map(self) -> Any:
@@ -194,11 +201,6 @@ class BaseExecutionBackend(ABC):
         # Validation
         if not tasks:
             raise ValueError("tasks list cannot be empty")
-
-        # Register internal callback once
-        if not self._callback_registered:
-            self.register_callback(self._internal_callback)
-            self._callback_registered = True
 
         # Get terminal states once (cached after first call)
         if not hasattr(self, "_terminal_states"):

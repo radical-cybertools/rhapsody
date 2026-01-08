@@ -514,12 +514,14 @@ class TaskLauncherV1:
     def _create_executable_process(self, task: dict, rank: int) -> Process:
         """Create a single executable process."""
         executable = task["executable"]
-        args = list(task.get("args", []))
+        args = list(task.get("arguments", []))
         uid = task["uid"]
+        backend_kwargs = task.get("task_backend_specific_kwargs", {})
+        execute_in_shell = backend_kwargs.get("shell", False)
 
         return Process(
             target=_executable_wrapper_v1,
-            args=(self.result_queue, executable, args, uid, rank, self.working_dir),
+            args=(self.result_queue, executable, args, uid, rank, self.working_dir, execute_in_shell),
         )
 
     async def _add_function_processes_to_group(
@@ -550,8 +552,10 @@ class TaskLauncherV1:
     ) -> None:
         """Add executable processes to process group."""
         executable = task["executable"]
-        args = list(task.get("args", []))
+        args = list(task.get("arguments", []))
         uid = task["uid"]
+        backend_kwargs = task.get("task_backend_specific_kwargs", {})
+        execute_in_shell = backend_kwargs.get("shell", False)
 
         for rank in range(ranks):
             env = os.environ.copy()
@@ -559,7 +563,7 @@ class TaskLauncherV1:
 
             template = ProcessTemplate(
                 target=_executable_wrapper_v1,
-                args=(self.result_queue, executable, args, uid, rank, self.working_dir),
+                args=(self.result_queue, executable, args, uid, rank, self.working_dir, execute_in_shell),
                 env=env,
                 cwd=self.working_dir,
             )
@@ -567,7 +571,13 @@ class TaskLauncherV1:
 
 
 def _executable_wrapper_v1(
-    result_queue: Queue, executable: str, args: list, task_uid: str, rank: int, working_dir: str
+    result_queue: Queue,
+    executable: str,
+    args: list,
+    task_uid: str,
+    rank: int,
+    working_dir: str,
+    execute_in_shell: bool = False,
 ):
     """wrapper function that executes executable and pushes completion to queue."""
     import subprocess
@@ -575,14 +585,27 @@ def _executable_wrapper_v1(
 
     try:
         # Execute the process and capture output
-        result = subprocess.run(
-            [executable] + args,
-            cwd=working_dir,
-            capture_output=True,
-            shell=True,
-            text=True,
-            timeout=3600,  # 1 hour timeout
-        )
+        if execute_in_shell:
+            # Shell mode: join executable and arguments into single command string
+            cmd = " ".join([executable] + args)
+            result = subprocess.run(
+                cmd,
+                cwd=working_dir,
+                capture_output=True,
+                shell=True,
+                text=True,
+                timeout=3600,  # 1 hour timeout
+            )
+        else:
+            # Exec mode: pass executable and arguments separately (no shell)
+            result = subprocess.run(
+                [executable] + args,
+                cwd=working_dir,
+                capture_output=True,
+                shell=False,
+                text=True,
+                timeout=3600,  # 1 hour timeout
+            )
 
         # Create completion object
         completion = ExecutableTaskCompletionV1(
@@ -759,6 +782,7 @@ class WorkerRequestV2:
     executable: Optional[str] = None
     exec_args: list = None
     working_dir: str = "."
+    execute_in_shell: bool = False
 
     def __post_init__(self):
         if self.kwargs is None:
@@ -1085,14 +1109,27 @@ def _worker_loop_v2(
 
                 elif request.task_type == TaskTypeV2.EXECUTABLE:
                     # Execute external process
-                    result = subprocess.run(
-                        [request.executable] + request.exec_args,
-                        cwd=request.working_dir,
-                        capture_output=True,
-                        text=True,
-                        shell=True,
-                        timeout=3600,  # FIXME: should be user defined
-                    )
+                    if request.execute_in_shell:
+                        # Shell mode: join executable and arguments into single command string
+                        cmd = " ".join([request.executable] + request.exec_args)
+                        result = subprocess.run(
+                            cmd,
+                            cwd=request.working_dir,
+                            capture_output=True,
+                            text=True,
+                            shell=True,
+                            timeout=3600,  # FIXME: should be user defined
+                        )
+                    else:
+                        # Exec mode: pass executable and arguments separately (no shell)
+                        result = subprocess.run(
+                            [request.executable] + request.exec_args,
+                            cwd=request.working_dir,
+                            capture_output=True,
+                            text=True,
+                            shell=False,
+                            timeout=3600,  # FIXME: should be user defined
+                        )
 
                     response.success = result.returncode == 0
                     response.stdout = result.stdout
@@ -1671,7 +1708,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
 
         self.tasks: dict[str, dict[str, Any]] = {}
         self.session = Session()
-        self._callback_func: Callable = None
+        self._callback_func: Callable = self._internal_callback
         self._resources = resources or {}
         self._initialized = False
 
@@ -1784,9 +1821,6 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
             pass
         logger.debug("Dragon backend V1 active with unified queue-based architecture.")
 
-    def register_callback(self, callback: Callable) -> None:
-        self._callback_func = callback
-
     def get_task_states_map(self):
         return StateMapper(backend=self)
 
@@ -1837,6 +1871,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
 
     async def _monitor_tasks(self) -> None:
         """Monitor running tasks with unified queue consumption."""
+        logger.debug("Monitor task started")
         while not self._shutdown_event.is_set():
             try:
                 # Batch consume queue results (unified for all task types)
@@ -2192,7 +2227,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
         self.tasks: dict[str, dict[str, Any]] = {}
         self.session = Session()
-        self._callback_func: Callable = None
+        self._callback_func: Callable = self._internal_callback
         self._resources = resources or {}
         self._initialized = False
         self._canceled_tasks = set()
@@ -2335,9 +2370,6 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         except Exception as e:
             logger.exception(f"Failed to initialize Dragon backend V2: {e}")
             raise
-
-    def register_callback(self, callback: Callable) -> None:
-        self._callback_func = callback
 
     def get_task_states_map(self):
         return StateMapper(backend=self)
@@ -2615,6 +2647,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
             backend_kwargs = task.get("task_backend_specific_kwargs", {})
             use_ddict_storage = backend_kwargs.get("use_ddict_storage", False)
+            execute_in_shell = backend_kwargs.get("shell", False)
 
             for rank in range(ranks):
                 gpu_ids = gpu_allocations.get(rank, [])
@@ -2640,8 +2673,9 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                         gpu_ids=gpu_ids,
                         use_ddict_storage=False,
                         executable=task["executable"],
-                        exec_args=list(task.get("args", [])),
+                        exec_args=list(task.get("arguments", [])),
                         working_dir=self._working_dir,
+                        execute_in_shell=execute_in_shell,
                     )
 
                 # Submit to specific worker's queue
@@ -2961,7 +2995,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
             self.session.path = working_directory
 
         self._state = "idle"
-        self._callback = None
+        self._callback_func = self._internal_callback
         self._task_registry: Dict[str, Any] = {}
         self._task_states = TaskStateMapperV3()
         self._initialized = False
@@ -3052,7 +3086,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
                     result = batch_task.result.get()
                     task_desc["return_value"] = result
                     logger.debug(f"Task {uid} completed successfully")
-                    self._callback(task_desc, "DONE")
+                    self._callback_func(task_desc, "DONE")
 
                 except Exception as e:
                     # Task failed - result.get() raised
@@ -3067,7 +3101,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
                         stderr = str(e)
 
                     task_desc["stderr"] = stderr
-                    self._callback(task_desc, "FAILED")
+                    self._callback_func(task_desc, "FAILED")
 
         except Exception as e:
             # Batch-level failure (wait() failed or catastrophic error)
@@ -3078,7 +3112,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
                 if task_info:
                     task_info["description"]["exception"] = e
                     task_info["description"]["stderr"] = str(e)
-                    self._callback(task_info["description"], "FAILED")
+                    self._callback_func(task_info["description"], "FAILED")
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
         """Submit a batch of tasks and start a wait thread for them."""
@@ -3098,7 +3132,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
             except Exception as e:
                 logger.error(f"Failed to create task {task.get('uid')}: {e}", exc_info=True)
                 task["exception"] = e
-                self._callback(task, "FAILED")
+                self._callback_func(task, "FAILED")
 
             task_uids.append(task["uid"])
 
@@ -3141,8 +3175,16 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         target = task.get("function" if is_function else "executable")
         backend_kwargs = task.get("task_backend_specific_kwargs", {})
         name = task.get("name", uid)
-        task_args = task.get("args", [])
-        task_kwargs = task.get("kwargs", {})
+
+        # For functions: use "args" and "kwargs"
+        # For executables: use "arguments"
+        if is_function:
+            task_args = task.get("args", [])
+            task_kwargs = task.get("kwargs", {})
+        else:
+            task_args = tuple(task.get("arguments", []))
+            task_kwargs = None
+
         timeout = backend_kwargs.get("timeout", 1000000000.0)
 
         # Handle async functions
@@ -3153,12 +3195,6 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         # Get template configs once
         process_templates_config = backend_kwargs.get("process_templates")
         process_template_config = backend_kwargs.get("process_template")
-
-        if not is_function:
-            task_kwargs = None
-            parts = shlex.split(target)
-            target = parts[0]
-            task_args = tuple(parts[1:]) if len(parts) > 1 else ()
 
         # Single decision tree - no redundant checks
         if process_templates_config:
@@ -3235,10 +3271,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         return self._state
 
     def task_state_cb(self, task: dict, state: str) -> None:
-        self._callback(task, state)
-
-    def register_callback(self, func: Callable) -> None:
-        self._callback = func
+        self._callback_func(task, state)
 
     def get_task_states_map(self):
         return self._task_states
@@ -3250,7 +3283,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         # NOTE: dragon.batch does not expose nor support
         # process/function/job cancellation, we just notify
         # the asyncflow that the task is cancelled so not to block the flow
-        self._callback(self._task_registry[uid]["description"], "CANCELED")
+        self._callback_func(self._task_registry[uid]["description"], "CANCELED")
         self._cancelled_tasks.append(uid)
 
         return True
