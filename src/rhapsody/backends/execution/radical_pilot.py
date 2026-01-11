@@ -6,6 +6,7 @@ resource management systems and distributed computing.
 
 from __future__ import annotations
 
+import os
 import asyncio
 import copy
 import logging
@@ -16,7 +17,7 @@ from typing import Callable
 import typeguard
 
 from ..base import BaseExecutionBackend
-from ..constants import StateMapper
+from ..constants import StateMapper, BackendMainStates
 
 try:
     import radical.pilot as rp
@@ -119,7 +120,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
     """
 
     @typeguard.typechecked
-    def __init__(self, resources: dict, raptor_config: dict | None = None) -> None:
+    def __init__(self, resources: dict = None, raptor_config: dict | None = None) -> None:
         """Initialize the RadicalExecutionBackend with resources.
 
         Creates a new Radical Pilot session, initializes task and pilot managers,
@@ -156,9 +157,12 @@ class RadicalExecutionBackend(BaseExecutionBackend):
 
         super().__init__()
 
-        self.resources = resources
+        self.resources = resources or {
+            "resource": "local.localhost",
+            "runtime": 30, "exit_on_error": True, "cores": os.cpu_count()}
         self.raptor_config = raptor_config or {}
         self._initialized = False
+        self._backend_state = BackendMainStates.INITIALIZED
 
         # This will allow us to have better control
         # on the error coming from the pilot object
@@ -170,10 +174,44 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         return self._async_init().__await__()
 
     async def _async_init(self):
-        """Async initialization on await."""
+        """Unified async initialization with backend and task state registration.
+
+        Pattern:
+        1. Register backend states first
+        2. Register task states
+        3. Set backend state to INITIALIZED
+        4. Initialize backend components
+        """
         if not self._initialized:
-            await self._initialize()
-            self._initialized = True
+            try:
+                # Step 1: Register backend states
+                logger.debug("Registering backend states...")
+                StateMapper.register_backend_states_with_defaults(backend=self)
+
+                # Step 2: Register task states
+                logger.debug("Registering task states...")
+                # Radical Pilot has custom states
+                StateMapper.register_backend_tasks_states(
+                    backend=self,
+                    done_state=rp.DONE,
+                    failed_state=rp.FAILED,
+                    canceled_state=rp.CANCELED,
+                    running_state=rp.AGENT_EXECUTING,
+                )
+
+                # Step 3: Set backend state to INITIALIZED
+                self._backend_state = BackendMainStates.INITIALIZED
+                logger.debug(f"Backend state set to: {self._backend_state.value}")
+
+                # Step 4: Initialize backend components
+                await self._initialize()
+                self._initialized = True
+                logger.info("RadicalPilot backend fully initialized and ready")
+
+            except Exception as e:
+                logger.exception(f"RadicalPilot backend initialization failed: {e}")
+                self._initialized = False
+                raise
         return self
 
     async def _initialize(self) -> None:
@@ -196,14 +234,6 @@ class RadicalExecutionBackend(BaseExecutionBackend):
                 self.raptor_mode = True
                 logger.info("Enabling Raptor mode for RadicalExecutionBackend")
                 self.setup_raptor_mode(self.raptor_config)
-
-            StateMapper.register_backend_states(
-                backend=self,
-                done_state=rp.DONE,
-                failed_state=rp.FAILED,
-                canceled_state=rp.CANCELED,
-                running_state=rp.AGENT_EXECUTING,
-            )
 
             logger.info("RadicalPilot execution backend started successfully")
 
@@ -624,6 +654,10 @@ class RadicalExecutionBackend(BaseExecutionBackend):
             - Only successfully built tasks are submitted to the task manager
             - Task building includes validation and error handling
         """
+        # Set backend state to RUNNING when tasks are submitted
+        if self._backend_state != BackendMainStates.RUNNING:
+            self._backend_state = BackendMainStates.RUNNING
+            logger.debug(f"Backend state set to: {self._backend_state.value}")
 
         _tasks = []
         for task in tasks:
@@ -672,9 +706,13 @@ class RadicalExecutionBackend(BaseExecutionBackend):
             nodelist = self.resource_pilot.nodelist
         return nodelist
 
-    def state(self):
-        """Retrieve resource pilot state."""
-        raise NotImplementedError
+    async def state(self) -> str:
+        """Get backend state.
+
+        Returns:
+            str: Current backend state (INITIALIZED, RUNNING, SHUTDOWN)
+        """
+        return self._backend_state.value
 
     def task_state_cb(self, task, state) -> None:
         """Handle task state changes."""
@@ -691,6 +729,10 @@ class RadicalExecutionBackend(BaseExecutionBackend):
             - Ensures graceful termination of all backend resources
             - Prints confirmation message when shutdown is triggered
         """
+        # Set backend state to SHUTDOWN
+        self._backend_state = BackendMainStates.SHUTDOWN
+        logger.debug(f"Backend state set to: {self._backend_state.value}")
+
         self.session.close(download=True)
         logger.info("Radical Pilot backend shutdown complete")
 

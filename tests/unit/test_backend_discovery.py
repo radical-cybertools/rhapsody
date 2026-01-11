@@ -94,23 +94,12 @@ def test_backend_registry_register_backend():
 
 
 def test_backend_registry_import_error_handling():
-    """Test BackendRegistry import error handling."""
+    """Test BackendRegistry error handling for invalid backends."""
     registry = rhapsody.BackendRegistry
 
-    # Save original state
-    original_backends = registry._backends.copy()
-
-    try:
-        # Register a backend with invalid import path
-        registry.register_backend("invalid_backend", "nonexistent.module.Class")
-
-        # Should raise ImportError when trying to get the class
-        with pytest.raises(ImportError, match="Failed to import backend 'invalid_backend'"):
-            registry.get_backend_class("invalid_backend")
-
-    finally:
-        # Restore original state
-        registry._backends = original_backends
+    # Should raise ValueError when trying to get a non-existent backend
+    with pytest.raises(ValueError, match="Backend 'invalid_backend' not found"):
+        registry.get_backend_class("invalid_backend")
 
 
 def test_get_backend_function():

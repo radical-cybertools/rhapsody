@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import typeguard
 
-from ..constants import StateMapper
+from ..constants import StateMapper, BackendMainStates
 from ..base import BaseExecutionBackend, Session
 
 try:
@@ -1711,6 +1711,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
         self._callback_func: Callable = self._internal_callback
         self._resources = resources or {}
         self._initialized = False
+        self._backend_state = BackendMainStates.INITIALIZED
 
         # Resource management
         self._slots: int = int(self._resources.get("slots", mp.cpu_count() or 1))
@@ -1741,16 +1742,35 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
         return self._async_init().__await__()
 
     async def _async_init(self):
+        """Unified async initialization with backend and task state registration.
+
+        Pattern:
+        1. Register backend states first
+        2. Register task states
+        3. Set backend state to INITIALIZED
+        4. Initialize backend components
+        """
         if not self._initialized:
             try:
                 logger.debug("Starting Dragon backend V1 async initialization...")
+
+                # Step 1: Register backend states
+                logger.debug("Registering backend states...")
+                StateMapper.register_backend_states_with_defaults(backend=self)
+
+                # Step 2: Register task states
+                logger.debug("Registering task states...")
+                StateMapper.register_backend_tasks_states_with_defaults(backend=self)
+
+                # Step 3: Set backend state to INITIALIZED
+                self._backend_state = BackendMainStates.INITIALIZED
+                logger.debug(f"Backend state set to: {self._backend_state.value}")
+
+                # Step 4: Initialize backend components
                 await self._initialize()
                 self._initialized = True
-                logger.debug(
-                    "Dragon backend V1 initialization completed, registering with StateMapper..."
-                )
-                StateMapper.register_backend_states_with_defaults(backend=self)
-                logger.debug("Dragon backend V1 fully initialized")
+                logger.info("Dragon backend V1 fully initialized and ready")
+
             except Exception as e:
                 logger.exception(f"Dragon backend V1 initialization failed: {e}")
                 self._initialized = False
@@ -1826,6 +1846,11 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
 
     async def submit_tasks(self, tasks: list[dict[str, Any]]) -> None:
         self._ensure_initialized()
+
+        # Set backend state to RUNNING when tasks are submitted
+        if self._backend_state != BackendMainStates.RUNNING:
+            self._backend_state = BackendMainStates.RUNNING
+            logger.debug(f"Backend state set to: {self._backend_state.value}")
 
         for task in tasks:
             # Validate task
@@ -2059,8 +2084,12 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
         pass
 
     async def state(self) -> str:
-        """Get backend state."""
-        return "CONNECTED" if self._initialized else "DISCONNECTED"
+        """Get backend state.
+
+        Returns:
+            str: Current backend state (INITIALIZED, RUNNING, SHUTDOWN)
+        """
+        return self._backend_state.value
 
     async def task_state_cb(self, task: dict, state: str) -> None:
         """Task state callback."""
@@ -2076,6 +2105,10 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
             return
 
         try:
+            # Set backend state to SHUTDOWN
+            self._backend_state = BackendMainStates.SHUTDOWN
+            logger.debug(f"Backend state set to: {self._backend_state.value}")
+
             self._shutdown_event.set()
             await self.cancel_all_tasks()
 
@@ -2230,6 +2263,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         self._callback_func: Callable = self._internal_callback
         self._resources = resources or {}
         self._initialized = False
+        self._backend_state = BackendMainStates.INITIALIZED
         self._canceled_tasks = set()
 
         # Parse worker configuration
@@ -2299,16 +2333,38 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         return self._async_init().__await__()
 
     async def _async_init(self):
+        """Unified async initialization with backend and task state registration.
+
+        Pattern:
+        1. Register backend states first
+        2. Register task states
+        3. Set backend state to INITIALIZED
+        4. Initialize backend components
+        """
         if not self._initialized:
             try:
                 logger.debug("Starting Dragon backend V2 async initialization...")
+
+                # Step 1: Register backend states
+                logger.debug("Registering backend states...")
+                StateMapper.register_backend_states_with_defaults(backend=self)
+
+                # Step 2: Register task states
+                logger.debug("Registering task states...")
+                StateMapper.register_backend_tasks_states_with_defaults(backend=self)
+
+                # Step 3: Set backend state to INITIALIZED
+                self._backend_state = BackendMainStates.INITIALIZED
+                logger.debug(f"Backend state set to: {self._backend_state.value}")
+
+                # Step 4: Initialize backend components
                 await self._initialize()
                 self._initialized = True
-                logger.debug("Registering with StateMapper...")
-                StateMapper.register_backend_states_with_defaults(backend=self)
-                logger.debug("Dragon backend V2 fully initialized")
+                logger.info("Dragon backend V2 fully initialized and ready")
+
             except Exception as e:
                 logger.exception(f"Dragon backend V2 initialization failed: {e}")
+                self._initialized = False
                 raise
         return self
 
@@ -2376,6 +2432,11 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
     async def submit_tasks(self, tasks: list[dict[str, Any]]) -> None:
         self._ensure_initialized()
+
+        # Set backend state to RUNNING when tasks are submitted
+        if self._backend_state != BackendMainStates.RUNNING:
+            self._backend_state = BackendMainStates.RUNNING
+            logger.debug(f"Backend state set to: {self._backend_state.value}")
 
         for task in tasks:
             is_valid, error_msg = self._validate_task(task)
@@ -2876,7 +2937,12 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         pass
 
     async def state(self) -> str:
-        return "CONNECTED" if self._initialized else "DISCONNECTED"
+        """Get backend state.
+
+        Returns:
+            str: Current backend state (INITIALIZED, RUNNING, SHUTDOWN)
+        """
+        return self._backend_state.value
 
     async def task_state_cb(self, task: dict, state: str) -> None:
         pass
@@ -2890,6 +2956,9 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
             return
 
         try:
+            # Set backend state to SHUTDOWN
+            self._backend_state = BackendMainStates.SHUTDOWN
+            logger.debug(f"Backend state set to: {self._backend_state.value}")
             logger.info("Starting Dragon backend V2 shutdown...")
             self._shutdown_event.set()
 
@@ -2994,7 +3063,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         if working_directory:
             self.session.path = working_directory
 
-        self._state = "idle"
+        self._backend_state = BackendMainStates.INITIALIZED
         self._callback_func = self._internal_callback
         self._task_registry: Dict[str, Any] = {}
         self._task_states = TaskStateMapperV3()
@@ -3017,15 +3086,34 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         return self._async_init().__await__()
 
     async def _async_init(self):
+        """Unified async initialization with backend and task state registration.
+
+        Pattern:
+        1. Register backend states first
+        2. Register task states
+        3. Set backend state to INITIALIZED
+        4. Initialize backend components (if needed)
+        """
         if not self._initialized:
             try:
                 logger.debug("Starting Dragon backend V3 async initialization...")
-                self._initialized = True
-                logger.debug(
-                    "Dragon backend V3 initialization completed, registering with StateMapper..."
-                )
+
+                # Step 1: Register backend states
+                logger.debug("Registering backend states...")
                 StateMapper.register_backend_states_with_defaults(backend=self)
-                logger.debug("Dragon backend V3 fully initialized")
+
+                # Step 2: Register task states
+                logger.debug("Registering task states...")
+                StateMapper.register_backend_tasks_states_with_defaults(backend=self)
+
+                # Step 3: Set backend state to INITIALIZED
+                self._backend_state = BackendMainStates.INITIALIZED
+                logger.debug(f"Backend state set to: {self._backend_state.value}")
+
+                # Step 4: Initialize backend components (V3 is already initialized in __init__)
+                self._initialized = True
+                logger.info("Dragon backend V3 fully initialized and ready")
+
             except Exception as e:
                 logger.exception(f"Dragon backend V3 initialization failed: {e}")
                 self._initialized = False
@@ -3116,10 +3204,13 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
         """Submit a batch of tasks and start a wait thread for them."""
-        if self._state == "shutting_down":
+        if self._backend_state == BackendMainStates.SHUTDOWN:
             raise RuntimeError("Cannot submit during shutdown")
 
-        self._state = "running"
+        # Set backend state to RUNNING when tasks are submitted
+        if self._backend_state != BackendMainStates.RUNNING:
+            self._backend_state = BackendMainStates.RUNNING
+            logger.debug(f"Backend state set to: {self._backend_state.value}")
 
         # Create Batch tasks (don't start yet)
         batch_tasks = []
@@ -3264,11 +3355,16 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
     def link_implicit_data_deps(self, src_task, dst_task):
         pass
 
+    async def state(self) -> str:
+        """Get backend state.
+
+        Returns:
+            str: Current backend state (INITIALIZED, RUNNING, SHUTDOWN)
+        """
+        return self._backend_state.value
+
     def link_explicit_data_deps(self, src_task=None, dst_task=None, file_name=None, file_path=None):
         pass
-
-    def state(self) -> str:
-        return self._state
 
     def task_state_cb(self, task: dict, state: str) -> None:
         self._callback_func(task, state)
@@ -3289,11 +3385,13 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         return True
 
     async def shutdown(self) -> None:
-        if self._state == "shutting_down":
+        if self._backend_state == BackendMainStates.SHUTDOWN:
             return
 
+        # Set backend state to SHUTDOWN
+        self._backend_state = BackendMainStates.SHUTDOWN
+        logger.debug(f"Backend state set to: {self._backend_state.value}")
         logger.info("Shutting down V3 backend")
-        self._state = "shutting_down"
         self._shutdown_event.set()
 
         # Close Batch FIRST to unblock waiting threads

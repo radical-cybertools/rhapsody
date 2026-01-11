@@ -10,6 +10,23 @@ from enum import Enum
 from typing import Any
 
 
+class BackendMainStates(Enum):
+    """Enumeration of standard backend states used across all backends.
+
+    This enum defines the canonical backend states that are common to all
+    execution backends, providing a unified interface for backend state management.
+
+    Attributes:
+        INITIALIZED: backend created, not yet executing
+        RUNNING: backend actively executing work
+        SHUTDOWN: backend fully stopped
+    """
+
+    INITIALIZED = "INITIALIZED"
+    RUNNING     = "RUNNING"
+    SHUTDOWN    = "SHUTDOWN"   
+
+
 class TasksMainStates(Enum):
     """Enumeration of standard task states used across all backends.
 
@@ -62,7 +79,7 @@ class StateMapper:
         ::
 
             # Register a backend with custom states
-            StateMapper.register_backend_states(
+            StateMapper.register_backend_tasks_states(
                 backend='my_backend',
                 done_state='COMPLETED',
                 failed_state='ERROR',
@@ -96,8 +113,8 @@ class StateMapper:
                 if backend name cannot be detected from the provided object.
 
         Note:
-            The backend must be registered using register_backend_states() or
-            register_backend_states_with_defaults() before initialization.
+            The backend must be registered using register_backend_tasks_states() or
+            register_backend_tasks_states_with_defaults() before initialization.
         """
         self.backend_name: str
         self.backend_module: Any | None = None
@@ -121,13 +138,96 @@ class StateMapper:
     def register_backend_states(
         cls,
         backend: str | Any,
+        initialized_state: Any,
+        running_state: Any,
+        shutdown_state: Any,
+        **additional_states: Any,
+    ) -> None:
+        """Register backend state mappings for a backend.
+
+        Associates a backend identifier with its corresponding backend state values,
+        mapping the standard backend states to backend-specific representations.
+
+        Args:
+            backend (Union[str, Any]): The identifier for the backend to register.
+            initialized_state (Any): Backend's representation of INITIALIZED state.
+            running_state (Any): Backend's representation of RUNNING state.
+            shutdown_state (Any): Backend's representation of SHUTDOWN state.
+            **additional_states: Additional state mappings beyond the core states.
+
+        Returns:
+            None
+
+        Example:
+            ::
+
+                StateMapper.register_backend_states(
+                    backend='my_backend',
+                    initialized_state='INIT',
+                    running_state='ACTIVE',
+                    shutdown_state='TERMINATED'
+                )
+        """
+        # Convert backend to string key for consistent lookup
+        if isinstance(backend, str):
+            backend_key = f"{backend.lower()}_backend_states"
+        else:
+            # Detect backend name from object
+            if hasattr(backend, "__name__"):
+                backend_key = f"{backend.__name__.lower()}_backend_states"
+            elif hasattr(backend, "__class__"):
+                backend_key = f"{backend.__class__.__name__.lower()}_backend_states"
+            else:
+                raise ValueError(f"Could not detect backend name from {backend}")
+
+        additional_mapped = {BackendMainStates[k.upper()]: v for k, v in additional_states.items()}
+        cls._backend_registry[backend_key] = {
+            BackendMainStates.INITIALIZED: initialized_state,
+            BackendMainStates.RUNNING: running_state,
+            BackendMainStates.SHUTDOWN: shutdown_state,
+            **additional_mapped,
+        }
+
+    @classmethod
+    def register_backend_states_with_defaults(cls, backend: str | Any) -> None:
+        """Register backend states using default main state values.
+
+        Convenience method that registers backend states where the backend-specific
+        states are identical to the main state values (i.e., the string values
+        of the BackendMainStates enum).
+
+        Args:
+            backend (Union[str, Any]): The backend identifier to register.
+
+        Returns:
+            None
+
+        Example:
+            ::
+
+                # Registers backend states as:
+                # INITIALIZED -> "INITIALIZED", RUNNING -> "RUNNING", etc.
+                StateMapper.register_backend_states_with_defaults('my_backend')
+        """
+        return cls.register_backend_states(
+            backend,
+            initialized_state=BackendMainStates.INITIALIZED.value,
+            running_state=BackendMainStates.RUNNING.value,
+            shutdown_state=BackendMainStates.SHUTDOWN.value,
+        )
+
+    
+    @classmethod
+    def register_backend_tasks_states(
+        cls,
+        backend: str | Any,
         done_state: Any,
         failed_state: Any,
         canceled_state: Any,
         running_state: Any,
         **additional_states: Any,
     ) -> None:
-        """Register state mappings for a new backend.
+        """Register tasks state mappings for a new backend.
 
         Associates a backend identifier with its corresponding task state values,
         mapping the standard task states to backend-specific representations.
@@ -150,7 +250,7 @@ class StateMapper:
         Example:
             ::
 
-                StateMapper.register_backend_states(
+                StateMapper.register_backend_tasks_states(
                     backend='slurm',
                     done_state='COMPLETED',
                     failed_state='FAILED',
@@ -182,7 +282,7 @@ class StateMapper:
         }
 
     @classmethod
-    def register_backend_states_with_defaults(cls, backend: str | Any) -> None:
+    def register_backend_tasks_states_with_defaults(cls, backend: str | Any) -> None:
         """Register a backend using default main state values.
 
         Convenience method that registers a backend where the backend-specific
@@ -193,16 +293,16 @@ class StateMapper:
             backend (Union[str, Any]): The backend identifier to register.
 
         Returns:
-            The result of register_backend_states() with default values.
+            The result of register_backend_tasks_states() with default values.
 
         Example:
             ::
 
                 # This registers backend states as:
                 # DONE -> "DONE", FAILED -> "FAILED", etc.
-                StateMapper.register_backend_states_with_defaults('thread_backend')
+                StateMapper.register_backend_tasks_states_with_defaults('thread_backend')
         """
-        return cls.register_backend_states(
+        return cls.register_backend_tasks_states(
             backend,
             done_state=TasksMainStates.DONE.value,
             failed_state=TasksMainStates.FAILED.value,

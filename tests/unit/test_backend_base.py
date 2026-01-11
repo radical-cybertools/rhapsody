@@ -65,7 +65,6 @@ def test_base_execution_backend_abstract_methods():
         "shutdown",
         "state",
         "task_state_cb",
-        "register_callback",
         "get_task_states_map",
         "build_task",
         "link_implicit_data_deps",

@@ -181,7 +181,7 @@ def test_radical_pilot_backend_state_mapper():
         backend = RadicalExecutionBackend({"resource": "local.localhost"})
 
         # Register the backend manually since we can't do async init
-        StateMapper.register_backend_states(
+        StateMapper.register_backend_tasks_states(
             backend=backend,
             done_state="DONE",
             failed_state="FAILED",

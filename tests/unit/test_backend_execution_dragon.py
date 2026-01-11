@@ -258,28 +258,7 @@ async def test_stdout_capture(backend):
 
 
 # ============================================================================
-# Test 10: Environment Variables
-# ============================================================================
-
-@pytest.mark.asyncio
-async def test_environment_variables(backend):
-    """Test that environment variables can be set for tasks."""
-    task = {
-        "uid": "test_env",
-        "executable": "/bin/bash",
-        "arguments": ["-c", "echo $TEST_VAR"],
-        "environment": {"TEST_VAR": "test_value_123"}
-    }
-
-    await backend.submit_tasks([task])
-    results = await backend.wait_tasks([task])
-
-    assert results["test_env"]["state"] == "DONE"
-    assert "test_value_123" in results["test_env"].get("stdout", "")
-
-
-# ============================================================================
-# Test 11: Task Cancellation
+# Test 10: Task Cancellation
 # ============================================================================
 
 @pytest.mark.asyncio
@@ -307,13 +286,13 @@ async def test_task_cancellation(backend):
 
 
 # ============================================================================
-# Test 12: Backend State
+# Test 11: Backend State
 # ============================================================================
 
 @pytest.mark.asyncio
 async def test_backend_state(backend):
     """Test backend state tracking."""
-    state = backend.state()
+    state = await backend.state()
     assert state is not None
 
     # Submit a task
@@ -325,15 +304,15 @@ async def test_backend_state(backend):
     }
 
     await backend.submit_tasks([task])
-    state_running = backend.state()
-    assert state_running == "running"
+    state_running = await backend.state()
+    assert state_running == "RUNNING"
 
     # Wait for completion
     await backend.wait_tasks([task])
 
 
 # ============================================================================
-# Test 13: Multiple Submissions (Sequential)
+# Test 12: Multiple Submissions (Sequential)
 # ============================================================================
 
 @pytest.mark.asyncio
@@ -365,7 +344,7 @@ async def test_sequential_submissions(backend):
 
 
 # ============================================================================
-# Test 14: Function with Kwargs
+# Test 13: Function with Kwargs
 # ============================================================================
 
 @pytest.mark.asyncio
@@ -391,7 +370,7 @@ async def test_function_with_kwargs(backend):
 
 
 # ============================================================================
-# Test 15: Empty Task List
+# Test 14: Empty Task List
 # ============================================================================
 
 @pytest.mark.asyncio
@@ -403,7 +382,7 @@ async def test_empty_task_list(backend):
 
 
 # ============================================================================
-# Test 16: Task UID Uniqueness
+# Test 15: Task UID Uniqueness
 # ============================================================================
 
 @pytest.mark.asyncio

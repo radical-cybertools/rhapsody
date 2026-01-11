@@ -16,7 +16,7 @@ import typeguard
 
 from ..base import BaseExecutionBackend
 from ..base import Session
-from ..constants import StateMapper
+from ..constants import StateMapper, BackendMainStates
 
 try:
     import dask.distributed as dask
@@ -60,17 +60,45 @@ class DaskExecutionBackend(BaseExecutionBackend):
         self._callback_func = None
         self._resources = resources or {}
         self._initialized = False
+        self._backend_state = BackendMainStates.INITIALIZED
 
     def __await__(self):
         """Make DaskExecutionBackend awaitable like Dask Client."""
         return self._async_init().__await__()
 
     async def _async_init(self):
-        """Async initialization that happens when awaited."""
+        """Unified async initialization with backend and task state registration.
+
+        Pattern:
+        1. Register backend states first
+        2. Register task states
+        3. Set backend state to INITIALIZED
+        4. Initialize backend components
+        """
         if not self._initialized:
-            await self._initialize()
-            self._initialized = True
-            StateMapper.register_backend_states_with_defaults(backend=self)
+            try:
+                # Step 1: Register backend states
+                logger.debug("Registering backend states...")
+                StateMapper.register_backend_states_with_defaults(backend=self)
+
+                # Step 2: Register task states
+                logger.debug("Registering task states...")
+                StateMapper.register_backend_tasks_states_with_defaults(backend=self)
+
+                # Step 3: Set backend state to INITIALIZED
+                self._backend_state = BackendMainStates.INITIALIZED
+                logger.debug(f"Backend state set to: {self._backend_state.value}")
+
+                # Step 4: Initialize backend components
+                await self._initialize()
+                self._initialized = True
+
+                logger.info("Dask backend fully initialized and ready")
+
+            except Exception as e:
+                logger.exception(f"Dask backend initialization failed: {e}")
+                self._initialized = False
+                raise
         return self
 
     async def _initialize(self) -> None:
@@ -145,6 +173,11 @@ class DaskExecutionBackend(BaseExecutionBackend):
             Future objects are filtered out from arguments as they are not picklable.
         """
         self._ensure_initialized()
+
+        # Set backend state to RUNNING when tasks are submitted
+        if self._backend_state != BackendMainStates.RUNNING:
+            self._backend_state = BackendMainStates.RUNNING
+            logger.debug(f"Backend state set to: {self._backend_state.value}")
 
         for task in tasks:
             is_func_task = bool(task.get("function"))
@@ -270,20 +303,12 @@ class DaskExecutionBackend(BaseExecutionBackend):
         pass
 
     async def state(self) -> str:
-        """Get the current state of the Dask execution backend.
+        """Get backend state.
 
         Returns:
-            Current state of the backend as a string.
+            str: Current backend state (INITIALIZED, RUNNING, SHUTDOWN)
         """
-        if not self._initialized or self._client is None:
-            return "DISCONNECTED"
-
-        try:
-            # Check if client is still connected
-            await self._client.scheduler_info()
-            return "CONNECTED"
-        except Exception:
-            return "DISCONNECTED"
+        return self._backend_state.value
 
     async def task_state_cb(self, task: dict, state: str) -> None:
         """Callback function invoked when a task's state changes.
@@ -309,6 +334,10 @@ class DaskExecutionBackend(BaseExecutionBackend):
         Closes the Dask client connection, clears task storage, and handles any cleanup exceptions
         gracefully.
         """
+        # Set backend state to SHUTDOWN
+        self._backend_state = BackendMainStates.SHUTDOWN
+        logger.debug(f"Backend state set to: {self._backend_state.value}")
+
         if self._client is not None:
             try:
                 # Cancel all running tasks first

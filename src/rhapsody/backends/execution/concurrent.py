@@ -14,7 +14,7 @@ from typing import Callable
 
 from ..base import BaseExecutionBackend
 from ..base import Session
-from ..constants import StateMapper
+from ..constants import StateMapper, BackendMainStates
 
 try:
     import cloudpickle
@@ -49,18 +49,45 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
         self.session = Session()
         self._callback_func: Callable = self._internal_callback
         self._initialized = False
+        self._backend_state = BackendMainStates.INITIALIZED
 
     def __await__(self):
         """Make backend awaitable."""
         return self._async_init().__await__()
 
     async def _async_init(self):
-        """Async initialization."""
+        """Unified async initialization with backend and task state registration.
+
+        Pattern:
+        1. Register backend states first
+        2. Register task states
+        3. Set backend state to INITIALIZED
+        4. Initialize backend components (if needed)
+        """
         if not self._initialized:
-            StateMapper.register_backend_states_with_defaults(backend=self)
-            self._initialized = True
-            executor_name = type(self.executor).__name__
-            logger.info(f"{executor_name} execution backend started successfully")
+            try:
+                # Step 1: Register backend states
+                logger.debug("Registering backend states...")
+                StateMapper.register_backend_states_with_defaults(backend=self)
+
+                # Step 2: Register task states
+                logger.debug("Registering task states...")
+                StateMapper.register_backend_tasks_states_with_defaults(backend=self)
+
+                # Step 3: Set backend state to INITIALIZED
+                self._backend_state = BackendMainStates.INITIALIZED
+                logger.debug(f"Backend state set to: {self._backend_state.value}")
+
+                # Step 4: Initialize backend components (already done in __init__)
+                self._initialized = True
+
+                executor_name = type(self.executor).__name__
+                logger.info(f"{executor_name} execution backend started successfully")
+
+            except Exception as e:
+                logger.exception(f"Concurrent backend initialization failed: {e}")
+                self._initialized = False
+                raise
         return self
 
     def get_task_states_map(self):
@@ -161,12 +188,20 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
 
     async def _handle_task(self, task: dict) -> None:
         """Handle task execution with callback."""
-        result_task, state = await self._execute_task(task)
-
-        self._callback_func(result_task, state)
+        try:
+            result_task, state = await self._execute_task(task)
+            self._callback_func(result_task, state)
+        except Exception as e:
+            logger.exception(f"Error handling task {task.get('uid')}: {e}")
+            raise
 
     async def submit_tasks(self, tasks: list[dict[str, Any]]) -> list[asyncio.Task]:
         """Submit tasks for execution."""
+        # Set backend state to RUNNING when tasks are submitted
+        if self._backend_state != BackendMainStates.RUNNING:
+            self._backend_state = BackendMainStates.RUNNING
+            logger.debug(f"Backend state set to: {self._backend_state.value}")
+
         submitted_tasks = []
 
         for task in tasks:
@@ -208,6 +243,10 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
 
     async def shutdown(self) -> None:
         """Shutdown the executor."""
+        # Set backend state to SHUTDOWN
+        self._backend_state = BackendMainStates.SHUTDOWN
+        logger.debug(f"Backend state set to: {self._backend_state.value}")
+
         await self.cancel_all_tasks()
         self.executor.shutdown(wait=True)
         logger.info("Concurrent execution backend shutdown complete")
@@ -221,8 +260,13 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
     def link_implicit_data_deps(self, src_task, dst_task):
         pass
 
-    def state(self):
-        pass
+    async def state(self) -> str:
+        """Get backend state.
+
+        Returns:
+            str: Current backend state (INITIALIZED, RUNNING, SHUTDOWN)
+        """
+        return self._backend_state.value
 
     def task_state_cb(self):
         pass

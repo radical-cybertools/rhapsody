@@ -7,6 +7,7 @@ dynamically.
 from __future__ import annotations
 
 import importlib
+import re
 from typing import Any
 
 from .base import BaseExecutionBackend
@@ -23,7 +24,12 @@ class BackendRegistry:
 
     @classmethod
     def _discover_backends(cls) -> None:
-        """Discover available backends from the execution module."""
+        """Discover available backends from the execution module.
+
+        Dynamically discovers backends by inspecting the __all__ exports from
+        rhapsody.backends.execution module. Automatically derives backend names
+        from class names by converting CamelCase to snake_case.
+        """
         if cls._initialized:
             return
 
@@ -34,26 +40,72 @@ class BackendRegistry:
             cls._initialized = True
             return
 
-        # Mapping of backend names to their class names
-        backend_mapping = {
-            "concurrent": "ConcurrentExecutionBackend",
-            "dask": "DaskExecutionBackend",
-            "radical_pilot": "RadicalExecutionBackend",
-            "dragon_v1": "DragonExecutionBackendV1",
-            "dragon_v2": "DragonExecutionBackendV2",
-            "dragon_v3": "DragonExecutionBackendV3",
-        }
+        # Dynamically discover backends from __all__
+        available_classes = getattr(execution_module, "__all__", [])
 
-        # Try to import each backend
-        for backend_name, class_name in backend_mapping.items():
+        for class_name in available_classes:
+            # Skip non-backend classes (like telemetry collectors)
+            # Match backends by checking if they contain "Backend" or match versioned pattern
+            is_backend = (
+                "Backend" in class_name
+                and "Collector" not in class_name
+                and "Telemetry" not in class_name
+            )
+            if not is_backend:
+                continue
+
             try:
                 backend_class = getattr(execution_module, class_name)
+
+                # Derive backend name from class name
+                # ConcurrentExecutionBackend -> concurrent
+                # DaskExecutionBackend -> dask
+                # RadicalExecutionBackend -> radical_pilot
+                # DragonExecutionBackendV1 -> dragon_v1
+                backend_name = cls._derive_backend_name(class_name)
+
                 cls._backends[backend_name] = backend_class
             except AttributeError:
-                # Backend not available (import failed in execution/__init__.py)
+                # Backend class not available despite being in __all__
                 pass
 
         cls._initialized = True
+
+    @classmethod
+    def _derive_backend_name(cls, class_name: str) -> str:
+        """Derive backend name from class name.
+
+        Converts CamelCase class names to snake_case backend names.
+        Special handling for known patterns:
+        - ConcurrentExecutionBackend -> concurrent
+        - DaskExecutionBackend -> dask
+        - RadicalExecutionBackend -> radical_pilot
+        - DragonExecutionBackendV1 -> dragon_v1
+
+        Args:
+            class_name: The class name (e.g., "DaskExecutionBackend")
+
+        Returns:
+            Snake case backend name (e.g., "dask")
+        """
+        # Remove common suffixes
+        name = class_name.replace("ExecutionBackend", "").replace("Backend", "")
+
+        # Handle version suffixes (V1, V2, V3)
+        match = re.match(r"(.+?)(V\d+)$", name)
+        if match:
+            base_name, version = match.groups()
+            name = base_name + "_" + version.lower()
+
+        # Convert CamelCase to snake_case
+        # Insert underscore before uppercase letters (except first)
+        name = re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+        # Special case: "radical" should become "radical_pilot"
+        if name == "radical":
+            name = "radical_pilot"
+
+        return name
 
     @classmethod
     def get_backend_class(cls, backend_name: str) -> type[BaseExecutionBackend]:
@@ -67,6 +119,7 @@ class BackendRegistry:
 
         Raises:
             ValueError: If backend is not registered
+            ImportError: If backend string path cannot be imported
         """
         cls._discover_backends()
 
@@ -74,7 +127,21 @@ class BackendRegistry:
             available = list(cls._backends.keys())
             raise ValueError(f"Backend '{backend_name}' not found. Available: {available}")
 
-        return cls._backends[backend_name]
+        backend_value = cls._backends[backend_name]
+
+        # If it's a string (import path), try to import it
+        if isinstance(backend_value, str):
+            try:
+                module_path, class_name = backend_value.rsplit(".", 1)
+                module = importlib.import_module(module_path)
+                backend_class = getattr(module, class_name)
+                # Cache the imported class for future use
+                cls._backends[backend_name] = backend_class
+                return backend_class
+            except (ImportError, AttributeError, ValueError) as e:
+                raise ImportError(f"Failed to import backend '{backend_name}' from '{backend_value}': {e}") from e
+
+        return backend_value
 
     @classmethod
     def list_backends(cls) -> list[str]:
@@ -83,12 +150,12 @@ class BackendRegistry:
         return list(cls._backends.keys())
 
     @classmethod
-    def register_backend(cls, name: str, backend_class: type[BaseExecutionBackend]) -> None:
+    def register_backend(cls, name: str, backend_class: type[BaseExecutionBackend] | str) -> None:
         """Register a new backend.
 
         Args:
             name: Name of the backend
-            backend_class: Backend class (not import path)
+            backend_class: Backend class or import path string (e.g., 'module.path.ClassName')
         """
         cls._backends[name] = backend_class
 
@@ -121,7 +188,16 @@ def discover_backends() -> dict[str, bool]:
     Returns:
         Dictionary mapping backend names to availability status
     """
-    # Simply return which backends were successfully imported
-    # The BackendRegistry._discover_backends() already handles import failures
-    available_backends = BackendRegistry.list_backends()
-    return {name: True for name in available_backends}
+    BackendRegistry._discover_backends()
+    available_backends = {}
+
+    for name in BackendRegistry.list_backends():
+        try:
+            # Try to get the backend class - this will import if it's a string path
+            BackendRegistry.get_backend_class(name)
+            available_backends[name] = True
+        except (ImportError, ValueError, AttributeError):
+            # Backend registered but can't be imported
+            available_backends[name] = False
+
+    return available_backends
