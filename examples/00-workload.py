@@ -1,28 +1,29 @@
 import asyncio
-from rhapsody.backends import Session
-from rhapsody.backends.execution.concurrent import ConcurrentExecutionBackend
+import rhapsody
+import logging
 
+from rhapsody.backends.execution.dragon import DragonExecutionBackendV3
+
+
+rhapsody.enable_logging(level=logging.DEBUG)
 
 async def main():
-    # Create a session
-
-    session = Session()
-
     # Get a backend (concurrent backend by default)
-    backend = await ConcurrentExecutionBackend()
+    backend = await DragonExecutionBackendV3()
 
     # Define tasks
     tasks = [
         {
             "uid": "task_1",
-            "executable": "echo",
-            "arguments": ["Hello from task 1 - $HOSTNAME"],
+            "executable": "/bin/bash",
+            "arguments": ["-c", "echo Hello from task 1 on $HOSTNAME"],
             "task_backend_specific_kwargs": {"shell": True}
         },
         {
             "uid": "task_2",
-            "executable": "/bin/echo",
-            "arguments": ["Hello", "from", "task", "2"]
+            "executable": "/bin/bash",
+            "arguments": ["-c", "echo Hello from task 1 on $HOSTNAME"],
+            "task_backend_specific_kwargs": {"shell": True}
         }
     ]
 

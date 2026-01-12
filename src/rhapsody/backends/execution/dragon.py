@@ -60,7 +60,14 @@ except ImportError:  # pragma: no cover - environment without Dragon
     find_accelerators = None
 
 
-logger = logging.getLogger(__name__)
+def _get_logger() -> logging.Logger:
+    """Get logger for dragon backend module.
+
+    This function provides lazy logger evaluation, ensuring the logger
+    is created after the user has configured logging, not at module import time.
+    """
+    return logging.getLogger(__name__)
+
 
 DRAGON_DEFAULT_REF_THRESHOLD = int(os.environ.get("DRAGON_DEFAULT_REF_THRESHOLD", 1024 * 1024))
 
@@ -1706,6 +1713,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
 
         super().__init__()
 
+        self.logger = _get_logger()
         self.tasks: dict[str, dict[str, Any]] = {}
         self.session = Session()
         self._callback_func: Callable = self._internal_callback
@@ -1752,44 +1760,44 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
         """
         if not self._initialized:
             try:
-                logger.debug("Starting Dragon backend V1 async initialization...")
+                self.logger.debug("Starting Dragon backend V1 async initialization...")
 
                 # Step 1: Register backend states
-                logger.debug("Registering backend states...")
+                self.logger.debug("Registering backend states...")
                 StateMapper.register_backend_states_with_defaults(backend=self)
 
                 # Step 2: Register task states
-                logger.debug("Registering task states...")
+                self.logger.debug("Registering task states...")
                 StateMapper.register_backend_tasks_states_with_defaults(backend=self)
 
                 # Step 3: Set backend state to INITIALIZED
                 self._backend_state = BackendMainStates.INITIALIZED
-                logger.debug(f"Backend state set to: {self._backend_state.value}")
+                self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
                 # Step 4: Initialize backend components
                 await self._initialize()
                 self._initialized = True
-                logger.info("Dragon backend V1 fully initialized and ready")
+                self.logger.info("Dragon backend V1 fully initialized and ready")
 
             except Exception as e:
-                logger.exception(f"Dragon backend V1 initialization failed: {e}")
+                self.logger.exception(f"Dragon backend V1 initialization failed: {e}")
                 self._initialized = False
                 raise
         return self
 
     async def _initialize(self) -> None:
         try:
-            logger.debug("Initializing Dragon backend V1 with unified queue architecture...")
+            self.logger.debug("Initializing Dragon backend V1 with unified queue architecture...")
             await self._initialize_dragon()
 
             # Initialize system allocation
-            logger.debug("Creating System allocation...")
+            self.logger.debug("Creating System allocation...")
             self._system_alloc = System()
             nnodes = self._system_alloc.nnodes
-            logger.debug(f"System allocation created with {nnodes} nodes")
+            self.logger.debug(f"System allocation created with {nnodes} nodes")
 
             # Initialize DDict (optional - only for large results)
-            logger.debug("Creating DDict")
+            self.logger.debug("Creating DDict")
             if not self._ddict:
                 self._ddict = DDict(
                     n_nodes=nnodes,
@@ -1798,48 +1806,48 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
                     working_set_size=4,
                     timeout=200,
                 )
-            logger.debug("DDict created successfully")
+            self.logger.debug("DDict created successfully")
 
             # Initialize global result queue (unified for all task types)
-            logger.debug("Creating unified result queue...")
+            self.logger.debug("Creating unified result queue...")
             self._result_queue = Queue()
-            logger.debug("Result queue created successfully")
+            self.logger.debug("Result queue created successfully")
 
             # Initialize shared memory manager
-            self._shared_memory = SharedMemoryManagerV1(self._ddict, self._system_alloc, logger)
+            self._shared_memory = SharedMemoryManagerV1(self._ddict, self._system_alloc, self.logger)
             await self._shared_memory.initialize()
 
             # Initialize utilities
             self._result_collector = ResultCollectorV1(
-                self._shared_memory, self._result_queue, logger
+                self._shared_memory, self._result_queue, self.logger
             )
             self._task_launcher = TaskLauncherV1(
-                self._ddict, self._result_queue, self._working_dir, logger
+                self._ddict, self._result_queue, self._working_dir, self.logger
             )
 
             # Start task monitoring
-            logger.debug("Starting unified task monitoring...")
+            self.logger.debug("Starting unified task monitoring...")
             self._monitor_task = asyncio.create_task(self._monitor_tasks())
             await asyncio.sleep(0.1)
 
-            logger.info(
+            self.logger.info(
                 f"Dragon backend V1 initialized with {self._slots} slots, "
                 f"unified queue architecture"
             )
         except Exception as e:
-            logger.exception(f"Failed to initialize Dragon backend V1: {str(e)}")
+            self.logger.exception(f"Failed to initialize Dragon backend V1: {str(e)}")
             raise
 
     async def _initialize_dragon(self):
         """Ensure start method is 'dragon' and proceed."""
         try:
             current_method = mp.get_start_method()
-            logger.debug(f"Current multiprocessing start method: {current_method}")
+            self.logger.debug(f"Current multiprocessing start method: {current_method}")
             if current_method != "dragon":
                 mp.set_start_method("dragon", force=True)
         except RuntimeError:
             pass
-        logger.debug("Dragon backend V1 active with unified queue-based architecture.")
+        self.logger.debug("Dragon backend V1 active with unified queue-based architecture.")
 
     def get_task_states_map(self):
         return StateMapper(backend=self)
@@ -1850,7 +1858,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
         # Set backend state to RUNNING when tasks are submitted
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
-            logger.debug(f"Backend state set to: {self._backend_state.value}")
+            self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
         for task in tasks:
             # Validate task
@@ -1876,7 +1884,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
 
         # Wait for available slots
         while self._free_slots < ranks:
-            logger.debug(f"Waiting for {ranks} slots for task {uid}, {self._free_slots} free")
+            self.logger.debug(f"Waiting for {ranks} slots for task {uid}, {self._free_slots} free")
             await asyncio.sleep(0.1)
 
         self._free_slots -= ranks
@@ -1896,7 +1904,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
 
     async def _monitor_tasks(self) -> None:
         """Monitor running tasks with unified queue consumption."""
-        logger.debug("Monitor task started")
+        self.logger.debug("Monitor task started")
         while not self._shutdown_event.is_set():
             try:
                 # Batch consume queue results (unified for all task types)
@@ -1938,7 +1946,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
                 await asyncio.sleep(0.01)  # Short sleep for responsiveness
 
             except Exception as e:
-                logger.exception(f"Error in task monitoring: {e}")
+                self.logger.exception(f"Error in task monitoring: {e}")
                 await asyncio.sleep(1)
 
     async def cancel_task(self, uid: str) -> bool:
@@ -1964,12 +1972,12 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
                     if isinstance(task_result, DataReferenceV1):
                         self._shared_memory.cleanup_reference(task_result)
                 except Exception as e:
-                    logger.warning(f"Error cleaning up references for task {uid}: {e}")
+                    self.logger.warning(f"Error cleaning up references for task {uid}: {e}")
 
             return success
 
         except Exception as e:
-            logger.exception(f"Error cancelling task {uid}: {e}")
+            self.logger.exception(f"Error cancelling task {uid}: {e}")
             return False
 
     async def _cancel_task_by_info(self, task_info: TaskInfoV1) -> bool:
@@ -2107,7 +2115,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
         try:
             # Set backend state to SHUTDOWN
             self._backend_state = BackendMainStates.SHUTDOWN
-            logger.debug(f"Backend state set to: {self._backend_state.value}")
+            self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
             self._shutdown_event.set()
             await self.cancel_all_tasks()
@@ -2117,7 +2125,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
                 if self._result_queue:
                     self._result_queue.put("SHUTDOWN", block=False)
             except Exception as e:
-                logger.warning(f"Error signaling queue shutdown: {e}")
+                self.logger.warning(f"Error signaling queue shutdown: {e}")
 
             # Stop monitoring task
             if self._monitor_task and not self._monitor_task.done():
@@ -2135,9 +2143,9 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
                         except:
                             break
                     self._result_queue = None
-                logger.debug("Result queue cleaned up")
+                self.logger.debug("Result queue cleaned up")
             except Exception as e:
-                logger.warning(f"Error cleaning up result queue: {e}")
+                self.logger.warning(f"Error cleaning up result queue: {e}")
 
             # Clean up DDict
             try:
@@ -2145,22 +2153,22 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
                     self._ddict.clear()
                     self._ddict.destroy()
                     self._ddict = None
-                logger.debug("DDict cleaned up and destroyed")
+                self.logger.debug("DDict cleaned up and destroyed")
             except Exception as e:
-                logger.warning(f"Error cleaning up DDict: {e}")
+                self.logger.warning(f"Error cleaning up DDict: {e}")
 
             # Clean up system allocation
             try:
                 if self._system_alloc:
                     self._system_alloc = None
-                logger.debug("System allocation cleaned up")
+                self.logger.debug("System allocation cleaned up")
             except Exception as e:
-                logger.warning(f"Error cleaning up system allocation: {e}")
+                self.logger.warning(f"Error cleaning up system allocation: {e}")
 
-            logger.info("Dragon execution backend V1 shutdown complete")
+            self.logger.info("Dragon execution backend V1 shutdown complete")
 
         except Exception as e:
-            logger.exception(f"Error during shutdown: {e}")
+            self.logger.exception(f"Error during shutdown: {e}")
         finally:
             self.tasks.clear()
             self._running_tasks.clear()
@@ -2258,6 +2266,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
         super().__init__()
 
+        self.logger = _get_logger()
         self.tasks: dict[str, dict[str, Any]] = {}
         self.session = Session()
         self._callback_func: Callable = self._internal_callback
@@ -2320,7 +2329,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         else:
             # No workers specified - create default compute worker
             slots = int(resources.get("slots", mp.cpu_count() or 1))
-            logger.info(f"No workers specified, creating default compute worker with {slots} slots")
+            self.logger.info(f"No workers specified, creating default compute worker with {slots} slots")
             return [
                 WorkerGroupConfigV2(
                     name="default_worker",
@@ -2343,27 +2352,27 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         """
         if not self._initialized:
             try:
-                logger.debug("Starting Dragon backend V2 async initialization...")
+                self.logger.debug("Starting Dragon backend V2 async initialization...")
 
                 # Step 1: Register backend states
-                logger.debug("Registering backend states...")
+                self.logger.debug("Registering backend states...")
                 StateMapper.register_backend_states_with_defaults(backend=self)
 
                 # Step 2: Register task states
-                logger.debug("Registering task states...")
+                self.logger.debug("Registering task states...")
                 StateMapper.register_backend_tasks_states_with_defaults(backend=self)
 
                 # Step 3: Set backend state to INITIALIZED
                 self._backend_state = BackendMainStates.INITIALIZED
-                logger.debug(f"Backend state set to: {self._backend_state.value}")
+                self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
                 # Step 4: Initialize backend components
                 await self._initialize()
                 self._initialized = True
-                logger.info("Dragon backend V2 fully initialized and ready")
+                self.logger.info("Dragon backend V2 fully initialized and ready")
 
             except Exception as e:
-                logger.exception(f"Dragon backend V2 initialization failed: {e}")
+                self.logger.exception(f"Dragon backend V2 initialization failed: {e}")
                 self._initialized = False
                 raise
         return self
@@ -2380,7 +2389,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
             # Initialize system
             self._system_alloc = System()
             nnodes = self._system_alloc.nnodes
-            logger.debug(f"System allocation created with {nnodes} nodes")
+            self.logger.debug(f"System allocation created with {nnodes} nodes")
 
             # Initialize DDict
             if not self._ddict:
@@ -2391,23 +2400,23 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                     working_set_size=4,
                     timeout=200,
                 )
-            logger.debug("DDict initialized")
+            self.logger.debug("DDict initialized")
 
             # Initialize shared memory manager
             self._shared_memory = SharedMemoryManagerV2(
-                self._ddict, self._system_alloc, logger, self._reference_threshold
+                self._ddict, self._system_alloc, self.logger, self._reference_threshold
             )
             await self._shared_memory.initialize()
 
             # Initialize result collector
-            self._result_collector = ResultCollectorV2(self._shared_memory, logger)
+            self._result_collector = ResultCollectorV2(self._shared_memory, self.logger)
 
             # Initialize worker pool with per-worker queues
             self._worker_pool = WorkerPoolV2(
                 self._worker_configs,
                 self._ddict,
                 self._working_dir,
-                logger,
+                self.logger,
                 self._system_alloc,
                 self._backend_id,
             )
@@ -2417,14 +2426,14 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
             self._monitor_task = asyncio.create_task(self._monitor_tasks())
             self._scheduler_task = asyncio.create_task(self._schedule_tasks())
 
-            logger.info(
+            self.logger.info(
                 f"Dragon backend V2 initialized: {len(self._worker_configs)} workers, "
                 f"{self._total_slots} total slots, {self._total_gpus} total GPUs, "
                 f"reference threshold: {self._reference_threshold} bytes"
             )
 
         except Exception as e:
-            logger.exception(f"Failed to initialize Dragon backend V2: {e}")
+            self.logger.exception(f"Failed to initialize Dragon backend V2: {e}")
             raise
 
     def get_task_states_map(self):
@@ -2436,7 +2445,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         # Set backend state to RUNNING when tasks are submitted
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
-            logger.debug(f"Backend state set to: {self._backend_state.value}")
+            self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
         for task in tasks:
             is_valid, error_msg = self._validate_task(task)
@@ -2459,7 +2468,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
         num_scheduler_workers = min(32, max(4, self._total_slots // 4))
 
-        logger.info(f"Starting parallel scheduler with {num_scheduler_workers} scheduler workers")
+        self.logger.info(f"Starting parallel scheduler with {num_scheduler_workers} scheduler workers")
 
         async def scheduler_worker(worker_id: int):
             """Individual scheduler worker."""
@@ -2537,10 +2546,10 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                         self._callback_func(task, "FAILED")
 
                 except Exception as e:
-                    logger.exception(f"Scheduler worker {worker_id}: Unexpected error: {e}")
+                    self.logger.exception(f"Scheduler worker {worker_id}: Unexpected error: {e}")
                     await asyncio.sleep(0.1)
 
-            logger.debug(
+            self.logger.debug(
                 f"Scheduler worker {worker_id} shutting down (processed {tasks_processed} tasks)"
             )
 
@@ -2549,25 +2558,25 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
             task = asyncio.create_task(scheduler_worker(worker_id))
             scheduler_tasks.append(task)
 
-        logger.info(f"Scheduler worker pool active with {num_scheduler_workers} workers")
+        self.logger.info(f"Scheduler worker pool active with {num_scheduler_workers} workers")
 
         await self._shutdown_event.wait()
 
-        logger.info("Shutdown signal received, stopping scheduler workers...")
+        self.logger.info("Shutdown signal received, stopping scheduler workers...")
 
         try:
             await asyncio.wait_for(
                 asyncio.gather(*scheduler_tasks, return_exceptions=True), timeout=10.0
             )
         except asyncio.TimeoutError:
-            logger.warning("Scheduler workers did not complete within timeout, canceling...")
+            self.logger.warning("Scheduler workers did not complete within timeout, canceling...")
             for task in scheduler_tasks:
                 if not task.done():
                     task.cancel()
 
             await asyncio.gather(*scheduler_tasks, return_exceptions=True)
 
-        logger.info("All scheduler workers stopped")
+        self.logger.info("All scheduler workers stopped")
 
     async def _apply_pinning_policy(
         self,
@@ -2594,14 +2603,14 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
         if not self._worker_pool.worker_exists(worker_hint):
             error_msg = f"Worker hint '{worker_hint}' does not exist. Available workers: {list(self._worker_pool.worker_slots.keys())}"
-            logger.error(error_msg)
+            self.logger.error(error_msg)
             task["exception"] = ValueError(error_msg)
             self._callback_func(task, "FAILED")
             return None
 
         if pinning_policy == WorkerPinningPolicyV2.AFFINITY:
             if self._worker_pool.worker_has_capacity(worker_hint, ranks, gpus_per_rank):
-                logger.debug(
+                self.logger.debug(
                     f"Task {task['uid']}: AFFINITY policy - using preferred worker {worker_hint}"
                 )
                 return worker_hint
@@ -2610,7 +2619,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                     ranks, gpus_per_rank, worker_type_hint=worker_type_hint
                 )
                 if worker_name:
-                    logger.debug(f"Task {task['uid']}: AFFINITY policy - fallback to {worker_name}")
+                    self.logger.debug(f"Task {task['uid']}: AFFINITY policy - fallback to {worker_name}")
                     return worker_name
                 while not worker_name and not self._shutdown_event.is_set():
                     await asyncio.sleep(0.01)
@@ -2620,10 +2629,10 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                 return worker_name
 
         elif pinning_policy == WorkerPinningPolicyV2.STRICT:
-            logger.debug(f"Task {task['uid']}: STRICT policy - waiting for worker {worker_hint}")
+            self.logger.debug(f"Task {task['uid']}: STRICT policy - waiting for worker {worker_hint}")
             while not self._shutdown_event.is_set():
                 if self._worker_pool.worker_has_capacity(worker_hint, ranks, gpus_per_rank):
-                    logger.debug(
+                    self.logger.debug(
                         f"Task {task['uid']}: STRICT policy - worker {worker_hint} now available"
                     )
                     return worker_hint
@@ -2631,14 +2640,14 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
             return None
 
         elif pinning_policy == WorkerPinningPolicyV2.SOFT:
-            logger.debug(
+            self.logger.debug(
                 f"Task {task['uid']}: SOFT policy - waiting {timeout}s for worker {worker_hint}"
             )
             start_time = time.time()
 
             while time.time() - start_time < timeout:
                 if self._worker_pool.worker_has_capacity(worker_hint, ranks, gpus_per_rank):
-                    logger.debug(
+                    self.logger.debug(
                         f"Task {task['uid']}: SOFT policy - worker {worker_hint} available"
                     )
                     return worker_hint
@@ -2646,7 +2655,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                 if self._shutdown_event.is_set():
                     return None
 
-            logger.debug(f"Task {task['uid']}: SOFT policy - timeout reached, using fallback")
+            self.logger.debug(f"Task {task['uid']}: SOFT policy - timeout reached, using fallback")
             worker_name = self._worker_pool.find_worker_for_task(
                 ranks, gpus_per_rank, worker_type_hint=worker_type_hint
             )
@@ -2657,12 +2666,12 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                 )
 
             if worker_name:
-                logger.debug(f"Task {task['uid']}: SOFT policy - fallback to {worker_name}")
+                self.logger.debug(f"Task {task['uid']}: SOFT policy - fallback to {worker_name}")
             return worker_name
 
         elif pinning_policy == WorkerPinningPolicyV2.EXCLUSIVE:
             if self._worker_pool.worker_has_capacity(worker_hint, ranks, gpus_per_rank):
-                logger.debug(f"Task {task['uid']}: EXCLUSIVE policy - using worker {worker_hint}")
+                self.logger.debug(f"Task {task['uid']}: EXCLUSIVE policy - using worker {worker_hint}")
                 return worker_hint
             else:
                 total_capacity = self._worker_pool.worker_slots.get(worker_hint, 0)
@@ -2681,7 +2690,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                         f"currently has insufficient free resources"
                     )
 
-                logger.error(error_msg)
+                self.logger.error(error_msg)
                 task["exception"] = ValueError(error_msg)
                 self._callback_func(task, "FAILED")
                 return None
@@ -2774,7 +2783,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                 for uid in completed_tasks:
                     # Check if task was canceled
                     if uid in self._canceled_tasks:
-                        logger.debug(f"Ignoring response for canceled task {uid}")
+                        self.logger.debug(f"Ignoring response for canceled task {uid}")
                         # Now clean it up from result collector
                         self._result_collector.cleanup_task(uid)
                         self._canceled_tasks.discard(uid)
@@ -2788,7 +2797,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
                     if task_info.canceled:
                         # Redundant check, but safe
-                        logger.debug(f"Skipping already-canceled task {uid}")
+                        self.logger.debug(f"Skipping already-canceled task {uid}")
                         self._result_collector.cleanup_task(uid)
                         self._running_tasks.pop(uid, None)
                         continue
@@ -2814,7 +2823,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
                 await asyncio.sleep(0.001)
             except Exception as e:
-                logger.exception(f"Error in task monitoring: {e}")
+                self.logger.exception(f"Error in task monitoring: {e}")
                 await asyncio.sleep(1)
 
     async def cancel_task(self, uid: str) -> bool:
@@ -2958,22 +2967,22 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         try:
             # Set backend state to SHUTDOWN
             self._backend_state = BackendMainStates.SHUTDOWN
-            logger.debug(f"Backend state set to: {self._backend_state.value}")
-            logger.info("Starting Dragon backend V2 shutdown...")
+            self.logger.debug(f"Backend state set to: {self._backend_state.value}")
+            self.logger.info("Starting Dragon backend V2 shutdown...")
             self._shutdown_event.set()
 
             # Cancel all running tasks
             canceled = await self.cancel_all_tasks()
             if canceled > 0:
-                logger.info(f"Canceled {canceled} running tasks")
+                self.logger.info(f"Canceled {canceled} running tasks")
 
             # Stop scheduler
             if self._scheduler_task and not self._scheduler_task.done():
-                logger.debug("Stopping scheduler task...")
+                self.logger.debug("Stopping scheduler task...")
                 try:
                     await asyncio.wait_for(self._scheduler_task, timeout=5.0)
                 except asyncio.TimeoutError:
-                    logger.warning("Scheduler task timeout, canceling...")
+                    self.logger.warning("Scheduler task timeout, canceling...")
                     self._scheduler_task.cancel()
                     try:
                         await self._scheduler_task
@@ -2982,11 +2991,11 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
             # Stop monitoring
             if self._monitor_task and not self._monitor_task.done():
-                logger.debug("Stopping monitor task...")
+                self.logger.debug("Stopping monitor task...")
                 try:
                     await asyncio.wait_for(self._monitor_task, timeout=5.0)
                 except asyncio.TimeoutError:
-                    logger.warning("Monitor task timeout, canceling...")
+                    self.logger.warning("Monitor task timeout, canceling...")
                     self._monitor_task.cancel()
                     try:
                         await self._monitor_task
@@ -2995,24 +3004,22 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
             # Shutdown worker pool (this waits for worker processes to exit)
             if self._worker_pool:
-                logger.debug("Shutting down worker pool...")
                 await self._worker_pool.shutdown()
-                logger.debug("Worker pool shutdown complete")
 
             # Clean up DDict
             if self._ddict:
                 try:
-                    logger.debug("Cleaning up DDict...")
+                    self.logger.debug("Cleaning up DDict...")
                     self._ddict.clear()
                     self._ddict.destroy()
-                    logger.debug("DDict cleanup complete")
+                    self.logger.debug("DDict cleanup complete")
                 except Exception as e:
-                    logger.warning(f"Error cleaning up DDict: {e}")
+                    self.logger.warning(f"Error cleaning up DDict: {e}")
 
-            logger.info("Dragon backend V2 shutdown complete")
+            self.logger.info("Dragon backend V2 shutdown complete")
 
         except Exception as e:
-            logger.exception(f"Error during shutdown: {e}")
+            self.logger.exception(f"Error during shutdown: {e}")
         finally:
             self.tasks.clear()
             self._running_tasks.clear()
@@ -3053,6 +3060,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
 
         super().__init__()
 
+        self.logger = _get_logger()
         self.batch = Batch(
             num_workers=num_workers or 0,
             disable_telem=disable_telemetry,
@@ -3077,7 +3085,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
 
         self._shutdown_event = threading.Event()
 
-        logger.info(
+        self.logger.info(
             f"DragonExecutionBackendV3: {self.batch.num_workers} workers, "
             f"{self.batch.num_managers} managers"
         )
@@ -3096,26 +3104,26 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         """
         if not self._initialized:
             try:
-                logger.debug("Starting Dragon backend V3 async initialization...")
+                self.logger.debug("Starting Dragon backend V3 async initialization...")
 
                 # Step 1: Register backend states
-                logger.debug("Registering backend states...")
+                self.logger.debug("Registering backend states...")
                 StateMapper.register_backend_states_with_defaults(backend=self)
 
                 # Step 2: Register task states
-                logger.debug("Registering task states...")
+                self.logger.debug("Registering task states...")
                 StateMapper.register_backend_tasks_states_with_defaults(backend=self)
 
                 # Step 3: Set backend state to INITIALIZED
                 self._backend_state = BackendMainStates.INITIALIZED
-                logger.debug(f"Backend state set to: {self._backend_state.value}")
+                self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
                 # Step 4: Initialize backend components (V3 is already initialized in __init__)
                 self._initialized = True
-                logger.info("Dragon backend V3 fully initialized and ready")
+                self.logger.info("Dragon backend V3 fully initialized and ready")
 
             except Exception as e:
-                logger.exception(f"Dragon backend V3 initialization failed: {e}")
+                self.logger.exception(f"Dragon backend V3 initialization failed: {e}")
                 self._initialized = False
                 raise
         return self
@@ -3129,10 +3137,10 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         try:
             # Check for shutdown before starting wait
             if self._shutdown_event.is_set():
-                logger.debug(f"Shutdown detected, aborting wait for tasks: {task_uids}")
+                self.logger.debug(f"Shutdown detected, aborting wait for tasks: {task_uids}")
                 return
 
-            logger.debug(f"Waiting for batch with tasks: {task_uids}")
+            self.logger.debug(f"Waiting for batch with tasks: {task_uids}")
             # Wait for batch with timeout to allow periodic shutdown checks
             while True:
                 try:
@@ -3143,42 +3151,42 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
 
                 # Check if shutdown was requested during wait
                 if self._shutdown_event.is_set():
-                    logger.debug(f"Shutdown detected during batch wait for tasks: {task_uids}")
+                    self.logger.debug(f"Shutdown detected during batch wait for tasks: {task_uids}")
                     return
 
-            logger.debug(f"Batch wait completed for tasks: {task_uids}")
+            self.logger.debug(f"Batch wait completed for tasks: {task_uids}")
 
             # Get results for all tasks
             for uid in task_uids:
                 task_info = self._task_registry.get(uid)
                 if not task_info:
-                    logger.warning(f"Task {uid} not found in registry")
+                    self.logger.warning(f"Task {uid} not found in registry")
                     continue
 
                 if uid in self._cancelled_tasks:
-                    logger.debug(f"Skipping cancelled task {uid}")
+                    self.logger.debug(f"Skipping cancelled task {uid}")
                     continue
 
                 batch_task = task_info["batch_task"]
                 task_desc = task_info["description"]
 
                 try:
-                    logger.debug(f"Getting stdout for task {uid}")
+                    self.logger.debug(f"Getting stdout for task {uid}")
                     # Always try to get stdout first (success/failure)
                     # May be None for failed Python functions
                     stdout = batch_task.stdout.get()
                     task_desc["stdout"] = stdout if stdout is not None else ""
 
-                    logger.debug(f"Getting result for task {uid}")
+                    self.logger.debug(f"Getting result for task {uid}")
                     # This raises if task failed
                     result = batch_task.result.get()
                     task_desc["return_value"] = result
-                    logger.debug(f"Task {uid} completed successfully")
+                    self.logger.debug(f"Task {uid} completed successfully")
                     self._callback_func(task_desc, "DONE")
 
                 except Exception as e:
                     # Task failed - result.get() raised
-                    logger.exception(f"Task {uid} failed with exception: {e}")
+                    self.logger.exception(f"Task {uid} failed with exception: {e}")
                     task_desc["exception"] = e
 
                     # Try to get stderr, but may be None for failed tasks
@@ -3193,7 +3201,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
 
         except Exception as e:
             # Batch-level failure (wait() failed or catastrophic error)
-            logger.error(f"Batch wait failed: {e}", exc_info=True)
+            self.logger.error(f"Batch wait failed: {e}", exc_info=True)
 
             for uid in task_uids:
                 task_info = self._task_registry.get(uid)
@@ -3210,7 +3218,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         # Set backend state to RUNNING when tasks are submitted
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
-            logger.debug(f"Backend state set to: {self._backend_state.value}")
+            self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
         # Create Batch tasks (don't start yet)
         batch_tasks = []
@@ -3221,7 +3229,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
                 batch_task = await self.build_task(task)
                 batch_tasks.append(batch_task)
             except Exception as e:
-                logger.error(f"Failed to create task {task.get('uid')}: {e}", exc_info=True)
+                self.logger.error(f"Failed to create task {task.get('uid')}: {e}", exc_info=True)
                 task["exception"] = e
                 self._callback_func(task, "FAILED")
 
@@ -3236,7 +3244,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         # Start the batch
         compiled_tasks.start()
 
-        logger.info(f"Submitted batch of {len(batch_tasks)} tasks for execution")
+        self.logger.info(f"Submitted batch of {len(batch_tasks)} tasks for execution")
 
         # Launch thread to wait for completion
         self._wait_executor.submit(self._wait_for_batch, compiled_tasks, task_uids)
@@ -3348,7 +3356,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
             "batch_task": batch_task,
         }
 
-        logger.debug(f"Created {execution_mode} task: {uid}")
+        self.logger.debug(f"Created {execution_mode} task: {uid}")
 
         return batch_task
 
@@ -3390,36 +3398,36 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
 
         # Set backend state to SHUTDOWN
         self._backend_state = BackendMainStates.SHUTDOWN
-        logger.debug(f"Backend state set to: {self._backend_state.value}")
-        logger.info("Shutting down V3 backend")
+        self.logger.debug(f"Backend state set to: {self._backend_state.value}")
+        self.logger.info("Shutting down V3 backend")
         self._shutdown_event.set()
 
         # Close Batch FIRST to unblock waiting threads
         if self.batch:
             try:
-                logger.debug("Closing batch...")
+                self.logger.debug("Closing batch...")
                 self.batch.close()
                 self.batch.join(timeout=10.0)
-                logger.debug("Batch closed successfully")
+                self.logger.debug("Batch closed successfully")
             except Exception as e:
-                logger.warning(f"Error closing batch gracefully: {e}")
+                self.logger.warning(f"Error closing batch gracefully: {e}")
                 try:
-                    logger.debug("Attempting to terminate batch...")
+                    self.logger.debug("Attempting to terminate batch...")
                     self.batch.terminate()
                 except Exception as te:
-                    logger.warning(f"Error terminating batch: {te}")
+                    self.logger.warning(f"Error terminating batch: {te}")
 
         # Give threads a moment to detect batch closure and exit cleanly
         time.sleep(0.5)
 
         # Now shutdown wait executor - threads should be unblocked
-        logger.debug("Shutting down wait executor...")
+        self.logger.debug("Shutting down wait executor...")
         self._wait_executor.shutdown(wait=False)
-        logger.debug("Wait executor shutdown complete")
+        self.logger.debug("Wait executor shutdown complete")
 
         self._task_registry.clear()
         self._state = "idle"
-        logger.info("Shutdown V3 complete")
+        self.logger.info("Shutdown V3 complete")
 
     # Batch features
     def fence(self):

@@ -30,7 +30,13 @@ except ImportError:
     ru = None
 
 
-logger = logging.getLogger(__name__)
+def _get_logger() -> logging.Logger:
+    """Get logger for radical_pilot backend module.
+
+    This function provides lazy logger evaluation, ensuring the logger
+    is created after the user has configured logging, not at module import time.
+    """
+    return logging.getLogger(__name__)
 
 
 def service_ready_callback(future: asyncio.Future, task, state) -> None:
@@ -157,6 +163,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
 
         super().__init__()
 
+        self.logger = _get_logger()
         self.resources = resources or {
             "resource": "local.localhost",
             "runtime": 30, "exit_on_error": True, "cores": os.cpu_count()}
@@ -185,11 +192,11 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         if not self._initialized:
             try:
                 # Step 1: Register backend states
-                logger.debug("Registering backend states...")
+                self.logger.debug("Registering backend states...")
                 StateMapper.register_backend_states_with_defaults(backend=self)
 
                 # Step 2: Register task states
-                logger.debug("Registering task states...")
+                self.logger.debug("Registering task states...")
                 # Radical Pilot has custom states
                 StateMapper.register_backend_tasks_states(
                     backend=self,
@@ -201,15 +208,15 @@ class RadicalExecutionBackend(BaseExecutionBackend):
 
                 # Step 3: Set backend state to INITIALIZED
                 self._backend_state = BackendMainStates.INITIALIZED
-                logger.debug(f"Backend state set to: {self._backend_state.value}")
+                self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
                 # Step 4: Initialize backend components
                 await self._initialize()
                 self._initialized = True
-                logger.info("RadicalPilot backend fully initialized and ready")
+                self.logger.info("RadicalPilot backend fully initialized and ready")
 
             except Exception as e:
-                logger.exception(f"RadicalPilot backend initialization failed: {e}")
+                self.logger.exception(f"RadicalPilot backend initialization failed: {e}")
                 self._initialized = False
                 raise
         return self
@@ -232,13 +239,13 @@ class RadicalExecutionBackend(BaseExecutionBackend):
 
             if self.raptor_config:
                 self.raptor_mode = True
-                logger.info("Enabling Raptor mode for RadicalExecutionBackend")
+                self.logger.info("Enabling Raptor mode for RadicalExecutionBackend")
                 self.setup_raptor_mode(self.raptor_config)
 
-            logger.info("RadicalPilot execution backend started successfully")
+            self.logger.info("RadicalPilot execution backend started successfully")
 
         except Exception as e:
-            logger.exception(f"RadicalPilot execution backend failed: {e}, terminating")
+            self.logger.exception(f"RadicalPilot execution backend failed: {e}, terminating")
             raise
 
         except (KeyboardInterrupt, SystemExit) as e:
@@ -365,7 +372,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
             if hasattr(self, "_pilot_failed"):
                 return
 
-            logger.error(f"{pilot.uid} has failed: {pilot}")
+            self.logger.error(f"{pilot.uid} has failed: {pilot}")
             self._pilot_failed = True
 
             try:
@@ -382,7 +389,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
                     if task.state != rp.DONE:
                         self._callback_func(task, rp.FAILED)
             except Exception as e:
-                logger.exception(f"Error handling pilot failure: {e}")
+                self.logger.exception(f"Error handling pilot failure: {e}")
 
     def register_callback(self, func: Callable) -> None:
         """Register a callback function for task state changes.
@@ -657,7 +664,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         # Set backend state to RUNNING when tasks are submitted
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
-            logger.debug(f"Backend state set to: {self._backend_state.value}")
+            self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
         _tasks = []
         for task in tasks:
@@ -731,10 +738,10 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         """
         # Set backend state to SHUTDOWN
         self._backend_state = BackendMainStates.SHUTDOWN
-        logger.debug(f"Backend state set to: {self._backend_state.value}")
+        self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
         self.session.close(download=True)
-        logger.info("Radical Pilot backend shutdown complete")
+        self.logger.info("Radical Pilot backend shutdown complete")
 
     async def __aenter__(self):
         """Async context manager entry."""

@@ -21,7 +21,14 @@ try:
 except ImportError:
     cloudpickle = None
 
-logger = logging.getLogger(__name__)
+
+def _get_logger() -> logging.Logger:
+    """Get logger for concurrent backend module.
+
+    This function provides lazy logger evaluation, ensuring the logger
+    is created after the user has configured logging, not at module import time.
+    """
+    return logging.getLogger(__name__)
 
 
 class ConcurrentExecutionBackend(BaseExecutionBackend):
@@ -30,9 +37,11 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
     def __init__(self, executor: Executor = None):
         super().__init__()
 
+        self.logger = _get_logger()
+
         if not executor:
             executor = ThreadPoolExecutor()
-            logger.info("No executor was provided. Falling back to default ThreadPoolExecutor")
+            self.logger.info("No executor was provided. Falling back to default ThreadPoolExecutor")
 
         if not isinstance(executor, Executor):
             err = "Executor must be ThreadPoolExecutor or ProcessPoolExecutor"
@@ -67,25 +76,25 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
         if not self._initialized:
             try:
                 # Step 1: Register backend states
-                logger.debug("Registering backend states...")
+                self.logger.debug("Registering backend states...")
                 StateMapper.register_backend_states_with_defaults(backend=self)
 
                 # Step 2: Register task states
-                logger.debug("Registering task states...")
+                self.logger.debug("Registering task states...")
                 StateMapper.register_backend_tasks_states_with_defaults(backend=self)
 
                 # Step 3: Set backend state to INITIALIZED
                 self._backend_state = BackendMainStates.INITIALIZED
-                logger.debug(f"Backend state set to: {self._backend_state.value}")
+                self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
                 # Step 4: Initialize backend components (already done in __init__)
                 self._initialized = True
 
                 executor_name = type(self.executor).__name__
-                logger.info(f"{executor_name} execution backend started successfully")
+                self.logger.info(f"{executor_name} execution backend started successfully")
 
             except Exception as e:
-                logger.exception(f"Concurrent backend initialization failed: {e}")
+                self.logger.exception(f"Concurrent backend initialization failed: {e}")
                 self._initialized = False
                 raise
         return self
@@ -192,7 +201,7 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
             result_task, state = await self._execute_task(task)
             self._callback_func(result_task, state)
         except Exception as e:
-            logger.exception(f"Error handling task {task.get('uid')}: {e}")
+            self.logger.exception(f"Error handling task {task.get('uid')}: {e}")
             raise
 
     async def submit_tasks(self, tasks: list[dict[str, Any]]) -> list[asyncio.Task]:
@@ -200,7 +209,7 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
         # Set backend state to RUNNING when tasks are submitted
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
-            logger.debug(f"Backend state set to: {self._backend_state.value}")
+            self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
         submitted_tasks = []
 
@@ -245,11 +254,11 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
         """Shutdown the executor."""
         # Set backend state to SHUTDOWN
         self._backend_state = BackendMainStates.SHUTDOWN
-        logger.debug(f"Backend state set to: {self._backend_state.value}")
+        self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
         await self.cancel_all_tasks()
         self.executor.shutdown(wait=True)
-        logger.info("Concurrent execution backend shutdown complete")
+        self.logger.info("Concurrent execution backend shutdown complete")
 
     def build_task(self, uid, task_desc, task_specific_kwargs):
         pass

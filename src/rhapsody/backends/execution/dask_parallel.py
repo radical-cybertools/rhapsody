@@ -24,7 +24,13 @@ except ImportError:
     dask = None
 
 
-logger = logging.getLogger(__name__)
+def _get_logger() -> logging.Logger:
+    """Get logger for dask backend module.
+
+    This function provides lazy logger evaluation, ensuring the logger
+    is created after the user has configured logging, not at module import time.
+    """
+    return logging.getLogger(__name__)
 
 
 class DaskExecutionBackend(BaseExecutionBackend):
@@ -54,6 +60,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
 
         super().__init__()
 
+        self.logger = _get_logger()
         self.tasks = {}
         self._client = None
         self.session = Session()
@@ -78,25 +85,25 @@ class DaskExecutionBackend(BaseExecutionBackend):
         if not self._initialized:
             try:
                 # Step 1: Register backend states
-                logger.debug("Registering backend states...")
+                self.logger.debug("Registering backend states...")
                 StateMapper.register_backend_states_with_defaults(backend=self)
 
                 # Step 2: Register task states
-                logger.debug("Registering task states...")
+                self.logger.debug("Registering task states...")
                 StateMapper.register_backend_tasks_states_with_defaults(backend=self)
 
                 # Step 3: Set backend state to INITIALIZED
                 self._backend_state = BackendMainStates.INITIALIZED
-                logger.debug(f"Backend state set to: {self._backend_state.value}")
+                self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
                 # Step 4: Initialize backend components
                 await self._initialize()
                 self._initialized = True
 
-                logger.info("Dask backend fully initialized and ready")
+                self.logger.info("Dask backend fully initialized and ready")
 
             except Exception as e:
-                logger.exception(f"Dask backend initialization failed: {e}")
+                self.logger.exception(f"Dask backend initialization failed: {e}")
                 self._initialized = False
                 raise
         return self
@@ -110,9 +117,9 @@ class DaskExecutionBackend(BaseExecutionBackend):
         try:
             self._client = await dask.Client(asynchronous=True, **self._resources)
             dashboard_link = self._client.dashboard_link
-            logger.info(f"Dask backend initialized with dashboard at {dashboard_link}")
+            self.logger.info(f"Dask backend initialized with dashboard at {dashboard_link}")
         except Exception as e:
-            logger.exception(f"Failed to initialize Dask client: {str(e)}")
+            self.logger.exception(f"Failed to initialize Dask client: {str(e)}")
             raise
 
     def register_callback(self, func: Callable) -> None:
@@ -177,7 +184,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
         # Set backend state to RUNNING when tasks are submitted
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
-            logger.debug(f"Backend state set to: {self._backend_state.value}")
+            self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
         for task in tasks:
             is_func_task = bool(task.get("function"))
@@ -336,7 +343,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
         """
         # Set backend state to SHUTDOWN
         self._backend_state = BackendMainStates.SHUTDOWN
-        logger.debug(f"Backend state set to: {self._backend_state.value}")
+        self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
         if self._client is not None:
             try:
@@ -345,12 +352,12 @@ class DaskExecutionBackend(BaseExecutionBackend):
 
                 # Close the client
                 await self._client.close()
-                logger.info("Dask client shutdown complete")
+                self.logger.info("Dask client shutdown complete")
             except Exception as e:
-                logger.exception(f"Error during shutdown: {str(e)}")
+                self.logger.exception(f"Error during shutdown: {str(e)}")
             finally:
                 self._client = None
-                logger.info("Dask execution backend shutdown complete")
+                self.logger.info("Dask execution backend shutdown complete")
 
         # Always clean up state regardless of client presence
         self.tasks.clear()

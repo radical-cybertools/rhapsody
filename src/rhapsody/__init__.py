@@ -11,6 +11,7 @@ from __future__ import annotations
 from .backends import BackendRegistry
 from .backends import discover_backends
 from .backends import get_backend
+from .logger import enable_logging
 
 __version__ = "0.1.0"
 
@@ -19,4 +20,5 @@ __all__ = [
     "get_backend",
     "discover_backends",
     "BackendRegistry",
+    "enable_logging",
 ]
