@@ -86,7 +86,7 @@ async def test_dask_backend_async_init():
 
             # Test state
             state = await backend.state()
-            assert state in ["CONNECTED", "DISCONNECTED"]
+            assert state == "INITIALIZED"
 
             # Cleanup
             await backend.shutdown()

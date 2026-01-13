@@ -11,6 +11,7 @@ from __future__ import annotations
 from .backends import BackendRegistry
 from .backends import discover_backends
 from .backends import get_backend
+from .logger import enable_logging
 
 from .resource_manager import ResourceManager, RMConfig, RMInfo
 
@@ -21,4 +22,5 @@ __all__ = [
     "get_backend",
     "discover_backends",
     "BackendRegistry",
+    "enable_logging",
 ]
