@@ -1,6 +1,5 @@
-
 __copyright__ = "Copyright 2018-2023, The RADICAL-Cybertools Team"
-__license__   = "MIT"
+__license__ = "MIT"
 
 import os
 
@@ -11,18 +10,15 @@ from .base import RMInfo
 # ------------------------------------------------------------------------------
 #
 class LSF(ResourceManager):
-
     # --------------------------------------------------------------------------
     #
     @staticmethod
     def batch_started():
-
         return bool(os.getenv("LSB_JOBID"))
 
     # --------------------------------------------------------------------------
     #
     def init_from_scratch(self, rm_info: RMInfo) -> RMInfo:
-
         # LSF hostfile format:
         #
         #     node_1
@@ -39,7 +35,7 @@ class LSF(ResourceManager):
         if not hostfile:
             raise RuntimeError("$LSB_DJOB_HOSTFILE not set")
 
-        smt   = rm_info.threads_per_core
+        smt = rm_info.threads_per_core
         nodes = self._parse_nodefile(hostfile, smt=smt)
 
         # LSF adds login and batch nodes to the hostfile (with 1 core) which
@@ -58,12 +54,11 @@ class LSF(ResourceManager):
 
         lsf_cores_per_node = self._get_cores_per_node(nodes)
         if rm_info.cores_per_node:
-            assert (rm_info.cores_per_node == lsf_cores_per_node)
+            assert rm_info.cores_per_node == lsf_cores_per_node
         else:
             rm_info.cores_per_node = lsf_cores_per_node
 
-        self._log.debug("found %d nodes with %d cores",
-                        len(nodes), rm_info.cores_per_node)
+        self._log.debug("found %d nodes with %d cores", len(nodes), rm_info.cores_per_node)
 
         # While LSF node names are unique and could serve as node uids, we
         # need an integer index later on for resource set specifications.
@@ -82,4 +77,3 @@ class LSF(ResourceManager):
 
 
 # ------------------------------------------------------------------------------
-

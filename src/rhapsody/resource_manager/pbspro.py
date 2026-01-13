@@ -1,6 +1,5 @@
-
 __copyright__ = "Copyright 2016-2023, The RADICAL-Cybertools Team"
-__license__   = "MIT"
+__license__ = "MIT"
 
 import os
 import subprocess
@@ -12,18 +11,15 @@ from .base import RMInfo
 # ------------------------------------------------------------------------------
 #
 class PBSPro(ResourceManager):
-
     # --------------------------------------------------------------------------
     #
     @staticmethod
     def batch_started():
-
         return bool(os.getenv("PBS_JOBID"))
 
     # --------------------------------------------------------------------------
     #
     def init_from_scratch(self, rm_info: RMInfo) -> RMInfo:
-
         nodes = None
 
         try:
@@ -40,14 +36,14 @@ class PBSPro(ResourceManager):
             self._log.debug_1(err_message)
 
         if not nodes:
-
             if not rm_info.cores_per_node or "PBS_NODEFILE" not in os.environ:
-                raise RuntimeError("resource configuration unknown, either "
-                                   "cores_per_node or $PBS_NODEFILE not set")
+                raise RuntimeError(
+                    "resource configuration unknown, either cores_per_node or $PBS_NODEFILE not set"
+                )
 
-            nodes = self._parse_nodefile(os.environ["PBS_NODEFILE"],
-                                         cpn=rm_info.cores_per_node,
-                                         smt=rm_info.threads_per_core)
+            nodes = self._parse_nodefile(
+                os.environ["PBS_NODEFILE"], cpn=rm_info.cores_per_node, smt=rm_info.threads_per_core
+            )
 
         rm_info.node_list = self._get_node_list(nodes, rm_info)
 
@@ -56,7 +52,6 @@ class PBSPro(ResourceManager):
     # --------------------------------------------------------------------------
     #
     def _parse_pbspro_vnodes(self) -> tuple[list[str], int]:
-
         # PBS Job ID
         jobid = os.environ.get("PBS_JOBID")
         if not jobid:
@@ -89,12 +84,12 @@ class PBSPro(ResourceManager):
             idx = rhs.find(")+(")
             node_str = rhs[1:idx]
             nodes_list.append(node_str)
-            rhs = rhs[idx + 2:]
+            rhs = rhs[idx + 2 :]
             if idx < 0:
                 break
 
         vnodes_set = set()
-        ncpus_set  = set()
+        ncpus_set = set()
         # Split out the slices into vnode name and cpu count
         for node_str in nodes_list:
             slices = node_str.split("+")
@@ -104,7 +99,7 @@ class PBSPro(ResourceManager):
                 ncpus_set.add(int(ncpus.split("=")[1]))
 
         self._log.debug_1("vnodes: %s", vnodes_set)
-        self._log.debug_1("ncpus: %s",  ncpus_set)
+        self._log.debug_1("ncpus: %s", ncpus_set)
 
         if len(ncpus_set) > 1:
             raise RuntimeError("detected vnodes of different sizes")
@@ -113,4 +108,3 @@ class PBSPro(ResourceManager):
 
 
 # ------------------------------------------------------------------------------
-

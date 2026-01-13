@@ -1,6 +1,5 @@
-
 __copyright__ = "Copyright 2016-2023, The RADICAL-Cybertools Team"
-__license__   = "MIT"
+__license__ = "MIT"
 
 
 import logging
@@ -21,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RMConfig:
-    '''
+    """
     Resource Manager configuration class.
 
     backup_nodes:     number of backup nodes (0)
@@ -32,7 +31,7 @@ class RMConfig:
     network:          network interface to use (None)
     blocked_cores:    list of blocked core indices ([])
     blocked_gpus:     list of blocked gpu indices ([])
-    '''
+    """
 
     backup_nodes: int = 0
     requested_nodes: int = 0
@@ -42,19 +41,6 @@ class RMConfig:
     network: Optional[str] = None
     blocked_cores: list[int] = field(default_factory=list)
     blocked_gpus: list[int] = field(default_factory=list)
-
-    def __post_init__(self) -> None:
-        self.verify()
-
-    def verify(self) -> None:
-        if not self.backup_nodes: self.backup_nodes = 0
-        if not self.requested_nodes:self. requested_nodes = 0
-        if not self.oversubscribe: self.oversubscribe = False
-        if not self.fake_resources: self.fake_resources = False
-        if not self.exact: self.exact = False
-        if not self.network: self.network = None
-        if not self.blocked_cores: self.blocked_cores: []
-        if not self.blocked_gpus: self.blocked_gpus: []
 
 
 @dataclass
@@ -143,23 +129,22 @@ class ResourceManager:
     """
 
     # defines for resource manager types
-    FORK    = "FORK"
-    CCM     = "CCM"
-    LSF     = "LSF"
-    PBSPRO  = "PBSPRO"
-    SLURM   = "SLURM"
-    TORQUE  = "TORQUE"
-    COBALT  = "COBALT"
-    YARN    = "YARN"
-    DEBUG   = "DEBUG"
+    FORK = "FORK"
+    CCM = "CCM"
+    LSF = "LSF"
+    PBSPRO = "PBSPRO"
+    SLURM = "SLURM"
+    TORQUE = "TORQUE"
+    COBALT = "COBALT"
+    YARN = "YARN"
+    DEBUG = "DEBUG"
 
     # defines for node states
-    FREE    = 0.0
-    BUSY    = 1.0
-    DOWN    = None
+    FREE = 0.0
+    BUSY = 1.0
+    DOWN = None
 
     def __init__(self, cfg: Optional[RMConfig] = None) -> None:
-
         self.name = type(self).__name__
         logger.debug("configuring RM %s", self.name)
 
@@ -172,13 +157,13 @@ class ResourceManager:
         self._rm_info.verify()
 
         #  FIXME RHAPSODY: where to put this?
-      # # immediately set the network interface if it was configured
-      # # NOTE: setting this here implies that no ZMQ connectio was set up
-      # #       before the ResourceManager got created!
-      # if rm_info.details.get("network"):
-      #     rc_cfg = ru.config.DefaultConfig()
-      #     rc_cfg.iface = rm_info.details["network"]
 
+    # # immediately set the network interface if it was configured
+    # # NOTE: setting this here implies that no ZMQ connectio was set up
+    # #       before the ResourceManager got created!
+    # if rm_info.details.get("network"):
+    #     rc_cfg = ru.config.DefaultConfig()
+    #     rc_cfg.iface = rm_info.details["network"]
 
     @classmethod
     def get_instance(cls, name=None, cfg: Optional[RMConfig] = None):
@@ -200,12 +185,12 @@ class ResourceManager:
         # ordered list of RMs.  SLURM is most likely, FORK is fallback if no
         # other RM is detected.
         rms = [
-            [cls.SLURM , Slurm],
+            [cls.SLURM, Slurm],
             [cls.PBSPRO, PBSPro],
             [cls.TORQUE, Torque],
             [cls.COBALT, Cobalt],
-            [cls.LSF   , LSF],
-            [cls.FORK  , Fork],
+            [cls.LSF, LSF],
+            [cls.FORK, Fork],
         ]
 
         if name:
@@ -223,7 +208,6 @@ class ResourceManager:
         else:
             rm = None
             for rm_name, rm_impl in rms:
-
                 try:
                     logger.debug("try RM %s", rm_name)
                     rm = rm_impl(cfg)
@@ -280,14 +264,13 @@ class ResourceManager:
         self._rm_info = rm_info
 
         # let the RM implementation gather resource information
-        print('initialize')
+        print("initialize")
         self._initialize()
 
         # we expect to have a valid node list now
         logger.info("node list: %s", rm_info.node_list)
 
         self._filter_nodes()
-
 
     def _filter_nodes(self, check_nodes: bool = False) -> None:
         """
@@ -299,15 +282,13 @@ class ResourceManager:
 
         # ensure that blocked resources are marked as down
         blocked_cores = rm_info.cfg.blocked_cores
-        blocked_gpus  = rm_info.cfg.blocked_gpus
+        blocked_gpus = rm_info.cfg.blocked_gpus
 
         if blocked_cores or blocked_gpus:
-
             rm_info.cores_per_node -= len(blocked_cores)
-            rm_info.gpus_per_node  -= len(blocked_gpus)
+            rm_info.gpus_per_node -= len(blocked_gpus)
 
             for node in rm_info.node_list:
-
                 for idx in blocked_cores:
                     assert len(node["cores"]) > idx
                     node["cores"][idx] = self.DOWN
@@ -318,14 +299,13 @@ class ResourceManager:
 
         assert rm_info.cfg.requested_nodes <= len(rm_info.node_list)
 
-
         # if requested, check all nodes for accessibility via ssh
         # FIXME: add configurable to limit number of concurrent ssh procs
         if check_nodes:
             procs = []
             for node in rm_info.node_list:
                 name = node["name"]
-                cmd  = f"ssh -oBatchMode=yes {name} hostname"
+                cmd = f"ssh -oBatchMode=yes {name} hostname"
                 logger.debug("check node: %s [%s]", name, cmd)
                 proc = Process(cmd)
                 proc.start()
@@ -334,19 +314,20 @@ class ResourceManager:
             ok = []
             for name, proc, node in procs:
                 proc.wait(timeout=15)
-                logger.debug("check node: %s [%s]", name,
-                                [proc.stdout, proc.stderr, proc.retcode])
+                logger.debug("check node: %s [%s]", name, [proc.stdout, proc.stderr, proc.retcode])
                 if proc.retcode is not None:
                     if not proc.retcode:
                         ok.append(node)
                 else:
-                    logger.warning("check node: %s [%s] timed out",
-                                      name, [proc.stdout, proc.stderr])
+                    logger.warning(
+                        "check node: %s [%s] timed out", name, [proc.stdout, proc.stderr]
+                    )
                     proc.cancel()
                     proc.wait(timeout=15)
                     if proc.retcode is None:
-                        logger.warning("check node: %s [%s] timed out again",
-                                           name, [proc.stdout, proc.stderr])
+                        logger.warning(
+                            "check node: %s [%s] timed out again", name, [proc.stdout, proc.stderr]
+                        )
 
             logger.warning("using %d nodes out of %d", len(ok), len(procs))
 
@@ -358,21 +339,18 @@ class ResourceManager:
 
         # reduce the node list to the requested size
         rm_info.backup_list = []
-        if rm_info.cfg.requested_nodes and \
-           len(rm_info.node_list) > rm_info.cfg.requested_nodes:
-
-            logger.debug("reduce %d nodes to %d", len(rm_info.node_list),
-                                                      rm_info.cfg.requested_nodes)
-            rm_info.node_list   = rm_info.node_list[:rm_info.cfg.requested_nodes]
-            rm_info.backup_list = rm_info.node_list[rm_info.cfg.requested_nodes:]
+        if rm_info.cfg.requested_nodes and len(rm_info.node_list) > rm_info.cfg.requested_nodes:
+            logger.debug(
+                "reduce %d nodes to %d", len(rm_info.node_list), rm_info.cfg.requested_nodes
+            )
+            rm_info.node_list = rm_info.node_list[: rm_info.cfg.requested_nodes]
+            rm_info.backup_list = rm_info.node_list[rm_info.cfg.requested_nodes :]
 
         # check if we can do any work
         if not rm_info.node_list:
             raise RuntimeError("ResourceManager has no nodes left to run tasks")
 
-    def _parse_nodefile(self, fname: str,
-                              cpn  : Optional[int] = 0,
-                              smt  : Optional[int] = 1) -> list:
+    def _parse_nodefile(self, fname: str, cpn: Optional[int] = 0, smt: Optional[int] = 1) -> list:
         """
         parse the given nodefile and return a list of tuples of the form
 
@@ -435,8 +413,7 @@ class ResourceManager:
         else:
             raise ValueError("non-uniform node list, cores_per_node invalid")
 
-    def _get_node_list(self, nodes  : list[str],
-                             rm_info: RMInfo) -> T_NODE_LIST:
+    def _get_node_list(self, nodes: list[str], rm_info: RMInfo) -> T_NODE_LIST:
         """
         From a node dict as returned by `self._parse_nodefile()`, and from
         additonal per-node information stored in rm_info, create a node list
@@ -445,13 +422,17 @@ class ResourceManager:
 
         # FIXME: use proper data structures for nodes and resources
         # keep nodes to be indexed (node_index)
-        node_list = [{"name"  : node,
-                      "index" : idx,
-                      "cores" : [self.FREE] * rm_info.cores_per_node,
-                      "gpus"  : [self.FREE] * rm_info.gpus_per_node,
-                      "lfs"   : rm_info.lfs_per_node,
-                      "mem"   : rm_info.mem_per_node}
-                     for idx, node in enumerate(nodes)]
+        node_list = [
+            {
+                "name": node,
+                "index": idx,
+                "cores": [self.FREE] * rm_info.cores_per_node,
+                "gpus": [self.FREE] * rm_info.gpus_per_node,
+                "lfs": rm_info.lfs_per_node,
+                "mem": rm_info.mem_per_node,
+            }
+            for idx, node in enumerate(nodes)
+        ]
 
         return node_list
 
@@ -501,12 +482,10 @@ class ResourceManager:
 
         idx, idx_stop = 0, len(hoststring)
         while idx != idx_stop:
-
-            comma_idx   = hoststring.find(",", idx)
+            comma_idx = hoststring.find(",", idx)
             bracket_idx = hoststring.find("[", idx)
 
             if comma_idx >= 0 and (bracket_idx == -1 or comma_idx < bracket_idx):
-
                 if host_group:
                     prefix = hoststring[idx:comma_idx]
                     if prefix:
@@ -521,7 +500,6 @@ class ResourceManager:
                 idx = comma_idx + 1
 
             elif bracket_idx >= 0 and (comma_idx == -1 or bracket_idx < comma_idx):
-
                 prefix = hoststring[idx:bracket_idx]
                 if not host_group:
                     host_group.append(prefix)
@@ -530,7 +508,7 @@ class ResourceManager:
                         host_group[h_idx] += prefix
 
                 closed_bracket_idx = hoststring.find("]", bracket_idx)
-                range_set = hoststring[(bracket_idx + 1):closed_bracket_idx]
+                range_set = hoststring[(bracket_idx + 1) : closed_bracket_idx]
 
                 host_group_ = []
                 for prefix in host_group:
@@ -540,5 +518,3 @@ class ResourceManager:
                 idx = closed_bracket_idx + 1
 
         return output
-
-

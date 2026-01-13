@@ -1,6 +1,5 @@
-
 __copyright__ = "Copyright 2016-2025, The RADICAL-Cybertools Team"
-__license__   = "MIT"
+__license__ = "MIT"
 
 import os
 
@@ -8,24 +7,23 @@ from .base import ResourceManager
 from .base import RMInfo
 
 import logging
+
 logger = logging.getLogger(__name__)
+
 
 # ------------------------------------------------------------------------------
 #
 class Slurm(ResourceManager):
-
     # --------------------------------------------------------------------------
     #
     def _initialize(self) -> RMInfo:
-
         # ensure we run in a SLURM environment
         if "SLURM_JOB_ID" not in os.environ:
             raise RuntimeError("not running in a SLURM job")
 
         rm_info = self._rm_info
 
-        node_list = os.environ.get("SLURM_NODELIST") or \
-                   os.environ.get("SLURM_JOB_NODELIST")
+        node_list = os.environ.get("SLURM_NODELIST") or os.environ.get("SLURM_JOB_NODELIST")
         if node_list is None:
             raise RuntimeError("$SLURM_*NODELIST not set")
 
@@ -47,9 +45,11 @@ class Slurm(ResourceManager):
                 # GPU IDs per node
                 # - global context: SLURM_JOB_GPUS and SLURM_STEP_GPUS
                 # - cgroup context: GPU_DEVICE_ORDINAL
-                gpu_ids = os.environ.get("SLURM_JOB_GPUS")  or \
-                          os.environ.get("SLURM_STEP_GPUS") or \
-                          os.environ.get("GPU_DEVICE_ORDINAL")
+                gpu_ids = (
+                    os.environ.get("SLURM_JOB_GPUS")
+                    or os.environ.get("SLURM_STEP_GPUS")
+                    or os.environ.get("GPU_DEVICE_ORDINAL")
+                )
                 if gpu_ids:
                     rm_info.gpus_per_node = len(gpu_ids.split(","))
 
@@ -59,4 +59,3 @@ class Slurm(ResourceManager):
 
 
 # ------------------------------------------------------------------------------
-

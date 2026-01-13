@@ -1,6 +1,5 @@
-
 __copyright__ = "Copyright 2016-2025, The RADICAL-Cybertools Team"
-__license__   = "MIT"
+__license__ = "MIT"
 
 import multiprocessing
 
@@ -9,11 +8,9 @@ from .base import RMInfo
 
 
 class Fork(ResourceManager):
-
     def _initialize(self) -> RMInfo:
-
         rm_info = self._rm_info
-        rm_cfg  = rm_info.cfg
+        rm_cfg = rm_info.cfg
 
         rm_info.cores_per_node = multiprocessing.cpu_count()
 
@@ -24,8 +21,6 @@ class Fork(ResourceManager):
         if n_nodes > 1 and not fake_resources:
             raise ValueError("1 out of {n_nodes} nodes found (fake disabled)")
 
-        nodes = [("localhost", rm_info.cores_per_node)
-                   for _ in range(n_nodes)]
+        nodes = [("localhost", rm_info.cores_per_node) for _ in range(n_nodes)]
 
         rm_info.node_list = self._get_node_list(nodes, rm_info)
-

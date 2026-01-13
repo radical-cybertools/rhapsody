@@ -1,6 +1,5 @@
-
-__copyright__ = 'Copyright 2016-2021, The RADICAL-Cybertools Team'
-__license__   = 'MIT'
+__copyright__ = "Copyright 2016-2021, The RADICAL-Cybertools Team"
+__license__ = "MIT"
 
 
 from .base import ResourceManager
@@ -12,4 +11,3 @@ __all__ = [
     "RMInfo",
     "ResourceManager",
 ]
-
