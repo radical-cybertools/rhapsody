@@ -1,6 +1,6 @@
 import asyncio
 import time
-from rhapsody.backends.execution.dragon import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackendV3
 
 from radical.asyncflow import WorkflowEngine
 
