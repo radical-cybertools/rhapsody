@@ -446,9 +446,6 @@ class RadicalExecutionBackend(BaseExecutionBackend):
             if 'exception' in rp_task_dict and state == rp.FAILED:
                 original_task['exception'] = rp_task_dict['exception']
 
-            # Set state on the original Task object
-            original_task['state'] = state
-
             # Call the registered callback with the original Task object
             func(original_task, state, service_callback=service_callback)
 

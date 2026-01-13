@@ -5,6 +5,9 @@ allowing fine-grained error handling and differentiation between backend failure
 and task-level issues.
 """
 
+from __future__ import annotations
+
+
 
 class RhapsodyError(Exception):
     """Base exception class for all RHAPSODY errors."""

@@ -7,7 +7,7 @@ infrastructures.
 from __future__ import annotations
 
 from .base import BaseExecutionBackend
-from .base import Session
+from rhapsody.api.session import Session
 from .constants import StateMapper
 from .constants import TasksMainStates
 from .discovery import BackendRegistry

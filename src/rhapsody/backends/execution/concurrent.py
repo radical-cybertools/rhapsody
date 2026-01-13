@@ -13,7 +13,6 @@ from typing import Any
 from typing import Callable
 
 from ..base import BaseExecutionBackend
-from ..base import Session
 from ..constants import StateMapper, BackendMainStates
 
 try:
@@ -55,8 +54,7 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
 
         self.executor = executor
         self.tasks: dict[str, asyncio.Task] = {}
-        self.session = Session()
-        self._callback_func: Callable = self._internal_callback
+        self._callback_func: Callable = lambda t, s: None
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
 
@@ -200,7 +198,6 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
         try:
             result_task, state = await self._execute_task(task)
             # Set state on the task object itself before callback
-            result_task['state'] = state
             self._callback_func(result_task, state)
         except Exception as e:
             self.logger.exception(f"Error handling task {task.get('uid')}: {e}")
@@ -239,7 +236,6 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
             future = task["future"]
             if future and future.cancel():
                 # Set state on the task object itself before callback
-                task['state'] = 'CANCELED'
                 self._callback_func(task, "CANCELED")
                 return True
         return False

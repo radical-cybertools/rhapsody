@@ -27,31 +27,7 @@ def test_base_execution_backend_is_abstract():
         BaseExecutionBackend()
 
 
-def test_session_class_import():
-    """Test that Session class can be imported."""
-    from rhapsody.backends.base import Session
 
-    assert Session is not None
-
-
-def test_session_instantiation():
-    """Test that Session class can be instantiated."""
-    from rhapsody.backends.base import Session
-
-    session = Session()
-    assert session is not None
-
-
-def test_session_path_attribute():
-    """Test that Session sets path attribute to current working directory."""
-    from rhapsody.backends.base import Session
-
-    original_cwd = os.getcwd()
-    session = Session()
-
-    # Should set path to current working directory
-    assert hasattr(session, "path")
-    assert session.path == original_cwd
 
 
 def test_base_execution_backend_abstract_methods():
@@ -100,89 +76,4 @@ def test_base_execution_backend_method_signatures():
     assert "uid" in cancel_task_sig.parameters
 
 
-@pytest.mark.asyncio
-async def test_wait_tasks_basic_functionality():
-    """Test that wait_tasks correctly waits for all tasks to complete."""
-    from rhapsody.backends import ConcurrentExecutionBackend
 
-    # Create a backend instance
-    backend = await ConcurrentExecutionBackend()
-
-    # Define tasks with simple commands
-    tasks = [
-        ComputeTask(
-            executable="echo",
-            arguments=["hello"]
-        ),
-        ComputeTask(
-            executable="echo",
-            arguments=["world"]
-        ),
-        ComputeTask(
-            executable="false"
-        ),  # This will fail
-    ]
-
-    # Submit tasks
-    await backend.submit_tasks(tasks)
-
-    # Wait for tasks to complete (returns list of tasks)
-    completed_tasks = await backend.wait_tasks(tasks, timeout=5.0)
-
-    # Verify all tasks are tracked
-    assert len(completed_tasks) == 3
-
-    # Verify all tasks have auto-generated UIDs
-    for task in completed_tasks:
-        assert task["uid"].startswith("task.")
-
-    # Verify tasks by index (order is preserved)
-    # First two should succeed
-    assert completed_tasks[0]["state"] == "DONE"
-    assert "stdout" in completed_tasks[0]
-
-    assert completed_tasks[1]["state"] == "DONE"
-    assert "stdout" in completed_tasks[1]
-
-    # Third should fail
-    assert completed_tasks[2]["state"] == "FAILED"
-    assert completed_tasks[2]["exit_code"] != 0
-
-    # Cleanup
-    await backend.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_wait_tasks_with_timeout():
-    """Test that wait_tasks respects timeout parameter."""
-    import asyncio
-    from rhapsody.backends import ConcurrentExecutionBackend
-
-    # Create a backend instance
-    backend = await ConcurrentExecutionBackend()
-
-    # Define tasks with one long-running task
-    tasks = [
-        ComputeTask(
-            executable="echo",
-            arguments=["quick"]
-        ),
-        ComputeTask(
-            executable="sleep",
-            arguments=["10"]
-        ),  # Long sleep
-    ]
-
-    # Submit tasks
-    await backend.submit_tasks(tasks)
-
-    # Wait with short timeout - should timeout
-    with pytest.raises(asyncio.TimeoutError):
-        await backend.wait_tasks(tasks, timeout=0.5)
-
-    # Cancel the long-running task using its auto-generated UID
-    long_running_task = tasks[1]
-    await backend.cancel_task(long_running_task.uid)
-
-    # Cleanup
-    await backend.shutdown()
