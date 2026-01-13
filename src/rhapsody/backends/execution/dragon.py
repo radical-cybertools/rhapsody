@@ -1865,6 +1865,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
             is_valid, error_msg = self._validate_task(task)
             if not is_valid:
                 task["exception"] = ValueError(error_msg)
+                task['state'] = 'FAILED'
                 self._callback_func(task, "FAILED")
                 continue
 
@@ -1874,6 +1875,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
                 await self._submit_task(task)
             except Exception as e:
                 task["exception"] = e
+                task['state'] = 'FAILED'
                 self._callback_func(task, "FAILED")
 
     async def _submit_task(self, task: dict[str, Any]) -> None:
@@ -1896,6 +1898,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
             # Launch task using unified launcher
             task_info = await self._task_launcher.launch_task(task)
             self._running_tasks[uid] = task_info
+            task['state'] = 'RUNNING'
             self._callback_func(task, "RUNNING")
 
         except Exception:
@@ -1931,10 +1934,13 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
 
                             # Determine task status and notify callback
                             if task.get("canceled", False):
+                                task['state'] = 'CANCELED'
                                 self._callback_func(task, "CANCELED")
                             elif task.get("exception") or task.get("exit_code", 0) != 0:
+                                task['state'] = 'FAILED'
                                 self._callback_func(task, "FAILED")
                             else:
+                                task['state'] = 'DONE'
                                 self._callback_func(task, "DONE")
 
                         # Free up slots
@@ -2451,6 +2457,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
             is_valid, error_msg = self._validate_task(task)
             if not is_valid:
                 task["exception"] = ValueError(error_msg)
+                task['state'] = 'FAILED'
                 self._callback_func(task, "FAILED")
                 continue
 
@@ -2461,6 +2468,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                 await self._pending_tasks.put(task)
             except Exception as e:
                 task["exception"] = e
+                task['state'] = 'FAILED'
                 self._callback_func(task, "FAILED")
 
     async def _schedule_tasks(self) -> None:
@@ -2543,6 +2551,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                             worker_name, ranks, gpu_allocations
                         )
                         task["exception"] = e
+                        task['state'] = 'FAILED'
                         self._callback_func(task, "FAILED")
 
                 except Exception as e:
@@ -2760,6 +2769,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                 start_time=time.time(),
             )
 
+            task['state'] = 'RUNNING'
             self._callback_func(task, "RUNNING")
 
         except Exception:
@@ -2815,8 +2825,10 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
                         # Send appropriate callback
                         if task.get("exception") or task.get("exit_code", 0) != 0:
+                            task['state'] = 'FAILED'
                             self._callback_func(task, "FAILED")
                         else:
+                            task['state'] = 'DONE'
                             self._callback_func(task, "DONE")
 
                     self._running_tasks.pop(uid, None)
@@ -2846,6 +2858,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         # Send immediate CANCELED callback
         task = self.tasks.get(uid)
         if task:
+            task['state'] = 'CANCELED'
             self._callback_func(task, "CANCELED")
 
         # Release resources
@@ -3182,6 +3195,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
                     result = batch_task.result.get()
                     task_desc["return_value"] = result
                     self.logger.debug(f"Task {uid} completed successfully")
+                    task_desc['state'] = 'DONE'
                     self._callback_func(task_desc, "DONE")
 
                 except Exception as e:
@@ -3197,6 +3211,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
                         stderr = str(e)
 
                     task_desc["stderr"] = stderr
+                    task_desc['state'] = 'FAILED'
                     self._callback_func(task_desc, "FAILED")
 
         except Exception as e:
@@ -3208,6 +3223,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
                 if task_info:
                     task_info["description"]["exception"] = e
                     task_info["description"]["stderr"] = str(e)
+                    task_info["description"]['state'] = 'FAILED'
                     self._callback_func(task_info["description"], "FAILED")
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
@@ -3231,6 +3247,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
             except Exception as e:
                 self.logger.error(f"Failed to create task {task.get('uid')}: {e}", exc_info=True)
                 task["exception"] = e
+                task['state'] = 'FAILED'
                 self._callback_func(task, "FAILED")
 
             task_uids.append(task["uid"])
@@ -3352,7 +3369,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         # Register and return
         self._task_registry[uid] = {
             "uid": uid,
-            "description": task.copy(),
+            "description": task,
             "batch_task": batch_task,
         }
 
@@ -3387,7 +3404,9 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         # NOTE: dragon.batch does not expose nor support
         # process/function/job cancellation, we just notify
         # the asyncflow that the task is cancelled so not to block the flow
-        self._callback_func(self._task_registry[uid]["description"], "CANCELED")
+        task = self._task_registry[uid]["description"]
+        task['state'] = 'CANCELED'
+        self._callback_func(task, "CANCELED")
         self._cancelled_tasks.append(uid)
 
         return True

@@ -9,8 +9,12 @@ from __future__ import annotations
 import os
 from abc import ABC
 from abc import abstractmethod
+from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
+
+if TYPE_CHECKING:
+    from rhapsody.api import BaseTask
 
 
 class BaseExecutionBackend(ABC):
@@ -29,9 +33,10 @@ class BaseExecutionBackend(ABC):
         """Submit a list of tasks for execution.
 
         Args:
-            tasks: A list of dictionaries containing task definitions and metadata.
-                Each task dictionary should contain the necessary information for
-                task execution.
+            tasks: A list of task dictionaries containing task definitions.
+                Task objects (ComputeTask, AITask) inherit from dict and can be
+                passed directly. Each task should contain the necessary information
+                for task execution.
         """
         pass
 
@@ -78,6 +83,7 @@ class BaseExecutionBackend(ABC):
         internal = self._internal_callback
 
         def chained_callback(task, state):
+            print(state)
             internal(task, state)  # Always track for wait_tasks()
             func(task, state)      # User's callback
 
@@ -149,8 +155,14 @@ class BaseExecutionBackend(ABC):
         """
         raise NotImplementedError("Not implemented in the base backend")
 
-    def _internal_callback(self, task: dict, state: str) -> None:
-        """Internal callback that tracks all task state changes."""
+    def _internal_callback(self, task: dict, state: str, **kwargs) -> None:
+        """Internal callback that tracks all task state changes.
+
+        Args:
+            task: Task dictionary
+            state: Task state
+            **kwargs: Additional backend-specific parameters (e.g., service_callback for RADICAL Pilot)
+        """
         self._internal_results.append((task, state))
 
     async def wait_tasks(
@@ -166,7 +178,8 @@ class BaseExecutionBackend(ABC):
 
         Args:
             tasks: List of task dictionaries that were submitted.
-                   Each task dict must contain a 'uid' field.
+                   Task objects (ComputeTask, AITask) can be passed directly as they
+                   inherit from dict. Each task must have a 'uid' field.
             timeout: Optional timeout in seconds. If None, waits indefinitely.
                     Raises asyncio.TimeoutError if timeout is reached.
             sleep_interval: Seconds to sleep when no progress is detected (default: 0.1).
@@ -211,15 +224,15 @@ class BaseExecutionBackend(ABC):
 
         num_tasks = len(tasks)
 
-        # Extract task UIDs for tracking
         task_uids = set()
         for task in tasks:
             if "uid" not in task:
                 raise ValueError(f"Task missing 'uid' field: {task}")
-            task_uids.add(task["uid"])
+            uid = task["uid"]
+            task_uids.add(uid)
 
-        # Track finished tasks: uid -> task_dict (with state added)
-        finished_tasks = {}
+        # Track which tasks have finished
+        finished_uids = set()
 
         # Track processed result indices to avoid re-processing
         processed_index = 0
@@ -227,13 +240,13 @@ class BaseExecutionBackend(ABC):
         # Timeout handling
         start_time = asyncio.get_event_loop().time() if timeout else None
 
-        while len(finished_tasks) < num_tasks:
+        while len(finished_uids) < num_tasks:
             # Check timeout
             if timeout is not None:
                 elapsed = asyncio.get_event_loop().time() - start_time
                 if elapsed >= timeout:
                     raise asyncio.TimeoutError(
-                        f"Timeout after {timeout}s: {len(finished_tasks)}/{num_tasks} tasks completed"
+                        f"Timeout after {timeout}s: {len(finished_uids)}/{num_tasks} tasks completed"
                     )
 
             # Process new results only (from processed_index onwards)
@@ -249,19 +262,18 @@ class BaseExecutionBackend(ABC):
                 if (
                     state in self._terminal_states
                     and task_uid in task_uids
-                    and task_uid not in finished_tasks
+                    and task_uid not in finished_uids
                 ):
-                    # Store complete task object with state
-                    task_with_state = task.copy() if isinstance(task, dict) else {"uid": task_uid}
-                    task_with_state["state"] = state
-                    finished_tasks[task_uid] = task_with_state
+                    # Mark as finished (the task object is already updated in-place by backend)
+                    finished_uids.add(task_uid)
                     made_progress = True
 
             # Sleep only if no progress was made
-            if not made_progress and len(finished_tasks) < num_tasks:
+            if not made_progress and len(finished_uids) < num_tasks:
                 await asyncio.sleep(sleep_interval)
 
-        return finished_tasks
+        # Return the original task objects (which have been updated in-place)
+        return tasks
 
 
 class Session:

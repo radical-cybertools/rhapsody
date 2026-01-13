@@ -14,6 +14,9 @@ from .discovery import BackendRegistry
 from .discovery import discover_backends
 from .discovery import get_backend
 
+# Import all execution backends for convenient access
+from .execution import *  # noqa: F401, F403
+
 __all__ = [
     "BackendRegistry",
     "get_backend",
@@ -22,4 +25,12 @@ __all__ = [
     "Session",
     "TasksMainStates",
     "StateMapper",
+    # Execution backends (imported from .execution)
+    "ConcurrentExecutionBackend",
+    "DaskExecutionBackend",  # Optional
+    "RadicalExecutionBackend",  # Optional
+    "DragonExecutionBackendV1",  # Optional
+    "DragonExecutionBackendV2",  # Optional
+    "DragonExecutionBackendV3",  # Optional
+    "DragonTelemetryCollector",  # Optional
 ]

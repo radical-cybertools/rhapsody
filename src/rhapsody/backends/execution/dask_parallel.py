@@ -64,7 +64,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
         self.tasks = {}
         self._client = None
         self.session = Session()
-        self._callback_func = None
+        self._callback_func: Callable = self._internal_callback
         self._resources = resources or {}
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
@@ -192,6 +192,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
 
             if is_exec_task:
                 error_msg = "DaskExecutionBackend does not support executable tasks"
+                task['state'] = "FAILED"
                 task["stderr"] = ValueError(error_msg)
                 self._callback_func(task, "FAILED")
                 continue
@@ -199,6 +200,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
             # Validate that function is async
             if is_func_task and not asyncio.iscoroutinefunction(task["function"]):
                 error_msg = "DaskExecutionBackend only supports async functions"
+                task['state'] = "FAILED"
                 task["exception"] = ValueError(error_msg)
                 self._callback_func(task, "FAILED")
                 continue
@@ -211,6 +213,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
             try:
                 await self._submit_async_function(task)
             except Exception as e:
+                task['state'] = "FAILED"
                 task["exception"] = e
                 self._callback_func(task, "FAILED")
 
@@ -235,6 +238,7 @@ class DaskExecutionBackend(BaseExecutionBackend):
             except dask.client.FutureCancelledError:
                 self._callback_func(task, "CANCELED")
             except Exception as e:
+                task["state"] = "FAILED"
                 task["exception"] = e
                 self._callback_func(task, "FAILED")
             finally:

@@ -126,7 +126,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
     """
 
     @typeguard.typechecked
-    def __init__(self, resources: dict = None, raptor_config: dict | None = None) -> None:
+    def __init__(self, resources: dict = {}, raptor_config: dict | None = None) -> None:
         """Initialize the RadicalExecutionBackend with resources.
 
         Creates a new Radical Pilot session, initializes task and pilot managers,
@@ -235,7 +235,10 @@ class RadicalExecutionBackend(BaseExecutionBackend):
             self.pilot_manager.register_callback(self.handle_pilot_state_callback)
 
             self.task_manager.add_pilots(self.resource_pilot)
-            self._callback_func: Callable[[asyncio.Future], None] = lambda f: None
+            self._callback_func: Callable = self._internal_callback
+
+            # Register the internal callback with the task manager
+            self.register_callback(self._internal_callback)
 
             if self.raptor_config:
                 self.raptor_mode = True
@@ -410,21 +413,44 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         """
         self._callback_func = func
 
-        def backend_callback(task, state) -> None:
+        def backend_callback(rp_task, state) -> None:
             service_callback = None
 
-            if task.mode == rp.TASK_SERVICE and state == rp.AGENT_EXECUTING:
+            if rp_task.mode == rp.TASK_SERVICE and state == rp.AGENT_EXECUTING:
                 service_callback = service_ready_callback
 
-            elif task.mode == rp.TASK_EXECUTABLE and state == rp.FAILED:
-                task = task.as_dict()
-                stderr = task.get("stderr")
-                exception = task.get("exception")
-                if stderr or exception:
-                    task["stderr"] = ", ".join(filter(None, [stderr, exception]))
-                    task["exception"] = ""
+            # Get the original Task object
+            original_task = self.tasks.get(rp_task.uid)
+            if not original_task:
+                self.logger.warning(f"No original task found for UID {rp_task.uid}")
+                return
 
-            func(task, state, service_callback=service_callback)
+            # Convert RP task to dict and extract results
+            rp_task_dict = rp_task.as_dict()
+
+            # Update original Task object with results from RP task
+            if 'stdout' in rp_task_dict:
+                original_task['stdout'] = rp_task_dict['stdout']
+            if 'stderr' in rp_task_dict:
+                stderr = rp_task_dict.get('stderr')
+                exception = rp_task_dict.get('exception')
+                if rp_task.mode == rp.TASK_EXECUTABLE and state == rp.FAILED:
+                    if stderr or exception:
+                        original_task['stderr'] = ", ".join(filter(None, [stderr, exception]))
+                else:
+                    original_task['stderr'] = stderr
+            if 'exit_code' in rp_task_dict:
+                original_task['exit_code'] = rp_task_dict['exit_code']
+            if 'return_value' in rp_task_dict:
+                original_task['return_value'] = rp_task_dict['return_value']
+            if 'exception' in rp_task_dict and state == rp.FAILED:
+                original_task['exception'] = rp_task_dict['exception']
+
+            # Set state on the original Task object
+            original_task['state'] = state
+
+            # Call the registered callback with the original Task object
+            func(original_task, state, service_callback=service_callback)
 
         self.task_manager.register_callback(backend_callback)
 
@@ -502,7 +528,6 @@ class RadicalExecutionBackend(BaseExecutionBackend):
 
             rp_task.raptor_id = next(self.master_selector)
 
-        self.tasks[uid] = rp_task
         return rp_task
 
     def link_explicit_data_deps(
@@ -668,8 +693,11 @@ class RadicalExecutionBackend(BaseExecutionBackend):
 
         _tasks = []
         for task in tasks:
+            # Store the original Task object (not the RP task)
+            self.tasks[task["uid"]] = task
+
             task_to_submit = self.build_task(
-                task["uid"], task, task["task_backend_specific_kwargs"]
+                task["uid"], task, task.get("task_backend_specific_kwargs", {})
             )
             if not task_to_submit:
                 continue

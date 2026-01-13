@@ -199,6 +199,8 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
         """Handle task execution with callback."""
         try:
             result_task, state = await self._execute_task(task)
+            # Set state on the task object itself before callback
+            result_task['state'] = state
             self._callback_func(result_task, state)
         except Exception as e:
             self.logger.exception(f"Error handling task {task.get('uid')}: {e}")
@@ -236,6 +238,8 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
             task = self.tasks[uid]
             future = task["future"]
             if future and future.cancel():
+                # Set state on the task object itself before callback
+                task['state'] = 'CANCELED'
                 self._callback_func(task, "CANCELED")
                 return True
         return False
