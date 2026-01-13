@@ -4,11 +4,11 @@ __license__   = "MIT"
 
 
 import logging
-import os
+import tempfile
+
 from collections import defaultdict
 from dataclasses import dataclass
 from dataclasses import field
-from enum import Enum
 from typing import Any
 from typing import Optional
 
@@ -18,25 +18,6 @@ T_NODE_LIST = list[dict[str, Any]]
 
 logger = logging.getLogger(__name__)
 
-
-# enum for resource manager types
-class RMType(Enum):
-    FORK    = "FORK"
-    CCM     = "CCM"
-    LSF     = "LSF"
-    PBSPRO  = "PBSPRO"
-    SLURM   = "SLURM"
-    TORQUE  = "TORQUE"
-    COBALT  = "COBALT"
-    YARN    = "YARN"
-    DEBUG   = "DEBUG"
-
-
-# enum for node states
-class RMStatus(Enum):
-    FREE    = 0.0
-    BUSY    = 1.0
-    DOWN    = None
 
 @dataclass
 class RMConfig:
@@ -61,6 +42,19 @@ class RMConfig:
     network: Optional[str] = None
     blocked_cores: list[int] = field(default_factory=list)
     blocked_gpus: list[int] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.verify()
+
+    def verify(self) -> None:
+        if not self.backup_nodes: self.backup_nodes = 0
+        if not self.requested_nodes:self. requested_nodes = 0
+        if not self.oversubscribe: self.oversubscribe = False
+        if not self.fake_resources: self.fake_resources = False
+        if not self.exact: self.exact = False
+        if not self.network: self.network = None
+        if not self.blocked_cores: self.blocked_cores: []
+        if not self.blocked_gpus: self.blocked_gpus: []
 
 
 @dataclass
@@ -118,17 +112,14 @@ class RMInfo:
     mem_per_gpu: int = 0
 
     lfs_per_node: int = 0
-    lfs_path: str = os.getc.get("TMPDIR", "/tmp")
+    lfs_path: str = tempfile.gettempdir()
     mem_per_node: int = 0
 
     cfg: "RMConfig" = field(default_factory=lambda: RMConfig())
 
     numa_domain_map: dict[int, "RMInfo"] = field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        self._verify()
-
-    def _verify(self) -> None:
+    def verify(self) -> None:
         assert self.node_list, "node_list must be non-empty"
         assert self.cores_per_node, "cores_per_node must be non-zero"
         assert self.gpus_per_node is not None, "gpus_per_node must not be None"
@@ -150,6 +141,22 @@ class ResourceManager:
     schedulers relying on those are invariably bound to the specific
     ResourceManager.
     """
+
+    # defines for resource manager types
+    FORK    = "FORK"
+    CCM     = "CCM"
+    LSF     = "LSF"
+    PBSPRO  = "PBSPRO"
+    SLURM   = "SLURM"
+    TORQUE  = "TORQUE"
+    COBALT  = "COBALT"
+    YARN    = "YARN"
+    DEBUG   = "DEBUG"
+
+    # defines for node states
+    FREE    = 0.0
+    BUSY    = 1.0
+    DOWN    = None
 
     def __init__(self, cfg: Optional[RMConfig] = None) -> None:
 
@@ -179,8 +186,6 @@ class ResourceManager:
         Factory method to create ResourceManager instances.
         """
 
-        cfg = RMConfig(cfg)
-
         # Make sure that we are the base-class!
         if cls != ResourceManager:
             raise TypeError("ResourceManager Factory only available to base class!")
@@ -195,12 +200,12 @@ class ResourceManager:
         # ordered list of RMs.  SLURM is most likely, FORK is fallback if no
         # other RM is detected.
         rms = [
-            [RMType.SLURM , Slurm],
-            [RMType.PBSPRO, PBSPro],
-            [RMType.TORQUE, Torque],
-            [RMType.COBALT, Cobalt],
-            [RMType.LSF   , LSF],
-            [RMType.FORK  , Fork],
+            [cls.SLURM , Slurm],
+            [cls.PBSPRO, PBSPro],
+            [cls.TORQUE, Torque],
+            [cls.COBALT, Cobalt],
+            [cls.LSF   , LSF],
+            [cls.FORK  , Fork],
         ]
 
         if name:
@@ -248,12 +253,12 @@ class ResourceManager:
 
             node_list = [
                 {
-                    "name" : str                        # node name
-                    "index": int                        # node index
-                    "cores": [RMStatus.FREE, RMStatus.FREE, ...]  # cores per node
-                    "gpus" : [RMStatus.FREE, RMStatus.FREE, ...]  # gpus per node
-                    "lfs"  : int                        # lfs per node (MB)
-                    "mem"  : int                        # mem per node (MB)
+                    "name" : str                          # node name
+                    "index": int                          # node index
+                    "cores": [self.FREE, self.FREE, ...]  # cores status
+                    "gpus" : [self.FREE, self.FREE, ...]  # gpus status
+                    "lfs"  : int                          # lfs per node (MB)
+                    "mem"  : int                          # mem per node (MB)
                 },
                 ...
             ]
@@ -275,6 +280,7 @@ class ResourceManager:
         self._rm_info = rm_info
 
         # let the RM implementation gather resource information
+        print('initialize')
         self._initialize()
 
         # we expect to have a valid node list now
@@ -292,8 +298,8 @@ class ResourceManager:
         rm_info = self._rm_info
 
         # ensure that blocked resources are marked as down
-        blocked_cores = rm_info.cfg.get("blocked_cores", [])
-        blocked_gpus  = rm_info.cfg.get("blocked_gpus" , [])
+        blocked_cores = rm_info.cfg.blocked_cores
+        blocked_gpus  = rm_info.cfg.blocked_gpus
 
         if blocked_cores or blocked_gpus:
 
@@ -304,11 +310,11 @@ class ResourceManager:
 
                 for idx in blocked_cores:
                     assert len(node["cores"]) > idx
-                    node["cores"][idx] = RMStatus.DOWN
+                    node["cores"][idx] = self.DOWN
 
                 for idx in blocked_gpus:
                     assert len(node["gpus"]) > idx
-                    node["gpus"][idx] = RMStatus.DOWN
+                    node["gpus"][idx] = self.DOWN
 
         assert rm_info.cfg.requested_nodes <= len(rm_info.node_list)
 
@@ -441,8 +447,8 @@ class ResourceManager:
         # keep nodes to be indexed (node_index)
         node_list = [{"name"  : node,
                       "index" : idx,
-                      "cores" : [RMStatus.FREE] * rm_info.cores_per_node,
-                      "gpus"  : [RMStatus.FREE] * rm_info.gpus_per_node,
+                      "cores" : [self.FREE] * rm_info.cores_per_node,
+                      "gpus"  : [self.FREE] * rm_info.gpus_per_node,
                       "lfs"   : rm_info.lfs_per_node,
                       "mem"   : rm_info.mem_per_node}
                      for idx, node in enumerate(nodes)]
