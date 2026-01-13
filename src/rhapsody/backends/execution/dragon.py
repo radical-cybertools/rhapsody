@@ -1,47 +1,54 @@
 import asyncio
+import glob
+import json
 import logging
 import os
-import time
+import queue
+import socket
 import sys
-import shlex
-import uuid
+import tempfile
 import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from dataclasses import field
+from enum import Enum
+from typing import Any
+from typing import Callable
+from typing import Dict
+from typing import List
+from typing import Optional
+from typing import Tuple
 
 import psutil
-
-import json
-import socket
-import glob
-import tempfile
-import queue
-
-
-from typing import Any, Callable, Optional, Dict, List, Tuple
-from enum import Enum
-from dataclasses import dataclass, field
-from concurrent.futures import ThreadPoolExecutor
-
 import typeguard
 
-from ..constants import StateMapper, BackendMainStates
-from ..base import BaseExecutionBackend, Session
+from ..base import BaseExecutionBackend
+from ..base import Session
+from ..constants import BackendMainStates
+from ..constants import StateMapper
 
 try:
-    import dragon
     import multiprocessing as mp
-    from dragon.native.process import Process, ProcessTemplate, Popen
-    from dragon.native.process_group import ProcessGroup
-    from dragon.native.queue import Queue
+
+    import dragon
     from dragon.data.ddict.ddict import DDict
-    from dragon.native.machine import System
-    from dragon.native.process_group import DragonUserCodeError
+    from dragon.infrastructure.gpu_desc import AccVendor
+    from dragon.infrastructure.gpu_desc import find_accelerators
     from dragon.infrastructure.policy import Policy
-    from dragon.workflows.batch import Batch
 
     # Node Telemetry only
     from dragon.native.event import Event
+    from dragon.native.machine import System
+    from dragon.native.process import Popen
+    from dragon.native.process import Process
+    from dragon.native.process import ProcessTemplate
+    from dragon.native.process_group import DragonUserCodeError
+    from dragon.native.process_group import ProcessGroup
+    from dragon.native.queue import Queue
     from dragon.telemetry import Telemetry
-    from dragon.infrastructure.gpu_desc import AccVendor, find_accelerators
+    from dragon.workflows.batch import Batch
 
 except ImportError:  # pragma: no cover - environment without Dragon
     dragon = None
@@ -219,7 +226,7 @@ class SharedMemoryManagerV1:
 
     async def initialize(self):
         """Initialize the storage manager."""
-        self.logger.debug(f"SharedMemoryManagerV1 initialized with optional DDict storage")
+        self.logger.debug("SharedMemoryManagerV1 initialized with optional DDict storage")
 
     def create_data_reference(self, task_uid: str, ranks: int) -> DataReferenceV1:
         """Create a zero-copy reference to existing result keys in DDict.
@@ -412,7 +419,7 @@ class ResultCollectorV1:
                 "stderr": "\n".join(stderr_parts),
                 "exit_code": max_exit_code,
                 "return_value": None,
-                "exception": None if max_exit_code == 0 else f"One or more processes failed",
+                "exception": None if max_exit_code == 0 else "One or more processes failed",
             }
 
     def cleanup_task(self, task_uid: str):
@@ -662,7 +669,6 @@ def _function_wrapper_v1(
     Otherwise, return value is sent directly via queue.
     """
     import io
-    import sys
     import traceback
 
     task_uid = task["uid"]
@@ -1015,9 +1021,8 @@ def _worker_loop_v2(
     - Executables: Run external processes via subprocess
     """
     import io
-    import sys
-    import traceback
     import subprocess
+    import traceback
 
     os.environ["DRAGON_WORKER_ID"] = str(worker_id)
     os.environ["DRAGON_WORKER_NAME"] = worker_name
@@ -3986,7 +3991,6 @@ class DragonTelemetryCollector:
         :return: Dictionary of GPU metrics
         :rtype: dict
         """
-        import sys
 
         rocm_path = os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm/"), "libexec/rocm_smi")
         sys.path.append(rocm_path)
@@ -4173,7 +4177,7 @@ class DragonTelemetryCollector:
                     f"DragonTelemetryCollector: Wrote checkpoint {filepath} ({len(metrics_data)} samples)"
                 )
 
-            except Exception as e:
+            except Exception:
                 # Clean up temp file on error
                 try:
                     os.remove(temp_path)

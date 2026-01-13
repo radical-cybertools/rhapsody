@@ -6,7 +6,8 @@ import os
 
 import radical.utils as ru
 
-from .base import RMInfo, ResourceManager
+from .base import ResourceManager
+from .base import RMInfo
 
 
 # ------------------------------------------------------------------------------

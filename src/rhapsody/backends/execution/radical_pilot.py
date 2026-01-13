@@ -6,10 +6,10 @@ resource management systems and distributed computing.
 
 from __future__ import annotations
 
-import os
 import asyncio
 import copy
 import logging
+import os
 import threading
 from collections.abc import Generator
 from typing import Callable
@@ -17,7 +17,8 @@ from typing import Callable
 import typeguard
 
 from ..base import BaseExecutionBackend
-from ..constants import StateMapper, BackendMainStates
+from ..constants import BackendMainStates
+from ..constants import StateMapper
 
 try:
     import radical.pilot as rp

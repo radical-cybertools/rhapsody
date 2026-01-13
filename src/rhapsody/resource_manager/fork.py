@@ -2,12 +2,10 @@
 __copyright__ = 'Copyright 2016-2025, The RADICAL-Cybertools Team'
 __license__   = 'MIT'
 
-import math
 import multiprocessing
 
-import radical.utils as ru
-
-from .base import RMInfo, ResourceManager
+from .base import ResourceManager
+from .base import RMInfo
 
 
 # ------------------------------------------------------------------------------

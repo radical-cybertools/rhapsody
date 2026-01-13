@@ -5,7 +5,6 @@ This module provides a backend that executes tasks on local or single node HPC r
 
 import asyncio
 import logging
-
 from concurrent.futures import Executor
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +13,8 @@ from typing import Callable
 
 from ..base import BaseExecutionBackend
 from ..base import Session
-from ..constants import StateMapper, BackendMainStates
+from ..constants import BackendMainStates
+from ..constants import StateMapper
 
 try:
     import cloudpickle

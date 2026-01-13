@@ -393,7 +393,7 @@ class DragonVllmInferenceBackend:
             # Extract OpenAI-style parameters
             messages = data.get("messages", [])
 
-            # FIXME pass to self.generate() if DragonInference supports these params 
+            # FIXME pass to self.generate() if DragonInference supports these params
             data.get("max_tokens", 1000)
             data.get("temperature", 0.7)
             model = data.get("model", self.model_name)

@@ -3,12 +3,13 @@ __copyright__ = 'Copyright 2016-2023, The RADICAL-Cybertools Team'
 __license__   = 'MIT'
 
 import os
-
-from typing import List, Tuple
+from typing import List
+from typing import Tuple
 
 import radical.utils as ru
 
-from .base import RMInfo, ResourceManager
+from .base import ResourceManager
+from .base import RMInfo
 
 
 # ------------------------------------------------------------------------------
