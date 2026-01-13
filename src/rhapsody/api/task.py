@@ -320,9 +320,9 @@ class ComputeTask(BaseTask):
         task_fields = {
             'executable': executable,
             'function': function,
-            'arguments': arguments,
-            'args': args,
-            'kwargs': kwargs,
+            'arguments': arguments if arguments is not None else [],
+            'args': args if args is not None else (),
+            'kwargs': kwargs if kwargs is not None else {},
             'input_files': input_files,
             'output_files': output_files,
             'working_directory': working_directory,

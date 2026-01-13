@@ -8,6 +8,7 @@ import pytest
 import sys
 import os
 
+from rhapsody import ComputeTask
 from rhapsody.backends.discovery import get_backend
 
 
@@ -36,19 +37,19 @@ async def backend(backend_name):
 @pytest.mark.asyncio
 async def test_single_executable(backend):
     """Test executing a single shell command task."""
-    task = {
-        "uid": "test_single_exec",
-        "executable": "echo",
-        "arguments": ["Hello Dragon"],
-        "task_backend_specific_kwargs": {"shell": True}
-    }
+    task = ComputeTask(
+        executable="echo",
+        arguments=["Hello Dragon"],
+        task_backend_specific_kwargs={"shell": True}
+    )
 
     await backend.submit_tasks([task])
     results = await backend.wait_tasks([task])
 
-    assert "test_single_exec" in results
-    assert results["test_single_exec"]["state"] == "DONE"
-    assert "Hello Dragon" in results["test_single_exec"].get("stdout", "")
+    # wait_tasks returns list of tasks (updated in-place)
+    assert results[0]["uid"].startswith("task.")
+    assert results[0]["state"] == "DONE"
+    assert "Hello Dragon" in results[0].get("stdout", "")
 
 
 # ============================================================================
@@ -63,19 +64,17 @@ async def test_single_function(backend):
         """Simple async function for testing."""
         return x * 2
 
-    task = {
-        "uid": "test_single_func",
-        "function": simple_function,
-        "args": (21,),
-        "kwargs": {}
-    }
+    task = ComputeTask(
+        function=simple_function,
+        args=(21,)
+    )
 
     await backend.submit_tasks([task])
     results = await backend.wait_tasks([task])
 
-    assert "test_single_func" in results
-    assert results["test_single_func"]["state"] == "DONE"
-    assert results["test_single_func"].get("return_value") == 42
+    assert results[0]["uid"].startswith("task.")
+    assert results[0]["state"] == "DONE"
+    assert results[0].get("return_value") == 42
 
 
 # ============================================================================
@@ -85,17 +84,16 @@ async def test_single_function(backend):
 @pytest.mark.asyncio
 async def test_task_with_args(backend):
     """Test task execution with multiple arguments."""
-    task = {
-        "uid": "test_args",
-        "executable": "/bin/echo",
-        "arguments": ["arg1", "arg2", "arg3"]
-    }
+    task = ComputeTask(
+        executable="/bin/echo",
+        arguments=["arg1", "arg2", "arg3"]
+    )
 
     await backend.submit_tasks([task])
     results = await backend.wait_tasks([task])
 
-    assert results["test_args"]["state"] == "DONE"
-    stdout = results["test_args"].get("stdout", "")
+    assert results[0]["state"] == "DONE"
+    stdout = results[0].get("stdout", "")
     assert "arg1" in stdout and "arg2" in stdout and "arg3" in stdout
 
 
@@ -106,15 +104,14 @@ async def test_task_with_args(backend):
 @pytest.mark.asyncio
 async def test_task_failure(backend):
     """Test that failed tasks are properly reported."""
-    task = {
-        "uid": "test_failure",
-        "executable": "/bin/false"  # Command that always fails
-    }
+    task = ComputeTask(
+        executable="/bin/false"  # Command that always fails
+    )
 
     await backend.submit_tasks([task])
     results = await backend.wait_tasks([task])
 
-    assert results["test_failure"]["state"] == "FAILED"
+    assert results[0]["state"] == "FAILED"
 
 
 # ============================================================================
@@ -129,18 +126,16 @@ async def test_function_exception(backend):
         """Function that raises an exception."""
         raise ValueError("Intentional test failure")
 
-    task = {
-        "uid": "test_func_exception",
-        "function": failing_function,
-        "args": (),
-        "kwargs": {}
-    }
+    task = ComputeTask(
+        function=failing_function,
+        args=()
+    )
 
     await backend.submit_tasks([task])
     results = await backend.wait_tasks([task])
 
-    assert results["test_func_exception"]["state"] == "FAILED"
-    assert "exception" in results["test_func_exception"]
+    assert results[0]["state"] == "FAILED"
+    assert "exception" in results[0]
 
 
 # ============================================================================
@@ -151,28 +146,30 @@ async def test_function_exception(backend):
 async def test_two_independent_tasks(backend):
     """Test executing two independent tasks in parallel."""
     tasks = [
-        {
-            "uid": "task_a",
-            "executable": "echo",
-            "arguments": ["Task A"],
-            "task_backend_specific_kwargs": {"shell": True}
-        },
-        {
-            "uid": "task_b",
-            "executable": "echo",
-            "arguments": ["Task B"],
-            "task_backend_specific_kwargs": {"shell": True}
-        }
+        ComputeTask(
+            executable="echo",
+            arguments=["Task A"],
+            task_backend_specific_kwargs={"shell": True}
+        ),
+        ComputeTask(
+            executable="echo",
+            arguments=["Task B"],
+            task_backend_specific_kwargs={"shell": True}
+        )
     ]
 
     await backend.submit_tasks(tasks)
     results = await backend.wait_tasks(tasks)
 
     assert len(results) == 2
-    assert results["task_a"]["state"] == "DONE"
-    assert results["task_b"]["state"] == "DONE"
-    assert "Task A" in results["task_a"].get("stdout", "")
-    assert "Task B" in results["task_b"].get("stdout", "")
+    # Verify both tasks have auto-generated UIDs and proper output
+    for result in results:
+        assert result["uid"].startswith("task.")
+        assert result["state"] == "DONE"
+    # Verify we have the right outputs (order may vary)
+    outputs = [r.get("stdout", "") for r in results]
+    assert any("Task A" in out for out in outputs)
+    assert any("Task B" in out for out in outputs)
 
 
 # ============================================================================
@@ -183,22 +180,25 @@ async def test_two_independent_tasks(backend):
 async def test_mixed_success_failure(backend):
     """Test handling tasks where some succeed and some fail."""
     tasks = [
-        {
-            "uid": "success_task",
-            "executable": "/bin/true"
-        },
-        {
-            "uid": "failure_task",
-            "executable": "/bin/false"
-        }
+        ComputeTask(
+            executable="/bin/true"
+        ),
+        ComputeTask(
+            executable="/bin/false"
+        )
     ]
 
     await backend.submit_tasks(tasks)
     results = await backend.wait_tasks(tasks)
 
     assert len(results) == 2
-    assert results["success_task"]["state"] == "DONE"
-    assert results["failure_task"]["state"] == "FAILED"
+    # Verify both tasks have auto-generated UIDs
+    for result in results:
+        assert result["uid"].startswith("task.")
+    # Verify we have one success and one failure
+    states = [r["state"] for r in results]
+    assert "DONE" in states
+    assert "FAILED" in states
 
 
 # ============================================================================
@@ -217,18 +217,16 @@ async def test_function_return_value(backend):
             "inputs": [a, b]
         }
 
-    task = {
-        "uid": "test_return",
-        "function": compute_function,
-        "args": (5, 7),
-        "kwargs": {}
-    }
+    task = ComputeTask(
+        function=compute_function,
+        args=(5, 7)
+    )
 
     await backend.submit_tasks([task])
     results = await backend.wait_tasks([task])
 
-    assert results["test_return"]["state"] == "DONE"
-    return_value = results["test_return"].get("return_value")
+    assert results[0]["state"] == "DONE"
+    return_value = results[0].get("return_value")
     assert return_value["sum"] == 12
     assert return_value["product"] == 35
     assert return_value["inputs"] == [5, 7]
@@ -241,17 +239,16 @@ async def test_function_return_value(backend):
 @pytest.mark.asyncio
 async def test_stdout_capture(backend):
     """Test that stdout is properly captured."""
-    task = {
-        "uid": "test_stdout",
-        "executable": "/bin/bash",
-        "arguments": ["-c", "echo 'Line 1'; echo 'Line 2'; echo 'Line 3'"]
-    }
+    task = ComputeTask(
+        executable="/bin/bash",
+        arguments=["-c", "echo 'Line 1'; echo 'Line 2'; echo 'Line 3'"]
+    )
 
     await backend.submit_tasks([task])
     results = await backend.wait_tasks([task])
 
-    assert results["test_stdout"]["state"] == "DONE"
-    stdout = results["test_stdout"].get("stdout", "")
+    assert results[0]["state"] == "DONE"
+    stdout = results[0].get("stdout", "")
     assert "Line 1" in stdout
     assert "Line 2" in stdout
     assert "Line 3" in stdout
@@ -265,17 +262,17 @@ async def test_stdout_capture(backend):
 async def test_task_cancellation(backend):
     """Test cancelling a task before completion."""
     # Long-running task
-    task = {
-        "uid": "test_cancel",
-        "executable": "/bin/sleep",
-        "arguments": ["10"]
-    }
+    task = ComputeTask(
+        executable="/bin/sleep",
+        arguments=["10"]
+    )
 
     await backend.submit_tasks([task])
     await asyncio.sleep(0.5)  # Let task start
 
-    # Cancel the task
-    cancelled = await backend.cancel_task("test_cancel")
+    # Cancel the task using the auto-generated UID
+    task_uid = task.uid
+    cancelled = await backend.cancel_task(task_uid)
     assert cancelled is True
 
     # Wait a bit and verify task was cancelled
@@ -296,12 +293,11 @@ async def test_backend_state(backend):
     assert state is not None
 
     # Submit a task
-    task = {
-        "uid": "test_state",
-        "executable": "echo",
-        "arguments": ["test"],
-        "task_backend_specific_kwargs": {"shell": True}
-    }
+    task = ComputeTask(
+        executable="echo",
+        arguments=["test"],
+        task_backend_specific_kwargs={"shell": True}
+    )
 
     await backend.submit_tasks([task])
     state_running = await backend.state()
@@ -319,28 +315,28 @@ async def test_backend_state(backend):
 async def test_sequential_submissions(backend):
     """Test submitting tasks in multiple batches."""
     # First batch
-    task1 = {
-        "uid": "batch1_task",
-        "executable": "echo",
-        "arguments": ["Batch 1"],
-        "task_backend_specific_kwargs": {"shell": True}
-    }
+    task1 = ComputeTask(
+        executable="echo",
+        arguments=["Batch 1"],
+        task_backend_specific_kwargs={"shell": True}
+    )
 
     await backend.submit_tasks([task1])
     results1 = await backend.wait_tasks([task1])
-    assert results1["batch1_task"]["state"] == "DONE"
+    assert results1[0]["state"] == "DONE"
+    assert "Batch 1" in results1[0].get("stdout", "")
 
     # Second batch
-    task2 = {
-        "uid": "batch2_task",
-        "executable": "echo",
-        "arguments": ["Batch 2"],
-        "task_backend_specific_kwargs": {"shell": True}
-    }
+    task2 = ComputeTask(
+        executable="echo",
+        arguments=["Batch 2"],
+        task_backend_specific_kwargs={"shell": True}
+    )
 
     await backend.submit_tasks([task2])
     results2 = await backend.wait_tasks([task2])
-    assert results2["batch2_task"]["state"] == "DONE"
+    assert results2[0]["state"] == "DONE"
+    assert "Batch 2" in results2[0].get("stdout", "")
 
 
 # ============================================================================
@@ -355,18 +351,17 @@ async def test_function_with_kwargs(backend):
         """Function that uses keyword arguments."""
         return x + y + z
 
-    task = {
-        "uid": "test_kwargs",
-        "function": function_with_kwargs,
-        "args": (5,),
-        "kwargs": {"y": 15, "z": 25}
-    }
+    task = ComputeTask(
+        function=function_with_kwargs,
+        args=(5,),
+        kwargs={"y": 15, "z": 25}
+    )
 
     await backend.submit_tasks([task])
     results = await backend.wait_tasks([task])
 
-    assert results["test_kwargs"]["state"] == "DONE"
-    assert results["test_kwargs"].get("return_value") == 45  # 5 + 15 + 25
+    assert results[0]["state"] == "DONE"
+    assert results[0].get("return_value") == 45  # 5 + 15 + 25
 
 
 # ============================================================================
@@ -387,30 +382,32 @@ async def test_empty_task_list(backend):
 
 @pytest.mark.asyncio
 async def test_task_uid_uniqueness(backend):
-    """Test that tasks are properly identified by their UIDs."""
+    """Test that auto-generated UIDs are unique."""
     tasks = [
-        {
-            "uid": "unique_task_1",
-            "executable": "echo",
-            "arguments": ["Task 1"],
-            "task_backend_specific_kwargs": {"shell": True}
-        },
-        {
-            "uid": "unique_task_2",
-            "executable": "echo",
-            "arguments": ["Task 2"],
-            "task_backend_specific_kwargs": {"shell": True}
-        }
+        ComputeTask(
+            executable="echo",
+            arguments=["Task 1"],
+            task_backend_specific_kwargs={"shell": True}
+        ),
+        ComputeTask(
+            executable="echo",
+            arguments=["Task 2"],
+            task_backend_specific_kwargs={"shell": True}
+        )
     ]
 
     await backend.submit_tasks(tasks)
     results = await backend.wait_tasks(tasks)
 
-    # Verify each UID maps to the correct task
-    assert "unique_task_1" in results
-    assert "unique_task_2" in results
-    assert "Task 1" in results["unique_task_1"].get("stdout", "")
-    assert "Task 2" in results["unique_task_2"].get("stdout", "")
+    # Verify each UID is unique and follows the format
+    assert len(results) == 2
+    uids = [r["uid"] for r in results]
+    assert len(set(uids)) == 2  # All UIDs are unique
+    assert all(uid.startswith("task.") for uid in uids)
+    # Verify outputs are correct (order may vary)
+    outputs = [r.get("stdout", "") for r in results]
+    assert any("Task 1" in out for out in outputs)
+    assert any("Task 2" in out for out in outputs)
 
 
 # ============================================================================
