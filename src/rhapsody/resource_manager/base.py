@@ -4,6 +4,8 @@ __license__   = "MIT"
 
 
 import logging
+import os
+from collections import defaultdict
 from dataclasses import dataclass
 from dataclasses import field
 from enum import Enum
@@ -116,7 +118,7 @@ class RMInfo:
     mem_per_gpu: int = 0
 
     lfs_per_node: int = 0
-    lfs_path: str = "/tmp/"
+    lfs_path: str = os.getc.get("TMPDIR", "/tmp")
     mem_per_node: int = 0
 
     cfg: "RMConfig" = field(default_factory=lambda: RMConfig())
@@ -208,10 +210,10 @@ class ResourceManager:
                         logger.debug("create RM %s", rm_name)
                         return rm_impl(cfg)
 
-                raise RuntimeError("no such ResourceManager: %s" % name)
+                raise RuntimeError(f"no such ResourceManager: {name}")
 
             except Exception as e:
-                raise RuntimeError("RM %s creation failed" % name) from e
+                raise RuntimeError(f"RM {name} creation failed") from e
 
         else:
             rm = None
@@ -268,7 +270,7 @@ class ResourceManager:
         """
 
         rm_info = RMInfo()
-        rm_info.cfg = ru.Config(cfg)
+        rm_info.cfg = cfg
 
         self._rm_info = rm_info
 
@@ -314,16 +316,16 @@ class ResourceManager:
         # if requested, check all nodes for accessibility via ssh
         # FIXME: add configurable to limit number of concurrent ssh procs
         if check_nodes:
-            procs = list()
+            procs = []
             for node in rm_info.node_list:
                 name = node["name"]
-                cmd  = "ssh -oBatchMode=yes %s hostname" % name
+                cmd  = f"ssh -oBatchMode=yes {name} hostname"
                 logger.debug("check node: %s [%s]", name, cmd)
                 proc = Process(cmd)
                 proc.start()
                 procs.append([name, proc, node])
 
-            ok = list()
+            ok = []
             for name, proc, node in procs:
                 proc.wait(timeout=15)
                 logger.debug("check node: %s [%s]", name,
@@ -349,7 +351,7 @@ class ResourceManager:
             rm_info.node_list = ok
 
         # reduce the node list to the requested size
-        rm_info.backup_list = list()
+        rm_info.backup_list = []
         if rm_info.cfg.requested_nodes and \
            len(rm_info.node_list) > rm_info.cfg.requested_nodes:
 
@@ -392,13 +394,12 @@ class ResourceManager:
 
         logger.info("using nodefile: %s", fname)
         try:
-            nodes = dict()
-            with ru.ru_open(fname, "r") as fin:
+            nodes = defaultdict(int)
+            with open(fname, encoding="utf-8") as fin:
                 for line in fin.readlines():
                     node = line.strip()
                     assert " " not in node
-                    if node in nodes: nodes[node] += 1
-                    else            : nodes[node]  = 1
+                    nodes[node] += 1
 
             if cpn:
                 for node in list(nodes.keys()):
@@ -418,7 +419,7 @@ class ResourceManager:
         node list is heterogeneous we will raise an `ValueError`.
         """
 
-        cores_per_node = set([node[1] for node in nodes])
+        cores_per_node = (node[1] for node in nodes)
 
         if len(cores_per_node) == 1:
             cores_per_node = cores_per_node.pop()
@@ -447,4 +448,91 @@ class ResourceManager:
                      for idx, node in enumerate(nodes)]
 
         return node_list
+
+    def get_hostlist_by_range(self, hoststring, prefix="", width=0):
+        """Convert string with host IDs into list of hosts.
+
+        Example: Cobalt RM would have host template as "nid%05d"
+                    get_hostlist_by_range("1-3,5", prefix="nid", width=5) =>
+                    ["nid00001", "nid00002", "nid00003", "nid00005"]
+        """
+
+        if not hoststring.replace("-", "").replace(",", "").isnumeric():
+            raise ValueError(f"non numeric set of ranges ({hoststring})")
+
+        host_ids = []
+        id_width = 0
+
+        for num in hoststring.split(","):
+            num_range = num.split("-")
+
+            if len(num_range) > 1:
+                num_lo, num_hi = num_range
+                if not num_lo or not num_hi:
+                    raise ValueError(f"incorrect range format ({num})")
+                host_ids.extend(list(range(int(num_lo), int(num_hi) + 1)))
+
+            else:
+                host_ids.append(int(num_range[0]))
+
+            id_width = max(id_width, *[len(n) for n in num_range])
+
+        width = width or id_width
+        return [f"{prefix}{hid:0{width}d}" for hid in host_ids]
+
+    def get_hostlist(self, hoststring):
+        """Convert string with hosts (IDs within brackets) into list of hosts.
+
+        Example: "node-b1-[1-3,5],node-c1-4,node-d3-3,node-k[10-12,15]" =>
+                 ["node-b1-1", "node-b1-2", "node-b1-3", "node-b1-5",
+                  "node-c1-4", "node-d3-3",
+                  "node-k10", "node-k11", "node-k12", "node-k15"]
+        """
+
+        output = []
+        hoststring += ","
+        host_group = []
+
+        idx, idx_stop = 0, len(hoststring)
+        while idx != idx_stop:
+
+            comma_idx   = hoststring.find(",", idx)
+            bracket_idx = hoststring.find("[", idx)
+
+            if comma_idx >= 0 and (bracket_idx == -1 or comma_idx < bracket_idx):
+
+                if host_group:
+                    prefix = hoststring[idx:comma_idx]
+                    if prefix:
+                        for h_idx in range(len(host_group)):
+                            host_group[h_idx] += prefix
+                    output.extend(host_group)
+                    del host_group[:]
+
+                else:
+                    output.append(hoststring[idx:comma_idx])
+
+                idx = comma_idx + 1
+
+            elif bracket_idx >= 0 and (comma_idx == -1 or bracket_idx < comma_idx):
+
+                prefix = hoststring[idx:bracket_idx]
+                if not host_group:
+                    host_group.append(prefix)
+                else:
+                    for h_idx in range(len(host_group)):
+                        host_group[h_idx] += prefix
+
+                closed_bracket_idx = hoststring.find("]", bracket_idx)
+                range_set = hoststring[(bracket_idx + 1):closed_bracket_idx]
+
+                host_group_ = []
+                for prefix in host_group:
+                    host_group_.extend(self.get_hostlist_by_range(range_set, prefix))
+                host_group = host_group_
+
+                idx = closed_bracket_idx + 1
+
+        return output
+
 

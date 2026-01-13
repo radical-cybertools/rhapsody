@@ -1,6 +1,6 @@
 
-__copyright__ = 'Copyright 2018-2023, The RADICAL-Cybertools Team'
-__license__   = 'MIT'
+__copyright__ = "Copyright 2018-2023, The RADICAL-Cybertools Team"
+__license__   = "MIT"
 
 import os
 
@@ -17,7 +17,7 @@ class LSF(ResourceManager):
     @staticmethod
     def batch_started():
 
-        return bool(os.getenv('LSB_JOBID'))
+        return bool(os.getenv("LSB_JOBID"))
 
     # --------------------------------------------------------------------------
     #
@@ -35,9 +35,9 @@ class LSF(ResourceManager):
         # There are in total "-n" entries (number of tasks of the job)
         # and "-R" entries per node (tasks per host).
         #
-        hostfile = os.environ.get('LSB_DJOB_HOSTFILE')
+        hostfile = os.environ.get("LSB_DJOB_HOSTFILE")
         if not hostfile:
-            raise RuntimeError('$LSB_DJOB_HOSTFILE not set')
+            raise RuntimeError("$LSB_DJOB_HOSTFILE not set")
 
         smt   = rm_info.threads_per_core
         nodes = self._parse_nodefile(hostfile, smt=smt)
@@ -50,13 +50,10 @@ class LSF(ResourceManager):
         # such node with 1 physical core, i.e., equals to SMT threads
         # (otherwise assertion error will be raised later)
         # *) affected machine(s): Lassen@LLNL
-        filtered = list()
+        filtered = []
         for node in nodes:
-            if   'login' in node[0]: continue
-            elif 'batch' in node[0]: continue
-            elif smt     == node[1]: continue
-            filtered.append(node)
-
+            if "login" not in node[0] and "batch" not in node[0] and smt != node[1]:
+                filtered.append(node)
         nodes = filtered
 
         lsf_cores_per_node = self._get_cores_per_node(nodes)
@@ -65,7 +62,7 @@ class LSF(ResourceManager):
         else:
             rm_info.cores_per_node = lsf_cores_per_node
 
-        self._log.debug('found %d nodes with %d cores',
+        self._log.debug("found %d nodes with %d cores",
                         len(nodes), rm_info.cores_per_node)
 
         # While LSF node names are unique and could serve as node uids, we
