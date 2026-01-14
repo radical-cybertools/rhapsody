@@ -20,6 +20,7 @@ from __future__ import annotations
 import threading
 from abc import ABC
 from abc import abstractmethod
+import asyncio
 from typing import Any
 from typing import Callable
 from typing import Optional
@@ -49,7 +50,7 @@ class BaseTask(dict, ABC):
     }
 
     # Internal attributes stored on object, not in dict
-    _INTERNAL_ATTRS = set()
+    _INTERNAL_ATTRS = {'_future'}
 
     @classmethod
     def _generate_uid(cls) -> str:
@@ -109,6 +110,9 @@ class BaseTask(dict, ABC):
 
         # Add any extra fields
         self.update(kwargs)
+
+        # Initialize internal future
+        self._future: Optional[asyncio.Future] = None
 
         # Validate base fields
         self._validate_base()
@@ -209,6 +213,45 @@ class BaseTask(dict, ABC):
         """
         self._validate_base()
         self._validate_specific()
+
+    def bind_future(self, future: asyncio.Future) -> None:
+        """Bind an asyncio.Future to the task for lifecycle management.
+
+        Args:
+            future: The future to bind to this task.
+        """
+        self._future = future
+
+    def __await__(self):
+        """Allow the task object to be awaited directly.
+
+        Delegates to the internal future.
+
+        Returns:
+            An iterator for the task completion.
+
+        Raises:
+            RuntimeError: If future is not bound (task not submitted).
+        """
+        if self._future is None:
+            raise RuntimeError(
+                f"Task {self.uid} has no bound future. Has it been submitted to a Session?"
+            )
+        return self._future.__await__()
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Exclude non-serializable fields from pickling state."""
+        state = self.__dict__.copy()
+        # Remove future as it cannot be pickled (and belongs to submitting process)
+        if '_future' in state:
+            del state['_future']
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore state and initialize internal fields."""
+        self.__dict__.update(state)
+        # Always re-initialize future to None in the new process
+        self._future = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert task to plain dictionary.

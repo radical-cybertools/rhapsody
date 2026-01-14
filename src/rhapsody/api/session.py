@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
+from collections import Counter
 from collections import defaultdict
 from typing import TYPE_CHECKING
 from typing import Any
@@ -26,7 +28,7 @@ class TaskStateManager:
     """
 
     def __init__(self):
-        self._task_events: dict[str, asyncio.Event] = {}
+        self._task_futures: dict[str, asyncio.Future] = {}
         self._task_states: dict[str, str] = {}
         self._terminal_states = set()  # Will be populated by backends
         self._lock = asyncio.Lock()
@@ -48,25 +50,45 @@ class TaskStateManager:
     def _update_task_impl(self, task: dict | BaseTask, state: str) -> None:
         """Actual update logic, expected to run on the event loop."""
         uid = task['uid']
+        now = time.time()
         
         # Update the task object in-place (Single Source of Truth update)
         task['state'] = state
+        
+        # Telemetry: Record transition history
+        if 'history' not in task:
+            task['history'] = {}
+        task['history'][state] = now
         
         self._task_states[uid] = state
         
         # If terminal, notify waiters
         if state in self._terminal_states:
-            if uid in self._task_events:
-                self._task_events[uid].set()
+            if uid in self._task_futures:
+                fut = self._task_futures[uid]
+                if not fut.done():
+                    fut.set_result(task)
 
-    def get_wait_event(self, uid: str) -> asyncio.Event:
-        """Get or create an event to wait for a specific task."""
-        if uid not in self._task_events:
-            self._task_events[uid] = asyncio.Event()
-            # If already done before we started waiting, set immediately
+    def get_wait_future(self, uid: str, task: dict | BaseTask) -> asyncio.Future:
+        """Get or create a future to wait for a specific task."""
+        if self._loop is None:
+             try:
+                 self.bind_loop(asyncio.get_running_loop())
+             except RuntimeError:
+                 pass
+
+        if uid not in self._task_futures:
+            # Create a future on the correct loop
+            if self._loop:
+                self._task_futures[uid] = self._loop.create_future()
+            else:
+                self._task_futures[uid] = asyncio.Future()
+            
+            # If already done before we started waiting, set result immediately
             if self._task_states.get(uid) in self._terminal_states:
-                self._task_events[uid].set()
-        return self._task_events[uid]
+                self._task_futures[uid].set_result(task)
+        
+        return self._task_futures[uid]
 
     def set_terminal_states(self, states: set[str]) -> None:
         """Update the set of states considered terminal."""
@@ -96,6 +118,7 @@ class Session:
         self.uid = uid or 'session.0000'
         self.work_dir = work_dir or os.getcwd()
         self.backends = backends or []
+        self._tasks: dict[str, BaseTask | dict] = {}
         
         self._state_manager = TaskStateManager()
         
@@ -112,11 +135,14 @@ class Session:
                 # Aggregate terminal states (union)
                 self._state_manager._terminal_states.update(state_mapper.terminal_states)
 
-    async def submit_tasks(self, tasks: list[dict | BaseTask]) -> None:
-        """Submit tasks to execution backends.
+    async def submit_tasks(self, tasks: list[dict | BaseTask]) -> list[asyncio.Future]:
+        """Submit tasks to execution backends and return futures.
 
         Args:
             tasks: List of tasks to submit.
+
+        Returns:
+            List of asyncio.Future objects representing task lifecycles.
         """
         # Ensure we have a bound loop for callbacks
         if not self._state_manager._loop:
@@ -131,9 +157,27 @@ class Session:
         # Future: Implement scheduling/routing logic.
         backend = self.backends[0]
         
-        # ensure we are calling the backend submit_tasks
+        # Track tasks locally for telemetry and futures
+        futures = []
+        for task in tasks:
+            uid = task['uid']
+            self._tasks[uid] = task
+            
+            # Create and bind future
+            fut = self._state_manager.get_wait_future(uid, task)
+            if hasattr(task, 'bind_future'):
+                task.bind_future(fut)
+            futures.append(fut)
 
+            # Mark submission time
+            if 'history' not in task:
+                task['history'] = {}
+            if 'submitted' not in task['history']:
+                task['history']['submitted'] = time.time()
+        
+        # ensure we are calling the backend submit_tasks
         await backend.submit_tasks(tasks)
+        return futures
 
     async def wait_tasks(
         self,
@@ -155,14 +199,14 @@ class Session:
         if not tasks:
             return []
 
-        wait_events = []
+        futures = []
         for task in tasks:
             uid = task['uid']
-            wait_events.append(self._state_manager.get_wait_event(uid).wait())
+            futures.append(self._state_manager.get_wait_future(uid, task))
 
-        # Wait for all events
+        # Wait for all futures
         try:
-             await asyncio.wait_for(asyncio.gather(*wait_events), timeout=timeout)
+             await asyncio.wait_for(asyncio.gather(*futures), timeout=timeout)
         except asyncio.TimeoutError:
              # Check how many finished
              finished = sum(1 for t in tasks if t.get('state') in self._state_manager._terminal_states)
@@ -171,6 +215,50 @@ class Session:
              )
 
         return tasks
+
+    def get_statistics(self) -> dict[str, Any]:
+        """Get session-wide delivery and performance statistics.
+
+        Returns:
+            Dictionary containing task counts, success rates, and latencies.
+        """
+        stats: dict[str, Any] = {
+            "counts": Counter(),
+            "latencies": {
+                "total": [],
+                "queue": [],
+                "execution": [],
+            },
+            "summary": {}
+        }
+        
+        for task in self._tasks.values():
+            state = task.get('state', 'UNKNOWN')
+            stats["counts"][state] += 1
+            
+            history = task.get('history', {})
+            submitted = history.get('submitted')
+            running = history.get('RUNNING')
+            done = history.get('DONE') or history.get('FAILED') or history.get('CANCELED')
+            
+            if submitted and done:
+                stats["latencies"]["total"].append(done - submitted)
+            
+            if submitted and running:
+                stats["latencies"]["queue"].append(running - submitted)
+                
+            if running and done:
+                stats["latencies"]["execution"].append(done - running)
+        
+        # Calculate averages for summary
+        for key, values in stats["latencies"].items():
+            if values:
+                stats["summary"][f"avg_{key}"] = sum(values) / len(values)
+            else:
+                stats["summary"][f"avg_{key}"] = 0.0
+                
+        stats["summary"]["total_tasks"] = len(self._tasks)
+        return stats
 
     async def close(self) -> None:
         """Shutdown all backends."""
