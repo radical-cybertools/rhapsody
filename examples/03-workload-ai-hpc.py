@@ -108,21 +108,11 @@ async def main():
 
     # Define tasks (UIDs auto-generated!)
     tasks = [
-        rhapsody.ComputeTask(
-            function=run_inference,
-            args=[['hi'], next(endpoint_cycle)],
-        )]
-    
+        rhapsody.AITask(
+            prompt=['Hello Gemini'])]
+
     rhapsody.submit_tasks(tasks)
 
-    # Execute workflow
-    logger.info("\n" + "=" * 60)
-    logger.info("Running Workflow Tasks (Load Balanced)")
-    logger.info("=" * 60)
-    
-    prompts_batch1 = ['hi'] * 1
-    prompts_batch2 = ['hi'] * 1
-    
     # Run multiple inference tasks with load balancing
     results = await asyncio.gather(tasks)
 

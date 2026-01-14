@@ -88,6 +88,10 @@ test-constants:  ## Run constants tests only
 	@echo "Running constants tests..."
 	@$(PYTHON) -m pytest tests/unit/test_backend_constants.py -xvs
 
+test-performance:  ## Run API performance benchmarks
+	@echo "Running API performance benchmarks..."
+	@$(PYTHON) -m pytest tests/performance/test_api_performance.py -xvs
+
 check:  ## Run lint checks via tox
 	. .venv/bin/activate && tox -e lint-check
 

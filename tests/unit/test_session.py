@@ -47,6 +47,69 @@ async def test_session_submit_and_wait_flow():
         assert task1.state == "DONE"
         assert task2.state == "FAILED"
 
+    @pytest.mark.asyncio
+    async def test_session_returns_futures(self):
+        """Test that submit_tasks returns native futures."""
+        backend = await ConcurrentExecutionBackend()
+        session = Session(backends=[backend])
+        task = ComputeTask(executable="echo", arguments=["hi"])
+        
+        async with session:
+            futures = await session.submit_tasks([task])
+            assert isinstance(futures, list)
+            assert len(futures) == 1
+            assert isinstance(futures[0], asyncio.Future)
+            
+            # Wait for completion via future
+            result = await futures[0]
+            assert result == task
+            assert task.state == "DONE"
+
+    @pytest.mark.asyncio
+    async def test_session_direct_task_await(self):
+        """Test that task objects can be awaited directly."""
+        backend = await ConcurrentExecutionBackend()
+        session = Session(backends=[backend])
+        task = ComputeTask(executable="echo", arguments=["hi"])
+        
+        async with session:
+            await session.submit_tasks([task])
+            
+            # Direct await on task
+            result = await task
+            assert result == task
+            assert task.state == "DONE"
+
+    @pytest.mark.asyncio
+    async def test_session_gather_tasks(self):
+        """Test that asyncio.gather works on tasks or futures."""
+        backend = await ConcurrentExecutionBackend()
+        session = Session(backends=[backend])
+        tasks = [
+            ComputeTask(uid=f"t{i}", executable="echo", arguments=[str(i)])
+            for i in range(3)
+        ]
+        
+        async with session:
+            futures = await session.submit_tasks(tasks)
+            
+            # Gather futures
+            results = await asyncio.gather(*futures)
+            assert len(results) == 3
+            assert all(t.state == "DONE" for t in tasks)
+            
+            # Reset tasks for another test
+            tasks2 = [
+                ComputeTask(uid=f"t2_{i}", executable="echo", arguments=[str(i)])
+                for i in range(3)
+            ]
+            await session.submit_tasks(tasks2)
+            
+            # Gather tasks directly
+            results2 = await asyncio.gather(*tasks2)
+            assert len(results2) == 3
+            assert all(t.state == "DONE" for t in tasks2)
+
 @pytest.mark.asyncio
 async def test_session_wait_timeout():
     """Test that Session.wait_tasks respects timeout."""

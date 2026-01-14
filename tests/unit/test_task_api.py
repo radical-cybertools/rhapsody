@@ -535,3 +535,54 @@ class TestEdgeCases:
         task.ranks = 0
         with pytest.raises(TaskValidationError):
             task.validate()
+
+    @pytest.mark.asyncio
+    async def test_task_awaitable(self):
+        """Test that task can be awaited directly."""
+        import asyncio
+        task = ComputeTask(executable="/bin/echo")
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        
+        task.bind_future(future)
+        
+        # Resolve future
+        future.set_result(task)
+        
+        # Should be awaitable
+        result = await task
+        assert result == task
+
+    def test_task_pickling(self):
+        """Test that task can be pickled and _future is excluded."""
+        import pickle
+        import asyncio
+        task = ComputeTask(executable="/bin/echo")
+        
+        # Create a loop and future (non-pickleable)
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+        future = loop.create_future()
+        task.bind_future(future)
+        
+        # Pickle
+        data = pickle.dumps(task)
+        
+        # Unpickle
+        task2 = pickle.loads(data)
+        
+        assert task2.uid == task.uid
+        assert task2.executable == "/bin/echo"
+        assert task2._future is None # Should be reset to None
+
+    def test_task_internal_attrs(self):
+        """Test that _future is in internal attrs and excluded from dictate."""
+        task = ComputeTask(executable="/bin/echo")
+        assert "_future" in task._INTERNAL_ATTRS
+        
+        task_dict = task.to_dict()
+        assert "_future" not in task_dict
