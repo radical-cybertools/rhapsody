@@ -1,5 +1,5 @@
-site_name: RHAPSODY - Runtime for Heterogeneous Applications, Service Orchestration and Dynamism
-site_description: High-performance runtime system for executing heterogeneous HPC-AI workflows with dynamic task graphs on high-performance computing infrastructures.
+site_name: RHAPSODY
+site_description: High-performance runtime system for executing heterogeneous HPC-AI workflows.
 site_url: https://radical-cybertools.github.io/rhapsody
 repo_url: https://github.com/radical-cybertools/rhapsody
 repo_name: radical-cybertools/rhapsody
@@ -7,17 +7,15 @@ repo_name: radical-cybertools/rhapsody
 theme:
   name: material
   palette:
-    # Palette toggle for light mode
     - scheme: default
-      primary: blue
-      accent: blue
+      primary: indigo
+      accent: indigo
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
-    # Palette toggle for dark mode
     - scheme: slate
-      primary: blue
-      accent: blue
+      primary: indigo
+      accent: indigo
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
@@ -26,6 +24,7 @@ theme:
     - navigation.sections
     - navigation.expand
     - navigation.top
+    - navigation.tracking
     - search.highlight
     - search.share
     - content.code.copy
@@ -33,11 +32,12 @@ theme:
 
 plugins:
   - search
-  # - mkdocs-jupyter:
-  #     execute: false
-  #     allow_errors: false
-  #     include_requirejs: true
-  #     include_source: true
+  - gen-files:
+      scripts:
+        - docs/gen_ref_pages.py
+  - literate-nav:
+      nav_file: api/SUMMARY.md
+  - section-index
   - mkdocstrings:
       handlers:
         python:
@@ -55,8 +55,7 @@ markdown_extensions:
       line_spans: __span
       pygments_lang_class: true
   - pymdownx.inlinehilite
-  - pymdownx.snippets:
-      base_path: docs/examples
+  - pymdownx.snippets
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid
@@ -78,59 +77,22 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - About: about.md
   - Getting Started:
     - getting-started/index.md
     - Installation: getting-started/installation.md
     - Quick Start: getting-started/quick-start.md
-    - First Workflow: getting-started/first-workflow.md
+    - Advanced Usage: getting-started/advanced-usage.md
     - Configuration: getting-started/configuration.md
-  # - User Guide:
-  #   - user-guide/index.md
-  #   - Core Concepts: user-guide/core-concepts.md
-  #   - Execution Backends: user-guide/backends.md
-  #   - Task Definition: user-guide/task-definition.md
-  #   - Workflow Orchestration: user-guide/orchestration.md
-  #   - Platform Support: user-guide/platforms.md
-  #   - AsyncFlow Integration: user-guide/asyncflow-integration.md
-  #   - Troubleshooting: user-guide/troubleshooting.md
-  # - Examples:
-  #   - examples/index.md
-  #   - Basic Examples: examples/basic.md
-  #   - HPC Workflows: examples/hpc.md
-  #   - AI/ML Pipelines: examples/ai-ml.md
-  #   - Heterogeneous Computing: examples/heterogeneous.md
-  - API Reference:
-    - reference/index.md
-    - Core API: reference/core.md
-    - Backends: reference/backends.md
-    - Session Management: reference/session.md
-    - Task Management: reference/task.md
-    - Configuration: reference/configuration.md
-    - Utilities: reference/utilities.md
-  # - Development:
-  #   - development/index.md
-  #   - Contributing: development/contributing.md
-  #   - Architecture: development/architecture.md
-  #   - Backend Development: development/backend-dev.md
-  #   - Testing: development/testing.md
-  #   - Performance: development/performance.md
+  - API Reference: api/
   - Project:
     - project/index.md
-    - NSF Award: project/nsf-award.md
     - Roadmap: project/roadmap.md
-    - Publications: project/publications.md
     - Team: project/team.md
 
 extra:
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/radical-cybertools/rhapsody
-    - icon: fontawesome/solid/globe
-      link: https://radical.rutgers.edu/
-  analytics:
-    provider: google
-    property: !ENV GOOGLE_ANALYTICS_KEY
 
 extra_css:
   - stylesheets/extra.css

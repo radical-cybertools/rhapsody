@@ -46,14 +46,21 @@ class DaskExecutionBackend(BaseBackend):
             await backend.submit_tasks(tasks)
     """
 
-    @typeguard.typechecked
-    def __init__(self, resources: dict | None = None, name: str = "dask"):
+    def __init__(
+        self,
+        resources: dict | None = None,
+        name: str = "dask",
+        cluster: Any | None = None,
+        client: Any | None = None,
+    ):
         """Initialize the Dask execution backend (non-async setup only).
 
         Args:
             resources: Dictionary of resource requirements for tasks. Contains
                 configuration parameters for the Dask client initialization.
             name: Name of the backend.
+            cluster: Optional preconfigured Dask Cluster object.
+            client: Optional preconfigured Dask Client object.
         """
 
         if dask is None:
@@ -66,6 +73,8 @@ class DaskExecutionBackend(BaseBackend):
         self._client = None
         self._callback_func: Callable = lambda t, s: None
         self._resources = resources or {}
+        self._cluster_provided = cluster
+        self._client_provided = client
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
 
@@ -115,7 +124,15 @@ class DaskExecutionBackend(BaseBackend):
             Exception: If Dask client initialization fails.
         """
         try:
-            self._client = await dask.Client(asynchronous=True, **self._resources)
+            if self._client_provided:
+                self._client = self._client_provided
+            elif self._cluster_provided:
+                self._client = await dask.Client(
+                    self._cluster_provided, asynchronous=True, **self._resources
+                )
+            else:
+                self._client = await dask.Client(asynchronous=True, **self._resources)
+
             dashboard_link = self._client.dashboard_link
             self.logger.info(f"Dask backend initialized with dashboard at {dashboard_link}")
         except Exception as e:
@@ -381,16 +398,24 @@ class DaskExecutionBackend(BaseBackend):
         """Async context manager exit."""
         await self.shutdown()
 
-    # Class method for cleaner instantiation (optional alternative pattern)
     @classmethod
-    async def create(cls, resources: dict | None = None) -> DaskExecutionBackend:
+    async def create(
+        cls,
+        resources: dict | None = None,
+        name: str = "dask",
+        cluster: Any | None = None,
+        client: Any | None = None,
+    ) -> DaskExecutionBackend:
         """Alternative factory method for creating initialized backend.
 
         Args:
             resources: Configuration parameters for Dask client initialization.
+            name: Name of the backend.
+            cluster: Optional preconfigured Dask Cluster object.
+            client: Optional preconfigured Dask Client object.
 
         Returns:
             Fully initialized DaskExecutionBackend instance.
         """
-        backend = cls(resources)
+        backend = cls(resources=resources, name=name, cluster=cluster, client=client)
         return await backend
