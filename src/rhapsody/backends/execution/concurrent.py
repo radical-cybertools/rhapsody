@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from typing import Callable
 
-from ..base import BaseExecutionBackend
+from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
 
@@ -30,7 +30,7 @@ def _get_logger() -> logging.Logger:
     return logging.getLogger(__name__)
 
 
-class ConcurrentExecutionBackend(BaseExecutionBackend):
+class ConcurrentExecutionBackend(BaseBackend):
     """Simple async-only concurrent execution backend."""
 
     def __init__(self, executor: Executor = None, name: str = "concurrent"):

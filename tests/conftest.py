@@ -23,10 +23,10 @@ def session_instance():
 
 @pytest.fixture
 def base_execution_backend_class():
-    """Fixture providing the BaseExecutionBackend class."""
-    from rhapsody.backends.base import BaseExecutionBackend
+    """Fixture providing the BaseBackend class."""
+    from rhapsody.backends.base import BaseBackend
 
-    return BaseExecutionBackend
+    return BaseBackend
 
 
 @pytest.fixture

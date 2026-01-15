@@ -25,10 +25,10 @@ def test_dask_backend_class_exists():
     """Test that DaskExecutionBackend class exists and inherits from base."""
     try:
         from rhapsody.backends import DaskExecutionBackend
-        from rhapsody.backends.base import BaseExecutionBackend
+        from rhapsody.backends.base import BaseBackend
 
         # Check inheritance
-        assert issubclass(DaskExecutionBackend, BaseExecutionBackend)
+        assert issubclass(DaskExecutionBackend, BaseBackend)
     except ImportError:
         pytest.skip("Dask dependencies not available")
 

@@ -12,7 +12,7 @@ from typing import Any
 
 if TYPE_CHECKING:
     from rhapsody.api.task import BaseTask
-    from rhapsody.backends.base import BaseExecutionBackend
+    from rhapsody.backends.base import BaseBackend
 
 
 logger = logging.getLogger(__name__)
@@ -102,7 +102,7 @@ class Session:
 
     def __init__(
         self,
-        backends: list[BaseExecutionBackend] | None = None,
+        backends: list[BaseBackend] | None = None,
         uid: str | None = None,
         work_dir: str | None = None,
     ):
@@ -120,11 +120,11 @@ class Session:
 
         # Register callbacks with all provided backends
         backends_list = backends or []
-        self.backends: list[BaseExecutionBackend] = []
+        self.backends: list[BaseBackend] = []
         for backend in backends_list:
             self.add_backend(backend)
 
-    def add_backend(self, backend: BaseExecutionBackend) -> None:
+    def add_backend(self, backend: BaseBackend) -> None:
         """Add a backend to the session and register callbacks.
 
         Args:

@@ -399,11 +399,11 @@ class Session:
     def __init__(self)
 ```
 
-#### `BaseExecutionBackend`
+#### `BaseBackend`
 Abstract base class for execution backends.
 
 ```python
-class BaseExecutionBackend:
+class BaseBackend:
     async def submit_tasks(self, tasks: List[Dict]) -> List
     async def shutdown(self) -> None
     def state(self) -> str
@@ -413,7 +413,7 @@ class BaseExecutionBackend:
 
 ```python
 # Get available backends
-rhapsody.get_backend(name: str) -> BaseExecutionBackend
+rhapsody.get_backend(name: str) -> BaseBackend
 rhapsody.discover_backends() -> Dict[str, bool]
 ```
 

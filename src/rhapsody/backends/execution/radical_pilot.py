@@ -16,7 +16,7 @@ from typing import Callable
 
 import typeguard
 
-from ..base import BaseExecutionBackend
+from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
 
@@ -61,7 +61,7 @@ def service_ready_callback(future: asyncio.Future, task, state) -> None:
     threading.Thread(target=wait_and_set, daemon=True).start()
 
 
-class RadicalExecutionBackend(BaseExecutionBackend):
+class RadicalExecutionBackend(BaseBackend):
     """Radical Pilot-based execution backend for large-scale HPC task execution.
 
     The RadicalExecutionBackend manages computing resources and task execution

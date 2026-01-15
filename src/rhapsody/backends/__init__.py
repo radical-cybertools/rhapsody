@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from rhapsody.api.session import Session
 
-from .base import BaseExecutionBackend
+from .base import BaseBackend
 from .constants import StateMapper
 from .constants import TasksMainStates
 from .discovery import BackendRegistry
@@ -28,7 +28,7 @@ __all__ = [
     "BackendRegistry",
     "get_backend",
     "discover_backends",
-    "BaseExecutionBackend",
+    "BaseBackend",
     "Session",
     "TasksMainStates",
     "StateMapper",

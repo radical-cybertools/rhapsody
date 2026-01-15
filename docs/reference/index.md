@@ -103,7 +103,7 @@ backend.register_callback(monitor_progress)
 ### Classes
 
 - [`Session`](session.md) - Workflow session management
-- [`BaseExecutionBackend`](backends.md) - Base backend interface
+- [`BaseBackend`](backends.md) - Base backend interface
 - [`DaskExecutionBackend`](backends.md) - Dask-based distributed execution
 - [`RadicalExecutionBackend`](backends.md) - RADICAL-Pilot HPC execution
 

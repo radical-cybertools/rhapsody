@@ -21,7 +21,7 @@ from typing import Optional
 import psutil
 import typeguard
 
-from ..base import BaseExecutionBackend
+from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
 
@@ -1657,7 +1657,7 @@ class TaskStateMapperV3:
 # ============================================================================
 
 
-class DragonExecutionBackendV1(BaseExecutionBackend):
+class DragonExecutionBackendV1(BaseBackend):
     """Dragon execution backend with unified queue-based architecture
 
                 ┌────────────────────────────┐
@@ -2193,7 +2193,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
         return await backend
 
 
-class DragonExecutionBackendV2(BaseExecutionBackend):
+class DragonExecutionBackendV2(BaseBackend):
     """Dragon execution backend with parallel scheduling.
 
     Features:
@@ -3047,7 +3047,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         return await backend
 
 
-class DragonExecutionBackendV3(BaseExecutionBackend):
+class DragonExecutionBackendV3(BaseBackend):
     """
     Fast Dragon Batch integration using .wait() in threads.
 

@@ -10,13 +10,13 @@ import rhapsody
 from rhapsody import AITask
 from rhapsody import ComputeTask
 from rhapsody.api.session import Session
-from rhapsody.backends.base import BaseExecutionBackend
+from rhapsody.backends.base import BaseBackend
 from rhapsody.backends.constants import StateMapper
 
 # Register a mock backend for performance testing
 StateMapper.register_backend_tasks_states_with_defaults('mock')
 
-class MockBackend(BaseExecutionBackend):
+class MockBackend(BaseBackend):
     """Minimal backend that does nothing but record submission."""
     def __init__(self, name: str = "mock"):
         super().__init__(name=name)

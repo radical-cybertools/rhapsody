@@ -26,7 +26,7 @@ except ImportError:
     dragon = None
     DragonInference = None
 
-from rhapsody.backends.base import BaseExecutionBackend
+from rhapsody.backends.base import BaseBackend
 from rhapsody.backends.constants import StateMapper
 
 logger = logging.getLogger(__name__)
@@ -45,7 +45,7 @@ class PendingRequest:
     task_uid: Optional[str] = None  # UID of the AITask if applicable
 
 
-class DragonVllmInferenceBackend(BaseExecutionBackend):
+class DragonVllmInferenceBackend(BaseBackend):
     """
     Server-side batching VLLM inference backend.
 
@@ -655,7 +655,7 @@ class DragonVllmInferenceBackend(BaseExecutionBackend):
         self._batch_lock = asyncio.Lock()
         self._new_request_event = asyncio.Event()
 
-    # BaseExecutionBackend abstract methods
+    # BaseBackend abstract methods
     def state(self) -> str:
         return "RUNNING" if self.is_initialized else "INITIALIZED"
 
@@ -668,18 +668,6 @@ class DragonVllmInferenceBackend(BaseExecutionBackend):
         return StateMapper("vllm")
 
     def build_task(self, task: dict) -> None:
-        pass
-
-    def link_implicit_data_deps(self, src_task: dict[str, Any], dst_task: dict[str, Any]) -> None:
-        pass
-
-    def link_explicit_data_deps(
-        self,
-        src_task: dict[str, Any] | None = None,
-        dst_task: dict[str, Any] | None = None,
-        file_name: str | None = None,
-        file_path: str | None = None,
-    ) -> None:
         pass
 
     async def cancel_task(self, uid: str) -> bool:

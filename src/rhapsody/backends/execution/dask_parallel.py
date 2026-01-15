@@ -14,7 +14,7 @@ from typing import Callable
 
 import typeguard
 
-from ..base import BaseExecutionBackend
+from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
 
@@ -33,7 +33,7 @@ def _get_logger() -> logging.Logger:
     return logging.getLogger(__name__)
 
 
-class DaskExecutionBackend(BaseExecutionBackend):
+class DaskExecutionBackend(BaseBackend):
     """An async-only Dask execution backend for distributed task execution.
 
     Handles task submission, cancellation, and proper async event loop handling

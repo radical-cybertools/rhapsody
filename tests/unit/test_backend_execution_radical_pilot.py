@@ -28,10 +28,10 @@ def test_radical_pilot_backend_class_exists():
     """Test that RadicalExecutionBackend class exists and inherits from base."""
     try:
         from rhapsody.backends import RadicalExecutionBackend
-        from rhapsody.backends.base import BaseExecutionBackend
+        from rhapsody.backends.base import BaseBackend
 
         # Check inheritance
-        assert issubclass(RadicalExecutionBackend, BaseExecutionBackend)
+        assert issubclass(RadicalExecutionBackend, BaseBackend)
     except ImportError:
         pytest.skip("RADICAL-Pilot dependencies not available")
 

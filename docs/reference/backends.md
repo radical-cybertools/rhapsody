@@ -4,7 +4,7 @@ API documentation for RHAPSODY execution backends.
 
 ## Base Backend Interface
 
-::: rhapsody.backends.base.BaseExecutionBackend
+::: rhapsody.backends.base.BaseBackend
     options:
       show_source: false
       show_root_heading: true

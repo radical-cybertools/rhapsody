@@ -16,11 +16,11 @@ if TYPE_CHECKING:
     pass
 
 
-class BaseExecutionBackend(ABC):
-    """Abstract base class for execution backends that manage task execution and state.
+class BaseBackend(ABC):
+    """Abstract base class for backends that manage task execution and state.
 
-    This class defines the interface for execution backends that handle task submission, state
-    management, and dependency linking in a distributed or parallel execution environment.
+    This class defines the interface for backends that handle task submission, state
+    management, and lifecycle in a distributed or parallel execution environment.
     """
 
     def __init__(self, name: str | None = None):
@@ -107,7 +107,6 @@ class BaseExecutionBackend(ABC):
         """
         pass
 
-    @abstractmethod
     def link_implicit_data_deps(self, src_task: dict[str, Any], dst_task: dict[str, Any]) -> None:
         """Link implicit data dependencies between two tasks.
 
@@ -121,7 +120,6 @@ class BaseExecutionBackend(ABC):
         """
         pass
 
-    @abstractmethod
     def link_explicit_data_deps(
         self,
         src_task: dict[str, Any] | None = None,
