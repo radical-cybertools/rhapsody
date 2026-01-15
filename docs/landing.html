@@ -1,10 +1,13 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>RHAPSODY - Hybrid AI-HPC Workflow Execution at Scale</title>
-    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=JetBrains+Mono:wght@400;600&family=Syne:wght@400;600;700&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=JetBrains+Mono:wght@400;600&family=Syne:wght@400;600;700&display=swap"
+        rel="stylesheet">
     <style>
         :root {
             --primary: #00d4ff;
@@ -48,7 +51,7 @@
             position: absolute;
             width: 200%;
             height: 200%;
-            background-image: 
+            background-image:
                 linear-gradient(rgba(0, 212, 255, 0.03) 1px, transparent 1px),
                 linear-gradient(90deg, rgba(0, 212, 255, 0.03) 1px, transparent 1px);
             background-size: 50px 50px;
@@ -56,8 +59,13 @@
         }
 
         @keyframes gridMove {
-            0% { transform: translate(0, 0); }
-            100% { transform: translate(50px, 50px); }
+            0% {
+                transform: translate(0, 0);
+            }
+
+            100% {
+                transform: translate(50px, 50px);
+            }
         }
 
         .orb {
@@ -96,9 +104,19 @@
         }
 
         @keyframes float {
-            0%, 100% { transform: translate(0, 0) scale(1); }
-            33% { transform: translate(100px, -50px) scale(1.1); }
-            66% { transform: translate(-50px, 100px) scale(0.9); }
+
+            0%,
+            100% {
+                transform: translate(0, 0) scale(1);
+            }
+
+            33% {
+                transform: translate(100px, -50px) scale(1.1);
+            }
+
+            66% {
+                transform: translate(-50px, 100px) scale(0.9);
+            }
         }
 
         /* Navigation */
@@ -118,8 +136,15 @@
         }
 
         @keyframes slideDown {
-            from { transform: translateY(-100px); opacity: 0; }
-            to { transform: translateY(0); opacity: 1; }
+            from {
+                transform: translateY(-100px);
+                opacity: 0;
+            }
+
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
         }
 
         .logo {
@@ -188,8 +213,15 @@
         }
 
         @keyframes fadeInUp {
-            from { opacity: 0; transform: translateY(40px); }
-            to { opacity: 1; transform: translateY(0); }
+            from {
+                opacity: 0;
+                transform: translateY(40px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         .hero-label {
@@ -206,8 +238,15 @@
         }
 
         @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.6; }
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.6;
+            }
         }
 
         h1 {
@@ -262,7 +301,7 @@
             left: -100%;
             width: 100%;
             height: 100%;
-            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
             transition: left 0.5s ease;
         }
 
@@ -303,9 +342,17 @@
             animation: fadeInUp 1s ease-out both;
         }
 
-        .stat-item:nth-child(1) { animation-delay: 0.4s; }
-        .stat-item:nth-child(2) { animation-delay: 0.5s; }
-        .stat-item:nth-child(3) { animation-delay: 0.6s; }
+        .stat-item:nth-child(1) {
+            animation-delay: 0.4s;
+        }
+
+        .stat-item:nth-child(2) {
+            animation-delay: 0.5s;
+        }
+
+        .stat-item:nth-child(3) {
+            animation-delay: 0.6s;
+        }
 
         .stat-number {
             font-family: 'Orbitron', monospace;
@@ -348,9 +395,17 @@
             border-radius: 50%;
         }
 
-        .dot-red { background: #ff5f56; }
-        .dot-yellow { background: #ffbd2e; }
-        .dot-green { background: #27c93f; }
+        .dot-red {
+            background: #ff5f56;
+        }
+
+        .dot-yellow {
+            background: #ffbd2e;
+        }
+
+        .dot-green {
+            background: #27c93f;
+        }
 
         .code-content {
             font-family: 'JetBrains Mono', monospace;
@@ -363,23 +418,61 @@
             animation: typeLine 0.5s ease-out forwards;
         }
 
-        .code-line:nth-child(1) { animation-delay: 0.8s; }
-        .code-line:nth-child(2) { animation-delay: 1s; }
-        .code-line:nth-child(3) { animation-delay: 1.2s; }
-        .code-line:nth-child(4) { animation-delay: 1.4s; }
-        .code-line:nth-child(5) { animation-delay: 1.6s; }
-        .code-line:nth-child(6) { animation-delay: 1.8s; }
-
-        @keyframes typeLine {
-            from { opacity: 0; transform: translateX(-10px); }
-            to { opacity: 1; transform: translateX(0); }
+        .code-line:nth-child(1) {
+            animation-delay: 0.8s;
         }
 
-        .keyword { color: #c792ea; }
-        .function { color: #82aaff; }
-        .string { color: #c3e88d; }
-        .comment { color: #697098; }
-        .number { color: #f78c6c; }
+        .code-line:nth-child(2) {
+            animation-delay: 1s;
+        }
+
+        .code-line:nth-child(3) {
+            animation-delay: 1.2s;
+        }
+
+        .code-line:nth-child(4) {
+            animation-delay: 1.4s;
+        }
+
+        .code-line:nth-child(5) {
+            animation-delay: 1.6s;
+        }
+
+        .code-line:nth-child(6) {
+            animation-delay: 1.8s;
+        }
+
+        @keyframes typeLine {
+            from {
+                opacity: 0;
+                transform: translateX(-10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+
+        .keyword {
+            color: #c792ea;
+        }
+
+        .function {
+            color: #82aaff;
+        }
+
+        .string {
+            color: #c3e88d;
+        }
+
+        .comment {
+            color: #697098;
+        }
+
+        .number {
+            color: #f78c6c;
+        }
 
         /* Features Section */
         .features {
@@ -436,12 +529,29 @@
             animation: fadeInUp 1s ease-out both;
         }
 
-        .feature-card:nth-child(1) { animation-delay: 0.2s; }
-        .feature-card:nth-child(2) { animation-delay: 0.3s; }
-        .feature-card:nth-child(3) { animation-delay: 0.4s; }
-        .feature-card:nth-child(4) { animation-delay: 0.5s; }
-        .feature-card:nth-child(5) { animation-delay: 0.6s; }
-        .feature-card:nth-child(6) { animation-delay: 0.7s; }
+        .feature-card:nth-child(1) {
+            animation-delay: 0.2s;
+        }
+
+        .feature-card:nth-child(2) {
+            animation-delay: 0.3s;
+        }
+
+        .feature-card:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        .feature-card:nth-child(4) {
+            animation-delay: 0.5s;
+        }
+
+        .feature-card:nth-child(5) {
+            animation-delay: 0.6s;
+        }
+
+        .feature-card:nth-child(6) {
+            animation-delay: 0.7s;
+        }
 
         .feature-card::before {
             content: '';
@@ -478,12 +588,29 @@
             z-index: 1;
         }
 
-        .icon-1 { background: linear-gradient(135deg, #667eea, #764ba2); }
-        .icon-2 { background: linear-gradient(135deg, #f093fb, #f5576c); }
-        .icon-3 { background: linear-gradient(135deg, #4facfe, #00f2fe); }
-        .icon-4 { background: linear-gradient(135deg, #43e97b, #38f9d7); }
-        .icon-5 { background: linear-gradient(135deg, #fa709a, #fee140); }
-        .icon-6 { background: linear-gradient(135deg, #30cfd0, #330867); }
+        .icon-1 {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+        }
+
+        .icon-2 {
+            background: linear-gradient(135deg, #f093fb, #f5576c);
+        }
+
+        .icon-3 {
+            background: linear-gradient(135deg, #4facfe, #00f2fe);
+        }
+
+        .icon-4 {
+            background: linear-gradient(135deg, #43e97b, #38f9d7);
+        }
+
+        .icon-5 {
+            background: linear-gradient(135deg, #fa709a, #fee140);
+        }
+
+        .icon-6 {
+            background: linear-gradient(135deg, #30cfd0, #330867);
+        }
 
         .feature-title {
             font-family: 'Orbitron', monospace;
@@ -553,9 +680,17 @@
             animation: fadeInUp 1s ease-out both;
         }
 
-        .use-case-card:nth-child(1) { animation-delay: 0.2s; }
-        .use-case-card:nth-child(2) { animation-delay: 0.3s; }
-        .use-case-card:nth-child(3) { animation-delay: 0.4s; }
+        .use-case-card:nth-child(1) {
+            animation-delay: 0.2s;
+        }
+
+        .use-case-card:nth-child(2) {
+            animation-delay: 0.3s;
+        }
+
+        .use-case-card:nth-child(3) {
+            animation-delay: 0.4s;
+        }
 
         .use-case-card::before {
             content: '';
@@ -661,8 +796,15 @@
         }
 
         @keyframes shine {
-            0%, 100% { transform: translateX(-100%) translateY(-100%) rotate(45deg); }
-            50% { transform: translateX(100%) translateY(100%) rotate(45deg); }
+
+            0%,
+            100% {
+                transform: translateX(-100%) translateY(-100%) rotate(45deg);
+            }
+
+            50% {
+                transform: translateX(100%) translateY(100%) rotate(45deg);
+            }
         }
 
         .cta-title {
@@ -759,8 +901,23 @@
                 text-align: center;
             }
         }
+
+        .code-line {
+            opacity: 0;
+            animation: typeLine 0.5s ease-out forwards;
+            padding-left: 0;
+        }
+
+        .code-line.indent-1 {
+            padding-left: 2rem;
+        }
+
+        .code-line.indent-2 {
+            padding-left: 4rem;
+        }
     </style>
 </head>
+
 <body>
     <!-- Animated Background -->
     <div class="bg-animation">
@@ -788,11 +945,15 @@
                 <span class="hero-label">⚡ Multi-Runtime AI-HPC Middleware</span>
                 <h1>Execute Hybrid AI-HPC Workflows at Scale</h1>
                 <p class="hero-subtitle">
-                    High-performance runtime system enabling concurrent execution of heterogeneous AI-HPC workloads across leadership-class platforms. Combine simulations, inference, and training in a single allocation.
+                    High-performance runtime system enabling concurrent execution of heterogeneous AI-HPC workloads
+                    across leadership-class platforms. Combine simulations, inference, and training in a single
+                    allocation.
                 </p>
                 <div class="cta-buttons">
-                    <a href="https://radical-cybertools.github.io/rhapsody/getting-started/installation/" class="btn btn-primary">Get Started</a>
-                    <a href="https://github.com/radical-cybertools/rhapsody" class="btn btn-secondary">View on GitHub</a>
+                    <a href="https://radical-cybertools.github.io/rhapsody/getting-started/installation/"
+                        class="btn btn-primary">Get Started</a>
+                    <a href="https://github.com/radical-cybertools/rhapsody" class="btn btn-secondary">View on
+                        GitHub</a>
                 </div>
                 <div class="stats">
                     <div class="stat-item">
@@ -817,15 +978,28 @@
                         <div class="dot dot-green"></div>
                     </div>
                     <div class="code-content">
-                        <div class="code-line"><span class="keyword">from</span> rhapsody <span class="keyword">import</span> Session</div>
+                        <div class="code-line"><span class="keyword">from</span> rhapsody <span
+                                class="keyword">import</span> Session, AITask, ComputeTask</div>
                         <div class="code-line"></div>
-                        <div class="code-line"><span class="comment"># Initialize RHAPSODY session</span></div>
-                        <div class="code-line">session = <span class="function">Session</span>(backend=<span class="string">"dragon"</span>)</div>
+                        <div class="code-line"><span class="comment"># Define heterogeneous AI-HPC tasks</span></div>
+                        <div class="code-line">tasks = [</div>
+                        <div class="code-line indent-1"><span class="function">AITask</span>(</div>
+                        <div class="code-line indent-2">prompt=<span class="string">'What is the capital of
+                                France?'</span>,</div>
+                        <div class="code-line indent-2">backend=inference_backend.name</div>
+                        <div class="code-line indent-1">),</div>
+                        <div class="code-line indent-1"><span class="function">ComputeTask</span>(</div>
+                        <div class="code-line indent-2">executable=<span class="string">'/usr/bin/echo'</span>,</div>
+                        <div class="code-line indent-2">arguments=[<span class="string">'Hello from Dragon!'</span>],
+                        </div>
+                        <div class="code-line indent-2">backend=execution_backend.name</div>
+                        <div class="code-line indent-1">)</div>
+                        <div class="code-line">]</div>
                         <div class="code-line"></div>
-                        <div class="code-line"><span class="comment"># Submit heterogeneous AI-HPC tasks</span></div>
-                        <div class="code-line">simulation = session.<span class="function">submit_mpi</span>(ranks=<span class="number">256</span>)</div>
-                        <div class="code-line">inference = session.<span class="function">launch_service</span>(<span class="string">"vllm"</span>)</div>
-                        <div class="code-line">results = session.<span class="function">submit_batch</span>(tasks=<span class="number">10000</span>)</div>
+                        <div class="code-line"><span class="comment"># Initialize and execute</span></div>
+                        <div class="code-line">session = <span class="function">Session</span>([execution_backend,
+                            inference_backend])</div>
+                        <div class="code-line">results = session.<span class="function">submit</span>(tasks)</div>
                     </div>
                 </div>
             </div>
@@ -838,7 +1012,8 @@
             <div class="section-label">Capabilities</div>
             <h2 class="section-title">Built for Hybrid AI-HPC at Scale</h2>
             <p class="section-description">
-                RHAPSODY composes existing runtime systems through uniform abstractions, enabling concurrent execution of simulations, inference services, and tightly coupled AI-HPC tasks.
+                RHAPSODY composes existing runtime systems through uniform abstractions, enabling concurrent execution
+                of simulations, inference services, and tightly coupled AI-HPC tasks.
             </p>
         </div>
         <div class="features-grid">
@@ -846,7 +1021,8 @@
                 <div class="feature-icon icon-1">🚀</div>
                 <h3 class="feature-title">High-Throughput Execution</h3>
                 <p class="feature-description">
-                    Execute thousands of fine-grained tasks per second with minimal overhead. Near-linear scaling demonstrated up to 1,024 nodes on leadership-class systems.
+                    Execute thousands of fine-grained tasks per second with minimal overhead. Near-linear scaling
+                    demonstrated up to 1,024 nodes on leadership-class systems.
                 </p>
                 <div class="feature-metrics">
                     <div class="metric">
@@ -864,7 +1040,8 @@
                 <div class="feature-icon icon-2">🔄</div>
                 <h3 class="feature-title">Heterogeneous Workloads</h3>
                 <p class="feature-description">
-                    Concurrently execute MPI simulations, GPU kernels, CPU analytics, and Python functions. Sustain up to 22 distinct task types without artificial phase separation.
+                    Concurrently execute MPI simulations, GPU kernels, CPU analytics, and Python functions. Sustain up
+                    to 22 distinct task types without artificial phase separation.
                 </p>
                 <div class="feature-metrics">
                     <div class="metric">
@@ -882,7 +1059,8 @@
                 <div class="feature-icon icon-3">🧠</div>
                 <h3 class="feature-title">Inference at Scale</h3>
                 <p class="feature-description">
-                    Deploy persistent vLLM services with intelligent request routing. Process 350K+ tokens/second with balanced load distribution across multi-node inference clusters.
+                    Deploy persistent vLLM services with intelligent request routing. Process 350K+ tokens/second with
+                    balanced load distribution across multi-node inference clusters.
                 </p>
                 <div class="feature-metrics">
                     <div class="metric">
@@ -900,7 +1078,8 @@
                 <div class="feature-icon icon-4">⚡</div>
                 <h3 class="feature-title">Tightly Coupled AI-HPC</h3>
                 <p class="feature-description">
-                    Low-latency data exchange between simulations and AI components via SmartRedis. Memory-based coupling achieves 50% faster execution than filesystem methods.
+                    Low-latency data exchange between simulations and AI components via SmartRedis. Memory-based
+                    coupling achieves 50% faster execution than filesystem methods.
                 </p>
                 <div class="feature-metrics">
                     <div class="metric">
@@ -918,7 +1097,8 @@
                 <div class="feature-icon icon-5">🤖</div>
                 <h3 class="feature-title">Agentic Workflows</h3>
                 <p class="feature-description">
-                    Support LLM-driven decision making with Flowgentic integration. Maintain bounded lag between agent decisions and HPC task execution at scale.
+                    Support LLM-driven decision making with Flowgentic integration. Maintain bounded lag between agent
+                    decisions and HPC task execution at scale.
                 </p>
                 <div class="feature-metrics">
                     <div class="metric">
@@ -936,7 +1116,8 @@
                 <div class="feature-icon icon-6">🔧</div>
                 <h3 class="feature-title">Multi-Runtime Integration</h3>
                 <p class="feature-description">
-                    Compose Dragon, Flux, RADICAL-Pilot, vLLM, and DeepSpeed through uniform APIs. Deploy without platform-specific customization on Frontier, Perlmutter, and more.
+                    Compose Dragon, Flux, RADICAL-Pilot, vLLM, and DeepSpeed through uniform APIs. Deploy without
+                    platform-specific customization on Frontier, Perlmutter, and more.
                 </p>
                 <div class="feature-metrics">
                     <div class="metric">
@@ -958,7 +1139,8 @@
             <div class="section-label">Applications</div>
             <h2 class="section-title">Real-World Scientific Impact</h2>
             <p class="section-description">
-                Powering cutting-edge research across drug discovery, foundation models, and AI-driven simulation campaigns on the American Science Cloud.
+                Powering cutting-edge research across drug discovery, foundation models, and AI-driven simulation
+                campaigns on the American Science Cloud.
             </p>
         </div>
         <div class="use-cases-grid">
@@ -966,7 +1148,8 @@
                 <div class="use-case-number">01</div>
                 <h3 class="use-case-title">Drug Discovery (IMPECCABLE)</h3>
                 <p class="use-case-description">
-                    Accelerate COVID-19 drug discovery by combining molecular dynamics simulations with ML-based docking surrogates and active learning loops.
+                    Accelerate COVID-19 drug discovery by combining molecular dynamics simulations with ML-based docking
+                    surrogates and active learning loops.
                 </p>
                 <div class="use-case-highlights">
                     <div class="highlight-item">
@@ -988,7 +1171,8 @@
                 <div class="use-case-number">02</div>
                 <h3 class="use-case-title">Foundation Models (LUCID & SPHERICAL)</h3>
                 <p class="use-case-description">
-                    Process scientific literature with long-context LLMs for hypothesis generation. Scale inference to 8 GPU nodes with sustained high utilization.
+                    Process scientific literature with long-context LLMs for hypothesis generation. Scale inference to 8
+                    GPU nodes with sustained high utilization.
                 </p>
                 <div class="use-case-highlights">
                     <div class="highlight-item">
@@ -1010,7 +1194,8 @@
                 <div class="use-case-number">03</div>
                 <h3 class="use-case-title">AI-Steered Simulations (IMPRESS)</h3>
                 <p class="use-case-description">
-                    Use LangGraph-based AI agents to dynamically orchestrate protein structure workflows, adapting task selection based on intermediate results.
+                    Use LangGraph-based AI agents to dynamically orchestrate protein structure workflows, adapting task
+                    selection based on intermediate results.
                 </p>
                 <div class="use-case-highlights">
                     <div class="highlight-item">
@@ -1035,10 +1220,12 @@
         <div class="cta-content">
             <h2 class="cta-title">Ready to Scale Your AI-HPC Workflows?</h2>
             <p class="cta-description">
-                Join the scientific community using RHAPSODY on the American Science Cloud and leadership-class HPC platforms.
+                Join the scientific community using RHAPSODY on the American Science Cloud and leadership-class HPC
+                platforms.
             </p>
             <div class="cta-buttons">
-                <a href="https://radical-cybertools.github.io/rhapsody/getting-started/quick-start/" class="btn btn-primary">Quick Start Guide</a>
+                <a href="https://radical-cybertools.github.io/rhapsody/getting-started/quick-start/"
+                    class="btn btn-primary">Quick Start Guide</a>
                 <a href="https://github.com/radical-cybertools/rhapsody" class="btn btn-secondary">Explore GitHub</a>
             </div>
         </div>
@@ -1057,4 +1244,5 @@
         </div>
     </footer>
 </body>
+
 </html>
