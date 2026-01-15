@@ -31,8 +31,11 @@ for path in sorted(package_dir.rglob("*.py")):
     elif parts[-1] == "__main__":
         continue
 
-    # nav entries should be relative to the 'api/' directory for literate-nav
-    nav[parts] = doc_path.as_posix()
+    # CHANGE HERE: Strip 'rhapsody' from the parts for navigation
+    # but keep the full path for doc_path
+    nav_parts = parts[1:] if parts[0] == "rhapsody" else parts  # Remove first element
+    if nav_parts:  # Only add if there are parts left
+        nav[nav_parts] = doc_path.as_posix()
 
     with mkdocs_gen_files.open(full_doc_path, "w") as fd:
         ident = ".".join(parts)
