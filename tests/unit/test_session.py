@@ -139,3 +139,44 @@ async def test_session_callbacks_registered():
     # The session registers self._state_manager.update_task
     assert backend._callback_func == session._state_manager.update_task
     await session.close()
+@pytest.mark.asyncio
+async def test_session_explicit_routing():
+    """Test that Session routes tasks to the correct named backend."""
+    # Create two backends with different names
+    backend1 = await ConcurrentExecutionBackend(name="b1")
+    backend2 = await ConcurrentExecutionBackend(name="b2")
+    
+    session = Session(backends=[backend1, backend2])
+    
+    # Task 1 goes to b1
+    task1 = ComputeTask(uid="t1", executable="echo", arguments=["b1"], backend="b1")
+    # Task 2 goes to b2
+    task2 = ComputeTask(uid="t2", executable="echo", arguments=["b2"], backend="b2")
+    # Task 3 has no backend, should go to first backend (b1)
+    task3 = ComputeTask(uid="t3", executable="echo", arguments=["default"])
+    
+    async with session:
+        await session.submit_tasks([task1, task2, task3])
+        
+        # Verify routing recorded in task object
+        assert task1.backend == "b1"
+        assert task2.backend == "b2"
+        assert task3.backend == "b1"
+        
+        # Wait for all
+        await asyncio.gather(task1, task2, task3)
+        
+        assert task1.state == "DONE"
+        assert task2.state == "DONE"
+        assert task3.state == "DONE"
+
+@pytest.mark.asyncio
+async def test_session_invalid_backend():
+    """Test that Session raises ValueError for unknown backend names."""
+    backend = await ConcurrentExecutionBackend(name="valid")
+    session = Session(backends=[backend])
+    task = ComputeTask(executable="echo", backend="invalid")
+    
+    async with session:
+        with pytest.raises(ValueError, match="Backend 'invalid' requested by task .* not found"):
+            await session.submit_tasks([task])

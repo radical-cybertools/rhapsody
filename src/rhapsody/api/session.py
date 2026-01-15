@@ -117,23 +117,32 @@ class Session:
         """
         self.uid = uid or 'session.0000'
         self.work_dir = work_dir or os.getcwd()
-        self.backends = backends or []
         self._tasks: dict[str, BaseTask | dict] = {}
-        
         self._state_manager = TaskStateManager()
-        
+
         # Register callbacks with all provided backends
-        for backend in self.backends:
-            # We wrap the update to ensuring it matches the signature expected by backends
-            # backend.register_callback(self._on_backend_update)
-            # Actually, backends usually take a function: cb(task, state)
-            backend.register_callback(self._state_manager.update_task)
+        backends_list = backends or []
+        self.backends: list[BaseExecutionBackend] = []
+        for backend in backends_list:
+            self.add_backend(backend)
+
+    def add_backend(self, backend: BaseExecutionBackend) -> None:
+        """Add a backend to the session and register callbacks.
+
+        Args:
+            backend: The execution or inference backend to add.
+        """
+        self.backends.append(backend)
+        
+        # Register state manager callback
+        backend.register_callback(self._state_manager.update_task)
+        
+        # Sync terminal states from backend
+        if hasattr(backend, 'get_task_states_map'):
+            state_mapper = backend.get_task_states_map()
+            self._state_manager._terminal_states.update(state_mapper.terminal_states)
             
-            # Also sync terminal states from backend
-            if hasattr(backend, 'get_task_states_map'):
-                state_mapper = backend.get_task_states_map()
-                # Aggregate terminal states (union)
-                self._state_manager._terminal_states.update(state_mapper.terminal_states)
+        logger.debug(f"Registered backend '{backend.name}' with Session '{self.uid}'")
 
     async def submit_tasks(self, tasks: list[dict | BaseTask]) -> list[asyncio.Future]:
         """Submit tasks to execution backends and return futures.
@@ -151,13 +160,13 @@ class Session:
              except RuntimeError:
                  pass
         if not self.backends:
-            raise RuntimeError("No execution backends configured in Session")
+            raise RuntimeError("No backends configured in Session")
 
-        # MVP Strategy: Submit all tasks to the first backend.
-        # Future: Implement scheduling/routing logic.
-        backend = self.backends[0]
+        # Map backends by name for fast lookup
+        backend_map = {b.name: b for b in self.backends}
+        tasks_by_backend = defaultdict(list)
         
-        # Track tasks locally for telemetry and futures
+        # Group tasks by their explicit backend target
         futures = []
         for task in tasks:
             uid = task['uid']
@@ -174,9 +183,34 @@ class Session:
                 task['history'] = {}
             if 'submitted' not in task['history']:
                 task['history']['submitted'] = time.time()
+
+            # Routing decision
+            target_name = task.get('backend')
+            if not target_name:
+                # If no backend specified, use the first one as default
+                target_name = self.backends[0].name
+                task['backend'] = target_name  # Ensure it's recorded
+
+            if target_name not in backend_map:
+                available = list(backend_map.keys())
+                raise ValueError(
+                    f"Backend '{target_name}' requested by task {uid} not found in Session. "
+                    f"Available backends: {available}"
+                )
+            
+            tasks_by_backend[target_name].append(task)
         
-        # ensure we are calling the backend submit_tasks
-        await backend.submit_tasks(tasks)
+        # Submit each group to its respective backend concurrently
+        submission_tasks = []
+        for name, backend_tasks in tasks_by_backend.items():
+            backend = backend_map[name]
+            submission_tasks.append(backend.submit_tasks(backend_tasks))
+            
+        if submission_tasks:
+            await asyncio.gather(*submission_tasks)
+
+        logger.info(f'Successfully submitted {len(tasks)} tasks')
+
         return futures
 
     async def wait_tasks(

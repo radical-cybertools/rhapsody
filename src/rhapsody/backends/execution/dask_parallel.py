@@ -46,18 +46,19 @@ class DaskExecutionBackend(BaseExecutionBackend):
     """
 
     @typeguard.typechecked
-    def __init__(self, resources: dict | None = None):
+    def __init__(self, resources: dict | None = None, name: str = "dask"):
         """Initialize the Dask execution backend (non-async setup only).
 
         Args:
             resources: Dictionary of resource requirements for tasks. Contains
                 configuration parameters for the Dask client initialization.
+            name: Name of the backend.
         """
 
         if dask is None:
             raise ImportError("Dask is required for DaskExecutionBackend.")
 
-        super().__init__()
+        super().__init__(name=name)
 
         self.logger = _get_logger()
         self.tasks = {}

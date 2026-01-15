@@ -61,9 +61,9 @@ class BaseTask(dict, ABC):
         Returns:
             Unique task identifier string
         """
-        with cls._uid_lock:
-            cls._uid_counter += 1
-            return f"task.{cls._uid_counter:06d}"
+        with BaseTask._uid_lock:
+            BaseTask._uid_counter += 1
+            return f"task.{BaseTask._uid_counter:06d}"
 
     def __init__(
         self,
@@ -73,6 +73,7 @@ class BaseTask(dict, ABC):
         gpu: Optional[int] = None,
         cpu_threads: Optional[int] = None,
         environment: Optional[dict[str, str]] = None,
+        backend: Optional[str] = None,
         **kwargs: Any,
     ):
         """Initialize base task with common fields.
@@ -99,6 +100,7 @@ class BaseTask(dict, ABC):
         self['gpu'] = gpu
         self['cpu_threads'] = cpu_threads
         self['environment'] = environment
+        self['backend'] = backend
 
         # Initialize result fields (populated by backends after execution)
         self['state'] = None
@@ -248,6 +250,22 @@ class BaseTask(dict, ABC):
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        # Always re-initialize future to None in the new process
+        self._future = None
+
+    def __hash__(self) -> int:
+        """Hash based on unique identifier.
+        
+        Allows tasks to be used in sets, as dictionary keys, and in asyncio.gather.
+        """
+        return hash(self.uid)
+
+    def __eq__(self, other: Any) -> bool:
+        """Equality based on unique identifier."""
+        if not isinstance(other, BaseTask):
+            return False
+        return self.uid == other.uid
         """Restore state and initialize internal fields."""
         self.__dict__.update(state)
         # Always re-initialize future to None in the new process
@@ -469,6 +487,7 @@ class AITask(BaseTask):
         gpu: Optional[int] = None,
         cpu_threads: Optional[int] = None,
         environment: Optional[dict[str, str]] = None,
+        backend: Optional[str] = None,
         **extra_kwargs: Any,
     ):
         """Initialize AI task.
@@ -515,6 +534,7 @@ class AITask(BaseTask):
             gpu=gpu,
             cpu_threads=cpu_threads,
             environment=environment,
+            backend=backend,
             **task_fields,
             **extra_kwargs,
         )
@@ -529,17 +549,26 @@ class AITask(BaseTask):
         prompt = self.get('prompt')
 
         # Prompt is required
-        if not prompt or not isinstance(prompt, str):
-            raise TaskValidationError(uid, "prompt must be a non-empty string")
+        if not prompt:
+            raise TaskValidationError(uid, "prompt is required")
+
+        if not isinstance(prompt, (str, list)):
+            raise TaskValidationError(uid, f"prompt must be a string or list of strings, got {type(prompt)}")
+
+        if isinstance(prompt, list):
+            for i, p in enumerate(prompt):
+                if not isinstance(p, str):
+                    raise TaskValidationError(uid, f"prompt item {i} must be a string, got {type(p)}")
 
         model = self.get('model')
         inference_endpoint = self.get('inference_endpoint')
 
-        # Either model or inference_endpoint must be specified
-        if model is None and inference_endpoint is None:
-            raise TaskValidationError(
-                uid, "AITask requires either 'model' or 'inference_endpoint' to be specified"
-            )
+        # Ensure a target is provided (model, endpoint, or named backend)
+        if not any([self.get('model'), self.get('inference_endpoint'), self.get('backend')]):
+             raise TaskValidationError(
+                 self['uid'],
+                 "AITask requires either 'model', 'inference_endpoint', or 'backend' to be specified"
+             )
 
         # Validate model
         if model is not None and not isinstance(model, str):

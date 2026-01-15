@@ -1703,7 +1703,11 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
     """
 
     @typeguard.typechecked
-    def __init__(self, resources: Optional[dict] = None, ddict: Optional[DDict] = None):
+    def __init__(self,
+     resources: Optional[dict] = None,
+     ddict: Optional[DDict] = None,
+     name: Optional[str] = "dragon"):
+
         if dragon is None:
             raise ImportError("Dragon is required for DragonExecutionBackendV1.")
         if DDict is None:
@@ -1711,7 +1715,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
         if System is None:
             raise ImportError("Dragon System is required for this backend version.")
 
-        super().__init__()
+        super().__init__(name=name)
 
         self.logger = _get_logger()
         self.tasks: dict[str, dict[str, Any]] = {}
@@ -2259,11 +2263,15 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
     """
 
     @typeguard.typechecked
-    def __init__(self, resources: Optional[dict] = None, ddict: Optional[DDict] = None):
+    def __init__(self,
+    resources: Optional[dict] = None,
+    ddict: Optional[DDict] = None,
+    name: Optional[str] = "dragon"):
+
         if dragon is None:
             raise ImportError("Dragon is required for DragonExecutionBackendV2.")
 
-        super().__init__()
+        super().__init__(name=name)
 
         self.logger = _get_logger()
         self.tasks: dict[str, dict[str, Any]] = {}
@@ -3052,11 +3060,12 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         working_directory: Optional[str] = None,
         disable_background_batching: bool = False,
         disable_telemetry: bool = False,
+        name: Optional[str] = "dragon",
     ):
         if not Batch:
             raise RuntimeError("Dragon Batch not available")
 
-        super().__init__()
+        super().__init__(name=name)
 
         self.logger = _get_logger()
         self.batch = Batch(

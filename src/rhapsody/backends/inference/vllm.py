@@ -6,6 +6,9 @@ Accumulates incoming requests and submits as batches to pipeline for efficiency
 import asyncio
 import copy
 import logging
+from typing import Optional, Any, Callable
+import copy
+import logging
 import multiprocessing as mp
 import socket
 import time
@@ -23,6 +26,9 @@ except ImportError:
     dragon = None
     DragonInference = None
 
+from rhapsody.backends.base import BaseExecutionBackend
+from rhapsody.backends.constants import StateMapper
+
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +43,10 @@ class PendingRequest:
     prompts: list[str]
     future: asyncio.Future
     timestamp: float = field(default_factory=time.time)
+    task_uid: Optional[str] = None  # UID of the AITask if applicable
 
 
-class DragonVllmInferenceBackend:
+class DragonVllmInferenceBackend(BaseExecutionBackend):
     """
     Server-side batching VLLM inference backend.
 
@@ -70,12 +77,18 @@ class DragonVllmInferenceBackend:
         use_service: bool = True,
         max_batch_size: int = 1024,
         max_batch_wait_ms: int = 500,
+        name: Optional[str] = "vllm",
     ):
         if dragon is None:
             raise ImportError("Dragon is required for DragonVllmInferenceBackend.")
 
         if DragonInference is None:
             raise ImportError("DragonVllm is required for DragonVllmInferenceBackend.")
+
+        super().__init__(name=name)
+
+        # Register states in StateMapper
+        StateMapper.register_backend_tasks_states_with_defaults(self.name)
 
         self.config_file = config_file
         self.model_name = model_name
@@ -108,6 +121,10 @@ class DragonVllmInferenceBackend:
         self._batch_lock = asyncio.Lock()
         self._batch_processor_task = None
         self._new_request_event = asyncio.Event()  # Signal when requests arrive
+        
+        # Callbacks and state tracking
+        self._callback_func = None
+        self._tasks_in_flight = {}  # UID -> AITask
 
     def update_config(self, base_config):
         """Update config with custom parameters"""
@@ -135,6 +152,43 @@ class DragonVllmInferenceBackend:
     def _get_response_queue(self):
         """Get response queue (lazy)"""
         return self._get_or_create_queues()["response"]
+
+    def register_callback(self, func: Callable[[dict, str], None]) -> None:
+        """Register a callback for task state changes."""
+        self._callback_func = func
+
+    async def submit_tasks(self, tasks: list[dict]) -> None:
+        """
+        Submit AITask objects for inference.
+        Each task is decomposed into prompts and added to the batching queue.
+        """
+        if not self.is_initialized:
+            await self.initialize()
+
+        for task in tasks:
+            uid = task["uid"]
+            self._tasks_in_flight[uid] = task
+            
+            # Report RUNNING state
+            if self._callback_func:
+                self._callback_func(task, "RUNNING")
+            
+            # Extract prompts (can be single str or list[str])
+            prompt = task.get("prompt")
+            prompts = [prompt] if isinstance(prompt, str) else prompt
+            
+            # Create a future to track this specific task's completion in batch processor
+            completion_future = asyncio.Future()
+            request = PendingRequest(prompts=prompts, future=completion_future, task_uid=uid)
+            
+            # Add to pending queue
+            async with self._batch_lock:
+                self._pending_requests.append(request)
+            
+            # Signal processor
+            self._new_request_event.set()
+            
+            # We don't await here; the batch processor will update task state and results
 
     async def initialize(self):
         """
@@ -275,8 +329,19 @@ class DragonVllmInferenceBackend:
                 offset = 0
                 for req, size in zip(batch, request_sizes):
                     req_results = all_results[offset : offset + size]
+                    
+                    # Store results in future (for direct generate() calls)
                     if not req.future.done():
                         req.future.set_result(req_results)
+                    
+                    # If this was part of an AITask, update task state and trigger callback
+                    if req.task_uid and req.task_uid in self._tasks_in_flight:
+                        task = self._tasks_in_flight.pop(req.task_uid)
+                        task['return_value'] = req_results
+                        task['state'] = "DONE"
+                        if self._callback_func:
+                            self._callback_func(task, "DONE")
+                    
                     offset += size
 
                 logger.info(f"Batch complete: {len(all_prompts)} prompts processed")
@@ -288,6 +353,14 @@ class DragonVllmInferenceBackend:
                     for req in self._pending_requests:
                         if not req.future.done():
                             req.future.set_exception(e)
+                        
+                        if req.task_uid and req.task_uid in self._tasks_in_flight:
+                            task = self._tasks_in_flight.pop(req.task_uid)
+                            task['state'] = "FAILED"
+                            task['exception'] = str(e)
+                            if self._callback_func:
+                                self._callback_func(task, "FAILED")
+                                
                     self._pending_requests.clear()
 
     async def _start_http_server(self):
@@ -582,3 +655,34 @@ class DragonVllmInferenceBackend:
         # These will be lazily re-initialized if needed
         self._batch_lock = asyncio.Lock()
         self._new_request_event = asyncio.Event()
+
+    # BaseExecutionBackend abstract methods
+    def state(self) -> str:
+        return "RUNNING" if self.is_initialized else "INITIALIZED"
+
+    def task_state_cb(self, task: dict, state: str) -> None:
+        if self._callback_func:
+            self._callback_func(task, state)
+
+    def get_task_states_map(self) -> Any:
+        # Return a mapper that includes terminal states
+        return StateMapper("vllm")
+
+    def build_task(self, task: dict) -> None:
+        pass
+
+    def link_implicit_data_deps(self, src_task: dict[str, Any], dst_task: dict[str, Any]) -> None:
+        pass
+
+    def link_explicit_data_deps(
+        self,
+        src_task: dict[str, Any] | None = None,
+        dst_task: dict[str, Any] | None = None,
+        file_name: str | None = None,
+        file_path: str | None = None,
+    ) -> None:
+        pass
+
+    async def cancel_task(self, uid: str) -> bool:
+        # vLLM/DragonInference doesn't easily support cancellation of single queries
+        return False

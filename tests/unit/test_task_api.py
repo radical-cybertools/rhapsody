@@ -164,6 +164,26 @@ class TestComputeTaskValidation:
         with pytest.raises(TaskValidationError) as exc:
             ComputeTask(executable="/bin/echo", ranks=0)
         assert "positive integer" in str(exc.value).lower()
+class TestBackendField:
+    """Tests for the 'backend' field in tasks."""
+
+    def test_compute_task_with_backend(self):
+        """Test that ComputeTask supports explicit backend."""
+        task = ComputeTask(executable="/bin/echo", backend="dragon")
+        assert task.backend == "dragon"
+        assert task['backend'] == "dragon"
+
+    def test_ai_task_with_backend(self):
+        """Test that AITask supports explicit backend."""
+        task = AITask(prompt="hi", model="m1", backend="vllm")
+        assert task.backend == "vllm"
+        assert task['backend'] == "vllm"
+
+    def test_task_default_backend_none(self):
+        """Test that tasks have None backend by default."""
+        task = ComputeTask(executable="/bin/echo")
+        assert task.backend is None
+        assert task['backend'] is None
 
         with pytest.raises(TaskValidationError):
             ComputeTask(executable="/bin/echo", ranks=-1)

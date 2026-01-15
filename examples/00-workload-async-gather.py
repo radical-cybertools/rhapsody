@@ -1,9 +1,12 @@
 
 import asyncio
+import logging
 import rhapsody
 import json
 from rhapsody.api.session import Session
 from rhapsody.backends import DragonExecutionBackendV3
+
+rhapsody.enable_logging(level=logging.DEBUG)
 
 async def func_task():
     print("Hello from function task")

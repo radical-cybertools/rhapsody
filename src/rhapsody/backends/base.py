@@ -24,9 +24,16 @@ class BaseExecutionBackend(ABC):
     management, and dependency linking in a distributed or parallel execution environment.
     """
 
-    def __init__(self):
+    def __init__(self, name: str | None = None):
         """Initialize the backend."""
-        pass
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        """Name of the backend."""
+        if self._name:
+            return self._name
+        return self.__class__.__name__
 
     @abstractmethod
     async def submit_tasks(self, tasks: list[dict]) -> None:

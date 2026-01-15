@@ -15,8 +15,8 @@ StateMapper.register_backend_tasks_states_with_defaults('mock')
 
 class MockBackend(BaseExecutionBackend):
     """Minimal backend that does nothing but record submission."""
-    def __init__(self):
-        super().__init__()
+    def __init__(self, name: str = "mock"):
+        super().__init__(name=name)
         self._callback_func = None
 
     async def initialize(self) -> None: pass
