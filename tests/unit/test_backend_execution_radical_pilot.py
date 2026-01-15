@@ -27,8 +27,8 @@ def test_radical_pilot_backend_import():
 def test_radical_pilot_backend_class_exists():
     """Test that RadicalExecutionBackend class exists and inherits from base."""
     try:
-        from rhapsody.backends.base import BaseExecutionBackend
         from rhapsody.backends import RadicalExecutionBackend
+        from rhapsody.backends.base import BaseExecutionBackend
 
         # Check inheritance
         assert issubclass(RadicalExecutionBackend, BaseExecutionBackend)
@@ -177,8 +177,8 @@ def test_radical_pilot_backend_callback_registration():
 def test_radical_pilot_backend_state_mapper():
     """Test state mapper functionality without initialization."""
     try:
-        from rhapsody.backends.constants import StateMapper
         from rhapsody.backends import RadicalExecutionBackend
+        from rhapsody.backends.constants import StateMapper
 
         backend = RadicalExecutionBackend({"resource": "local.localhost"})
 

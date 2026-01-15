@@ -8,6 +8,7 @@ Tests cover:
 """
 
 import pytest
+
 import rhapsody
 from rhapsody import ComputeTask
 from rhapsody.api.session import Session

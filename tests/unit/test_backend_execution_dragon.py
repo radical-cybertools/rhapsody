@@ -3,12 +3,13 @@
 These tests focus on core features with minimal tasks (1-2 per test).
 Run with: dragon python -m pytest tests/unit/test_backend_execution_dragon.py -v
 """
-import pytest
 import asyncio
-from rhapsody import ComputeTask
-from rhapsody.backends.discovery import get_backend
-from rhapsody.api.session import Session
 
+import pytest
+
+from rhapsody import ComputeTask
+from rhapsody.api.session import Session
+from rhapsody.backends.discovery import get_backend
 
 # ============================================================================
 # Fixtures
@@ -172,7 +173,7 @@ async def test_two_independent_tasks(session):
         for result in results:
             assert result.uid.startswith("task.")
             assert result.state == "DONE"
-        
+
         outputs = [r.get("stdout", "") for r in results]
         assert any("Task A" in out for out in outputs)
         assert any("Task B" in out for out in outputs)
@@ -310,7 +311,7 @@ async def test_backend_state(session):
         await session.submit_tasks([task])
         state_running = await backend.state()
         # assert state_running == "RUNNING" # This is flaky depending on timing
-        
+
         await session.wait_tasks([task])
 
 

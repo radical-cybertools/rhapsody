@@ -9,12 +9,10 @@ from collections import Counter
 from collections import defaultdict
 from typing import TYPE_CHECKING
 from typing import Any
-from typing import Optional
 
 if TYPE_CHECKING:
     from rhapsody.api.task import BaseTask
     from rhapsody.backends.base import BaseExecutionBackend
-from rhapsody.backends.constants import StateMapper, TasksMainStates
 
 
 logger = logging.getLogger(__name__)
@@ -32,7 +30,7 @@ class TaskStateManager:
         self._task_states: dict[str, str] = {}
         self._terminal_states = set()  # Will be populated by backends
         self._lock = asyncio.Lock()
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Bind an event loop to the manager for thread-safe updates."""
@@ -51,17 +49,17 @@ class TaskStateManager:
         """Actual update logic, expected to run on the event loop."""
         uid = task['uid']
         now = time.time()
-        
+
         # Update the task object in-place (Single Source of Truth update)
         task['state'] = state
-        
+
         # Telemetry: Record transition history
         if 'history' not in task:
             task['history'] = {}
         task['history'][state] = now
-        
+
         self._task_states[uid] = state
-        
+
         # If terminal, notify waiters
         if state in self._terminal_states:
             if uid in self._task_futures:
@@ -83,11 +81,11 @@ class TaskStateManager:
                 self._task_futures[uid] = self._loop.create_future()
             else:
                 self._task_futures[uid] = asyncio.Future()
-            
+
             # If already done before we started waiting, set result immediately
             if self._task_states.get(uid) in self._terminal_states:
                 self._task_futures[uid].set_result(task)
-        
+
         return self._task_futures[uid]
 
     def set_terminal_states(self, states: set[str]) -> None:
@@ -104,9 +102,9 @@ class Session:
 
     def __init__(
         self,
-        backends: Optional[list[BaseExecutionBackend]] = None,
-        uid: Optional[str] = None,
-        work_dir: Optional[str] = None,
+        backends: list[BaseExecutionBackend] | None = None,
+        uid: str | None = None,
+        work_dir: str | None = None,
     ):
         """Initialize a new session.
 
@@ -133,15 +131,15 @@ class Session:
             backend: The execution or inference backend to add.
         """
         self.backends.append(backend)
-        
+
         # Register state manager callback
         backend.register_callback(self._state_manager.update_task)
-        
+
         # Sync terminal states from backend
         if hasattr(backend, 'get_task_states_map'):
             state_mapper = backend.get_task_states_map()
             self._state_manager._terminal_states.update(state_mapper.terminal_states)
-            
+
         logger.debug(f"Registered backend '{backend.name}' with Session '{self.uid}'")
 
     async def submit_tasks(self, tasks: list[dict | BaseTask]) -> list[asyncio.Future]:
@@ -165,13 +163,13 @@ class Session:
         # Map backends by name for fast lookup
         backend_map = {b.name: b for b in self.backends}
         tasks_by_backend = defaultdict(list)
-        
+
         # Group tasks by their explicit backend target
         futures = []
         for task in tasks:
             uid = task['uid']
             self._tasks[uid] = task
-            
+
             # Create and bind future
             fut = self._state_manager.get_wait_future(uid, task)
             if hasattr(task, 'bind_future'):
@@ -197,15 +195,15 @@ class Session:
                     f"Backend '{target_name}' requested by task {uid} not found in Session. "
                     f"Available backends: {available}"
                 )
-            
+
             tasks_by_backend[target_name].append(task)
-        
+
         # Submit each group to its respective backend concurrently
         submission_tasks = []
         for name, backend_tasks in tasks_by_backend.items():
             backend = backend_map[name]
             submission_tasks.append(backend.submit_tasks(backend_tasks))
-            
+
         if submission_tasks:
             await asyncio.gather(*submission_tasks)
 
@@ -216,7 +214,7 @@ class Session:
     async def wait_tasks(
         self,
         tasks: list[dict | BaseTask],
-        timeout: Optional[float] = None,
+        timeout: float | None = None,
     ) -> list[dict | BaseTask]:
         """Wait for tasks to reach a terminal state.
 
@@ -265,32 +263,32 @@ class Session:
             },
             "summary": {}
         }
-        
+
         for task in self._tasks.values():
             state = task.get('state', 'UNKNOWN')
             stats["counts"][state] += 1
-            
+
             history = task.get('history', {})
             submitted = history.get('submitted')
             running = history.get('RUNNING')
             done = history.get('DONE') or history.get('FAILED') or history.get('CANCELED')
-            
+
             if submitted and done:
                 stats["latencies"]["total"].append(done - submitted)
-            
+
             if submitted and running:
                 stats["latencies"]["queue"].append(running - submitted)
-                
+
             if running and done:
                 stats["latencies"]["execution"].append(done - running)
-        
+
         # Calculate averages for summary
         for key, values in stats["latencies"].items():
             if values:
                 stats["summary"][f"avg_{key}"] = sum(values) / len(values)
             else:
                 stats["summary"][f"avg_{key}"] = 0.0
-                
+
         stats["summary"]["total_tasks"] = len(self._tasks)
         return stats
 

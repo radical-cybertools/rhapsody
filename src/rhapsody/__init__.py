@@ -17,7 +17,6 @@ from .api import RhapsodyError
 from .api import SessionError
 from .api import TaskExecutionError
 from .api import TaskValidationError
-
 from .backends import BackendRegistry
 from .backends import discover_backends
 from .backends import get_backend

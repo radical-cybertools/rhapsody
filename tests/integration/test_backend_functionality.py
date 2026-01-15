@@ -149,7 +149,7 @@ class TestBackendFunctionality:
 
         try:
             # Test each available backend
-            for i, backend_name in enumerate(available_names):
+            for _i, backend_name in enumerate(available_names):
                 try:
                     backend = rhapsody.get_backend(backend_name)
                     backends.append(backend)

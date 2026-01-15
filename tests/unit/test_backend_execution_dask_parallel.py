@@ -24,8 +24,8 @@ def test_dask_backend_import():
 def test_dask_backend_class_exists():
     """Test that DaskExecutionBackend class exists and inherits from base."""
     try:
-        from rhapsody.backends.base import BaseExecutionBackend
         from rhapsody.backends import DaskExecutionBackend
+        from rhapsody.backends.base import BaseExecutionBackend
 
         # Check inheritance
         assert issubclass(DaskExecutionBackend, BaseExecutionBackend)

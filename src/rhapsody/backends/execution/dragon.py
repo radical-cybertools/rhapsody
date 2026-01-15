@@ -1,47 +1,50 @@
 import asyncio
+import glob
+import json
 import logging
 import os
-import time
+import queue
+import socket
 import sys
-import shlex
-import uuid
+import tempfile
 import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from dataclasses import field
+from enum import Enum
+from typing import Any
+from typing import Callable
+from typing import Optional
 
 import psutil
-
-import json
-import socket
-import glob
-import tempfile
-import queue
-
-
-from typing import Any, Callable, Optional, Dict, List, Tuple
-from enum import Enum
-from dataclasses import dataclass, field
-from concurrent.futures import ThreadPoolExecutor
-
 import typeguard
 
-from ..constants import StateMapper, BackendMainStates
 from ..base import BaseExecutionBackend
+from ..constants import BackendMainStates
+from ..constants import StateMapper
 
 try:
-    import dragon
     import multiprocessing as mp
-    from dragon.native.process import Process, ProcessTemplate, Popen
-    from dragon.native.process_group import ProcessGroup
-    from dragon.native.queue import Queue
+
+    import dragon
     from dragon.data.ddict.ddict import DDict
-    from dragon.native.machine import System
-    from dragon.native.process_group import DragonUserCodeError
+    from dragon.infrastructure.gpu_desc import AccVendor
+    from dragon.infrastructure.gpu_desc import find_accelerators
     from dragon.infrastructure.policy import Policy
-    from dragon.workflows.batch import Batch
 
     # Node Telemetry only
     from dragon.native.event import Event
+    from dragon.native.machine import System
+    from dragon.native.process import Popen
+    from dragon.native.process import Process
+    from dragon.native.process import ProcessTemplate
+    from dragon.native.process_group import DragonUserCodeError
+    from dragon.native.process_group import ProcessGroup
+    from dragon.native.queue import Queue
     from dragon.telemetry import Telemetry
-    from dragon.infrastructure.gpu_desc import AccVendor, find_accelerators
+    from dragon.workflows.batch import Batch
 
 except ImportError:  # pragma: no cover - environment without Dragon
     dragon = None
@@ -219,7 +222,7 @@ class SharedMemoryManagerV1:
 
     async def initialize(self):
         """Initialize the storage manager."""
-        self.logger.debug(f"SharedMemoryManagerV1 initialized with optional DDict storage")
+        self.logger.debug("SharedMemoryManagerV1 initialized with optional DDict storage")
 
     def create_data_reference(self, task_uid: str, ranks: int) -> DataReferenceV1:
         """Create a zero-copy reference to existing result keys in DDict.
@@ -287,9 +290,9 @@ class ResultCollectorV1:
         self.logger = logger
 
         # Track completion for all task types
-        self.completion_counts: Dict[str, int] = {}  # task_uid -> received_count
-        self.expected_counts: Dict[str, int] = {}  # task_uid -> expected_count
-        self.aggregated_results: Dict[str, List] = {}  # task_uid -> [completions]
+        self.completion_counts: dict[str, int] = {}  # task_uid -> received_count
+        self.expected_counts: dict[str, int] = {}  # task_uid -> expected_count
+        self.aggregated_results: dict[str, list] = {}  # task_uid -> [completions]
 
     def register_task(self, task_uid: str, ranks: int):
         """Register any task (executable or function) for result tracking."""
@@ -357,7 +360,7 @@ class ResultCollectorV1:
         return result_data
 
     def _aggregate_function_results(
-        self, task_uid: str, results: List[FunctionTaskCompletionV1]
+        self, task_uid: str, results: list[FunctionTaskCompletionV1]
     ) -> dict:
         """Aggregate function task results."""
         if len(results) == 1:
@@ -398,7 +401,7 @@ class ResultCollectorV1:
                 "success": all_successful,
             }
 
-    def _aggregate_executable_results(self, results: List[ExecutableTaskCompletionV1]) -> dict:
+    def _aggregate_executable_results(self, results: list[ExecutableTaskCompletionV1]) -> dict:
         """Aggregate executable task results."""
         if len(results) == 1:
             return results[0].to_result_dict()
@@ -412,7 +415,7 @@ class ResultCollectorV1:
                 "stderr": "\n".join(stderr_parts),
                 "exit_code": max_exit_code,
                 "return_value": None,
-                "exception": None if max_exit_code == 0 else f"One or more processes failed",
+                "exception": None if max_exit_code == 0 else "One or more processes failed",
             }
 
     def cleanup_task(self, task_uid: str):
@@ -535,7 +538,7 @@ class TaskLauncherV1:
         self, group: ProcessGroup, task: dict, ranks: int
     ) -> None:
         """Add function processes to process group."""
-        uid = task["uid"]
+        task["uid"]
         backend_kwargs = task.get("task_backend_specific_kwargs", {})
         use_ddict_storage = backend_kwargs.get("use_ddict_storage", False)
 
@@ -662,7 +665,6 @@ def _function_wrapper_v1(
     Otherwise, return value is sent directly via queue.
     """
     import io
-    import sys
     import traceback
 
     task_uid = task["uid"]
@@ -781,7 +783,7 @@ class WorkerRequestV2:
     task_type: TaskTypeV2
     rank: int
     total_ranks: int
-    gpu_ids: List[int] = field(default_factory=list)
+    gpu_ids: list[int] = field(default_factory=list)
     use_ddict_storage: bool = False
     function: Optional[Callable] = None
     args: tuple = ()
@@ -824,7 +826,7 @@ class TaskInfoV2:
     ranks: int
     start_time: float
     worker_name: str = ""
-    gpu_allocations: Dict[int, List[int]] = field(default_factory=dict)
+    gpu_allocations: dict[int, list[int]] = field(default_factory=dict)
     canceled: bool = False
     completed_ranks: int = 0
 
@@ -871,8 +873,8 @@ class WorkerGroupConfigV2:
 
     name: str
     worker_type: WorkerTypeV2 = WorkerTypeV2.COMPUTE
-    policies: List[PolicyConfigV2] = field(default_factory=list)
-    kwargs: Dict[str, Any] = field(default_factory=dict)
+    policies: list[PolicyConfigV2] = field(default_factory=list)
+    kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validate configuration."""
@@ -910,7 +912,7 @@ class DataReferenceV2:
     """Reference to data stored in Cross Node Distributed Dict."""
 
     def __init__(
-        self, ref_id: str, backend_id: str, ddict: DDict, rank_info: Optional[Dict] = None
+        self, ref_id: str, backend_id: str, ddict: DDict, rank_info: Optional[dict] = None
     ):
         self._ref_id = ref_id
         self._backend_id = backend_id
@@ -1015,9 +1017,8 @@ def _worker_loop_v2(
     - Executables: Run external processes via subprocess
     """
     import io
-    import sys
-    import traceback
     import subprocess
+    import traceback
 
     os.environ["DRAGON_WORKER_ID"] = str(worker_id)
     os.environ["DRAGON_WORKER_NAME"] = worker_name
@@ -1179,7 +1180,7 @@ class WorkerPoolV2:
 
     def __init__(
         self,
-        worker_configs: List[WorkerGroupConfigV2],
+        worker_configs: list[WorkerGroupConfigV2],
         ddict: DDict,
         working_dir: str,
         logger: logging.Logger,
@@ -1194,16 +1195,16 @@ class WorkerPoolV2:
         self.backend_id = backend_id
 
         self.output_queue: Optional[Queue] = None
-        self.worker_queues: Dict[str, Queue] = {}
+        self.worker_queues: dict[str, Queue] = {}
         # CPU slot tracking
-        self.worker_slots: Dict[str, int] = {}
-        self.worker_free_slots: Dict[str, int] = {}
+        self.worker_slots: dict[str, int] = {}
+        self.worker_free_slots: dict[str, int] = {}
         # GPU tracking
-        self.worker_gpus: Dict[str, int] = {}
-        self.worker_free_gpus: Dict[str, List[int]] = {}
-        self.worker_types: Dict[str, WorkerTypeV2] = {}
+        self.worker_gpus: dict[str, int] = {}
+        self.worker_free_gpus: dict[str, list[int]] = {}
+        self.worker_types: dict[str, WorkerTypeV2] = {}
 
-        self.process_groups: List[ProcessGroup] = []
+        self.process_groups: list[ProcessGroup] = []
         self.total_workers = len(worker_configs)
         self.total_slots = sum(cfg.total_slots() for cfg in worker_configs)
         self.total_gpus = sum(cfg.total_gpus() for cfg in worker_configs)
@@ -1396,7 +1397,7 @@ class WorkerPoolV2:
 
     async def reserve_resources(
         self, worker_name: str, ranks: int, gpus_per_rank: int = 0
-    ) -> Tuple[bool, Dict[int, List[int]]]:
+    ) -> tuple[bool, dict[int, list[int]]]:
         """Reserve resources (thread-safe)."""
         async with self._resource_lock:
             if worker_name not in self.worker_free_slots:
@@ -1432,7 +1433,7 @@ class WorkerPoolV2:
             return True, gpu_allocations
 
     async def release_resources(
-        self, worker_name: str, ranks: int, gpu_allocations: Dict[int, List[int]]
+        self, worker_name: str, ranks: int, gpu_allocations: dict[int, list[int]]
     ):
         """Release resources (thread-safe)."""
         async with self._resource_lock:
@@ -1463,7 +1464,7 @@ class WorkerPoolV2:
         """Try to get response from output queue."""
         try:
             return self.output_queue.get(block=False)
-        except:
+        except Exception:
             return None
 
     async def shutdown(self):
@@ -1538,8 +1539,8 @@ class ResultCollectorV2:
         self.logger = logger
 
         # Track task completions
-        self.task_responses: Dict[str, List[WorkerResponseV2]] = {}
-        self.task_expected: Dict[str, int] = {}
+        self.task_responses: dict[str, list[WorkerResponseV2]] = {}
+        self.task_expected: dict[str, int] = {}
 
     def register_task(self, task_uid: str, ranks: int):
         """Register a task for result tracking."""
@@ -2143,7 +2144,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
                     while True:
                         try:
                             self._result_queue.get(block=False)
-                        except:
+                        except Exception:
                             break
                     self._result_queue = None
                 self.logger.debug("Result queue cleaned up")
@@ -2309,7 +2310,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         self._scheduler_task: Optional[asyncio.Task] = None
         self._shutdown_event = asyncio.Event()
 
-    def _parse_worker_config(self, resources: dict) -> List[WorkerGroupConfigV2]:
+    def _parse_worker_config(self, resources: dict) -> list[WorkerGroupConfigV2]:
         """Parse worker configuration from resources.
 
         If no workers specified, creates a default compute worker.
@@ -2487,7 +2488,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                     except asyncio.TimeoutError:
                         continue
 
-                    uid = task["uid"]
+                    task["uid"]
                     backend_kwargs = task.get("task_backend_specific_kwargs", {})
                     ranks = int(backend_kwargs.get("ranks", 1))
                     gpus_per_rank = int(backend_kwargs.get("gpus_per_rank", 0))
@@ -2708,7 +2709,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         task: dict[str, Any],
         worker_name: str,
         ranks: int,
-        gpu_allocations: Dict[int, List[int]],
+        gpu_allocations: dict[int, list[int]],
     ) -> None:
         """Submit task to specific worker."""
         uid = task["uid"]
@@ -3076,7 +3077,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
 
         self._backend_state = BackendMainStates.INITIALIZED
         self._callback_func = lambda t, s: None
-        self._task_registry: Dict[str, Any] = {}
+        self._task_registry: dict[str, Any] = {}
         self._task_states = TaskStateMapperV3()
         self._initialized = False
         self._cancelled_tasks = []
@@ -3131,7 +3132,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
                 raise
         return self
 
-    def _wait_for_batch(self, compiled_tasks, task_uids: List[str]):
+    def _wait_for_batch(self, compiled_tasks, task_uids: list[str]):
         """
         Wait for batch to complete and trigger callbacks.
 
@@ -3292,7 +3293,8 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         # Handle async functions
         if is_function and asyncio.iscoroutinefunction(target):
             original_target = target
-            target = lambda *a, **kw: asyncio.run(original_target(*a, **kw))
+            def target(*a, **kw):
+                return asyncio.run(original_target(*a, **kw))
 
         # Get template configs once
         process_templates_config = backend_kwargs.get("process_templates")
@@ -3968,7 +3970,7 @@ class DragonTelemetryCollector:
             try:
                 power_mw = pynvml.nvmlDeviceGetPowerUsage(handle)
                 power_w = power_mw / 1000.0
-            except:
+            except Exception:
                 power_w = 0.0
 
             return {
@@ -3990,7 +3992,6 @@ class DragonTelemetryCollector:
         :return: Dictionary of GPU metrics
         :rtype: dict
         """
-        import sys
 
         rocm_path = os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm/"), "libexec/rocm_smi")
         sys.path.append(rocm_path)
@@ -4177,11 +4178,11 @@ class DragonTelemetryCollector:
                     f"DragonTelemetryCollector: Wrote checkpoint {filepath} ({len(metrics_data)} samples)"
                 )
 
-            except Exception as e:
+            except Exception:
                 # Clean up temp file on error
                 try:
                     os.remove(temp_path)
-                except:
+                except Exception:
                     pass
                 raise
 

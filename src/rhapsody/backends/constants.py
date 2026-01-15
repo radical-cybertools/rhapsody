@@ -24,7 +24,7 @@ class BackendMainStates(Enum):
 
     INITIALIZED = "INITIALIZED"
     RUNNING     = "RUNNING"
-    SHUTDOWN    = "SHUTDOWN"   
+    SHUTDOWN    = "SHUTDOWN"
 
 
 class TasksMainStates(Enum):
@@ -216,7 +216,7 @@ class StateMapper:
             shutdown_state=BackendMainStates.SHUTDOWN.value,
         )
 
-    
+
     @classmethod
     def register_backend_tasks_states(
         cls,

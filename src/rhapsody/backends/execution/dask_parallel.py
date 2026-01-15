@@ -15,7 +15,8 @@ from typing import Callable
 import typeguard
 
 from ..base import BaseExecutionBackend
-from ..constants import StateMapper, BackendMainStates
+from ..constants import BackendMainStates
+from ..constants import StateMapper
 
 try:
     import dask.distributed as dask

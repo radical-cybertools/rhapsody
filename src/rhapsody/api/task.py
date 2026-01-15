@@ -17,13 +17,12 @@ Design Goals:
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from abc import ABC
 from abc import abstractmethod
-import asyncio
 from typing import Any
 from typing import Callable
-from typing import Optional
 
 from .errors import TaskValidationError
 
@@ -67,13 +66,13 @@ class BaseTask(dict, ABC):
 
     def __init__(
         self,
-        uid: Optional[str] = None,
+        uid: str | None = None,
         ranks: int = 1,
-        memory: Optional[int] = None,
-        gpu: Optional[int] = None,
-        cpu_threads: Optional[int] = None,
-        environment: Optional[dict[str, str]] = None,
-        backend: Optional[str] = None,
+        memory: int | None = None,
+        gpu: int | None = None,
+        cpu_threads: int | None = None,
+        environment: dict[str, str] | None = None,
+        backend: str | None = None,
         **kwargs: Any,
     ):
         """Initialize base task with common fields.
@@ -114,7 +113,7 @@ class BaseTask(dict, ABC):
         self.update(kwargs)
 
         # Initialize internal future
-        self._future: Optional[asyncio.Future] = None
+        self._future: asyncio.Future | None = None
 
         # Validate base fields
         self._validate_base()
@@ -125,7 +124,7 @@ class BaseTask(dict, ABC):
     def __contains__(self, key: str) -> bool:
         return key in self.keys()
 
-    
+
     def __getattr__(self, name: str) -> Any:
         """Allow attribute access to dict keys.
 
@@ -256,7 +255,7 @@ class BaseTask(dict, ABC):
 
     def __hash__(self) -> int:
         """Hash based on unique identifier.
-        
+
         Allows tasks to be used in sets, as dictionary keys, and in asyncio.gather.
         """
         return hash(self.uid)
@@ -266,10 +265,6 @@ class BaseTask(dict, ABC):
         if not isinstance(other, BaseTask):
             return False
         return self.uid == other.uid
-        """Restore state and initialize internal fields."""
-        self.__dict__.update(state)
-        # Always re-initialize future to None in the new process
-        self._future = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert task to plain dictionary.
@@ -337,20 +332,20 @@ class ComputeTask(BaseTask):
 
     def __init__(
         self,
-        executable: Optional[str] = None,
-        function: Optional[Callable] = None,
-        arguments: Optional[list[str]] = None,
-        args: Optional[tuple] = None,
-        kwargs: Optional[dict] = None,
-        uid: Optional[str] = None,
+        executable: str | None = None,
+        function: Callable | None = None,
+        arguments: list[str] | None = None,
+        args: tuple | None = None,
+        kwargs: dict | None = None,
+        uid: str | None = None,
         ranks: int = 1,
-        memory: Optional[int] = None,
-        gpu: Optional[int] = None,
-        cpu_threads: Optional[int] = None,
-        environment: Optional[dict[str, str]] = None,
-        input_files: Optional[list[str]] = None,
-        output_files: Optional[list[str]] = None,
-        working_directory: Optional[str] = None,
+        memory: int | None = None,
+        gpu: int | None = None,
+        cpu_threads: int | None = None,
+        environment: dict[str, str] | None = None,
+        input_files: list[str] | None = None,
+        output_files: list[str] | None = None,
+        working_directory: str | None = None,
         shell: bool = False,
         **extra_kwargs: Any,
     ):
@@ -473,21 +468,21 @@ class AITask(BaseTask):
     def __init__(
         self,
         prompt: str,
-        model: Optional[str] = None,
-        inference_endpoint: Optional[str] = None,
-        system_prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        top_p: Optional[float] = None,
-        top_k: Optional[int] = None,
-        stop_sequences: Optional[list[str]] = None,
-        uid: Optional[str] = None,
+        model: str | None = None,
+        inference_endpoint: str | None = None,
+        system_prompt: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        stop_sequences: list[str] | None = None,
+        uid: str | None = None,
         ranks: int = 1,
-        memory: Optional[int] = None,
-        gpu: Optional[int] = None,
-        cpu_threads: Optional[int] = None,
-        environment: Optional[dict[str, str]] = None,
-        backend: Optional[str] = None,
+        memory: int | None = None,
+        gpu: int | None = None,
+        cpu_threads: int | None = None,
+        environment: dict[str, str] | None = None,
+        backend: str | None = None,
         **extra_kwargs: Any,
     ):
         """Initialize AI task.

@@ -6,15 +6,15 @@ Accumulates incoming requests and submits as batches to pipeline for efficiency
 import asyncio
 import copy
 import logging
-from typing import Optional, Any, Callable
-import copy
-import logging
 import multiprocessing as mp
 import socket
 import time
 import uuid
 from dataclasses import dataclass
 from dataclasses import field
+from typing import Any
+from typing import Callable
+from typing import Optional
 
 import yaml
 from aiohttp import web
@@ -28,7 +28,6 @@ except ImportError:
 
 from rhapsody.backends.base import BaseExecutionBackend
 from rhapsody.backends.constants import StateMapper
-
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +120,7 @@ class DragonVllmInferenceBackend(BaseExecutionBackend):
         self._batch_lock = asyncio.Lock()
         self._batch_processor_task = None
         self._new_request_event = asyncio.Event()  # Signal when requests arrive
-        
+
         # Callbacks and state tracking
         self._callback_func = None
         self._tasks_in_flight = {}  # UID -> AITask
@@ -168,26 +167,26 @@ class DragonVllmInferenceBackend(BaseExecutionBackend):
         for task in tasks:
             uid = task["uid"]
             self._tasks_in_flight[uid] = task
-            
+
             # Report RUNNING state
             if self._callback_func:
                 self._callback_func(task, "RUNNING")
-            
+
             # Extract prompts (can be single str or list[str])
             prompt = task.get("prompt")
             prompts = [prompt] if isinstance(prompt, str) else prompt
-            
+
             # Create a future to track this specific task's completion in batch processor
             completion_future = asyncio.Future()
             request = PendingRequest(prompts=prompts, future=completion_future, task_uid=uid)
-            
+
             # Add to pending queue
             async with self._batch_lock:
                 self._pending_requests.append(request)
-            
+
             # Signal processor
             self._new_request_event.set()
-            
+
             # We don't await here; the batch processor will update task state and results
 
     async def initialize(self):
@@ -329,11 +328,11 @@ class DragonVllmInferenceBackend(BaseExecutionBackend):
                 offset = 0
                 for req, size in zip(batch, request_sizes):
                     req_results = all_results[offset : offset + size]
-                    
+
                     # Store results in future (for direct generate() calls)
                     if not req.future.done():
                         req.future.set_result(req_results)
-                    
+
                     # If this was part of an AITask, update task state and trigger callback
                     if req.task_uid and req.task_uid in self._tasks_in_flight:
                         task = self._tasks_in_flight.pop(req.task_uid)
@@ -341,7 +340,7 @@ class DragonVllmInferenceBackend(BaseExecutionBackend):
                         task['state'] = "DONE"
                         if self._callback_func:
                             self._callback_func(task, "DONE")
-                    
+
                     offset += size
 
                 logger.info(f"Batch complete: {len(all_prompts)} prompts processed")
@@ -353,14 +352,14 @@ class DragonVllmInferenceBackend(BaseExecutionBackend):
                     for req in self._pending_requests:
                         if not req.future.done():
                             req.future.set_exception(e)
-                        
+
                         if req.task_uid and req.task_uid in self._tasks_in_flight:
                             task = self._tasks_in_flight.pop(req.task_uid)
                             task['state'] = "FAILED"
                             task['exception'] = str(e)
                             if self._callback_func:
                                 self._callback_func(task, "FAILED")
-                                
+
                     self._pending_requests.clear()
 
     async def _start_http_server(self):
@@ -466,7 +465,7 @@ class DragonVllmInferenceBackend(BaseExecutionBackend):
             # Extract OpenAI-style parameters
             messages = data.get("messages", [])
 
-            # FIXME pass to self.generate() if DragonInference supports these params 
+            # FIXME pass to self.generate() if DragonInference supports these params
             data.get("max_tokens", 1000)
             data.get("temperature", 0.7)
             model = data.get("model", self.model_name)

@@ -2,18 +2,16 @@
 Dragon V3 Workflow with Multiple VLLM Services (Node-Partitioned)
 Each service uses different nodes via offset
 """
-import json
 import asyncio
-import logging
-import rhapsody
-import multiprocessing as mp
-from typing import List
 import itertools
+import json
+import logging
+import multiprocessing as mp
 
-
+import rhapsody
 from rhapsody.api.session import Session
-from rhapsody.backends.inference.vllm import DragonVllmInferenceBackend
 from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends.inference.vllm import DragonVllmInferenceBackend
 
 rhapsody.enable_logging(level=logging.DEBUG)
 
@@ -23,13 +21,13 @@ async def main():
     """
     + Start Radical.Asyncflow with Dragon execution backend.
     + Start the VLLM inference engine as a service using Dragon
-    + Distribuite the workflows across the services in RR fashion via Asyncflow 
+    + Distribuite the workflows across the services in RR fashion via Asyncflow
     + Service endpoints are centralized on the head node for:
         - Easier endpoint management
         - Simpler load balancing
         - Centralized logging
         - Better control plane
-    
+
     Note: Only send batch tasks. I.e, tasks that can send N requests.
     """
     mp.set_start_method("dragon")
@@ -47,18 +45,18 @@ async def main():
     )
 
     # Initialize ALL services concurrently
-    logger.info(f"Initializing 1 service...")
+    logger.info("Initializing 1 service...")
     await inference_backend.initialize()
 
     # Define multiple tasks with single or multiple prompts
     # Note: Explicit backend mapping by user
     tasks = [
         rhapsody.AITask(
-            prompt='What is the capital of France?', 
+            prompt='What is the capital of France?',
             backend=inference_backend.name
         ),
         rhapsody.AITask(
-            prompt=['Tell me a joke', 'What is 2+2?'], 
+            prompt=['Tell me a joke', 'What is 2+2?'],
             backend=inference_backend.name
         ),
         rhapsody.ComputeTask(
