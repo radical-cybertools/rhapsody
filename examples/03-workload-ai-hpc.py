@@ -1,42 +1,24 @@
-"""
-Dragon V3 Workflow with Multiple VLLM Services (Node-Partitioned)
-Each service uses different nodes via offset
-"""
 import asyncio
-import itertools
-import json
 import logging
+import rhapsody
+
 import multiprocessing as mp
 
-import rhapsody
 from rhapsody.api.session import Session
-from rhapsody.backends import DragonExecutionBackendV3
-from rhapsody.backends.inference.vllm import DragonVllmInferenceBackend
+from rhapsody.backends import DragonExecutionBackendV3, DragonVllmInferenceBackend
 
 rhapsody.enable_logging(level=logging.DEBUG)
 
 logger = logging.getLogger(__name__)
 
 async def main():
-    """
-    + Start Radical.Asyncflow with Dragon execution backend.
-    + Start the VLLM inference engine as a service using Dragon
-    + Distribuite the workflows across the services in RR fashion via Asyncflow
-    + Service endpoints are centralized on the head node for:
-        - Easier endpoint management
-        - Simpler load balancing
-        - Centralized logging
-        - Better control plane
-
-    Note: Only send batch tasks. I.e, tasks that can send N requests.
-    """
     mp.set_start_method("dragon")
 
     execution_backend = await DragonExecutionBackendV3()
 
     inference_backend = DragonVllmInferenceBackend(
-        config_file="/home/aymen/RADICAL/models/config.yaml",
-        model_name="/home/aymen/RADICAL/models/Qwen2.5-0.5B-Instruct",
+        config_file="config.yaml",
+        model_name="Qwen2.5-0.5B-Instruct",
         num_nodes=1,
         num_gpus=0,
         tp_size=1,
@@ -75,10 +57,9 @@ async def main():
     # Gather results using standard asyncio
     results = await asyncio.gather(*tasks)
 
-    print("\nMixed Results:")
     for i, task in enumerate(results):
         rtype = "AI" if 'prompt' in task else "Compute"
-        print(f"Task {i+1} [{rtype}] ({task.get('backend')}): {task.return_value}")
+        logger.info(f"Task {i+1} [{rtype}] ({task.get('backend')}): {task.return_value}")
 
     await session.close()
 
