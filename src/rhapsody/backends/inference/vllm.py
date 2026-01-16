@@ -337,7 +337,6 @@ class DragonVllmInferenceBackend(BaseBackend):
                     if req.task_uid and req.task_uid in self._tasks_in_flight:
                         task = self._tasks_in_flight.pop(req.task_uid)
                         task['return_value'] = req_results
-                        task['state'] = "DONE"
                         if self._callback_func:
                             self._callback_func(task, "DONE")
 
@@ -355,7 +354,6 @@ class DragonVllmInferenceBackend(BaseBackend):
 
                         if req.task_uid and req.task_uid in self._tasks_in_flight:
                             task = self._tasks_in_flight.pop(req.task_uid)
-                            task['state'] = "FAILED"
                             task['exception'] = str(e)
                             if self._callback_func:
                                 self._callback_func(task, "FAILED")
