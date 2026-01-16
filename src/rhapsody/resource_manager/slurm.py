@@ -1,21 +1,15 @@
-__copyright__ = "Copyright 2016-2025, The RADICAL-Cybertools Team"
-__license__ = "MIT"
 
+import logging
 import os
 
 from .base import ResourceManager
 from .base import RMInfo
 
-import logging
-
 logger = logging.getLogger(__name__)
 
 
-# ------------------------------------------------------------------------------
-#
 class Slurm(ResourceManager):
-    # --------------------------------------------------------------------------
-    #
+
     def _initialize(self) -> RMInfo:
         # ensure we run in a SLURM environment
         if "SLURM_JOB_ID" not in os.environ:
@@ -57,5 +51,3 @@ class Slurm(ResourceManager):
 
         rm_info.node_list = self._get_node_list(nodes, rm_info)
 
-
-# ------------------------------------------------------------------------------

@@ -1,5 +1,3 @@
-__copyright__ = "Copyright 2016-2023, The RADICAL-Cybertools Team"
-__license__ = "MIT"
 
 import os
 
@@ -7,17 +5,12 @@ from .base import ResourceManager
 from .base import RMInfo
 
 
-# ------------------------------------------------------------------------------
-#
 class Torque(ResourceManager):
-    # --------------------------------------------------------------------------
-    #
+
     @staticmethod
     def batch_started():
         return bool(os.getenv("PBS_JOBID"))
 
-    # --------------------------------------------------------------------------
-    #
     def init_from_scratch(self, rm_info: RMInfo) -> RMInfo:
         nodefile = os.environ.get("PBS_NODEFILE")
         if not nodefile:
@@ -32,5 +25,3 @@ class Torque(ResourceManager):
 
         return rm_info
 
-
-# ------------------------------------------------------------------------------

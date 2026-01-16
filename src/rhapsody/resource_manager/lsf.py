@@ -1,5 +1,3 @@
-__copyright__ = "Copyright 2018-2023, The RADICAL-Cybertools Team"
-__license__ = "MIT"
 
 import os
 
@@ -7,17 +5,12 @@ from .base import ResourceManager
 from .base import RMInfo
 
 
-# ------------------------------------------------------------------------------
-#
 class LSF(ResourceManager):
-    # --------------------------------------------------------------------------
-    #
+
     @staticmethod
     def batch_started():
         return bool(os.getenv("LSB_JOBID"))
 
-    # --------------------------------------------------------------------------
-    #
     def init_from_scratch(self, rm_info: RMInfo) -> RMInfo:
         # LSF hostfile format:
         #
@@ -75,5 +68,3 @@ class LSF(ResourceManager):
 
         return rm_info
 
-
-# ------------------------------------------------------------------------------

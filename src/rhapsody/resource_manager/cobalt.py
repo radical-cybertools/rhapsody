@@ -1,5 +1,3 @@
-__copyright__ = "Copyright 2016-2023, The RADICAL-Cybertools Team"
-__license__ = "MIT"
 
 import os
 
@@ -41,3 +39,4 @@ class Cobalt(ResourceManager):
         rm_info.node_list = self._get_node_list(nodes, rm_info)
 
         return rm_info
+

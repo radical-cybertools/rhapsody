@@ -1,5 +1,3 @@
-__copyright__ = "Copyright 2016-2023, The RADICAL-Cybertools Team"
-__license__ = "MIT"
 
 import os
 import subprocess
@@ -8,17 +6,12 @@ from .base import ResourceManager
 from .base import RMInfo
 
 
-# ------------------------------------------------------------------------------
-#
 class PBSPro(ResourceManager):
-    # --------------------------------------------------------------------------
-    #
+
     @staticmethod
     def batch_started():
         return bool(os.getenv("PBS_JOBID"))
 
-    # --------------------------------------------------------------------------
-    #
     def init_from_scratch(self, rm_info: RMInfo) -> RMInfo:
         nodes = None
 
@@ -49,8 +42,6 @@ class PBSPro(ResourceManager):
 
         return rm_info
 
-    # --------------------------------------------------------------------------
-    #
     def _parse_pbspro_vnodes(self) -> tuple[list[str], int]:
         # PBS Job ID
         jobid = os.environ.get("PBS_JOBID")
@@ -106,5 +97,3 @@ class PBSPro(ResourceManager):
 
         return sorted(vnodes_set), ncpus_set.pop()
 
-
-# ------------------------------------------------------------------------------

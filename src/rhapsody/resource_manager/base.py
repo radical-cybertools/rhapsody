@@ -1,10 +1,6 @@
-__copyright__ = "Copyright 2016-2023, The RADICAL-Cybertools Team"
-__license__ = "MIT"
-
 
 import logging
 import tempfile
-
 from collections import defaultdict
 from dataclasses import dataclass
 from dataclasses import field

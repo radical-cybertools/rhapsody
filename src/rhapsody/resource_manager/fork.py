@@ -1,5 +1,3 @@
-__copyright__ = "Copyright 2016-2025, The RADICAL-Cybertools Team"
-__license__ = "MIT"
 
 import multiprocessing
 
@@ -24,3 +22,4 @@ class Fork(ResourceManager):
         nodes = [("localhost", rm_info.cores_per_node) for _ in range(n_nodes)]
 
         rm_info.node_list = self._get_node_list(nodes, rm_info)
+
