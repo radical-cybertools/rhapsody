@@ -721,8 +721,8 @@
             <div class="tab-buttons">
                 <button class="tab-button active" data-tab="heterogeneous">Heterogeneous Workloads</button>
                 <button class="tab-button" data-tab="inference">High-Throughput Inference</button>
-                <button class="tab-button" data-tab="coupling">Tightly Coupled AI-HPC Workflows</button>
-                <button class="tab-button" data-tab="agents">Agentic Workflows</button>
+                <button class="tab-button" data-tab="coupling">Integrations: AI-HPC Workflows</button>
+                <button class="tab-button" data-tab="agents">Integrations: Agentic Workflows</button>
             </div>
 
             <!-- Heterogeneous Tab -->
@@ -730,7 +730,7 @@
                 <div class="tab-text">
                     <h3>Heterogeneous Workloads</h3>
                     <p>Execute diverse task types concurrently—MPI simulations, GPU kernels, CPU analytics, and Python
-                        functions. RHAPSODY sustains up to 22 distinct task types without artificial phase separation,
+                        functions. RHAPSODY sustains up to 6 distinct task types without artificial phase separation,
                         maintaining 95% GPU utilization.</p>
                     <div class="tab-links">
                         <a href="https://radical-cybertools.github.io/rhapsody/api/">Documentation →</a>
@@ -790,7 +790,7 @@
                         <span style="color: var(--text-light); font-weight: 600;">Integrates with:</span>
                         <span style="color: var(--text); font-weight: 600;">vLLM</span>
                         <span style="color: var(--text); font-weight: 600;">PyTorch</span>
-                        <span style="color: var(--text); font-weight: 600;">DeepSpeed</span>
+                        <span style="color: var(--text); font-weight: 600;">DeepSpeed (upcoming)</span>
                     </div>
                 </div>
                 <div class="code-window">
@@ -802,15 +802,15 @@
                     <div class="code-content">
                         <div class="code-line"><span class="keyword">from</span> rhapsody <span
                                 class="keyword">import</span> Session</div>
-                        <div class="code-line"><span class="keyword">from</span> rhapsody.backends.inference <span
-                                class="keyword">import</span> VLLMBackend</div>
+                        <div class="code-line"><span class="keyword">from</span> rhapsody.backends <span
+                                class="keyword">import</span> DragonVllmInferenceBackend</div>
                         <div class="code-line"></div>
                         <div class="code-line"><span class="comment"># Launch multi-node vLLM service</span></div>
-                        <div class="code-line">vllm = <span class="function">VLLMBackend</span>(</div>
+                        <div class="code-line">vllm = <span class="function">DragonVllmInferenceBackend</span>(</div>
                         <div class="code-line indent-1">model=<span class="string">"meta-llama/Llama-2-70b"</span>,
                         </div>
-                        <div class="code-line indent-1">n_workers=<span class="number">8</span>,</div>
-                        <div class="code-line indent-1">tensor_parallel_size=<span class="number">4</span></div>
+                        <div class="code-line indent-1">nodes=<span class="number">32</span>,</div>
+                        <div class="code-line indent-1">tp=<span class="number">4</span></div>
                         <div class="code-line">)</div>
                         <div class="code-line"></div>
                         <div class="code-line">session = <span class="function">Session</span>([vllm])</div>
@@ -820,7 +820,7 @@
                         <div class="code-line">prompts = [<span class="string">"Analyze..."</span> <span
                                 class="keyword">for</span> _ <span class="keyword">in</span> <span
                                 class="function">range</span>(<span class="number">8000</span>)]</div>
-                        <div class="code-line">results = session.<span class="function">submit_inference</span>(prompts)
+                        <div class="code-line">results = session.<span class="function">submit_tasks</span>(prompts)
                         </div>
                     </div>
                 </div>
@@ -829,7 +829,7 @@
             <!-- Coupling Tab -->
             <div class="tab-content" id="coupling">
                 <div class="tab-text">
-                    <h3>Tightly Coupled AI-HPC</h3>
+                    <h3>Integrations: Coupled AI-HPC</h3>
                     <p>Low-latency data exchange between simulations and AI components via Memory-based
                         coupling achieves 50% faster execution than filesystem methods with only 0.08ms latency for
                         PUT/GET operations.</p>
@@ -851,16 +851,18 @@
                     <div class="code-content">
                         <div class="code-line"><span class="keyword">from</span> rhapsody <span
                                 class="keyword">import</span> Session</div>
-                        <div class="code-line"><span class="keyword">from</span> smartredis <span
-                                class="keyword">import</span> Client</div>
+                        <div class="code-line"><span class="keyword">from</span> radical.asyncflow <span
+                                class="keyword">import</span> WorkflowManager</div>
                         <div class="code-line"></div>
                         <div class="code-line"><span class="comment"># Create coupled simulation-inference
                                 workflow</span></div>
-                        <div class="code-line">redis_client = <span class="function">Client</span>(cluster=<span
-                                class="keyword">True</span>)</div>
+                        
+                        
+                        <div class="code-line">flow = <span class="function">WorkflowManager()</span></div>
                         <div class="code-line"></div>
                         <div class="code-line"><span class="comment"># Simulation writes state to Redis</span></div>
-                        <div class="code-line"><span class="keyword">def</span> <span
+                        <div class="code-line">@flow.function_task</div>
+                        <div class="code-line"><span class="keyword">async def</span> <span
                                 class="function">simulation</span>(step):</div>
                         <div class="code-line indent-1">state = compute_state(step)</div>
                         <div class="code-line indent-1">redis_client.<span class="function">put_tensor</span>(<span
@@ -868,7 +870,8 @@
                         <div class="code-line"></div>
                         <div class="code-line"><span class="comment"># AI task reads from Redis for inference</span>
                         </div>
-                        <div class="code-line"><span class="keyword">def</span> <span
+                        <div class="code-line">@flow.function_task</div>
+                        <div class="code-line"><span class="keyword">async def</span> <span
                                 class="function">ai_inference</span>(step):</div>
                         <div class="code-line indent-1">state = redis_client.<span
                                 class="function">get_tensor</span>(<span class="string">f"state_{step}"</span>)</div>
@@ -881,7 +884,7 @@
             <!-- Agents Tab -->
             <div class="tab-content" id="agents">
                 <div class="tab-text">
-                    <h3>Agentic Workflows</h3>
+                    <h3>Integrations: Agentic Workflows</h3>
                     <p>Support LLM-driven decision making with Flowgentic integration. Maintain bounded lag between
                         agent decisions and HPC task execution at scale. Tested with 49,000+ agents managing dynamic
                         workflow orchestration.</p>
@@ -949,9 +952,9 @@
             </div>
             <div class="perf-card">
                 <h3>Sustained Heterogeneity</h3>
-                <p>Concurrently execute up to 22 distinct task types spanning MPI simulations, GPU kernels, and Python
+                <p>Concurrently execute up to 6 distinct task types spanning MPI simulations, GPU kernels, and Python
                     functions without runtime-imposed phase separation.</p>
-                <span class="perf-metric">22 task types</span>
+                <span class="perf-metric">6 task types</span>
                 <span class="perf-metric">95% GPU utilization</span>
             </div>
             <div class="perf-card">
@@ -975,7 +978,7 @@
     <section class="deployment">
         <div class="section-header">
             <h2 class="section-title">Where you can run RHAPSODY</h2>
-            <p class="section-subtitle">Deploy on HPC systems with no platform-specific customization required</p>
+            <p class="section-subtitle">Deploy on local and HPC systems with no platform-specific customization required</p>
         </div>
         <div class="deploy-tabs">
             <div class="deploy-option">
