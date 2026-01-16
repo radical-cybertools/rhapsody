@@ -5,29 +5,28 @@
 RHAPSODY is a high-performance runtime system designed for orchestrating complex, heterogeneous workflows that combine traditional HPC tasks with modern AI/ML inference services.
 
 !!! note "Core Objective"
-    RHAPSODY aims to provide a unified, asynchronous interface for managing dynamic task graphs across diverse computing infrastructures, from local workstations to large-scale HPC machines.
+    RHAPSODY aims to provide a unified, asynchronous and scalable runtime capabilities for managing AI-HPC workloads and workflows across diverse computing infrastructures, from local workstations to large-scale HPC machines.
 
 ## Key Features
 
-- **Heterogeneous Task Support**: Seamlessly mix `ComputeTask` (HPC/Binary) and `AITask` (Inference) in a single workflow.
-- **Explicit Task Routing**: Manually route tasks to specific backends or let the scheduler handle it automatically.
+- **Heterogeneous Task Support**: Seamlessly mix and scale `ComputeTask` (HPC/Binary) and `AITask` (Inference) in a single workflow.
 - **Asynchronous API**: Built on Python's `asyncio`, allowing for high-throughput task submission and non-blocking state monitoring.
-- **Extensible Backends**: Support for multiple execution environments including Dragon, Dask, RADICAL-Pilot, and local concurrent workers.
-- **Preconfigured Clusters**: Directly utilize existing Dask clusters (GPU, HPC) with zero-config overhead.
+- **Extensible Backends**: Scale to large number of nodes with multiple execution backends including Dragon, Dask, RADICAL-Pilot, and local concurrent workers.
+- **Integrations**: Integrates with with highly scalable workflow systems such `radical.asyncflow` and agentic frameworks such as `flowgentic`
 
 ## Quick Example
 
 ```python
 import asyncio
 from rhapsody import Session, ComputeTask
-from rhapsody.backends import ConcurrentExecutionBackend
+from rhapsody.backends import DragonExecutionBackendV3
 
 async def main():
     # 1. Initialize session with a backend
-    backend = ConcurrentExecutionBackend()
+    backend = await DragonExecutionBackendV3(num_workers=2048)
     async with Session(backends=[backend]) as session:
-        
-        # 2. Define a simple task
+
+        # 2. Define a task
         task = ComputeTask(executable="/bin/echo", arguments=["Hello, Rhapsody!"])
         
         # 3. Submit and wait

@@ -16,31 +16,32 @@ Here is a complete script demonstrating a simple compute workflow.
 
 ```python
 import asyncio
-from rhapsody import Session, ComputeTask
+import rhapsody
+from rhapsody.api.session import Session
 from rhapsody.backends import ConcurrentExecutionBackend
 
 async def run_example():
     # 1. Choose an execution backend (Concurrent uses local threads/processes)
-    backend = ConcurrentExecutionBackend(name="local")
-    
+    backend = await ConcurrentExecutionBackend(name="local")
+
     # 2. Open a session
     async with Session(backends=[backend]) as session:
-        
+
         # 3. Define tasks
         tasks = [
-            ComputeTask(executable="/bin/echo", arguments=[f"Task {i}"])
-            for i in range(5)
+            rhapsody.ComputeTask(executable="/bin/echo", arguments=[f"Task {i}"])
+            for i in range(1024)
         ]
-        
+
         # 4. Submit tasks to the session
         await session.submit_tasks(tasks)
-        
+
         # 5. Wait for all tasks to complete
         results = await asyncio.gather(*tasks)
-        
+
         # 6. Inspect results
         for t in tasks:
-            print(f"{t.uid}: {t.state} (Output: {t.return_value})")
+            print(f"{t.uid}: {t.state} (Output: {t.stdout})")
 
 if __name__ == "__main__":
     asyncio.run(run_example())
@@ -49,9 +50,26 @@ if __name__ == "__main__":
 !!! success "Output"
     If everything is set up correctly, you should see:
     ```text
-    task.0000: DONE (Output: Task 0)
-    task.0001: DONE (Output: Task 1)
-    ...
+    task.000001: DONE (Output: Task 0)
+    task.000002: DONE (Output: Task 1)
+    task.000003: DONE (Output: Task 2)
+    task.000004: DONE (Output: Task 3)
+    task.000005: DONE (Output: Task 4)
+    task.000006: DONE (Output: Task 5)
+    task.000007: DONE (Output: Task 6)
+    task.000008: DONE (Output: Task 7)
+    task.000009: DONE (Output: Task 8)
+    task.000010: DONE (Output: Task 9)
+    task.000011: DONE (Output: Task 10)
+    task.000012: DONE (Output: Task 11)
+    ......
+    task.001021: DONE (Output: Task 1020)
+    task.001022: DONE (Output: Task 1021)
+    task.001023: DONE (Output: Task 1022)
+    task.001024: DONE (Output: Task 1023)
+    real    0m2.669s
+    user    0m2.384s
+    sys     0m2.071s
     ```
 
 ## What's Next?
