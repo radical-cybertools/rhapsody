@@ -3,7 +3,7 @@ import logging
 import tempfile
 from collections import defaultdict
 from dataclasses import dataclass
-from dataclasses import field
+from dataclasses import field, InitVar
 from typing import Any
 from typing import Optional
 
@@ -77,9 +77,6 @@ class RMInfo:
 
     cfg : RMConfig
         Resource manager config.
-
-    numa_domain_map : dict[int, Any]
-        Resources per NUMA domain.
     """
 
     # tuples of node uids and names (kept flexible; tighten if you know exact types)
@@ -87,7 +84,7 @@ class RMInfo:
     backup_list: list[Any] = field(default_factory=list)
 
     cores_per_node: int = 0
-    threads_per_core: Optional[int] = 0
+    threads_per_core: Optional[int] = 1
 
     gpus_per_node: Optional[int] = 0
     threads_per_gpu: int = 1
@@ -99,14 +96,94 @@ class RMInfo:
 
     cfg: "RMConfig" = field(default_factory=lambda: RMConfig())
 
-    numa_domain_map: dict[int, "RMInfo"] = field(default_factory=dict)
-
     def verify(self) -> None:
         assert self.node_list, "node_list must be non-empty"
         assert self.cores_per_node, "cores_per_node must be non-zero"
         assert self.gpus_per_node is not None, "gpus_per_node must not be None"
         assert self.threads_per_core is not None, "threads_per_core must not be None"
 
+
+@dataclass
+class Node:
+    """
+    name : hostname of the node
+    index: index of the node in the node list
+    cores: number of cores
+    gpus : number of gpus
+    lfs  : local filesystem size (MB)
+    mem  : memory size (MB)
+
+    partition_id    : partition id of the node
+    blocked_cores   : list of cores reserved/blocked by the system
+    threads_per_core: number of threads per core
+    threads_per_gpu : number of threads per gpu
+    mem_per_gpu     : memory per gpu (MB)
+    lfs_path        : path to local filesystem
+    """
+
+    name: str
+    index: int
+    cores: int | None = None
+    gpus: int | None = None
+    lfs: int | None = None
+    mem: int | None = None
+
+    blocked_cores: list[int] | None = None
+    threads_per_core: int | None = None
+    threads_per_gpu: int | None = None
+    mem_per_gpu: int | None = None
+    lfs_path: str | None = None
+
+    rm_info: InitVar[Optional[RMInfo]]= None
+
+    _partition_id: Optional[int] = field(default=None, init=False, repr=False)
+
+    def __post_init__(self, rm_info: RMInfo = None) -> None:
+
+        if not rm_info:
+            # ensure that cores and gpus are set
+            if not self.cores:
+                raise ValueError("cores must be provided if no rm_info is given")
+            if not self.gpus:
+                raise ValueError("gpus must be provided if no rm_info is given")
+
+        # otherwise rm_info will provide missing resource info
+        if self.cores is None:
+            self.cores = rm_info.cores_per_node
+        if self.gpus is None:
+            self.gpus = rm_info.gpus_per_node
+        if self.lfs is None:
+            self.lfs = rm_info.lfs_per_node
+        if self.mem is None:
+            self.mem = rm_info.mem_per_node
+        if self.blocked_cores is None:
+            self.blocked_cores = rm_info.cfg.blocked_cores
+        if self.threads_per_core is None:
+            self.threads_per_core = rm_info.threads_per_core
+        if self.threads_per_gpu is None:
+            self.threads_per_gpu = rm_info.threads_per_gpu
+        if self.mem_per_gpu is None:
+            self.mem_per_gpu = rm_info.mem_per_gpu
+        if self.lfs_path is None:
+            self.lfs_path = rm_info.lfs_path
+
+
+    @property
+    def partition_id(self) -> Optional[str]:
+        return self._partition_id
+
+    @partition_id.setter
+    def partition_id(self, v: Optional[str]) -> None:
+
+        if v is None:
+            self._partition_id = None
+            return
+
+        cur = self._partition_id
+        if cur is not None:
+            raise ValueError(f"node {self.name} is already in partition {cur}")
+
+        self._partition_id = v
 
 # Base class for ResourceManager implementations.
 class ResourceManager:
@@ -264,7 +341,7 @@ class ResourceManager:
         self._initialize()
 
         # we expect to have a valid node list now
-        logger.info("node list: %s", rm_info.node_list)
+        logger.info(f"found {len(rm_info.node_list)} nodes")
 
         self._filter_nodes()
 
@@ -416,19 +493,8 @@ class ResourceManager:
         as required for rm_info.
         """
 
-        # FIXME: use proper data structures for nodes and resources
-        # keep nodes to be indexed (node_index)
-        node_list = [
-            {
-                "name": node,
-                "index": idx,
-                "cores": [self.FREE] * rm_info.cores_per_node,
-                "gpus": [self.FREE] * rm_info.gpus_per_node,
-                "lfs": rm_info.lfs_per_node,
-                "mem": rm_info.mem_per_node,
-            }
-            for idx, node in enumerate(nodes)
-        ]
+        node_list = [Node(name=node, index=idx, rm_info=rm_info)
+                     for idx, node in enumerate(nodes)]
 
         return node_list
 
@@ -514,3 +580,37 @@ class ResourceManager:
                 idx = closed_bracket_idx + 1
 
         return output
+
+
+    def get_partition(self, part_id: str, n_nodes: int) -> list:
+        """
+        Find 'n_nodes' which don't yet belong to a partition and return them
+        """
+
+        if n_nodes <= 0:
+            return []
+
+        node_list = []
+        for node in self._rm_info.node_list:
+            if node.partition_id is None:
+                node.partition_id = part_id
+                node_list.append(node)
+                if len(node_list) == n_nodes:
+                    break
+
+        if len(node_list) < n_nodes:
+            raise RuntimeError(
+                f"not enough free nodes to allocate partition {part_id} ({n_nodes})"
+            )
+
+        return node_list
+
+    def release_partition(self, part_id: str) -> None:
+        """
+        Release all nodes belonging to partition 'part_id'
+        """
+
+        for node in self._rm_info.node_list:
+            if node.partition_id == part_id:
+                node.partition_id = None
+
