@@ -5,7 +5,7 @@ import multiprocessing as mp
 import rhapsody
 from rhapsody.api import ComputeTask
 from rhapsody.api import Session
-from rhapsody.backends import RadicalExecutionBackend, ConcurrentExecutionBackend
+from rhapsody.backends import ConcurrentExecutionBackend
 
 rhapsody.enable_logging(level=logging.DEBUG)
 
@@ -13,7 +13,7 @@ rhapsody.enable_logging(level=logging.DEBUG)
 async def main():
 
     # Get a backend (concurrent backend by default)
-    backend = await RadicalExecutionBackend()
+    backend = await ConcurrentExecutionBackend()
     session = Session([backend])
 
     # Define tasks (UIDs auto-generated!)
