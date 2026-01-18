@@ -12,7 +12,9 @@ import logging
 import os
 import threading
 from collections.abc import Generator
+from typing import Any
 from typing import Callable
+from typing import Optional
 
 import typeguard
 
@@ -34,8 +36,8 @@ except ImportError:
 def _get_logger() -> logging.Logger:
     """Get logger for radical_pilot backend module.
 
-    This function provides lazy logger evaluation, ensuring the logger
-    is created after the user has configured logging, not at module import time.
+    This function provides lazy logger evaluation, ensuring the logger is created after the user has
+    configured logging, not at module import time.
     """
     return logging.getLogger(__name__)
 
@@ -128,10 +130,11 @@ class RadicalExecutionBackend(BaseBackend):
 
     @typeguard.typechecked
     def __init__(
-     self, resources: dict = None,
-     raptor_config: dict | None = None,
-     name: Optional[str] = "radical_pilot") -> None:
-
+        self,
+        resources: Optional[dict] = None,
+        raptor_config: dict | None = None,
+        name: Optional[str] = "radical_pilot",
+    ) -> None:
         """Initialize the RadicalExecutionBackend with resources.
 
         Creates a new Radical Pilot session, initializes task and pilot managers,
@@ -173,7 +176,10 @@ class RadicalExecutionBackend(BaseBackend):
         self.logger = _get_logger()
         self.resources = resources or {
             "resource": "local.localhost",
-            "runtime": 30, "exit_on_error": True, "cores": os.cpu_count()}
+            "runtime": 30,
+            "exit_on_error": True,
+            "cores": os.cpu_count(),
+        }
         self.raptor_config = raptor_config or {}
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
@@ -242,10 +248,7 @@ class RadicalExecutionBackend(BaseBackend):
             self.pilot_manager.register_callback(self.handle_pilot_state_callback)
 
             self.task_manager.add_pilots(self.resource_pilot)
-            self._callback_func: Callable = self._internal_callback
-
-            # Register the internal callback with the task manager
-            self.register_callback(self._internal_callback)
+            self._callback_func: Callable = lambda t, s: None
 
             if self.raptor_config:
                 self.raptor_mode = True
@@ -423,38 +426,44 @@ class RadicalExecutionBackend(BaseBackend):
         def backend_callback(rp_task, state) -> None:
             service_callback = None
 
-            if rp_task.mode == rp.TASK_SERVICE and state == rp.AGENT_EXECUTING:
-                service_callback = service_ready_callback
+            try:
+                if rp_task.mode == rp.TASK_SERVICE and state == rp.AGENT_EXECUTING:
+                    service_callback = service_ready_callback
 
-            # Get the original Task object
-            original_task = self.tasks.get(rp_task.uid)
-            if not original_task:
-                self.logger.warning(f"No original task found for UID {rp_task.uid}")
-                return
+                # Get the original Task object
+                original_task = self.tasks.get(rp_task.uid)
+                if not original_task:
+                    self.logger.warning(f"No original task found for UID {rp_task.uid}")
+                    return
 
-            # Convert RP task to dict and extract results
-            rp_task_dict = rp_task.as_dict()
+                # Convert RP task to dict and extract results
+                rp_task_dict = rp_task.as_dict()
 
-            # Update original Task object with results from RP task
-            if 'stdout' in rp_task_dict:
-                original_task['stdout'] = rp_task_dict['stdout']
-            if 'stderr' in rp_task_dict:
-                stderr = rp_task_dict.get('stderr')
-                exception = rp_task_dict.get('exception')
-                if rp_task.mode == rp.TASK_EXECUTABLE and state == rp.FAILED:
-                    if stderr or exception:
-                        original_task['stderr'] = ", ".join(filter(None, [stderr, exception]))
-                else:
-                    original_task['stderr'] = stderr
-            if 'exit_code' in rp_task_dict:
-                original_task['exit_code'] = rp_task_dict['exit_code']
-            if 'return_value' in rp_task_dict:
-                original_task['return_value'] = rp_task_dict['return_value']
-            if 'exception' in rp_task_dict and state == rp.FAILED:
-                original_task['exception'] = rp_task_dict['exception']
+                # Update original Task object with results from RP task
+                if "stdout" in rp_task_dict:
+                    original_task["stdout"] = rp_task_dict["stdout"]
+                if "stderr" in rp_task_dict:
+                    stderr = rp_task_dict.get("stderr")
+                    exception = rp_task_dict.get("exception")
+                    if rp_task.mode == rp.TASK_EXECUTABLE and state == rp.FAILED:
+                        if stderr or exception:
+                            original_task["stderr"] = ", ".join(filter(None, [stderr, exception]))
+                    else:
+                        original_task["stderr"] = stderr
+                if "exit_code" in rp_task_dict:
+                    original_task["exit_code"] = rp_task_dict["exit_code"]
+                if "return_value" in rp_task_dict:
+                    original_task["return_value"] = rp_task_dict["return_value"]
+                if "exception" in rp_task_dict and state == rp.FAILED:
+                    original_task["exception"] = rp_task_dict["exception"]
 
-            # Call the registered callback with the original Task object
-            func(original_task, state, service_callback=service_callback)
+                # Call the registered callback with the original Task object
+                func(original_task, state, service_callback=service_callback)
+            except Exception:
+                self.logger.exception(
+                    f"Backend callback failed for task {getattr(rp_task, 'uid', None)} "
+                    f"in state {state}"
+                )
 
         self.task_manager.register_callback(backend_callback)
 

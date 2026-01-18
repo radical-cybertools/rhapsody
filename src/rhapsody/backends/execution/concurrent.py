@@ -24,8 +24,8 @@ except ImportError:
 def _get_logger() -> logging.Logger:
     """Get logger for concurrent backend module.
 
-    This function provides lazy logger evaluation, ensuring the logger
-    is created after the user has configured logging, not at module import time.
+    This function provides lazy logger evaluation, ensuring the logger is created after the user has
+    configured logging, not at module import time.
     """
     return logging.getLogger(__name__)
 

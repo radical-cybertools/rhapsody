@@ -16,7 +16,7 @@ import rhapsody
 @pytest.fixture
 def session_instance():
     """Fixture providing a Session instance."""
-    from rhapsody.api.session import Session
+    from rhapsody.api import Session
 
     return Session()
 

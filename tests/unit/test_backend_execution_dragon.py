@@ -3,19 +3,21 @@
 These tests focus on core features with minimal tasks (1-2 per test).
 Run with: dragon python -m pytest tests/unit/test_backend_execution_dragon.py -v
 """
+
 import asyncio
 
 import pytest
 
 from rhapsody import ComputeTask
-from rhapsody.api.session import Session
+from rhapsody.api import Session
 from rhapsody.backends.discovery import get_backend
 
 # ============================================================================
 # Fixtures
 # ============================================================================
 
-@pytest.fixture(params=['dragon_v1', 'dragon_v2', 'dragon_v3'])
+
+@pytest.fixture(params=["dragon_v1", "dragon_v2", "dragon_v3"])
 def backend_name(request):
     """Parametrize tests across all Dragon backend versions."""
     return request.param
@@ -34,13 +36,12 @@ async def session(backend_name):
 # Test 1: Single Executable Task
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_single_executable(session):
     """Test executing a single shell command task."""
     task = ComputeTask(
-        executable="echo",
-        arguments=["Hello Dragon"],
-        task_backend_specific_kwargs={"shell": True}
+        executable="echo", arguments=["Hello Dragon"], task_backend_specific_kwargs={"shell": True}
     )
 
     async with session:
@@ -57,6 +58,7 @@ async def test_single_executable(session):
 # Test 2: Single Function Task
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_single_function(session):
     """Test executing a single Python function task."""
@@ -65,10 +67,7 @@ async def test_single_function(session):
         """Simple async function for testing."""
         return x * 2
 
-    task = ComputeTask(
-        function=simple_function,
-        args=(21,)
-    )
+    task = ComputeTask(function=simple_function, args=(21,))
 
     async with session:
         await session.submit_tasks([task])
@@ -83,13 +82,11 @@ async def test_single_function(session):
 # Test 3: Task with Arguments
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_task_with_args(session):
     """Test task execution with multiple arguments."""
-    task = ComputeTask(
-        executable="/bin/echo",
-        arguments=["arg1", "arg2", "arg3"]
-    )
+    task = ComputeTask(executable="/bin/echo", arguments=["arg1", "arg2", "arg3"])
 
     async with session:
         await session.submit_tasks([task])
@@ -105,6 +102,7 @@ async def test_task_with_args(session):
 # ============================================================================
 # Test 4: Task Failure Handling
 # ============================================================================
+
 
 @pytest.mark.asyncio
 async def test_task_failure(session):
@@ -124,6 +122,7 @@ async def test_task_failure(session):
 # Test 5: Function with Exception
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_function_exception(session):
     """Test that function exceptions are properly handled."""
@@ -132,10 +131,7 @@ async def test_function_exception(session):
         """Function that raises an exception."""
         raise ValueError("Intentional test failure")
 
-    task = ComputeTask(
-        function=failing_function,
-        args=()
-    )
+    task = ComputeTask(function=failing_function, args=())
 
     async with session:
         await session.submit_tasks([task])
@@ -149,20 +145,17 @@ async def test_function_exception(session):
 # Test 6: Two Independent Tasks (Parallel Execution)
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_two_independent_tasks(session):
     """Test executing two independent tasks in parallel."""
     tasks = [
         ComputeTask(
-            executable="echo",
-            arguments=["Task A"],
-            task_backend_specific_kwargs={"shell": True}
+            executable="echo", arguments=["Task A"], task_backend_specific_kwargs={"shell": True}
         ),
         ComputeTask(
-            executable="echo",
-            arguments=["Task B"],
-            task_backend_specific_kwargs={"shell": True}
-        )
+            executable="echo", arguments=["Task B"], task_backend_specific_kwargs={"shell": True}
+        ),
     ]
 
     async with session:
@@ -183,17 +176,11 @@ async def test_two_independent_tasks(session):
 # Test 7: Mixed Success and Failure
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_mixed_success_failure(session):
     """Test handling tasks where some succeed and some fail."""
-    tasks = [
-        ComputeTask(
-            executable="/bin/true"
-        ),
-        ComputeTask(
-            executable="/bin/false"
-        )
-    ]
+    tasks = [ComputeTask(executable="/bin/true"), ComputeTask(executable="/bin/false")]
 
     async with session:
         await session.submit_tasks(tasks)
@@ -209,22 +196,16 @@ async def test_mixed_success_failure(session):
 # Test 8: Function with Return Value
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_function_return_value(session):
     """Test that function return values are properly captured."""
 
     async def compute_function(a: int, b: int) -> dict:
         """Function that returns a complex value."""
-        return {
-            "sum": a + b,
-            "product": a * b,
-            "inputs": [a, b]
-        }
+        return {"sum": a + b, "product": a * b, "inputs": [a, b]}
 
-    task = ComputeTask(
-        function=compute_function,
-        args=(5, 7)
-    )
+    task = ComputeTask(function=compute_function, args=(5, 7))
 
     async with session:
         await session.submit_tasks([task])
@@ -240,13 +221,15 @@ async def test_function_return_value(session):
 # Test 9: Stdout Capture
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_stdout_capture(session):
     """Test that stdout is properly captured."""
     import sys
+
     task = ComputeTask(
         executable=sys.executable,
-        arguments=["-c", "print('Line 1'); print('Line 2'); print('Line 3')"]
+        arguments=["-c", "print('Line 1'); print('Line 2'); print('Line 3')"],
     )
 
     async with session:
@@ -264,14 +247,12 @@ async def test_stdout_capture(session):
 # Test 10: Task Cancellation
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_task_cancellation(session):
     """Test cancelling a task before completion."""
     # Long-running task
-    task = ComputeTask(
-        executable="/bin/sleep",
-        arguments=["10"]
-    )
+    task = ComputeTask(executable="/bin/sleep", arguments=["10"])
 
     async with session:
         await session.submit_tasks([task])
@@ -284,7 +265,7 @@ async def test_task_cancellation(session):
         cancelled = await backend.cancel_task(task.uid)
         assert cancelled is True
 
-        # Wait a bit and verify task was updated (optional, depends on backend propogation)
+        # Wait a bit and verify task was updated (optional, depends on backend propagation)
         await asyncio.sleep(1.0)
         # We don't assert state here as it may vary between backends immediately
 
@@ -292,6 +273,7 @@ async def test_task_cancellation(session):
 # ============================================================================
 # Test 11: Backend State
 # ============================================================================
+
 
 @pytest.mark.asyncio
 async def test_backend_state(session):
@@ -302,9 +284,7 @@ async def test_backend_state(session):
 
     # Submit a task
     task = ComputeTask(
-        executable="echo",
-        arguments=["test"],
-        task_backend_specific_kwargs={"shell": True}
+        executable="echo", arguments=["test"], task_backend_specific_kwargs={"shell": True}
     )
 
     async with session:
@@ -319,15 +299,14 @@ async def test_backend_state(session):
 # Test 12: Multiple Submissions (Sequential)
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_sequential_submissions(session):
     """Test submitting tasks in multiple batches."""
     async with session:
         # First batch
         task1 = ComputeTask(
-            executable="echo",
-            arguments=["Batch 1"],
-            task_backend_specific_kwargs={"shell": True}
+            executable="echo", arguments=["Batch 1"], task_backend_specific_kwargs={"shell": True}
         )
 
         await session.submit_tasks([task1])
@@ -337,9 +316,7 @@ async def test_sequential_submissions(session):
 
         # Second batch
         task2 = ComputeTask(
-            executable="echo",
-            arguments=["Batch 2"],
-            task_backend_specific_kwargs={"shell": True}
+            executable="echo", arguments=["Batch 2"], task_backend_specific_kwargs={"shell": True}
         )
 
         await session.submit_tasks([task2])
@@ -352,6 +329,7 @@ async def test_sequential_submissions(session):
 # Test 13: Function with Kwargs
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_function_with_kwargs(session):
     """Test function execution with keyword arguments."""
@@ -360,11 +338,7 @@ async def test_function_with_kwargs(session):
         """Function that uses keyword arguments."""
         return x + y + z
 
-    task = ComputeTask(
-        function=function_with_kwargs,
-        args=(5,),
-        kwargs={"y": 15, "z": 25}
-    )
+    task = ComputeTask(function=function_with_kwargs, args=(5,), kwargs={"y": 15, "z": 25})
 
     async with session:
         await session.submit_tasks([task])
@@ -378,6 +352,7 @@ async def test_function_with_kwargs(session):
 # Test 14: Empty Task List
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_empty_task_list(session):
     """Test handling of empty task list."""
@@ -389,20 +364,17 @@ async def test_empty_task_list(session):
 # Test 15: Task UID Uniqueness
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_task_uid_uniqueness(session):
     """Test that auto-generated UIDs are unique."""
     tasks = [
         ComputeTask(
-            executable="echo",
-            arguments=["Task 1"],
-            task_backend_specific_kwargs={"shell": True}
+            executable="echo", arguments=["Task 1"], task_backend_specific_kwargs={"shell": True}
         ),
         ComputeTask(
-            executable="echo",
-            arguments=["Task 2"],
-            task_backend_specific_kwargs={"shell": True}
-        )
+            executable="echo", arguments=["Task 2"], task_backend_specific_kwargs={"shell": True}
+        ),
     ]
 
     async with session:

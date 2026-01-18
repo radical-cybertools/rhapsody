@@ -1,15 +1,18 @@
 import asyncio
 import logging
-import rhapsody
-
 import multiprocessing as mp
 
-from rhapsody.api.session import Session
-from rhapsody.backends import DragonExecutionBackendV3, DragonVllmInferenceBackend
+import rhapsody
+from rhapsody.api import AITask
+from rhapsody.api import ComputeTask
+from rhapsody.api import Session
+from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonVllmInferenceBackend
 
 rhapsody.enable_logging(level=logging.DEBUG)
 
 logger = logging.getLogger(__name__)
+
 
 async def main():
     mp.set_start_method("dragon")
@@ -23,7 +26,7 @@ async def main():
         num_gpus=0,
         tp_size=1,
         port=8002,
-        offset=0  # Change this to control the number of nodes each inference pipeline takes
+        offset=0,  # Change this to control the number of nodes each inference pipeline takes
     )
 
     # Initialize ALL services concurrently
@@ -33,19 +36,13 @@ async def main():
     # Define multiple tasks with single or multiple prompts
     # Note: Explicit backend mapping by user
     tasks = [
-        rhapsody.AITask(
-            prompt='What is the capital of France?',
-            backend=inference_backend.name
+        AITask(prompt="What is the capital of France?", backend=inference_backend.name),
+        AITask(prompt=["Tell me a joke", "What is 2+2?"], backend=inference_backend.name),
+        ComputeTask(
+            executable="/usr/bin/echo",
+            arguments=["Hello from Dragon backend!"],
+            backend=execution_backend.name,
         ),
-        rhapsody.AITask(
-            prompt=['Tell me a joke', 'What is 2+2?'],
-            backend=inference_backend.name
-        ),
-        rhapsody.ComputeTask(
-            executable='/usr/bin/echo',
-            arguments=['Hello from Dragon backend!'],
-            backend=execution_backend.name
-        )
     ]
 
     session = Session([execution_backend, inference_backend])
@@ -58,10 +55,11 @@ async def main():
     results = await asyncio.gather(*tasks)
 
     for i, task in enumerate(results):
-        rtype = "AI" if 'prompt' in task else "Compute"
-        logger.info(f"Task {i+1} [{rtype}] ({task.get('backend')}): {task.return_value}")
+        rtype = "AI" if "prompt" in task else "Compute"
+        logger.info(f"Task {i + 1} [{rtype}] ({task.get('backend')}): {task.return_value}")
 
     await session.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

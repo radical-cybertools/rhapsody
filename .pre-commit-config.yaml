@@ -1,7 +1,7 @@
 # .pre-commit-config.yaml
 
 default_language_version:
-  python: python3.13
+  python: python3.12
 
 repos:
   - repo: https://github.com/PyCQA/docformatter
@@ -9,16 +9,16 @@ repos:
     hooks:
       - id: docformatter
         args: ["--in-place", "--wrap-summaries=100", "--wrap-descriptions=100"]
-        language_version: python3.13
+        language_version: python3.12
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.13.1
     hooks:
       - id: ruff
         args: ["--fix", "--exit-non-zero-on-fix"]
-        language_version: python3.13
+        language_version: python3.12
       - id: ruff-format
-        language_version: python3.13
+        language_version: python3.12
 
   # - repo: https://github.com/pre-commit/mirrors-mypy
   #   rev: v1.14.0

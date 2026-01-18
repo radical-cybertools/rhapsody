@@ -1,29 +1,32 @@
 import asyncio
 import logging
 
+import multiprocessing as mp
 import rhapsody
-from rhapsody.api.session import Session
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.api import ComputeTask
+from rhapsody.api import Session
+from rhapsody.backends import RadicalExecutionBackend, ConcurrentExecutionBackend
 
 rhapsody.enable_logging(level=logging.DEBUG)
+
 
 async def main():
 
     # Get a backend (concurrent backend by default)
-    backend = await DragonExecutionBackendV3()
+    backend = await RadicalExecutionBackend()
     session = Session([backend])
 
     # Define tasks (UIDs auto-generated!)
     tasks = [
-        rhapsody.ComputeTask(
+        ComputeTask(
             executable="/bin/bash",
             arguments=["-c", "echo Hello from task 1 on $HOSTNAME"],
-            shell=True
+            shell=True,
         ),
-        rhapsody.ComputeTask(
+        ComputeTask(
             executable="/bin/bash",
             arguments=["-c", "echo Hello from task 2 on $HOSTNAME"],
-            shell=True
+            shell=True,
         ),
     ]
 
@@ -40,6 +43,7 @@ async def main():
 
     # Cleanup
     await backend.shutdown()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -66,8 +66,8 @@ except ImportError:  # pragma: no cover - environment without Dragon
 def _get_logger() -> logging.Logger:
     """Get logger for dragon backend module.
 
-    This function provides lazy logger evaluation, ensuring the logger
-    is created after the user has configured logging, not at module import time.
+    This function provides lazy logger evaluation, ensuring the logger is created after the user has
+    configured logging, not at module import time.
     """
     return logging.getLogger(__name__)
 
@@ -159,8 +159,8 @@ class FunctionTaskCompletionV1:
 class DataReferenceV1:
     """Zero-copy reference to function results stored in DDict.
 
-    Points directly to result keys written by function wrapper.
-    User controls when to resolve and fetch data from DDict.
+    Points directly to result keys written by function wrapper. User controls when to resolve and
+    fetch data from DDict.
     """
 
     def __init__(self, task_uid: str, ranks: int, ddict: DDict, backend_id: str):
@@ -301,7 +301,10 @@ class ResultCollectorV1:
         self.aggregated_results[task_uid] = []
 
     def try_consume_result(self) -> Optional[str]:
-        """Try to consume one result from queue. Returns task_uid if task completed, None otherwise."""
+        """Try to consume one result from queue.
+
+        Returns task_uid if task completed, None otherwise.
+        """
         try:
             result = self.result_queue.get(block=False)
             if result == "SHUTDOWN":
@@ -310,7 +313,7 @@ class ResultCollectorV1:
             if isinstance(result, (ExecutableTaskCompletionV1, FunctionTaskCompletionV1)):
                 return self._process_completion(result)
 
-        except Exception:
+        except Exception:  # noqa: S110
             # Queue empty
             pass
         return None
@@ -531,7 +534,15 @@ class TaskLauncherV1:
 
         return Process(
             target=_executable_wrapper_v1,
-            args=(self.result_queue, executable, args, uid, rank, self.working_dir, execute_in_shell),
+            args=(
+                self.result_queue,
+                executable,
+                args,
+                uid,
+                rank,
+                self.working_dir,
+                execute_in_shell,
+            ),
         )
 
     async def _add_function_processes_to_group(
@@ -573,7 +584,15 @@ class TaskLauncherV1:
 
             template = ProcessTemplate(
                 target=_executable_wrapper_v1,
-                args=(self.result_queue, executable, args, uid, rank, self.working_dir, execute_in_shell),
+                args=(
+                    self.result_queue,
+                    executable,
+                    args,
+                    uid,
+                    rank,
+                    self.working_dir,
+                    execute_in_shell,
+                ),
                 env=env,
                 cwd=self.working_dir,
             )
@@ -589,7 +608,7 @@ def _executable_wrapper_v1(
     working_dir: str,
     execute_in_shell: bool = False,
 ):
-    """wrapper function that executes executable and pushes completion to queue."""
+    """Wrapper function that executes executable and pushes completion to queue."""
     import subprocess
     import time
 
@@ -598,7 +617,7 @@ def _executable_wrapper_v1(
         if execute_in_shell:
             # Shell mode: join executable and arguments into single command string
             cmd = " ".join([executable] + args)
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: S602
                 cmd,
                 cwd=working_dir,
                 capture_output=True,
@@ -659,10 +678,10 @@ def _executable_wrapper_v1(
 def _function_wrapper_v1(
     result_queue: Queue, ddict: DDict, task: dict, rank: int, use_ddict_storage: bool
 ):
-    """wrapper function that executes user functions and pushes completion to queue.
+    """Wrapper function that executes user functions and pushes completion to queue.
 
-    DDict is only used when user explicitly sets use_ddict_storage=True.
-    Otherwise, return value is sent directly via queue.
+    DDict is only used when user explicitly sets use_ddict_storage=True. Otherwise, return value is
+    sent directly via queue.
     """
     import io
     import traceback
@@ -743,7 +762,7 @@ def _function_wrapper_v1(
         try:
             if stored_in_ddict:
                 ddict.detach()
-        except Exception:
+        except Exception:  # noqa: S110
             pass
 
 
@@ -1120,7 +1139,7 @@ def _worker_loop_v2(
                     if request.execute_in_shell:
                         # Shell mode: join executable and arguments into single command string
                         cmd = " ".join([request.executable] + request.exec_args)
-                        result = subprocess.run(
+                        result = subprocess.run(  # noqa: S602
                             cmd,
                             cwd=request.working_dir,
                             capture_output=True,
@@ -1165,7 +1184,7 @@ def _worker_loop_v2(
     finally:
         try:
             ddict.detach()
-        except Exception:
+        except Exception:  # noqa: S110
             pass
 
 
@@ -1658,7 +1677,7 @@ class TaskStateMapperV3:
 
 
 class DragonExecutionBackendV1(BaseBackend):
-    """Dragon execution backend with unified queue-based architecture
+    """Dragon execution backend with unified queue-based architecture.
 
                 ┌────────────────────────────┐
                 │  DRAGON EXECUTION BACKEND  │
@@ -1704,11 +1723,12 @@ class DragonExecutionBackendV1(BaseBackend):
     """
 
     @typeguard.typechecked
-    def __init__(self,
-     resources: Optional[dict] = None,
-     ddict: Optional[DDict] = None,
-     name: Optional[str] = "dragon"):
-
+    def __init__(
+        self,
+        resources: Optional[dict] = None,
+        ddict: Optional[DDict] = None,
+        name: Optional[str] = "dragon",
+    ):
         if dragon is None:
             raise ImportError("Dragon is required for DragonExecutionBackendV1.")
         if DDict is None:
@@ -1818,7 +1838,9 @@ class DragonExecutionBackendV1(BaseBackend):
             self.logger.debug("Result queue created successfully")
 
             # Initialize shared memory manager
-            self._shared_memory = SharedMemoryManagerV1(self._ddict, self._system_alloc, self.logger)
+            self._shared_memory = SharedMemoryManagerV1(
+                self._ddict, self._system_alloc, self.logger
+            )
             await self._shared_memory.initialize()
 
             # Initialize utilities
@@ -2014,7 +2036,7 @@ class DragonExecutionBackendV1(BaseBackend):
             try:
                 if await self.cancel_task(task_uid):
                     canceled += 1
-            except Exception:
+            except Exception:  # noqa: S110
                 pass
         return canceled
 
@@ -2264,11 +2286,12 @@ class DragonExecutionBackendV2(BaseBackend):
     """
 
     @typeguard.typechecked
-    def __init__(self,
-    resources: Optional[dict] = None,
-    ddict: Optional[DDict] = None,
-    name: Optional[str] = "dragon"):
-
+    def __init__(
+        self,
+        resources: Optional[dict] = None,
+        ddict: Optional[DDict] = None,
+        name: Optional[str] = "dragon",
+    ):
         if dragon is None:
             raise ImportError("Dragon is required for DragonExecutionBackendV2.")
 
@@ -2336,7 +2359,9 @@ class DragonExecutionBackendV2(BaseBackend):
         else:
             # No workers specified - create default compute worker
             slots = int(resources.get("slots", mp.cpu_count() or 1))
-            self.logger.info(f"No workers specified, creating default compute worker with {slots} slots")
+            self.logger.info(
+                f"No workers specified, creating default compute worker with {slots} slots"
+            )
             return [
                 WorkerGroupConfigV2(
                     name="default_worker",
@@ -2475,7 +2500,9 @@ class DragonExecutionBackendV2(BaseBackend):
 
         num_scheduler_workers = min(32, max(4, self._total_slots // 4))
 
-        self.logger.info(f"Starting parallel scheduler with {num_scheduler_workers} scheduler workers")
+        self.logger.info(
+            f"Starting parallel scheduler with {num_scheduler_workers} scheduler workers"
+        )
 
         async def scheduler_worker(worker_id: int):
             """Individual scheduler worker."""
@@ -2626,7 +2653,9 @@ class DragonExecutionBackendV2(BaseBackend):
                     ranks, gpus_per_rank, worker_type_hint=worker_type_hint
                 )
                 if worker_name:
-                    self.logger.debug(f"Task {task['uid']}: AFFINITY policy - fallback to {worker_name}")
+                    self.logger.debug(
+                        f"Task {task['uid']}: AFFINITY policy - fallback to {worker_name}"
+                    )
                     return worker_name
                 while not worker_name and not self._shutdown_event.is_set():
                     await asyncio.sleep(0.01)
@@ -2636,7 +2665,9 @@ class DragonExecutionBackendV2(BaseBackend):
                 return worker_name
 
         elif pinning_policy == WorkerPinningPolicyV2.STRICT:
-            self.logger.debug(f"Task {task['uid']}: STRICT policy - waiting for worker {worker_hint}")
+            self.logger.debug(
+                f"Task {task['uid']}: STRICT policy - waiting for worker {worker_hint}"
+            )
             while not self._shutdown_event.is_set():
                 if self._worker_pool.worker_has_capacity(worker_hint, ranks, gpus_per_rank):
                     self.logger.debug(
@@ -2678,7 +2709,9 @@ class DragonExecutionBackendV2(BaseBackend):
 
         elif pinning_policy == WorkerPinningPolicyV2.EXCLUSIVE:
             if self._worker_pool.worker_has_capacity(worker_hint, ranks, gpus_per_rank):
-                self.logger.debug(f"Task {task['uid']}: EXCLUSIVE policy - using worker {worker_hint}")
+                self.logger.debug(
+                    f"Task {task['uid']}: EXCLUSIVE policy - using worker {worker_hint}"
+                )
                 return worker_hint
             else:
                 total_capacity = self._worker_pool.worker_slots.get(worker_hint, 0)
@@ -2835,6 +2868,7 @@ class DragonExecutionBackendV2(BaseBackend):
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a running task.
+
         Note: With worker pool architecture, cancellation is best-effort.
         Workers that already picked up the task will complete it.
         """
@@ -3048,11 +3082,10 @@ class DragonExecutionBackendV2(BaseBackend):
 
 
 class DragonExecutionBackendV3(BaseBackend):
-    """
-    Fast Dragon Batch integration using .wait() in threads.
+    """Fast Dragon Batch integration using .wait() in threads.
 
-    No polling! Each compiled batch gets a thread that calls .wait()
-    and triggers callbacks when done. This is the Dragon-native way.
+    No polling! Each compiled batch gets a thread that calls .wait() and triggers callbacks when
+    done. This is the Dragon-native way.
     """
 
     def __init__(
@@ -3076,7 +3109,7 @@ class DragonExecutionBackendV3(BaseBackend):
         )
 
         self._backend_state = BackendMainStates.INITIALIZED
-        self._callback_func = lambda t, s: None
+        self._callback_func: Callable = lambda t, s: None
         self._task_registry: dict[str, Any] = {}
         self._task_states = TaskStateMapperV3()
         self._initialized = False
@@ -3133,8 +3166,7 @@ class DragonExecutionBackendV3(BaseBackend):
         return self
 
     def _wait_for_batch(self, compiled_tasks, task_uids: list[str]):
-        """
-        Wait for batch to complete and trigger callbacks.
+        """Wait for batch to complete and trigger callbacks.
 
         Simple: just wait(), then check results. No state tracking needed.
         """
@@ -3254,8 +3286,7 @@ class DragonExecutionBackendV3(BaseBackend):
         self._wait_executor.submit(self._wait_for_batch, compiled_tasks, task_uids)
 
     async def build_task(self, task: dict):
-        """
-        Translate AsyncFlow task to Dragon Batch task.
+        """Translate AsyncFlow task to Dragon Batch task.
 
         Translation Priority (in order):
         1. If process_templates (list) provided → Job mode (ignore type='mpi', ignore ranks) [function/executable]
@@ -3270,7 +3301,6 @@ class DragonExecutionBackendV3(BaseBackend):
         - Function Job: batch.job() - function in MPI job with multiple ranks
         - Executable Process: batch.process() - single executable process
         - Executable Job: batch.job() - executable in MPI job with multiple ranks
-
         """
         # Fast path: extract everything upfront
         uid = task["uid"]
@@ -3293,6 +3323,7 @@ class DragonExecutionBackendV3(BaseBackend):
         # Handle async functions
         if is_function and asyncio.iscoroutinefunction(target):
             original_target = target
+
             def target(*a, **kw):
                 return asyncio.run(original_target(*a, **kw))
 
@@ -3461,9 +3492,8 @@ class DragonExecutionBackendV3(BaseBackend):
 
 
 class DragonTelemetryCollector:
-    """
-    Telemetry collection class that spawns one collector process per node to monitor
-    CPU, GPU memory, and RAM utilization.
+    """Telemetry collection class that spawns one collector process per node to monitor CPU, GPU
+    memory, and RAM utilization.
 
     This class integrates with Dragon's built-in Telemetry infrastructure and periodically
     checkpoints all collected metrics (system + user custom) to JSON files for persistence.
@@ -3506,7 +3536,7 @@ class DragonTelemetryCollector:
         self,
         collection_rate: float = 1.0,
         checkpoint_interval: float = 30.0,
-        checkpoint_dir: str = "/tmp",
+        checkpoint_dir: str = "/tmp",  # noqa: S108
         checkpoint_count: int = 5,
         enable_cpu: bool = True,
         enable_gpu: bool = True,
@@ -3521,7 +3551,8 @@ class DragonTelemetryCollector:
         :type checkpoint_interval: float, optional
         :param checkpoint_dir: Directory to write checkpoint files, defaults to "/tmp"
         :type checkpoint_dir: str, optional
-        :param checkpoint_count: Maximum number of checkpoint files to keep (0 for unlimited), defaults to 5
+        :param checkpoint_count: Maximum number of checkpoint files to keep (0 for unlimited),
+            defaults to 5
         :type checkpoint_count: int, optional
         :param enable_cpu: Enable CPU metric collection, defaults to True
         :type enable_cpu: bool, optional
@@ -3561,9 +3592,9 @@ class DragonTelemetryCollector:
     def start(self):
         """Start telemetry collection on all nodes.
 
-        Spawns one collector process per node using Dragon's ProcessGroup.
-        Each collector monitors CPU, GPU, and memory metrics and sends them
-        to Dragon's TSDB while also checkpointing to JSON files.
+        Spawns one collector process per node using Dragon's ProcessGroup. Each collector monitors
+        CPU, GPU, and memory metrics and sends them to Dragon's TSDB while also checkpointing to
+        JSON files.
 
         :raises RuntimeError: if collector is already started
         """
@@ -3615,8 +3646,7 @@ class DragonTelemetryCollector:
     def stop(self, timeout: float = 10.0):
         """Stop telemetry collection with clean shutdown.
 
-        Triggers a final checkpoint before exiting and waits for all
-        collector processes to finish.
+        Triggers a final checkpoint before exiting and waits for all collector processes to finish.
 
         :param timeout: Seconds to wait for processes to finish, defaults to 10.0
         :type timeout: float, optional
@@ -4027,7 +4057,7 @@ class DragonTelemetryCollector:
         import subprocess
 
         # Run xpu-smi to get metrics for all GPUs
-        output = subprocess.run(
+        output = subprocess.run(  # noqa: S607
             ["xpu-smi", "dump", "-d", "-1", "-m", "0,1,5", "-n", "1"],
             text=True,
             capture_output=True,
@@ -4182,7 +4212,7 @@ class DragonTelemetryCollector:
                 # Clean up temp file on error
                 try:
                     os.remove(temp_path)
-                except Exception:
+                except Exception:  # noqa: S110
                     pass
                 raise
 

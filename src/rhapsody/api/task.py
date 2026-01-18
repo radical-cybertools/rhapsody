@@ -44,12 +44,10 @@ class BaseTask(dict, ABC):
     _uid_lock = threading.Lock()
 
     # Reserved keys that should not appear in dict iteration
-    _RESERVED_ATTRS = {
-        '_uid_counter', '_uid_lock', '_RESERVED_ATTRS', '_INTERNAL_ATTRS'
-    }
+    _RESERVED_ATTRS = {"_uid_counter", "_uid_lock", "_RESERVED_ATTRS", "_INTERNAL_ATTRS"}
 
     # Internal attributes stored on object, not in dict
-    _INTERNAL_ATTRS = {'_future'}
+    _INTERNAL_ATTRS = {"_future"}
 
     @classmethod
     def _generate_uid(cls) -> str:
@@ -93,21 +91,21 @@ class BaseTask(dict, ABC):
         super().__init__()
 
         # Set all fields in dict (always initialize to None for consistent access)
-        self['uid'] = uid if uid is not None else self._generate_uid()
-        self['ranks'] = ranks
-        self['memory'] = memory
-        self['gpu'] = gpu
-        self['cpu_threads'] = cpu_threads
-        self['environment'] = environment
-        self['backend'] = backend
+        self["uid"] = uid if uid is not None else self._generate_uid()
+        self["ranks"] = ranks
+        self["memory"] = memory
+        self["gpu"] = gpu
+        self["cpu_threads"] = cpu_threads
+        self["environment"] = environment
+        self["backend"] = backend
 
         # Initialize result fields (populated by backends after execution)
-        self['state'] = None
-        self['stdout'] = None
-        self['stderr'] = None
-        self['exit_code'] = None
-        self['return_value'] = None
-        self['exception'] = None
+        self["state"] = None
+        self["stdout"] = None
+        self["stderr"] = None
+        self["exit_code"] = None
+        self["return_value"] = None
+        self["exception"] = None
 
         # Add any extra fields
         self.update(kwargs)
@@ -124,7 +122,6 @@ class BaseTask(dict, ABC):
     def __contains__(self, key: str) -> bool:
         return key in self.keys()
 
-
     def __getattr__(self, name: str) -> Any:
         """Allow attribute access to dict keys.
 
@@ -140,7 +137,7 @@ class BaseTask(dict, ABC):
             AttributeError: If key not found in dict
         """
         # Avoid infinite recursion for special attributes
-        if name.startswith('_'):
+        if name.startswith("_"):
             raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
 
         try:
@@ -169,27 +166,31 @@ class BaseTask(dict, ABC):
         Raises:
             TaskValidationError: If validation fails
         """
-        uid = self.get('uid')
+        uid = self.get("uid")
         if not uid or not isinstance(uid, str):
             raise TaskValidationError(None, "uid must be a non-empty string")
 
-        ranks = self.get('ranks')
+        ranks = self.get("ranks")
         if not isinstance(ranks, int) or ranks < 1:
             raise TaskValidationError(uid, f"ranks must be a positive integer, got {ranks}")
 
-        memory = self.get('memory')
+        memory = self.get("memory")
         if memory is not None and (not isinstance(memory, int) or memory < 0):
-            raise TaskValidationError(uid, f"memory must be a non-negative integer (MB), got {memory}")
+            raise TaskValidationError(
+                uid, f"memory must be a non-negative integer (MB), got {memory}"
+            )
 
-        gpu = self.get('gpu')
+        gpu = self.get("gpu")
         if gpu is not None and (not isinstance(gpu, int) or gpu < 0):
             raise TaskValidationError(uid, f"gpu must be a non-negative integer, got {gpu}")
 
-        cpu_threads = self.get('cpu_threads')
+        cpu_threads = self.get("cpu_threads")
         if cpu_threads is not None and (not isinstance(cpu_threads, int) or cpu_threads < 1):
-            raise TaskValidationError(uid, f"cpu_threads must be a positive integer, got {cpu_threads}")
+            raise TaskValidationError(
+                uid, f"cpu_threads must be a positive integer, got {cpu_threads}"
+            )
 
-        environment = self.get('environment')
+        environment = self.get("environment")
         if environment is not None and not isinstance(environment, dict):
             raise TaskValidationError(uid, f"environment must be a dict, got {type(environment)}")
 
@@ -244,8 +245,8 @@ class BaseTask(dict, ABC):
         """Exclude non-serializable fields from pickling state."""
         state = self.__dict__.copy()
         # Remove future as it cannot be pickled (and belongs to submitting process)
-        if '_future' in state:
-            del state['_future']
+        if "_future" in state:
+            del state["_future"]
         return state
 
     def __setstate__(self, state: dict[str, Any]) -> None:
@@ -305,7 +306,7 @@ class BaseTask(dict, ABC):
     def __repr__(self) -> str:
         """String representation of task showing all fields."""
         items = [f"{key}={repr(value)}" for key, value in self.items()]
-        items_str = ', '.join(items)
+        items_str = ", ".join(items)
         return f"{self.__class__.__name__}({items_str})"
 
 
@@ -374,15 +375,15 @@ class ComputeTask(BaseTask):
         """
         # Store task-specific fields in dict (initialize all to None for consistent access)
         task_fields = {
-            'executable': executable,
-            'function': function,
-            'arguments': arguments if arguments is not None else [],
-            'args': args if args is not None else (),
-            'kwargs': kwargs if kwargs is not None else {},
-            'input_files': input_files,
-            'output_files': output_files,
-            'working_directory': working_directory,
-            'shell': shell,
+            "executable": executable,
+            "function": function,
+            "arguments": arguments if arguments is not None else [],
+            "args": args if args is not None else (),
+            "kwargs": kwargs if kwargs is not None else {},
+            "input_files": input_files,
+            "output_files": output_files,
+            "working_directory": working_directory,
+            "shell": shell,
         }
 
         # Initialize base with all fields
@@ -403,9 +404,9 @@ class ComputeTask(BaseTask):
         Raises:
             TaskValidationError: If validation fails
         """
-        uid = self.get('uid')
-        executable = self.get('executable')
-        function = self.get('function')
+        uid = self.get("uid")
+        executable = self.get("executable")
+        function = self.get("function")
 
         # Exactly one of executable or function must be specified
         if executable is None and function is None:
@@ -421,9 +422,11 @@ class ComputeTask(BaseTask):
         # Validate executable
         if executable is not None:
             if not isinstance(executable, str):
-                raise TaskValidationError(uid, f"executable must be a string, got {type(executable)}")
+                raise TaskValidationError(
+                    uid, f"executable must be a string, got {type(executable)}"
+                )
 
-            arguments = self.get('arguments')
+            arguments = self.get("arguments")
             if arguments is not None and not isinstance(arguments, list):
                 raise TaskValidationError(uid, f"arguments must be a list, got {type(arguments)}")
 
@@ -432,18 +435,20 @@ class ComputeTask(BaseTask):
             if not callable(function):
                 raise TaskValidationError(uid, f"function must be callable, got {type(function)}")
 
-            func_args = self.get('args')
+            func_args = self.get("args")
             if func_args is not None and not isinstance(func_args, (tuple, list)):
-                raise TaskValidationError(uid, f"args must be a tuple or list, got {type(func_args)}")
+                raise TaskValidationError(
+                    uid, f"args must be a tuple or list, got {type(func_args)}"
+                )
 
-            func_kwargs = self.get('kwargs')
+            func_kwargs = self.get("kwargs")
             if func_kwargs is not None and not isinstance(func_kwargs, dict):
                 raise TaskValidationError(uid, f"kwargs must be a dict, got {type(func_kwargs)}")
 
     def __repr__(self) -> str:
         """String representation of compute task showing all fields."""
         items = [f"{key}={repr(value)}" for key, value in self.items()]
-        items_str = ', '.join(items)
+        items_str = ", ".join(items)
         return f"ComputeTask({items_str})"
 
 
@@ -510,15 +515,15 @@ class AITask(BaseTask):
         """
         # Store AI-specific fields in dict (initialize all to None for consistent access)
         task_fields = {
-            'prompt': prompt,
-            'model': model,
-            'inference_endpoint': inference_endpoint,
-            'system_prompt': system_prompt,
-            'temperature': temperature,
-            'max_tokens': max_tokens,
-            'top_p': top_p,
-            'top_k': top_k,
-            'stop_sequences': stop_sequences,
+            "prompt": prompt,
+            "model": model,
+            "inference_endpoint": inference_endpoint,
+            "system_prompt": system_prompt,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "top_p": top_p,
+            "top_k": top_k,
+            "stop_sequences": stop_sequences,
         }
 
         # Initialize base with all fields
@@ -540,30 +545,34 @@ class AITask(BaseTask):
         Raises:
             TaskValidationError: If validation fails
         """
-        uid = self.get('uid')
-        prompt = self.get('prompt')
+        uid = self.get("uid")
+        prompt = self.get("prompt")
 
         # Prompt is required
         if not prompt:
             raise TaskValidationError(uid, "prompt is required")
 
         if not isinstance(prompt, (str, list)):
-            raise TaskValidationError(uid, f"prompt must be a string or list of strings, got {type(prompt)}")
+            raise TaskValidationError(
+                uid, f"prompt must be a string or list of strings, got {type(prompt)}"
+            )
 
         if isinstance(prompt, list):
             for i, p in enumerate(prompt):
                 if not isinstance(p, str):
-                    raise TaskValidationError(uid, f"prompt item {i} must be a string, got {type(p)}")
+                    raise TaskValidationError(
+                        uid, f"prompt item {i} must be a string, got {type(p)}"
+                    )
 
-        model = self.get('model')
-        inference_endpoint = self.get('inference_endpoint')
+        model = self.get("model")
+        inference_endpoint = self.get("inference_endpoint")
 
         # Ensure a target is provided (model, endpoint, or named backend)
-        if not any([self.get('model'), self.get('inference_endpoint'), self.get('backend')]):
-             raise TaskValidationError(
-                 self['uid'],
-                 "AITask requires either 'model', 'inference_endpoint', or 'backend' to be specified"
-             )
+        if not any([self.get("model"), self.get("inference_endpoint"), self.get("backend")]):
+            raise TaskValidationError(
+                self["uid"],
+                "AITask requires either 'model', 'inference_endpoint', or 'backend' to be specified",
+            )
 
         # Validate model
         if model is not None and not isinstance(model, str):
@@ -576,32 +585,38 @@ class AITask(BaseTask):
             )
 
         # Validate optional parameters
-        temperature = self.get('temperature')
+        temperature = self.get("temperature")
         if temperature is not None:
             if not isinstance(temperature, (int, float)) or temperature < 0:
-                raise TaskValidationError(uid, f"temperature must be a non-negative number, got {temperature}")
+                raise TaskValidationError(
+                    uid, f"temperature must be a non-negative number, got {temperature}"
+                )
 
-        max_tokens = self.get('max_tokens')
+        max_tokens = self.get("max_tokens")
         if max_tokens is not None:
             if not isinstance(max_tokens, int) or max_tokens < 1:
-                raise TaskValidationError(uid, f"max_tokens must be a positive integer, got {max_tokens}")
+                raise TaskValidationError(
+                    uid, f"max_tokens must be a positive integer, got {max_tokens}"
+                )
 
-        top_p = self.get('top_p')
+        top_p = self.get("top_p")
         if top_p is not None:
             if not isinstance(top_p, (int, float)) or not (0 <= top_p <= 1):
                 raise TaskValidationError(uid, f"top_p must be between 0 and 1, got {top_p}")
 
-        top_k = self.get('top_k')
+        top_k = self.get("top_k")
         if top_k is not None:
             if not isinstance(top_k, int) or top_k < 1:
                 raise TaskValidationError(uid, f"top_k must be a positive integer, got {top_k}")
 
-        stop_sequences = self.get('stop_sequences')
+        stop_sequences = self.get("stop_sequences")
         if stop_sequences is not None and not isinstance(stop_sequences, list):
-            raise TaskValidationError(uid, f"stop_sequences must be a list, got {type(stop_sequences)}")
+            raise TaskValidationError(
+                uid, f"stop_sequences must be a list, got {type(stop_sequences)}"
+            )
 
     def __repr__(self) -> str:
         """String representation of AI task showing all fields."""
         items = [f"{key}={repr(value)}" for key, value in self.items()]
-        items_str = ', '.join(items)
+        items_str = ", ".join(items)
         return f"AITask({items_str})"

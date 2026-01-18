@@ -15,7 +15,8 @@ You can register multiple backends in a single session and explicitly route task
 import asyncio
 
 import rhapsody
-from rhapsody.api.session import Session
+from rhapsody.api import Session
+from rhapsody.api import ComputeTask
 from rhapsody.backends import ConcurrentExecutionBackend, DragonExecutionBackendV3
 
 
@@ -32,9 +33,9 @@ async def multi_backend_demo():
 
     async with Session(backends=[be_local, be_remote]) as session:
         # Route tasks explicitly by backend name
-        task1 = rhapsody.ComputeTask(
+        task1 = ComputeTask(
             function=compute_function, backend=be_local.name)
-        task2 = rhapsody.ComputeTask(
+        task2 = ComputeTask(
             function=compute_function, backend=be_remote.name)
 
         await session.submit_tasks([task1, task2])
@@ -77,7 +78,7 @@ For large-scale HPC deployments, the Dragon backend provides native integration 
 ```python
 import asyncio
 import rhapsody
-from rhapsody.api.session import Session
+from rhapsody.api import Session, ComputeTask
 from rhapsody.backends import DragonExecutionBackendV3
 
 async def dragon_demo():
@@ -87,15 +88,15 @@ async def dragon_demo():
         num_workers=8,
         name="dragon_hpc"
     )
-    
+
     async with Session(backends=[dragon_be]) as session:
         # Define tasks for the Dragon cluster
         tasks = [
-            rhapsody.ComputeTask(
+            ComputeTask(
                 executable="hostname", backend=dragon_be.name)
             for _ in range(16)
         ]
-        
+
         await session.submit_tasks(tasks)
         results = await asyncio.gather(*tasks)
 
@@ -118,7 +119,7 @@ One of RHAPSODY's most powerful features is the ability to orchestrate tradition
 ```python
 import asyncio
 import rhapsody
-from rhapsody.api.session import Session
+from rhapsody.api import Session, ComputeTask, AITask
 from rhapsody.backends import ConcurrentExecutionBackend
 from rhapsody.backends.inference import DragonVllmInferenceBackend
 
@@ -128,23 +129,23 @@ async def mixed_workload():
     ai_backend = await DragonVllmInferenceBackend(name="vllm_service", model="llama-3")
 
     async with Session(backends=[hpc_backend, ai_backend]) as session:
-        
+
         # 2. Define a ComputeTask (e.g., simulation)
-        sim_task = rhapsody.ComputeTask(executable="./simulate.sh", backend="hpc_cluster")
-        
+        sim_task = ComputeTask(executable="./simulate.sh", backend="hpc_cluster")
+
         # 3. Define an AITask (e.g., summarize results)
-        summary_task = rhapsody.AITask(
+        summary_task = AITask(
             prompt="Summarize the simulation findings: ...",
             backend="vllm_service"
         )
-        
+
         # 4. Submit both!
         await session.submit_tasks([sim_task, summary_task])
-        
+
         # Wait for simulation to finish first
         await sim_task
         print(f"Simulation Done: {sim_task.return_value}")
-        
+
         # Then summarize
         result = await summary_task
         print(f"AI Summary: {result}")
@@ -163,10 +164,10 @@ from rhapsody.backends.execution import DaskExecutionBackend
 async def custom_cluster_demo():
     # Outside Rhapsody, you might have a specialized GPU cluster
     gpu_cluster = await LocalCluster(n_workers=4, threads_per_worker=1, asynchronous=True)
-    
+
     # Pass it directly to the Dask backend
     backend = await DaskExecutionBackend(cluster=gpu_cluster)
-    
+
     async with Session(backends=[backend]) as session:
         # Tasks will now run on your pre-allocated GPU workers
         ...

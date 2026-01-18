@@ -27,8 +27,8 @@ class BackendRegistry:
         """Discover available backends from the execution module.
 
         Dynamically discovers backends by inspecting the __all__ exports from
-        rhapsody.backends.execution module. Automatically derives backend names
-        from class names by converting CamelCase to snake_case.
+        rhapsody.backends.execution module. Automatically derives backend names from class names by
+        converting CamelCase to snake_case.
         """
         if cls._initialized:
             return
@@ -139,7 +139,9 @@ class BackendRegistry:
                 cls._backends[backend_name] = backend_class
                 return backend_class
             except (ImportError, AttributeError, ValueError) as e:
-                raise ImportError(f"Failed to import backend '{backend_name}' from '{backend_value}': {e}") from e
+                raise ImportError(
+                    f"Failed to import backend '{backend_name}' from '{backend_value}': {e}"
+                ) from e
 
         return backend_value
 

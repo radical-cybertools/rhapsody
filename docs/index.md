@@ -28,11 +28,11 @@ async def main():
 
         # 2. Define a task
         task = ComputeTask(executable="/bin/echo", arguments=["Hello, Rhapsody!"])
-        
+
         # 3. Submit and wait
         await session.submit_tasks([task])
         result = await task
-        
+
         print(f"Task finished with state: {task.state}")
         print(f"Output: {task.return_value}")
 
