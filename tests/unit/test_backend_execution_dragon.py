@@ -12,6 +12,9 @@ from rhapsody import ComputeTask
 from rhapsody.api import Session
 from rhapsody.backends.discovery import get_backend
 
+# Skip all tests in this module if Dragon is not available
+pytest.importorskip("dragon", reason="Dragon is required for Dragon backend tests")
+
 # ============================================================================
 # Fixtures
 # ============================================================================

@@ -46,6 +46,7 @@ dependencies = [
 # Backend-specific dependencies
 dask = ["dask[distributed]>=2023.0.0"]
 radical_pilot = ["radical.pilot>=1.30.0"]
+dragon = ["dragonhpc"]
 
 # Development and testing
 dev = [
@@ -80,7 +81,7 @@ examples = [
 
 # Complete installation with all backends
 backends = [
-    "rhapsody[dask,radical_pilot]"
+    "rhapsody[dask,radical_pilot,dragon]"
 ]
 
 all = [
