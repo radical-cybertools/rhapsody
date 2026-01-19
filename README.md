@@ -16,7 +16,7 @@ A unified runtime for executing **AI and HPC workloads** on supercomputing infra
 - **Multi-Backend Execution**: Run on local machines, HPC clusters ([Dragon](https://dragonhpc.github.io/dragon/doc/_build/html/index.html)), or distributed systems ([Dask](https://docs.dask.org/en/stable/))
 - **Async-First Design**: Native asyncio integration for efficient task orchestration
 - **Integratable Design**: RHAPSODY is designed to be integratable with existing workflows and tools such as [AsyncFlow](https://github.com/radical-cybertools/asyncflow) and [LangGraph/FlowGentic](https://github.com/stride-research/flowgentic).
-- **Scale-Ready**: Scale your workload and worklfows to thousands of tasks and nodes.
+- **Scale-Ready**: Scale your workload and workflows to thousands of tasks and nodes.
 
 ## Quick Example: AI-HPC Workflow
 
@@ -29,30 +29,30 @@ async def main():
     # Initialize backends
     hpc_backend = await DragonExecutionBackendV3(name="hpc", num_workers=128)
     ai_backend = await DragonVllmInferenceBackend(name="vllm", model="Qwen2.5-7B")
-    
+
     # Create session with multiple backends
     async with Session(backends=[hpc_backend, ai_backend]) as session:
-        
+
         # HPC simulation task
         simulation = ComputeTask(
             executable="./simulate",
             arguments=["--config", "params.yaml"],
             backend=hpc_backend.name
         )
-        
+
         # AI analysis task
         analysis = AITask(
             prompt="Analyze the simulation results and identify key patterns...",
             backend=ai_backend.name
         )
-        
+
         # Submit and execute
         await session.submit_tasks([simulation, analysis])
-        
+
         # Wait for completion (tasks are awaitable!)
         sim_result = await simulation
         ai_result = await analysis
-        
+
         print(f"Simulation: {sim_result['state']}")
         print(f"AI Analysis: {ai_result['output']}")
 
