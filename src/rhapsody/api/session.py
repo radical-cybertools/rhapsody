@@ -137,7 +137,7 @@ class Session:
 
         # Register state manager callback
         backend.register_callback(self._state_manager.update_task)
-        
+
         logger.debug(f"Setting up backend callback for'{backend.name}' with Session '{self.uid}'")
 
         # Sync terminal states from backend

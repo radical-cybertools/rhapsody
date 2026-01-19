@@ -4057,8 +4057,8 @@ class DragonTelemetryCollector:
         import subprocess
 
         # Run xpu-smi to get metrics for all GPUs
-        output = subprocess.run(  # noqa: S607
-            ["xpu-smi", "dump", "-d", "-1", "-m", "0,1,5", "-n", "1"],
+        output = subprocess.run(
+            ["xpu-smi", "dump", "-d", "-1", "-m", "0,1,5", "-n", "1"],  # noqa: S607
             text=True,
             capture_output=True,
         )

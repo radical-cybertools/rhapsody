@@ -1,7 +1,7 @@
 import asyncio
 import logging
-
 import multiprocessing as mp
+
 import rhapsody
 from rhapsody.api import ComputeTask
 from rhapsody.api import Session
@@ -11,7 +11,6 @@ rhapsody.enable_logging(level=logging.DEBUG)
 
 
 async def main():
-
     # Get a backend (concurrent backend by default)
     backend = await ConcurrentExecutionBackend()
     session = Session([backend])

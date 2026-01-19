@@ -12,9 +12,7 @@ import logging
 import os
 import threading
 from collections.abc import Generator
-from typing import Any
 from typing import Callable
-from typing import Optional
 
 import typeguard
 
@@ -131,9 +129,9 @@ class RadicalExecutionBackend(BaseBackend):
     @typeguard.typechecked
     def __init__(
         self,
-        resources: Optional[dict] = None,
+        resources: dict | None = None,
         raptor_config: dict | None = None,
-        name: Optional[str] = "radical_pilot",
+        name: str | None = "radical_pilot",
     ) -> None:
         """Initialize the RadicalExecutionBackend with resources.
 
