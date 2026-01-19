@@ -15,7 +15,8 @@ A unified runtime for executing **AI and HPC workloads** on supercomputing infra
 - **Unified AI-HPC API**: Single interface for compute tasks and AI inference
 - **Multi-Backend Execution**: Run on local machines, HPC clusters ([Dragon](https://dragonhpc.github.io/dragon/doc/_build/html/index.html)), or distributed systems ([Dask](https://docs.dask.org/en/stable/))
 - **Async-First Design**: Native asyncio integration for efficient task orchestration
-- **Production-Ready**: Comprehensive testing, logging, and state management
+- **Integratable Design**: RHAPSODY is designed to be integratable with existing workflows and tools such as [AsyncFlow](https://github.com/radical-cybertools/asyncflow) and [LangGraph/FlowGentic](https://github.com/stride-research/flowgentic).
+- **Scale-Ready**: Scale your workload and worklfows to thousands of tasks and nodes.
 
 ## Quick Example: AI-HPC Workflow
 
