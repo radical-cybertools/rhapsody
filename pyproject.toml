@@ -46,7 +46,7 @@ dependencies = [
 # Backend-specific dependencies
 dask = ["dask[distributed]>=2023.0.0"]
 radical_pilot = ["radical.pilot>=1.30.0"]
-dragon = ["dragonhpc"]
+dragon = ["dragonhpc"]  # Requires Python >= 3.10
 
 # Development and testing
 dev = [
