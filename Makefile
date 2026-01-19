@@ -1,4 +1,4 @@
-.PHONY: help install lint format test test-all test-unit test-unit-no-dragon test-unit-dragon test-integration check setup-pre-commit
+.PHONY: help install lint format test test-all test-unit test-unit-no-dragon test-unit-dragon test-integration test-quick test-auto check setup-pre-commit
 .DEFAULT_GOAL := help
 
 # Python executable - override with PYTHON variable if needed
@@ -71,6 +71,16 @@ test-integration-dragon:  ## Run Dragon integration tests (requires 'dragon pyte
 
 test-quick:  ## Quick test - only non-Dragon tests (unit + integration, recommended for development)
 test-quick: test-unit-no-dragon test-integration-no-dragon
+
+test-auto:  ## Auto test - uses 'dragon pytest' if available, otherwise 'pytest' (for CI)
+	@echo "Running tests with auto-detection of dragon launcher..."
+	@if command -v dragon >/dev/null 2>&1 && python -c "import dragon" 2>/dev/null; then \
+		echo "Dragon detected, using 'dragon pytest'..."; \
+		dragon $(PYTHON) -m pytest tests/unit/ tests/integration/ -xvs; \
+	else \
+		echo "Dragon not available, using regular 'pytest' (Dragon tests will skip)..."; \
+		$(PYTHON) -m pytest tests/unit/ tests/integration/ -xvs; \
+	fi
 
 test-dask:  ## Run Dask backend tests only
 	@echo "Running Dask tests..."
