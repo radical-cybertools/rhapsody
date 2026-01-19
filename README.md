@@ -73,55 +73,6 @@ pip install rhapsody[dragon]         # Dragon runtime (Python 3.10-3.12)
 pip install rhapsody[dev]
 ```
 
-## Key Features
-
-### Unified Task API
-
-```python
-from rhapsody.api import ComputeTask, AITask
-
-# HPC compute task
-compute = ComputeTask(
-    executable="/bin/simulate",
-    arguments=["--input", "data.csv"],
-    ranks=64  # MPI ranks
-)
-
-# AI inference task
-ai = AITask(
-    prompt="Summarize the following data...",
-    model="llama-3",
-    temperature=0.7
-)
-```
-
-### Multi-Backend Session Management
-
-```python
-# Single session orchestrates multiple backends
-session = Session(backends=[
-    await ConcurrentExecutionBackend(name="local"),
-    await DragonExecutionBackendV3(name="hpc"),
-    await DragonVllmInferenceBackend(name="ai")
-])
-
-# Tasks automatically routed to appropriate backends
-await session.submit_tasks([local_task, hpc_task, ai_task])
-```
-
-### Type-Safe and Awaitable
-
-```python
-# Pydantic validation at definition time
-task = ComputeTask(executable="echo", arguments=["hello"])
-
-# Native asyncio integration
-result = await task
-print(result.stdout)
-
-# Or gather multiple tasks
-results = await asyncio.gather(task1, task2, task3)
-```
 
 ## Documentation
 
