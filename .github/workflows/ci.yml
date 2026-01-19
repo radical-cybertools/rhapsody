@@ -49,4 +49,4 @@ jobs:
           pip install dragonhpc || echo "Dragon not available for Python ${{ matrix.python-version }}, skipping"
 
       - name: Run tests
-        run: make test-auto
+        run: make test-ci

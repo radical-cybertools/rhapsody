@@ -1,4 +1,4 @@
-.PHONY: help install lint format test test-all test-unit test-unit-no-dragon test-unit-dragon test-integration test-quick test-auto check setup-pre-commit
+.PHONY: help install lint format test test-all test-unit test-unit-no-dragon test-unit-dragon test-integration test-quick test-regular test-dragon-only test-ci check setup-pre-commit
 .DEFAULT_GOAL := help
 
 # Python executable - override with PYTHON variable if needed
@@ -72,15 +72,27 @@ test-integration-dragon:  ## Run Dragon integration tests (requires 'dragon pyte
 test-quick:  ## Quick test - only non-Dragon tests (unit + integration, recommended for development)
 test-quick: test-unit-no-dragon test-integration-no-dragon
 
-test-auto:  ## Auto test - uses 'dragon pytest' if available, otherwise 'pytest' (for CI)
-	@echo "Running tests with auto-detection of dragon launcher..."
-	@if command -v dragon >/dev/null 2>&1 && python -c "import dragon" 2>/dev/null; then \
-		echo "Dragon detected, using 'dragon pytest'..."; \
-		dragon $(PYTHON) -m pytest tests/unit/ tests/integration/ -xvs; \
+test-regular:  ## Run all regular tests (excludes Dragon tests, uses pytest)
+	@echo "Running all regular tests (excluding Dragon)..."
+	@$(PYTHON) -m pytest tests/unit/ tests/integration/ \
+		--ignore=tests/unit/test_backend_execution_dragon.py \
+		-xvs
+
+test-dragon-only:  ## Run Dragon tests only (requires 'dragon' launcher)
+	@echo "Running Dragon tests..."
+	@if command -v dragon >/dev/null 2>&1; then \
+		dragon $(PYTHON) -m pytest tests/unit/test_backend_execution_dragon.py -xvs; \
 	else \
-		echo "Dragon not available, using regular 'pytest' (Dragon tests will skip)..."; \
-		$(PYTHON) -m pytest tests/unit/ tests/integration/ -xvs; \
+		echo "Dragon launcher not available. Install Dragon and run with 'dragon' command."; \
+		exit 1; \
 	fi
+
+test-ci:  ## CI test - regular tests + Dragon tests if available (fails gracefully)
+	@echo "Running CI tests..."
+	@$(MAKE) test-regular
+	@echo ""
+	@echo "Attempting Dragon tests (optional, skips if unavailable)..."
+	@$(MAKE) test-dragon-only 2>/dev/null || echo "Dragon tests skipped (Dragon not available on this Python version)"
 
 test-dask:  ## Run Dask backend tests only
 	@echo "Running Dask tests..."
