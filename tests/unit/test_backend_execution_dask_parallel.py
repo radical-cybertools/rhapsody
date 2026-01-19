@@ -197,10 +197,7 @@ async def test_dask_backend_task_submission_errors():
         backend.register_callback(mock_callback)
 
         # Test executable task (should fail)
-        executable_task = ComputeTask(
-            executable="/bin/echo",
-            arguments=["hello"]
-        )
+        executable_task = ComputeTask(executable="/bin/echo", arguments=["hello"])
 
         await backend.submit_tasks([executable_task])
 
@@ -213,11 +210,7 @@ async def test_dask_backend_task_submission_errors():
         def sync_function():
             return "sync"
 
-        sync_task = ComputeTask(
-            function=sync_function,
-            args=[],
-            kwargs={}
-        )
+        sync_task = ComputeTask(function=sync_function, args=[], kwargs={})
 
         callback_calls.clear()
         await backend.submit_tasks([sync_task])

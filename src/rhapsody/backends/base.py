@@ -19,8 +19,8 @@ if TYPE_CHECKING:
 class BaseBackend(ABC):
     """Abstract base class for backends that manage task execution and state.
 
-    This class defines the interface for backends that handle task submission, state
-    management, and lifecycle in a distributed or parallel execution environment.
+    This class defines the interface for backends that handle task submission, state management, and
+    lifecycle in a distributed or parallel execution environment.
     """
 
     def __init__(self, name: str | None = None):
@@ -107,7 +107,7 @@ class BaseBackend(ABC):
         """
         pass
 
-    def link_implicit_data_deps(self, src_task: dict[str, Any], dst_task: dict[str, Any]) -> None:
+    def link_implicit_data_deps(self, src_task: dict[str, Any], dst_task: dict[str, Any]) -> None:  # noqa: B027
         """Link implicit data dependencies between two tasks.
 
         Creates a dependency relationship where the destination task depends on
@@ -120,7 +120,7 @@ class BaseBackend(ABC):
         """
         pass
 
-    def link_explicit_data_deps(
+    def link_explicit_data_deps(  # noqa: B027
         self,
         src_task: dict[str, Any] | None = None,
         dst_task: dict[str, Any] | None = None,
@@ -151,4 +151,3 @@ class BaseBackend(ABC):
             NotImplementedError: If the backend doesn't support cancellation
         """
         raise NotImplementedError("Not implemented in the base backend")
-

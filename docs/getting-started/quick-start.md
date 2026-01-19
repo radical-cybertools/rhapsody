@@ -17,7 +17,7 @@ Here is a complete script demonstrating a simple compute workflow.
 ```python
 import asyncio
 import rhapsody
-from rhapsody.api.session import Session
+from rhapsody.api import Session, ComputeTask
 from rhapsody.backends import ConcurrentExecutionBackend
 
 async def run_example():
@@ -29,7 +29,7 @@ async def run_example():
 
         # 3. Define tasks
         tasks = [
-            rhapsody.ComputeTask(executable="/bin/echo", arguments=[f"Task {i}"])
+            ComputeTask(executable="/bin/echo", arguments=[f"Task {i}"])
             for i in range(1024)
         ]
 

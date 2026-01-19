@@ -14,6 +14,7 @@ from .api import BaseTask
 from .api import ComputeTask
 from .api import ResourceError
 from .api import RhapsodyError
+from .api import Session
 from .api import SessionError
 from .api import TaskExecutionError
 from .api import TaskValidationError
@@ -34,6 +35,7 @@ __all__ = [
     "BaseTask",
     "ComputeTask",
     "AITask",
+    "Session",
     # Errors
     "RhapsodyError",
     "BackendError",

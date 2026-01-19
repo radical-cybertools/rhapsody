@@ -27,9 +27,6 @@ def test_base_execution_backend_is_abstract():
         BaseBackend()
 
 
-
-
-
 def test_base_execution_backend_abstract_methods():
     """Test that BaseBackend has all required abstract methods."""
     from rhapsody.backends.base import BaseBackend
@@ -45,8 +42,6 @@ def test_base_execution_backend_abstract_methods():
         "task_state_cb",
         "get_task_states_map",
         "build_task",
-        "link_implicit_data_deps",
-        "link_explicit_data_deps",
         "cancel_task",
     }
 
@@ -74,6 +69,3 @@ def test_base_execution_backend_method_signatures():
     cancel_task_sig = inspect.signature(BaseBackend.cancel_task)
     assert len(cancel_task_sig.parameters) == 2  # self, uid
     assert "uid" in cancel_task_sig.parameters
-
-
-

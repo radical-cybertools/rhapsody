@@ -26,7 +26,7 @@ from typing import Optional
 
 def enable_logging(
     level: int = logging.INFO,
-    format_string: Optional[str] = '%(asctime)s | %(levelname)-8s | [%(name)s] | %(message)s',
+    format_string: Optional[str] = "%(asctime)s | %(levelname)-8s | [%(name)s] | %(message)s",
     stream=None,
     force: bool = True,
 ) -> None:

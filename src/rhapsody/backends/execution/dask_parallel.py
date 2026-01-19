@@ -12,8 +12,6 @@ from functools import wraps
 from typing import Any
 from typing import Callable
 
-import typeguard
-
 from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
@@ -27,8 +25,8 @@ except ImportError:
 def _get_logger() -> logging.Logger:
     """Get logger for dask backend module.
 
-    This function provides lazy logger evaluation, ensuring the logger
-    is created after the user has configured logging, not at module import time.
+    This function provides lazy logger evaluation, ensuring the logger is created after the user has
+    configured logging, not at module import time.
     """
     return logging.getLogger(__name__)
 

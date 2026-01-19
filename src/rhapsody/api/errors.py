@@ -1,8 +1,7 @@
 """Exception classes for RHAPSODY API.
 
-This module defines custom exceptions for different error scenarios in RHAPSODY,
-allowing fine-grained error handling and differentiation between backend failures
-and task-level issues.
+This module defines custom exceptions for different error scenarios in RHAPSODY, allowing fine-
+grained error handling and differentiation between backend failures and task-level issues.
 """
 
 from __future__ import annotations

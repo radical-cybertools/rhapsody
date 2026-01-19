@@ -164,6 +164,8 @@ class TestComputeTaskValidation:
         with pytest.raises(TaskValidationError) as exc:
             ComputeTask(executable="/bin/echo", ranks=0)
         assert "positive integer" in str(exc.value).lower()
+
+
 class TestBackendField:
     """Tests for the 'backend' field in tasks."""
 
@@ -171,19 +173,19 @@ class TestBackendField:
         """Test that ComputeTask supports explicit backend."""
         task = ComputeTask(executable="/bin/echo", backend="dragon")
         assert task.backend == "dragon"
-        assert task['backend'] == "dragon"
+        assert task["backend"] == "dragon"
 
     def test_ai_task_with_backend(self):
         """Test that AITask supports explicit backend."""
         task = AITask(prompt="hi", model="m1", backend="vllm")
         assert task.backend == "vllm"
-        assert task['backend'] == "vllm"
+        assert task["backend"] == "vllm"
 
     def test_task_default_backend_none(self):
         """Test that tasks have None backend by default."""
         task = ComputeTask(executable="/bin/echo")
         assert task.backend is None
-        assert task['backend'] is None
+        assert task["backend"] is None
 
         with pytest.raises(TaskValidationError):
             ComputeTask(executable="/bin/echo", ranks=-1)
@@ -426,8 +428,7 @@ class TestTaskSerialization:
 
     def test_from_dict_compute_task(self):
         """Test from_dict() reconstructs ComputeTask correctly."""
-        original = ComputeTask(executable="/bin/echo", arguments=["hello"], ranks=2, memory=2048
-        )
+        original = ComputeTask(executable="/bin/echo", arguments=["hello"], ranks=2, memory=2048)
 
         task_dict = original.to_dict()
         reconstructed = ComputeTask.from_dict(task_dict)
@@ -453,7 +454,8 @@ class TestTaskSerialization:
 
     def test_roundtrip_serialization_compute(self):
         """Test ComputeTask → dict → ComputeTask roundtrip."""
-        original = ComputeTask(executable="/bin/app", arguments=["arg1"], memory=1024, custom_key="custom_value"
+        original = ComputeTask(
+            executable="/bin/app", arguments=["arg1"], memory=1024, custom_key="custom_value"
         )
 
         # Roundtrip
@@ -560,6 +562,7 @@ class TestEdgeCases:
     async def test_task_awaitable(self):
         """Test that task can be awaited directly."""
         import asyncio
+
         task = ComputeTask(executable="/bin/echo")
         loop = asyncio.get_running_loop()
         future = loop.create_future()
@@ -577,6 +580,7 @@ class TestEdgeCases:
         """Test that task can be pickled and _future is excluded."""
         import asyncio
         import pickle
+
         task = ComputeTask(executable="/bin/echo")
 
         # Create a loop and future (non-pickleable)
@@ -597,7 +601,7 @@ class TestEdgeCases:
 
         assert task2.uid == task.uid
         assert task2.executable == "/bin/echo"
-        assert task2._future is None # Should be reset to None
+        assert task2._future is None  # Should be reset to None
 
     def test_task_internal_attrs(self):
         """Test that _future is in internal attrs and excluded from dictate."""

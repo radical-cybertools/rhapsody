@@ -11,7 +11,7 @@ import pytest
 
 import rhapsody
 from rhapsody import ComputeTask
-from rhapsody.api.session import Session
+from rhapsody.api import Session
 
 
 @pytest.mark.asyncio
@@ -33,9 +33,9 @@ async def test_direct_compute_task_submission():
 
         # Verify all tasks completed
         for task in tasks:
-            assert task.uid in [r['uid'] for r in results]
+            assert task.uid in [r["uid"] for r in results]
             # Session updates the task object in place
-            assert task['state'] in ["DONE", "COMPLETED"]
+            assert task["state"] in ["DONE", "COMPLETED"]
 
 
 @pytest.mark.asyncio
@@ -63,11 +63,11 @@ async def test_mixed_task_and_dict_submission():
         task_obj_uids = [t.uid for t in tasks if isinstance(t, ComputeTask)]
         for uid in task_obj_uids:
             assert uid.startswith("task.")
-            assert uid in [r['uid'] for r in results if isinstance(r, ComputeTask)]
+            assert uid in [r["uid"] for r in results if isinstance(r, ComputeTask)]
 
         # Verify manual UIDs for dicts
-        assert "dict_task_1" in [r['uid'] for r in results if isinstance(r, dict)]
-        assert "dict_task_2" in [r['uid'] for r in results if isinstance(r, dict)]
+        assert "dict_task_1" in [r["uid"] for r in results if isinstance(r, dict)]
+        assert "dict_task_2" in [r["uid"] for r in results if isinstance(r, dict)]
 
 
 @pytest.mark.asyncio
@@ -85,7 +85,7 @@ async def test_large_batch_submission():
         assert len(results) == 100
 
         # All UIDs should be present
-        result_uids = [r['uid'] for r in results]
+        result_uids = [r["uid"] for r in results]
         for task in tasks:
             assert task.uid in result_uids
 
@@ -103,7 +103,7 @@ async def test_auto_uid_uniqueness_in_backend():
         results = await session.wait_tasks(tasks)
 
         # All UIDs should be unique
-        uids = [r['uid'] for r in results]
+        uids = [r["uid"] for r in results]
         assert len(uids) == 50
         assert len(set(uids)) == 50
 
@@ -132,11 +132,11 @@ async def test_function_task_submission():
         assert len(results) == 10
 
         # Verify all tasks were processed
-        result_uids = [r['uid'] for r in results]
+        result_uids = [r["uid"] for r in results]
         for task in tasks:
             assert task.uid in result_uids
             # Task state update check
-            assert task['state'] in ["DONE", "COMPLETED", "FAILED", "FINISHED"]
+            assert task["state"] in ["DONE", "COMPLETED", "FAILED", "FINISHED"]
 
 
 @pytest.mark.asyncio
@@ -157,7 +157,7 @@ async def test_task_with_resources():
 
         assert len(results) == 3
 
-        result_uids = [r['uid'] for r in results]
+        result_uids = [r["uid"] for r in results]
         for task in tasks:
             assert task.uid in result_uids
 
@@ -179,7 +179,7 @@ async def test_task_with_custom_fields():
 
         assert len(results) == 2
 
-        result_uids = [r['uid'] for r in results]
+        result_uids = [r["uid"] for r in results]
         for task in tasks:
             assert task.uid in result_uids
 
@@ -200,7 +200,7 @@ async def test_wait_tasks_with_task_objects():
 
         assert len(results) == 5
 
-        result_uids = [r['uid'] for r in results]
+        result_uids = [r["uid"] for r in results]
         for task in tasks:
             assert task.uid in result_uids
 
@@ -246,7 +246,7 @@ async def test_concurrent_submissions():
         assert len(results) == 50  # 5 batches * 10 tasks
 
         # All UIDs should be unique
-        uids = [r['uid'] for r in results]
+        uids = [r["uid"] for r in results]
         assert len(set(uids)) == 50
 
 
@@ -260,7 +260,10 @@ async def test_task_api_backward_compatibility():
     ]
 
     # New-style Task objects
-    task_objects = [ComputeTask(executable="/bin/echo", arguments=["world"]), ComputeTask(executable="/bin/pwd")]
+    task_objects = [
+        ComputeTask(executable="/bin/echo", arguments=["world"]),
+        ComputeTask(executable="/bin/pwd"),
+    ]
 
     # Mix both styles
     all_tasks = dict_tasks + task_objects
@@ -275,7 +278,7 @@ async def test_task_api_backward_compatibility():
 
         assert len(results) == 4
 
-        result_uids = [r['uid'] for r in results]
+        result_uids = [r["uid"] for r in results]
 
         # Dict tasks should have their manual UIDs
         assert "old_task_1" in result_uids
@@ -300,6 +303,6 @@ async def test_task_state_tracking():
 
         # All tasks should have a state
         for task in tasks:
-            result_task = next(r for r in results if r['uid'] == task.uid)
+            result_task = next(r for r in results if r["uid"] == task.uid)
             assert "state" in result_task
             assert result_task["state"] in ["DONE", "COMPLETED", "FINISHED"]
