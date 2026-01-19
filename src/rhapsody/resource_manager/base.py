@@ -1,13 +1,15 @@
 
 import logging
+import subprocess
 import tempfile
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
+from dataclasses import InitVar
 from dataclasses import dataclass
-from dataclasses import field, InitVar
+from dataclasses import field
 from typing import Any
 from typing import Optional
-
-from rc.process import Process
 
 T_NODE_LIST = list[dict[str, Any]]
 
@@ -373,55 +375,46 @@ class ResourceManager:
         assert rm_info.cfg.requested_nodes <= len(rm_info.node_list)
 
         # if requested, check all nodes for accessibility via ssh
-        # FIXME: add configurable to limit number of concurrent ssh procs
         if check_nodes:
-            procs = []
-            for node in rm_info.node_list:
-                name = node["name"]
-                cmd = f"ssh -oBatchMode=yes {name} hostname"
-                logger.debug("check node: %s [%s]", name, cmd)
-                proc = Process(cmd)
-                proc.start()
-                procs.append([name, proc, node])
-
-            ok = []
-            for name, proc, node in procs:
-                proc.wait(timeout=15)
-                logger.debug("check node: %s [%s]", name, [proc.stdout, proc.stderr, proc.retcode])
-                if proc.retcode is not None:
-                    if not proc.retcode:
-                        ok.append(node)
-                else:
-                    logger.warning(
-                        "check node: %s [%s] timed out", name, [proc.stdout, proc.stderr]
-                    )
-                    proc.cancel()
-                    proc.wait(timeout=15)
-                    if proc.retcode is None:
-                        logger.warning(
-                            "check node: %s [%s] timed out again", name, [proc.stdout, proc.stderr]
-                        )
-
-            logger.warning("using %d nodes out of %d", len(ok), len(procs))
-
-            if not ok:
-                raise RuntimeError("no accessible nodes found")
-
-            # limit the node list to the requested number of nodes
-            rm_info.node_list = ok
+            rm_info.node_list = self._check_nodes(rm_info.node_list)
 
         # reduce the node list to the requested size
         rm_info.backup_list = []
-        if rm_info.cfg.requested_nodes and len(rm_info.node_list) > rm_info.cfg.requested_nodes:
-            logger.debug(
-                "reduce %d nodes to %d", len(rm_info.node_list), rm_info.cfg.requested_nodes
-            )
-            rm_info.node_list = rm_info.node_list[: rm_info.cfg.requested_nodes]
-            rm_info.backup_list = rm_info.node_list[rm_info.cfg.requested_nodes :]
+        if rm_info.cfg.requested_nodes:
+            if len(rm_info.node_list) > rm_info.cfg.requested_nodes:
+                rm_info.node_list = rm_info.node_list[:rm_info.cfg.requested_nodes]
+                rm_info.backup_list = rm_info.node_list[rm_info.cfg.requested_nodes:]
+            if len(rm_info.node_list) < rm_info.cfg.requested_nodes:
+                logger.warning(
+                    "requested %d nodes, %d available",
+                    rm_info.cfg.requested_nodes,
+                    len(rm_info.node_list))
 
         # check if we can do any work
         if not rm_info.node_list:
             raise RuntimeError("ResourceManager has no nodes left to run tasks")
+
+    def _check_nodes(self, nodes: list[str]) \
+            -> (list[str], list[tuple[str, int, str, str]]):
+
+        rm_info = self._rm_info
+        max_concurrent = 32  # FIXME: make configurable, likely want larger
+
+        def run_cmd(cmd: str, node: str) -> tuple[str, int, str, str]:
+           result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+           return node, result.returncode, result.stdout, result.stderr
+
+        futs = []
+        with ThreadPoolExecutor(max_workers=max_concurrent) as tp_exec:
+            for node in rm_info.node_list:
+                cmd = f"ssh -oBatchMode=yes {node.name} hostname"
+                futs.append(tp_exec.submit(run_cmd, cmd, node.name))
+
+        results = [fut.result() for fut in as_completed(futs)]
+        node_ok = [node for node, retval, _, _ in results if retval == 0]
+        retval  = [node for node in rm_info.node_list if node.name in node_ok]
+
+        return retval
 
     def _parse_nodefile(self, fname: str, cpn: Optional[int] = 0, smt: Optional[int] = 1) -> list:
         """
