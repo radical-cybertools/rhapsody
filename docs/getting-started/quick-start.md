@@ -1,219 +1,78 @@
 # Quick Start
 
-This tutorial will get you up and running with RHAPSODY in just a few minutes. You'll create a simple workflow, execute it, and understand the basic concepts.
+This guide will help you run your first heterogeneous workflow using RHAPSODY in just a few minutes.
 
-## Hello World Workflow
+## Core Concepts
 
-Let's start with a simple "Hello World" example that demonstrates the core RHAPSODY concepts.
+Before we start, keep these three key objects in mind:
 
-### Step 1: Import Required Modules
+1.  **Backend**: Where your tasks actually run (e.g., your local CPU, a Dask cluster, or an HPC queue).
+2.  **Task**: A unit of work. `ComputeTask` for binaries/scripts, or `AITask` for inference.
+3.  **Session**: The manager that connects backends and tasks together.
+
+## Basic Workflow
+
+Here is a complete script demonstrating a simple compute workflow.
 
 ```python
 import asyncio
 import rhapsody
-from rhapsody.backends import Session
-```
+from rhapsody.api import Session, ComputeTask
+from rhapsody.backends import ConcurrentExecutionBackend
 
-### Step 2: Create a Simple Workflow
+async def run_example():
+    # 1. Choose an execution backend (Concurrent uses local threads/processes)
+    backend = await ConcurrentExecutionBackend(name="local")
 
-```python
-async def hello_world():
-    # Create a session
-    session = Session()
+    # 2. Open a session
+    async with Session(backends=[backend]) as session:
 
-    # Get the Dask backend
-    backend = rhapsody.get_backend("dask")
+        # 3. Define tasks
+        tasks = [
+            ComputeTask(executable="/bin/echo", arguments=[f"Task {i}"])
+            for i in range(1024)
+        ]
 
-    # Set up a callback to track results
-    results = []
-    def task_callback(task, state):
-        print(f"Task {task['uid']} changed to state: {state}")
-        results.append((task['uid'], state))
+        # 4. Submit tasks to the session
+        await session.submit_tasks(tasks)
 
-    # Register the callback
-    backend.register_callback(task_callback)
+        # 5. Wait for all tasks to complete
+        results = await asyncio.gather(*tasks)
 
-    # Define a simple task
-    tasks = [
-        {
-            "uid": "hello_task",
-            "executable": "echo",
-            "arguments": ["Hello, RHAPSODY!"]
-        }
-    ]
-
-    # Submit and execute the task
-    await backend.submit_tasks(tasks)
-
-    # Wait for completion
-    await backend.wait()
-
-    print(f"Workflow completed! Results: {results}")
-
-# Run the workflow
-if __name__ == "__main__":
-    asyncio.run(hello_world())
-```
-
-### Step 3: Run the Workflow
-
-Save the code above as `hello_rhapsody.py` and run:
-
-```bash
-python hello_rhapsody.py
-```
-
-Expected output:
-```
-Task hello_task changed to state: EXECUTING
-Task hello_task changed to state: COMPLETED
-Workflow completed! Results: [('hello_task', 'EXECUTING'), ('hello_task', 'COMPLETED')]
-```
-
-## Understanding the Code
-
-Let's break down what happened in the Hello World example:
-
-### Session
-```python
-session = Session()
-```
-A session manages the workflow execution context and resource lifecycle.
-
-### Backend Selection
-```python
-backend = rhapsody.get_backend("dask")
-```
-We selected the Dask backend, which provides local and distributed computing capabilities.
-
-### Callback Registration
-```python
-def task_callback(task, state):
-    print(f"Task {task['uid']} changed to state: {state}")
-
-backend.register_callback(task_callback)
-```
-Callbacks provide real-time monitoring of task state changes.
-
-### Task Definition
-```python
-tasks = [
-    {
-        "uid": "hello_task",
-        "executable": "echo",
-        "arguments": ["Hello, RHAPSODY!"]
-    }
-]
-```
-Tasks are defined as dictionaries with:
-- `uid`: Unique identifier
-- `executable`: Command to run
-- `arguments`: Command line arguments
-
-## A More Complex Example
-
-Let's create a workflow with dependencies and data flow:
-
-```python
-import asyncio
-import tempfile
-import os
-import rhapsody
-from rhapsody.backends import Session
-
-async def data_processing_workflow():
-    session = Session()
-    backend = rhapsody.get_backend("dask")
-
-    # Create a temporary directory for outputs
-    temp_dir = tempfile.mkdtemp()
-
-    # Define tasks with dependencies
-    tasks = [
-        {
-            "uid": "generate_data",
-            "executable": "python",
-            "arguments": ["-c",
-                f"import random; "
-                f"data = [random.randint(1, 100) for _ in range(10)]; "
-                f"with open('{temp_dir}/data.txt', 'w') as f: "
-                f"f.write('\\n'.join(map(str, data)))"],
-            "input_staging": [],
-            "output_staging": [f"{temp_dir}/data.txt"]
-        },
-        {
-            "uid": "process_data",
-            "executable": "python",
-            "arguments": ["-c",
-                f"with open('{temp_dir}/data.txt', 'r') as f: "
-                f"numbers = [int(line.strip()) for line in f]; "
-                f"result = sum(numbers) / len(numbers); "
-                f"print(f'Average: {{result}}'); "
-                f"with open('{temp_dir}/result.txt', 'w') as f: "
-                f"f.write(str(result))"],
-            "input_staging": [f"{temp_dir}/data.txt"],
-            "output_staging": [f"{temp_dir}/result.txt"],
-            "dependencies": ["generate_data"]
-        }
-    ]
-
-    # Execute workflow
-    await backend.submit_tasks(tasks)
-    await backend.wait()
-
-    # Read the result
-    with open(f"{temp_dir}/result.txt", "r") as f:
-        result = f.read().strip()
-        print(f"Final result: {result}")
-
-    # Cleanup
-    import shutil
-    shutil.rmtree(temp_dir)
+        # 6. Inspect results
+        for t in tasks:
+            print(f"{t.uid}: {t.state} (Output: {t.stdout})")
 
 if __name__ == "__main__":
-    asyncio.run(data_processing_workflow())
+    asyncio.run(run_example())
 ```
 
-This example demonstrates:
-- Task dependencies (`"dependencies": ["generate_data"]`)
-- File staging for input/output data
-- Data flow between tasks
+!!! success "Output"
+    If everything is set up correctly, you should see:
+    ```text
+    task.000001: DONE (Output: Task 0)
+    task.000002: DONE (Output: Task 1)
+    task.000003: DONE (Output: Task 2)
+    task.000004: DONE (Output: Task 3)
+    task.000005: DONE (Output: Task 4)
+    task.000006: DONE (Output: Task 5)
+    task.000007: DONE (Output: Task 6)
+    task.000008: DONE (Output: Task 7)
+    task.000009: DONE (Output: Task 8)
+    task.000010: DONE (Output: Task 9)
+    task.000011: DONE (Output: Task 10)
+    task.000012: DONE (Output: Task 11)
+    ......
+    task.001021: DONE (Output: Task 1020)
+    task.001022: DONE (Output: Task 1021)
+    task.001023: DONE (Output: Task 1022)
+    task.001024: DONE (Output: Task 1023)
+    real    0m2.669s
+    user    0m2.384s
+    sys     0m2.071s
+    ```
 
-## Key Takeaways
+## What's Next?
 
-From these examples, you've learned:
-
-1. **Session management**: Sessions orchestrate workflow execution
-2. **Backend selection**: Choose between Dask (local/distributed) and RADICAL-Pilot (HPC)
-3. **Task definition**: Tasks are defined with executables, arguments, and metadata
-4. **Callbacks**: Real-time monitoring of task execution
-5. **Dependencies**: Tasks can depend on other tasks
-6. **Data staging**: File inputs and outputs can be managed automatically
-
-## Backend Selection Guide
-
-Choose the right backend for your use case:
-
-- **Dask**: Use for development, testing, and moderate-scale workflows. Works on all platforms.
-- **RADICAL-Pilot**: Use for large-scale HPC computing on clusters and supercomputers.
-
-Example with RADICAL-Pilot:
-```python
-# For HPC environments
-hpc_resources = {
-    "resource": "your.hpc.system",
-    "runtime": 30,  # minutes
-    "cores": 16
-}
-backend = await rhapsody.get_backend("radical_pilot", hpc_resources)
-```
-
-## Next Steps
-
-Now that you understand the basics, you can:
-
-1. **Explore different backends**: Learn about backends in the [API Reference](../reference/backends.md)
-2. **Create your first workflow**: Follow the [First Workflow](first-workflow.md) tutorial
-3. **Learn about configuration**: Check out the [Configuration Guide](configuration.md)
-
-Ready to build something more substantial? Continue with the [First Workflow](first-workflow.md) tutorial.
+- Explore **[Advanced Usage](advanced-usage.md)** for multi-backend and AI mixed workloads.
+- Check the **[Configuration Guide](configuration.md)** for backend-specific tuning.

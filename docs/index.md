@@ -1,89 +1,45 @@
 # RHAPSODY
 
-**RHAPSODY** – **R**untime for **H**eterogeneous **AP**plications, **S**ervice **O**rchestration and **DY**namism
+**Runtime for Heterogeneous Applications, Service Orchestration and Dynamism**
 
-RHAPSODY is a high-performance runtime system designed for executing heterogeneous HPC-AI workflows with dynamic task graphs on high-performance computing infrastructures. It provides seamless integration between different computational paradigms, enabling efficient orchestration of complex scientific workloads.
+RHAPSODY is a high-performance runtime system designed for orchestrating complex, heterogeneous workflows that combine traditional HPC tasks with modern AI/ML inference services.
+
+!!! note "Core Objective"
+    RHAPSODY aims to provide a unified, asynchronous and scalable runtime capabilities for managing AI-HPC workloads and workflows across diverse computing infrastructures, from local workstations to large-scale HPC machines.
 
 ## Key Features
 
-- **Heterogeneous Execution**: Support for mixed CPU/GPU workloads and diverse computational frameworks
-- **Dynamic Task Graphs**: Runtime adaptation of workflow structures based on execution results
-- **Multiple Backend Support**: Pluggable execution backends including concurrent, Dask, and RADICAL-Pilot
-- **HPC-Optimized**: Designed for large-scale scientific computing on supercomputing clusters
-- **AsyncFlow Integration**: Full compatibility with AsyncFlow workflow management
-- **Platform Abstraction**: Unified interface across different HPC platforms and resource managers
-- **Fault Tolerance**: Robust error handling and recovery mechanisms
-- **Real-time Monitoring**: Comprehensive logging and state tracking capabilities
+- **Heterogeneous Task Support**: Seamlessly mix and scale `ComputeTask` (HPC/Binary) and `AITask` (Inference) in a single workflow.
+- **Asynchronous API**: Built on Python's `asyncio`, allowing for high-throughput task submission and non-blocking state monitoring.
+- **Extensible Backends**: Scale to large number of nodes with multiple execution backends including Dragon, Dask, RADICAL-Pilot, and local concurrent workers.
+- **Integrations**: Integrates with with highly scalable workflow systems such `radical.asyncflow` and agentic frameworks such as `flowgentic`
 
-## Quick Start
-
-Get started with RHAPSODY in just a few commands:
-
-```bash
-pip install rhapsody
-```
+## Quick Example
 
 ```python
 import asyncio
-import rhapsody
-from rhapsody.backends import Session
+from rhapsody import Session, ComputeTask
+from rhapsody.backends import DragonExecutionBackendV3
 
 async def main():
-    # Create a session and get backend
-    session = Session()
-    backend = rhapsody.get_backend("concurrent")
+    # 1. Initialize session with a backend
+    backend = await DragonExecutionBackendV3(num_workers=2048)
+    async with Session(backends=[backend]) as session:
 
-    # Define and execute tasks
-    tasks = [
-        {"uid": "task_1", "executable": "echo", "arguments": ["Hello, RHAPSODY!"]}
-    ]
+        # 2. Define a task
+        task = ComputeTask(executable="/bin/echo", arguments=["Hello, Rhapsody!"])
 
-    await backend.submit_tasks(tasks)
+        # 3. Submit and wait
+        await session.submit_tasks([task])
+        result = await task
 
-# Run the workflow
-asyncio.run(main())
+        print(f"Task finished with state: {task.state}")
+        print(f"Output: {task.return_value}")
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-[Get Started →](getting-started/index.md){ .md-button .md-button--primary }
+## Getting Started
 
-## Documentation
-
-<div class="grid cards" markdown>
-
--   :material-rocket-launch-outline:{ .lg .middle } **Getting Started**
-
-    ---
-
-    Quick installation guide, tutorials, and your first RHAPSODY workflow
-
-    [:octicons-arrow-right-24: Getting Started](getting-started/index.md)
-
--   :material-api:{ .lg .middle } **API Reference**
-
-    ---
-
-    Complete API documentation with detailed function and class references
-
-    [:octicons-arrow-right-24: API Reference](reference/index.md)
-
-</div>
-
-## NSF-Funded Project
-
-RHAPSODY is supported by the National Science Foundation (NSF) under Award ID [2103986](https://www.nsf.gov/awardsearch/showAward?AWD_ID=2103986). This collaborative project aims to advance the state-of-the-art in heterogeneous workflow execution for scientific computing.
-
-[Learn More About the Project →](project/nsf-award.md){ .md-button }
-
-## Contributing
-
-RHAPSODY is an open-source project and we welcome contributions from the community! Whether you're reporting bugs, suggesting features, or contributing code, your help is appreciated.
-
-Check out our [GitHub repository](https://github.com/radical-cybertools/rhapsody) to get involved.
-
-## License
-
-RHAPSODY is released under the [MIT License](https://github.com/radical-cybertools/rhapsody/blob/main/LICENSE.md).
-
----
-
-*Built by the [RADICAL Research Team](https://radical.rutgers.edu/) at Rutgers University*
+Ready to dive in? Check out our [Installation Guide](getting-started/installation.md) or jump straight into the [Quick Start](getting-started/quick-start.md).

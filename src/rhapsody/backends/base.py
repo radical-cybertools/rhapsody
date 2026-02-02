@@ -6,28 +6,43 @@ implement.
 
 from __future__ import annotations
 
-import os
 from abc import ABC
 from abc import abstractmethod
+from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
 
+if TYPE_CHECKING:
+    pass
 
-class BaseExecutionBackend(ABC):
-    """Abstract base class for execution backends that manage task execution and state.
 
-    This class defines the interface for execution backends that handle task submission, state
-    management, and dependency linking in a distributed or parallel execution environment.
+class BaseBackend(ABC):
+    """Abstract base class for backends that manage task execution and state.
+
+    This class defines the interface for backends that handle task submission, state management, and
+    lifecycle in a distributed or parallel execution environment.
     """
+
+    def __init__(self, name: str | None = None):
+        """Initialize the backend."""
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        """Name of the backend."""
+        if self._name:
+            return self._name
+        return self.__class__.__name__
 
     @abstractmethod
     async def submit_tasks(self, tasks: list[dict]) -> None:
         """Submit a list of tasks for execution.
 
         Args:
-            tasks: A list of dictionaries containing task definitions and metadata.
-                Each task dictionary should contain the necessary information for
-                task execution.
+            tasks: A list of task dictionaries containing task definitions.
+                Task objects (ComputeTask, AITask) inherit from dict and can be
+                passed directly. Each task should contain the necessary information
+                for task execution.
         """
         pass
 
@@ -61,15 +76,17 @@ class BaseExecutionBackend(ABC):
         """
         pass
 
-    @abstractmethod
     def register_callback(self, func: Callable[[dict[str, Any], str], None]) -> None:
         """Register a callback function for task state changes.
+
+        This chains the user's callback with the internal callback used by wait_tasks().
+        Both callbacks will be invoked on every state change.
 
         Args:
             func: A callable that will be invoked when task states change.
                 The function should accept task and state parameters.
         """
-        pass
+        self._callback_func = func
 
     @abstractmethod
     def get_task_states_map(self) -> Any:
@@ -90,8 +107,7 @@ class BaseExecutionBackend(ABC):
         """
         pass
 
-    @abstractmethod
-    def link_implicit_data_deps(self, src_task: dict[str, Any], dst_task: dict[str, Any]) -> None:
+    def link_implicit_data_deps(self, src_task: dict[str, Any], dst_task: dict[str, Any]) -> None:  # noqa: B027
         """Link implicit data dependencies between two tasks.
 
         Creates a dependency relationship where the destination task depends on
@@ -104,8 +120,7 @@ class BaseExecutionBackend(ABC):
         """
         pass
 
-    @abstractmethod
-    def link_explicit_data_deps(
+    def link_explicit_data_deps(  # noqa: B027
         self,
         src_task: dict[str, Any] | None = None,
         dst_task: dict[str, Any] | None = None,
@@ -136,18 +151,3 @@ class BaseExecutionBackend(ABC):
             NotImplementedError: If the backend doesn't support cancellation
         """
         raise NotImplementedError("Not implemented in the base backend")
-
-
-class Session:
-    """Manages execution session state and working directory.
-
-    This class maintains session-specific information including the current working directory path
-    for task execution.
-    """
-
-    def __init__(self):
-        """Initialize a new session with the current working directory.
-
-        Sets the session path to the current working directory at the time of initialization.
-        """
-        self.path = os.getcwd()

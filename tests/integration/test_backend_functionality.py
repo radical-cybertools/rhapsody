@@ -2,13 +2,22 @@
 
 This module tests specific backend functionality that AsyncFlow workflows will depend on, focusing
 on real task execution and state management.
+
+Test Mode Control:
+------------------
+Set RHAPSODY_TEST_MODE environment variable to control which backends are tested:
+- RHAPSODY_TEST_MODE=regular (default): Tests non-Dragon backends (concurrent, dask, radical_pilot)
+  Run with: pytest tests/integration/test_backend_functionality.py
+
+- RHAPSODY_TEST_MODE=dragon: Tests Dragon backends only (dragon_v1, dragon_v2, dragon_v3)
+  Run with: dragon pytest tests/integration/test_backend_functionality.py
+
+- RHAPSODY_TEST_MODE=all: Tests all backends
+  Run with: pytest tests/integration/test_backend_functionality.py (requires Dragon runtime)
 """
 
 import asyncio
 import os
-import tempfile
-from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -16,23 +25,54 @@ import rhapsody
 from rhapsody.backends.constants import TasksMainStates
 
 
+def get_test_mode() -> str:
+    """Get the current test mode from environment variable.
+
+    Returns:
+        "regular", "dragon", or "all"
+    """
+    return os.environ.get("RHAPSODY_TEST_MODE", "regular").lower()
+
+
+def get_available_backends_for_mode() -> list[str]:
+    """Get list of available backends based on test mode.
+
+    Returns:
+        List of backend names to test
+    """
+    all_backends = rhapsody.discover_backends()
+    available = [name for name, avail in all_backends.items() if avail]
+
+    mode = get_test_mode()
+
+    if mode == "dragon":
+        # Only Dragon backends
+        return [name for name in available if name.startswith("dragon_")]
+    elif mode == "regular":
+        # Exclude Dragon backends
+        return [name for name in available if not name.startswith("dragon_")]
+    else:  # mode == "all"
+        # All available backends
+        return available
+
+
 async def setup_test_backend(backend_name=None):
-    """Helper to set up a backend with proper initialization and callback."""
+    """Helper to set up a backend with proper initialization and callback.
+
+    Args:
+        backend_name: Optional backend name. If None, uses first available for current mode.
+    """
     if backend_name is None:
-        # Get first available backend
-        available_backends = rhapsody.discover_backends()
-        backend_names = [name for name, avail in available_backends.items() if avail]
+        backend_names = get_available_backends_for_mode()
 
         if not backend_names:
-            pytest.skip("No backends available for testing")
+            mode = get_test_mode()
+            pytest.skip(f"No backends available for test mode: {mode}")
         backend_name = backend_names[0]
 
     try:
         # Initialize backend with proper resources
-        if backend_name == "radical_pilot":
-            backend = rhapsody.get_backend(backend_name, resources={})
-        else:
-            backend = rhapsody.get_backend(backend_name)
+        backend = rhapsody.get_backend(backend_name)
 
         # Handle async initialization for backends that need it
         if hasattr(backend, "__await__"):
@@ -56,20 +96,18 @@ class TestBackendFunctionality:
 
     async def test_backend_task_cancellation(self):
         """Test task cancellation functionality."""
-        backend = await setup_test_backend("dask")
+        backend = await setup_test_backend("dask" if get_test_mode() == "regular" else None)
 
         try:
             # Create a long-running task
             tasks = [
-                {
-                    "uid": "long_task",
-                    "executable": "/bin/sleep",
-                    "arguments": ["30"],  # 30 second sleep
-                    "state": TasksMainStates.RUNNING,
-                }
+                rhapsody.ComputeTask(
+                    executable="/bin/sleep",
+                    arguments=["30"],  # 30 second sleep
+                )
             ]
 
-            # Submit task
+            # Submit task (Task objects accepted directly)
             await backend.submit_tasks(tasks)
 
             # For most backends, cancellation may not be implemented
@@ -100,30 +138,28 @@ class TestBackendFunctionality:
 
     async def test_backend_resource_management(self):
         """Test backend resource allocation and management."""
-        # Test different backend configurations
-        available_backends = rhapsody.discover_backends()
-        available_names = [name for name, avail in available_backends.items() if avail]
+        # Test different backend configurations based on mode
+        available_names = get_available_backends_for_mode()
 
         if not available_names:
-            pytest.skip("No backends available for testing")
+            mode = get_test_mode()
+            pytest.skip(f"No backends available for test mode: {mode}")
 
         backends = []
 
         try:
             # Test each available backend
-            for i, backend_name in enumerate(available_names):
+            for _i, backend_name in enumerate(available_names):
                 try:
                     backend = rhapsody.get_backend(backend_name)
                     backends.append(backend)
 
                     # Submit a simple task to verify backend works
                     tasks = [
-                        {
-                            "uid": f"resource_test_{backend_name}_{i}",
-                            "executable": "/bin/echo",
-                            "arguments": [f"Testing backend {backend_name}"],
-                            "state": TasksMainStates.RUNNING,
-                        }
+                        rhapsody.ComputeTask(
+                            executable="/bin/echo",
+                            arguments=[f"Testing backend {backend_name}"],
+                        )
                     ]
 
                     await backend.submit_tasks(tasks)
@@ -152,14 +188,11 @@ class TestBackendFunctionality:
         backend = await setup_test_backend()
 
         try:
-            task_uid = "state_test_task"
             tasks = [
-                {
-                    "uid": task_uid,
-                    "executable": "/bin/echo",
-                    "arguments": ["State transition test"],
-                    "state": TasksMainStates.RUNNING,
-                }
+                rhapsody.ComputeTask(
+                    executable="/bin/echo",
+                    arguments=["State transition test"],
+                )
             ]
 
             # Submit tasks
@@ -179,18 +212,14 @@ class TestBackendFunctionality:
         try:
             # Mix of good and bad tasks
             tasks = [
-                {
-                    "uid": "good_task",
-                    "executable": "/bin/echo",
-                    "arguments": ["This should work"],
-                    "state": TasksMainStates.RUNNING,
-                },
-                {
-                    "uid": "bad_task",
-                    "executable": "/nonexistent/command",
-                    "arguments": ["This will fail"],
-                    "state": TasksMainStates.RUNNING,
-                },
+                rhapsody.ComputeTask(
+                    executable="/bin/echo",
+                    arguments=["This should work"],
+                ),
+                rhapsody.ComputeTask(
+                    executable="/nonexistent/command",
+                    arguments=["This will fail"],
+                ),
             ]
 
             # Submit tasks
@@ -215,23 +244,19 @@ class TestBackendFunctionality:
         try:
             # Create batch of tasks
             batch_size = 10
-            tasks = []
-
-            for i in range(batch_size):
-                tasks.append(
-                    {
-                        "uid": f"batch_task_{i}",
-                        "executable": "/bin/echo",
-                        "arguments": [f"Batch task {i}"],
-                        "state": TasksMainStates.RUNNING,
-                    }
+            tasks = [
+                rhapsody.ComputeTask(
+                    executable="/bin/echo",
+                    arguments=[f"Batch task {i}"],
                 )
+                for i in range(batch_size)
+            ]
 
             # Submit batch
             await backend.submit_tasks(tasks)
 
             # Wait for all to complete
-            task_uids = [task["uid"] for task in tasks]
+            task_uids = [task.uid for task in tasks]
             # Backend submission completed
             assert True
 
@@ -245,7 +270,12 @@ class TestBackendFunctionality:
 
     async def test_backend_async_patterns(self):
         """Test that backends work properly with asyncio patterns."""
-        # Test only dask backend to avoid radical_pilot concurrency issues
+        # Test only dask backend if in regular mode, skip if in dragon mode
+        mode = get_test_mode()
+
+        if mode == "dragon":
+            pytest.skip("Async pattern test not applicable for Dragon mode")
+
         available_backends = rhapsody.discover_backends()
         if not available_backends.get("dask", False):
             pytest.skip("Dask backend not available for async pattern testing")
@@ -274,12 +304,10 @@ class TestBackendFunctionality:
             # Submit tasks to backend
             async def submit_to_backend(backend, backend_idx):
                 tasks = [
-                    {
-                        "uid": f"async_test_{backend_idx}",
-                        "executable": "/bin/echo",
-                        "arguments": [f"Async test {backend_idx}"],
-                        "state": TasksMainStates.RUNNING,
-                    }
+                    rhapsody.ComputeTask(
+                        executable="/bin/echo",
+                        arguments=[f"Async test {backend_idx}"],
+                    )
                 ]
 
                 await backend.submit_tasks(tasks)
@@ -307,19 +335,17 @@ class TestBackendCompatibility:
 
     async def test_backend_interface_consistency(self):
         """Test that all backends implement the same interface."""
-        available_backends = rhapsody.discover_backends()
-
+        available_names = get_available_backends_for_mode()
         backend_instances = {}
 
         try:
-            # Create instances of all available backends
-            for name, available in available_backends.items():
-                if available:
-                    try:
-                        backend = rhapsody.get_backend(name)
-                        backend_instances[name] = backend
-                    except Exception as e:
-                        print(f"Could not create {name} backend: {e}")
+            # Create instances of all available backends for current mode
+            for name in available_names:
+                try:
+                    backend = await rhapsody.get_backend(name)
+                    backend_instances[name] = backend
+                except Exception as e:
+                    print(f"Could not create {name} backend: {e}")
 
             # Test that all backends have the core interface
             for _name, backend in backend_instances.items():
@@ -345,23 +371,21 @@ class TestBackendCompatibility:
     async def test_backend_switching(self):
         """Test switching between different backends in same workflow."""
         # Create a simple task that should work on any backend
-        test_task = {
-            "uid": "switch_test",
+        test_task_template = {
             "executable": "/bin/echo",
             "arguments": ["Backend switching test"],
-            "state": TasksMainStates.RUNNING,
         }
 
-        available_backends = rhapsody.discover_backends()
+        available_names = get_available_backends_for_mode()
         results = {}
 
-        for name, available in available_backends.items():
-            if not available:
-                continue
-
+        for name in available_names:
             try:
                 # Create backend
-                backend = rhapsody.get_backend(name)
+                backend = await rhapsody.get_backend(name)
+
+                # Create a fresh task for this backend
+                test_task = rhapsody.ComputeTask(**test_task_template)
 
                 # Submit task
                 await backend.submit_tasks([test_task])
@@ -379,8 +403,7 @@ class TestBackendCompatibility:
                 results[name] = None
 
         # Should have at least one backend working
-        available_backends = rhapsody.discover_backends()
-        working_backends = [name for name, avail in available_backends.items() if avail]
+        working_backends = get_available_backends_for_mode()
         assert len(working_backends) > 0
         assert working_backends[0] in results
         print(f"Backend switching results: {results}")
@@ -388,27 +411,30 @@ class TestBackendCompatibility:
 
 async def main():
     """Run a functionality test."""
-    print("Running Backend Functionality Tests...")
+    mode = get_test_mode()
+    print(f"Running Backend Functionality Tests in '{mode}' mode...")
 
     try:
         # Test first available backend
-        available_backends = rhapsody.discover_backends()
-        backend_name = next(name for name, avail in available_backends.items() if avail)
+        available_names = get_available_backends_for_mode()
+        if not available_names:
+            print(f"No backends available for mode: {mode}")
+            return
+
+        backend_name = available_names[0]
         backend = rhapsody.get_backend(backend_name)
         tasks = [
-            {
-                "uid": "test",
-                "executable": "/bin/echo",
-                "arguments": ["test"],
-                "state": TasksMainStates.RUNNING,
-            }
+            rhapsody.ComputeTask(
+                executable="/bin/echo",
+                arguments=["test"],
+            )
         ]
         await backend.submit_tasks(tasks)
         # Backend submission completed
         assert True
         await backend.shutdown()
 
-        print("✅ Backend functionality test passed!")
+        print(f"✅ Backend functionality test passed for {backend_name}!")
 
     except Exception as e:
         print(f"❌ Backend functionality test failed: {e}")

@@ -12,10 +12,8 @@ from functools import wraps
 from typing import Any
 from typing import Callable
 
-import typeguard
-
-from ..base import BaseExecutionBackend
-from ..base import Session
+from ..base import BaseBackend
+from ..constants import BackendMainStates
 from ..constants import StateMapper
 
 try:
@@ -24,10 +22,16 @@ except ImportError:
     dask = None
 
 
-logger = logging.getLogger(__name__)
+def _get_logger() -> logging.Logger:
+    """Get logger for dask backend module.
+
+    This function provides lazy logger evaluation, ensuring the logger is created after the user has
+    configured logging, not at module import time.
+    """
+    return logging.getLogger(__name__)
 
 
-class DaskExecutionBackend(BaseExecutionBackend):
+class DaskExecutionBackend(BaseBackend):
     """An async-only Dask execution backend for distributed task execution.
 
     Handles task submission, cancellation, and proper async event loop handling
@@ -40,35 +44,75 @@ class DaskExecutionBackend(BaseExecutionBackend):
             await backend.submit_tasks(tasks)
     """
 
-    @typeguard.typechecked
-    def __init__(self, resources: dict | None = None):
+    def __init__(
+        self,
+        resources: dict | None = None,
+        name: str = "dask",
+        cluster: Any | None = None,
+        client: Any | None = None,
+    ):
         """Initialize the Dask execution backend (non-async setup only).
 
         Args:
             resources: Dictionary of resource requirements for tasks. Contains
                 configuration parameters for the Dask client initialization.
+            name: Name of the backend.
+            cluster: Optional preconfigured Dask Cluster object.
+            client: Optional preconfigured Dask Client object.
         """
 
         if dask is None:
             raise ImportError("Dask is required for DaskExecutionBackend.")
 
+        super().__init__(name=name)
+
+        self.logger = _get_logger()
         self.tasks = {}
         self._client = None
-        self.session = Session()
-        self._callback_func = None
+        self._callback_func: Callable = lambda t, s: None
         self._resources = resources or {}
+        self._cluster_provided = cluster
+        self._client_provided = client
         self._initialized = False
+        self._backend_state = BackendMainStates.INITIALIZED
 
     def __await__(self):
         """Make DaskExecutionBackend awaitable like Dask Client."""
         return self._async_init().__await__()
 
     async def _async_init(self):
-        """Async initialization that happens when awaited."""
+        """Unified async initialization with backend and task state registration.
+
+        Pattern:
+        1. Register backend states first
+        2. Register task states
+        3. Set backend state to INITIALIZED
+        4. Initialize backend components
+        """
         if not self._initialized:
-            await self._initialize()
-            self._initialized = True
-            StateMapper.register_backend_states_with_defaults(backend=self)
+            try:
+                # Step 1: Register backend states
+                self.logger.debug("Registering backend states...")
+                StateMapper.register_backend_states_with_defaults(backend=self)
+
+                # Step 2: Register task states
+                self.logger.debug("Registering task states...")
+                StateMapper.register_backend_tasks_states_with_defaults(backend=self)
+
+                # Step 3: Set backend state to INITIALIZED
+                self._backend_state = BackendMainStates.INITIALIZED
+                self.logger.debug(f"Backend state set to: {self._backend_state.value}")
+
+                # Step 4: Initialize backend components
+                await self._initialize()
+                self._initialized = True
+
+                self.logger.info("Dask backend fully initialized and ready")
+
+            except Exception as e:
+                self.logger.exception(f"Dask backend initialization failed: {e}")
+                self._initialized = False
+                raise
         return self
 
     async def _initialize(self) -> None:
@@ -78,11 +122,19 @@ class DaskExecutionBackend(BaseExecutionBackend):
             Exception: If Dask client initialization fails.
         """
         try:
-            self._client = await dask.Client(asynchronous=True, **self._resources)
+            if self._client_provided:
+                self._client = self._client_provided
+            elif self._cluster_provided:
+                self._client = await dask.Client(
+                    self._cluster_provided, asynchronous=True, **self._resources
+                )
+            else:
+                self._client = await dask.Client(asynchronous=True, **self._resources)
+
             dashboard_link = self._client.dashboard_link
-            logger.info(f"Dask backend initialized with dashboard at {dashboard_link}")
+            self.logger.info(f"Dask backend initialized with dashboard at {dashboard_link}")
         except Exception as e:
-            logger.exception(f"Failed to initialize Dask client: {str(e)}")
+            self.logger.exception(f"Failed to initialize Dask client: {str(e)}")
             raise
 
     def register_callback(self, func: Callable) -> None:
@@ -143,6 +195,11 @@ class DaskExecutionBackend(BaseExecutionBackend):
             Future objects are filtered out from arguments as they are not picklable.
         """
         self._ensure_initialized()
+
+        # Set backend state to RUNNING when tasks are submitted
+        if self._backend_state != BackendMainStates.RUNNING:
+            self._backend_state = BackendMainStates.RUNNING
+            self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
         for task in tasks:
             is_func_task = bool(task.get("function"))
@@ -268,20 +325,12 @@ class DaskExecutionBackend(BaseExecutionBackend):
         pass
 
     async def state(self) -> str:
-        """Get the current state of the Dask execution backend.
+        """Get backend state.
 
         Returns:
-            Current state of the backend as a string.
+            str: Current backend state (INITIALIZED, RUNNING, SHUTDOWN)
         """
-        if not self._initialized or self._client is None:
-            return "DISCONNECTED"
-
-        try:
-            # Check if client is still connected
-            await self._client.scheduler_info()
-            return "CONNECTED"
-        except Exception:
-            return "DISCONNECTED"
+        return self._backend_state.value
 
     async def task_state_cb(self, task: dict, state: str) -> None:
         """Callback function invoked when a task's state changes.
@@ -307,6 +356,10 @@ class DaskExecutionBackend(BaseExecutionBackend):
         Closes the Dask client connection, clears task storage, and handles any cleanup exceptions
         gracefully.
         """
+        # Set backend state to SHUTDOWN
+        self._backend_state = BackendMainStates.SHUTDOWN
+        self.logger.debug(f"Backend state set to: {self._backend_state.value}")
+
         if self._client is not None:
             try:
                 # Cancel all running tasks first
@@ -314,12 +367,12 @@ class DaskExecutionBackend(BaseExecutionBackend):
 
                 # Close the client
                 await self._client.close()
-                logger.info("Dask client shutdown complete")
+                self.logger.info("Dask client shutdown complete")
             except Exception as e:
-                logger.exception(f"Error during shutdown: {str(e)}")
+                self.logger.exception(f"Error during shutdown: {str(e)}")
             finally:
                 self._client = None
-                logger.info("Dask execution backend shutdown complete")
+                self.logger.info("Dask execution backend shutdown complete")
 
         # Always clean up state regardless of client presence
         self.tasks.clear()
@@ -343,16 +396,24 @@ class DaskExecutionBackend(BaseExecutionBackend):
         """Async context manager exit."""
         await self.shutdown()
 
-    # Class method for cleaner instantiation (optional alternative pattern)
     @classmethod
-    async def create(cls, resources: dict | None = None) -> DaskExecutionBackend:
+    async def create(
+        cls,
+        resources: dict | None = None,
+        name: str = "dask",
+        cluster: Any | None = None,
+        client: Any | None = None,
+    ) -> DaskExecutionBackend:
         """Alternative factory method for creating initialized backend.
 
         Args:
             resources: Configuration parameters for Dask client initialization.
+            name: Name of the backend.
+            cluster: Optional preconfigured Dask Cluster object.
+            client: Optional preconfigured Dask Client object.
 
         Returns:
             Fully initialized DaskExecutionBackend instance.
         """
-        backend = cls(resources)
+        backend = cls(resources=resources, name=name, cluster=cluster, client=client)
         return await backend

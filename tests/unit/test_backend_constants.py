@@ -55,12 +55,12 @@ def test_state_mapper_basic_functionality():
         StateMapper("nonexistent_backend")
 
 
-def test_state_mapper_register_backend_states():
-    """Test StateMapper.register_backend_states() method."""
+def test_state_mapper_register_backend_tasks_states():
+    """Test StateMapper.register_backend_tasks_states() method."""
     from rhapsody.backends.constants import StateMapper
 
     # Register a test backend
-    StateMapper.register_backend_states(
+    StateMapper.register_backend_tasks_states(
         backend="test_backend",
         done_state="COMPLETED",
         failed_state="ERROR",
@@ -79,13 +79,13 @@ def test_state_mapper_register_backend_states():
     del StateMapper._backend_registry["test_backend"]
 
 
-def test_state_mapper_register_backend_states_with_defaults():
-    """Test StateMapper.register_backend_states_with_defaults() method."""
+def test_state_mapper_register_backend_tasks_states_with_defaults():
+    """Test StateMapper.register_backend_tasks_states_with_defaults() method."""
     from rhapsody.backends.constants import StateMapper
     from rhapsody.backends.constants import TasksMainStates
 
     # Register a test backend with defaults
-    StateMapper.register_backend_states_with_defaults("test_default_backend")
+    StateMapper.register_backend_tasks_states_with_defaults("test_default_backend")
 
     # Verify the backend was registered
     assert "test_default_backend" in StateMapper._backend_registry
@@ -106,7 +106,7 @@ def test_state_mapper_init_with_string():
     from rhapsody.backends.constants import StateMapper
 
     # Register test backend
-    StateMapper.register_backend_states_with_defaults("string_test_backend")
+    StateMapper.register_backend_tasks_states_with_defaults("string_test_backend")
 
     # Test initialization with string
     mapper = StateMapper("string_test_backend")
@@ -128,7 +128,7 @@ def test_state_mapper_init_with_object():
     mock_obj = MockBackend()
 
     # Register the backend
-    StateMapper.register_backend_states_with_defaults(mock_obj)
+    StateMapper.register_backend_tasks_states_with_defaults(mock_obj)
 
     # Test initialization with object
     mapper = StateMapper(mock_obj)
@@ -170,7 +170,7 @@ def test_state_mapper_getattr():
     from rhapsody.backends.constants import StateMapper
 
     # Register test backend
-    StateMapper.register_backend_states(
+    StateMapper.register_backend_tasks_states(
         backend="attr_test_backend",
         done_state="COMPLETED",
         failed_state="ERROR",
@@ -200,7 +200,7 @@ def test_state_mapper_to_main_state():
     from rhapsody.backends.constants import TasksMainStates
 
     # Register test backend
-    StateMapper.register_backend_states(
+    StateMapper.register_backend_tasks_states(
         backend="to_main_test_backend",
         done_state="COMPLETED",
         failed_state="ERROR",
@@ -230,7 +230,7 @@ def test_state_mapper_get_backend_state():
     from rhapsody.backends.constants import TasksMainStates
 
     # Register test backend
-    StateMapper.register_backend_states(
+    StateMapper.register_backend_tasks_states(
         backend="get_state_test_backend",
         done_state="COMPLETED",
         failed_state="ERROR",
@@ -261,7 +261,7 @@ def test_state_mapper_terminal_states():
     from rhapsody.backends.constants import StateMapper
 
     # Register test backend
-    StateMapper.register_backend_states(
+    StateMapper.register_backend_tasks_states(
         backend="terminal_test_backend",
         done_state="COMPLETED",
         failed_state="ERROR",
@@ -290,7 +290,7 @@ def test_state_mapper_additional_states():
     from rhapsody.backends.constants import TasksMainStates
 
     # Register backend with additional states
-    StateMapper.register_backend_states(
+    StateMapper.register_backend_tasks_states(
         backend="custom_backend",
         done_state="COMPLETED",
         failed_state="ERROR",
@@ -314,7 +314,7 @@ def test_state_mapper_backend_registry_isolation():
     from rhapsody.backends.constants import StateMapper
 
     # Register multiple backends
-    StateMapper.register_backend_states(
+    StateMapper.register_backend_tasks_states(
         backend="backend1",
         done_state="DONE1",
         failed_state="FAILED1",
@@ -322,7 +322,7 @@ def test_state_mapper_backend_registry_isolation():
         running_state="RUNNING1",
     )
 
-    StateMapper.register_backend_states(
+    StateMapper.register_backend_tasks_states(
         backend="backend2",
         done_state="DONE2",
         failed_state="FAILED2",
