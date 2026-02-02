@@ -2,10 +2,10 @@ name: Deploy Documentation
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master, feature/docs_polish ]
   workflow_dispatch:
 
-permissions:
+permissions:  
   contents: read
   pages: write
   id-token: write
