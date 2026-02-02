@@ -291,7 +291,7 @@ class ConcurrentExecutionBackend(BaseBackend):
         await self.shutdown()
 
     @classmethod
-    async def create(cls, executor: Executor):
+    async def create(cls, executor: Executor) -> "ConcurrentExecutionBackend":
         """Alternative factory method for creating initialized backend.
 
         Args:

@@ -225,13 +225,13 @@ class BaseTask(dict, ABC):
         """
         self._future = future
 
-    def __await__(self):
+    def __await__(self) -> Generator[Any, None, Any]:
         """Allow the task object to be awaited directly.
 
         Delegates to the internal future.
 
         Returns:
-            An iterator for the task completion.
+            Generator[Any, None, Any]: An iterator for the task completion.
 
         Raises:
             RuntimeError: If future is not bound (task not submitted).
@@ -337,6 +337,7 @@ class ComputeTask(BaseTask):
         output_files: list[str] | None = None,
         working_directory: str | None = None,
         shell: bool = False,
+
         **extra_kwargs: Any,
     ):
         """Initialize compute task.
