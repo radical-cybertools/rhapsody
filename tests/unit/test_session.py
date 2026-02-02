@@ -18,7 +18,7 @@ def test_session_instantiation():
     """Test that Session class can be instantiated."""
     session = Session()
     assert session is not None
-    assert session.backends == []
+    assert session.backends == {}
 
 
 def test_session_path_attribute():

@@ -82,6 +82,7 @@ class BaseTask(dict, ABC):
             gpu: Number of GPUs required (optional)
             cpu_threads: Number of CPU threads required (optional)
             environment: Environment variables dict (optional)
+            backend: Backend to use for task execution (optional)
             **kwargs: Additional custom fields
 
         Raises:
@@ -266,18 +267,6 @@ class BaseTask(dict, ABC):
         if not isinstance(other, BaseTask):
             return False
         return self.uid == other.uid
-
-    def to_dict(self) -> dict[str, Any]:
-        """Convert task to plain dictionary.
-
-        Creates a new dict containing all task fields. For tasks with function fields,
-        the function is included (useful for serialization with pickle/dill).
-
-        Returns:
-            Plain dictionary containing all task fields
-        """
-        # Return copy of dict data (tasks ARE dicts, so just copy self)
-        return dict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BaseTask:

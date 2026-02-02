@@ -264,7 +264,7 @@ async def test_task_cancellation(session):
         # Cancel the task using the backend directly (via session mostly for simplicity but API allows backend access)
         # Note: Session doesn't expose cancel_task directly yet, we invoke it on backend
         # MVP: Assuming single backend in session
-        backend = session.backends[0]
+        backend = next(iter(session.backends.values()))
         cancelled = await backend.cancel_task(task.uid)
         assert cancelled is True
 
@@ -281,7 +281,7 @@ async def test_task_cancellation(session):
 @pytest.mark.asyncio
 async def test_backend_state(session):
     """Test backend state tracking."""
-    backend = session.backends[0]
+    backend = next(iter(session.backends.values()))
     state = await backend.state()
     assert state is not None
 
