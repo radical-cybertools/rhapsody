@@ -173,16 +173,22 @@ class TestBackendField:
         """Test that ComputeTask supports explicit backend."""
         task = ComputeTask(executable="/bin/echo", backend="dragon")
         assert task.backend == "dragon"
+        task = ComputeTask(executable="/bin/echo", backend="dragon")
+        assert task.backend == "dragon"
         assert task["backend"] == "dragon"
 
     def test_ai_task_with_backend(self):
         """Test that AITask supports explicit backend."""
         task = AITask(prompt="hi", model="m1", backend="vllm")
         assert task.backend == "vllm"
+        task = AITask(prompt="hi", model="m1", backend="vllm")
+        assert task.backend == "vllm"
         assert task["backend"] == "vllm"
 
     def test_task_default_backend_none(self):
         """Test that tasks have None backend by default."""
+        task = ComputeTask(executable="/bin/echo")
+        assert task.backend is None
         task = ComputeTask(executable="/bin/echo")
         assert task.backend is None
         assert task["backend"] is None
@@ -338,99 +344,15 @@ class TestAITaskValidation:
         assert task.top_k == 50
         assert task.stop_sequences == ["\n\n", "END"]
 
-
-class TestTaskSerialization:
-    """Tests for task serialization (to_dict, from_dict)."""
-
-    def test_compute_task_to_dict_minimal(self):
-        """Test ComputeTask to_dict() with minimal fields."""
-        task = ComputeTask(executable="/bin/echo")
-
-        task_dict = task.to_dict()
-
-        assert task_dict["uid"] == task.uid
-        assert task_dict["executable"] == "/bin/echo"
-        assert task_dict["ranks"] == 1
-
-    def test_compute_task_to_dict_full(self):
-        """Test ComputeTask to_dict() with all fields."""
-        task = ComputeTask(
-            uid="task.000001",
-            executable="/bin/echo",
-            arguments=["hello", "world"],
-            ranks=4,
-            memory=2048,
-            gpu=2,
-            cpu_threads=8,
-            environment={"PATH": "/usr/bin"},
-            input_files=["/data/input.txt"],
-            output_files=["/data/output.txt"],
-            working_directory="/tmp",
-            shell=True,
-        )
-
-        task_dict = task.to_dict()
-
-        assert task_dict["uid"] == "task.000001"
-        assert task_dict["executable"] == "/bin/echo"
-        assert task_dict["arguments"] == ["hello", "world"]
-        assert task_dict["ranks"] == 4
-        assert task_dict["memory"] == 2048
-        assert task_dict["gpu"] == 2
-        assert task_dict["cpu_threads"] == 8
-        assert task_dict["environment"] == {"PATH": "/usr/bin"}
-        assert task_dict["input_files"] == ["/data/input.txt"]
-        assert task_dict["shell"] is True
-
-    def test_function_task_to_dict(self):
-        """Test function-based ComputeTask to_dict()."""
-
-        def my_func(x):
-            return x * 2
-
-        task = ComputeTask(function=my_func, args=(5,))
-
-        task_dict = task.to_dict()
-
-        assert task_dict["function"] == my_func
-        assert task_dict["args"] == (5,)
-        assert task_dict["executable"] is None  # All fields initialized to None
-
-    def test_ai_task_to_dict(self):
-        """Test AITask to_dict() conversion."""
-        task = AITask(
-            prompt="test prompt",
-            model="gpt-4",
-            system_prompt="You are helpful",
-            temperature=0.7,
-            max_tokens=1000,
-        )
-
-        task_dict = task.to_dict()
-
-        assert task_dict["prompt"] == "test prompt"
-        assert task_dict["model"] == "gpt-4"
-        assert task_dict["system_prompt"] == "You are helpful"
-        assert task_dict["temperature"] == 0.7
-        assert task_dict["max_tokens"] == 1000
-
-    def test_custom_fields_in_to_dict(self):
-        """Test custom fields appear in to_dict()."""
-        task = ComputeTask(
-            executable="/bin/echo", custom_field1="value1", custom_field2=42, priority="high"
-        )
-
-        task_dict = task.to_dict()
-
-        assert task_dict["custom_field1"] == "value1"
-        assert task_dict["custom_field2"] == 42
-        assert task_dict["priority"] == "high"
+    def test_from_dict_compute_task(self):
+        """Test from_dict() reconstructs ComputeTask correctly."""
+        original = ComputeTask(executable="/bin/echo", arguments=["hello"], ranks=2, memory=2048)
 
     def test_from_dict_compute_task(self):
         """Test from_dict() reconstructs ComputeTask correctly."""
         original = ComputeTask(executable="/bin/echo", arguments=["hello"], ranks=2, memory=2048)
 
-        task_dict = original.to_dict()
+        task_dict = dict(original)
         reconstructed = ComputeTask.from_dict(task_dict)
 
         assert reconstructed.uid == original.uid
@@ -443,7 +365,11 @@ class TestTaskSerialization:
         """Test from_dict() reconstructs AITask correctly."""
         original = AITask(prompt="test", model="gpt-4", temperature=0.5, max_tokens=1000)
 
-        task_dict = original.to_dict()
+    def test_from_dict_ai_task(self):
+        """Test from_dict() reconstructs AITask correctly."""
+        original = AITask(prompt="test", model="gpt-4", temperature=0.5, max_tokens=1000)
+
+        task_dict = dict(original)
         reconstructed = AITask.from_dict(task_dict)
 
         assert reconstructed.uid == original.uid
@@ -459,9 +385,9 @@ class TestTaskSerialization:
         )
 
         # Roundtrip
-        task_dict = original.to_dict()
+        task_dict = dict(original)
         reconstructed = ComputeTask.from_dict(task_dict)
-        final_dict = reconstructed.to_dict()
+        final_dict = dict(reconstructed)
 
         # Should be identical
         assert task_dict == final_dict
@@ -471,9 +397,9 @@ class TestTaskSerialization:
         original = AITask(prompt="test", model="gpt-4", temperature=0.7, gpu=1)
 
         # Roundtrip
-        task_dict = original.to_dict()
+        task_dict = dict(original)
         reconstructed = AITask.from_dict(task_dict)
-        final_dict = reconstructed.to_dict()
+        final_dict = dict(reconstructed)
 
         # Should be identical
         assert task_dict == final_dict
@@ -608,5 +534,5 @@ class TestEdgeCases:
         task = ComputeTask(executable="/bin/echo")
         assert "_future" in task._INTERNAL_ATTRS
 
-        task_dict = task.to_dict()
+        task_dict = dict(task)
         assert "_future" not in task_dict

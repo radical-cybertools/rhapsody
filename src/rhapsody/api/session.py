@@ -123,7 +123,7 @@ class Session:
 
         # Register callbacks with all provided backends
         backends_list = backends or []
-        self.backends: list[BaseBackend] = []
+        self.backends: dict[str, BaseBackend] = {}
         for backend in backends_list:
             self.add_backend(backend)
 
@@ -133,7 +133,7 @@ class Session:
         Args:
             backend: The execution or inference backend to add.
         """
-        self.backends.append(backend)
+        self.backends[backend.name] = backend
 
         # Register state manager callback
         backend.register_callback(self._state_manager.update_task)
@@ -166,7 +166,6 @@ class Session:
             raise RuntimeError("No backends configured in Session")
 
         # Map backends by name for fast lookup
-        backend_map = {b.name: b for b in self.backends}
         tasks_by_backend = defaultdict(list)
 
         # Group tasks by their explicit backend target
@@ -191,11 +190,11 @@ class Session:
             target_name = task.get("backend")
             if not target_name:
                 # If no backend specified, use the first one as default
-                target_name = self.backends[0].name
+                target_name = next(iter(self.backends))
                 task["backend"] = target_name  # Ensure it's recorded
 
-            if target_name not in backend_map:
-                available = list(backend_map.keys())
+            if target_name not in self.backends:
+                available = list(self.backends.keys())
                 raise ValueError(
                     f"Backend '{target_name}' requested by task {uid} not found in Session. "
                     f"Available backends: {available}"
@@ -206,7 +205,7 @@ class Session:
         # Submit each group to its respective backend concurrently
         submission_tasks = []
         for name, backend_tasks in tasks_by_backend.items():
-            backend = backend_map[name]
+            backend = self.backends[name]
             submission_tasks.append(backend.submit_tasks(backend_tasks))
 
         if submission_tasks:
@@ -301,7 +300,7 @@ class Session:
 
     async def close(self) -> None:
         """Shutdown all backends."""
-        for backend in self.backends:
+        for backend in self.backends.values():
             await backend.shutdown()
 
     async def __aenter__(self):
