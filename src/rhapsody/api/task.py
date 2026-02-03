@@ -21,6 +21,7 @@ import asyncio
 import threading
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Generator
 from typing import Any
 from typing import Callable
 
@@ -337,7 +338,6 @@ class ComputeTask(BaseTask):
         output_files: list[str] | None = None,
         working_directory: str | None = None,
         shell: bool = False,
-
         **extra_kwargs: Any,
     ):
         """Initialize compute task.
