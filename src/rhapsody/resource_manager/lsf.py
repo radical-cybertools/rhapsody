@@ -1,8 +1,10 @@
 
+import logging
 import os
 
 from .base import ResourceManager
-from .base import RMInfo
+
+logger = logging.getLogger(__name__)
 
 
 class LSF(ResourceManager):
@@ -11,7 +13,9 @@ class LSF(ResourceManager):
     def batch_started():
         return bool(os.getenv("LSB_JOBID"))
 
-    def init_from_scratch(self, rm_info: RMInfo) -> RMInfo:
+    def _initialize(self) -> None:
+        rm_info = self._rm_info
+
         # LSF hostfile format:
         #
         #     node_1
@@ -51,7 +55,7 @@ class LSF(ResourceManager):
         else:
             rm_info.cores_per_node = lsf_cores_per_node
 
-        self._log.debug("found %d nodes with %d cores", len(nodes), rm_info.cores_per_node)
+        logger.debug("found %d nodes with %d cores", len(nodes), rm_info.cores_per_node)
 
         # While LSF node names are unique and could serve as node uids, we
         # need an integer index later on for resource set specifications.
@@ -65,6 +69,4 @@ class LSF(ResourceManager):
         #
         # The current approach uses "logical" CPU indexing
         # FIXME: set cpu_indexing as a parameter in resource config
-
-        return rm_info
 

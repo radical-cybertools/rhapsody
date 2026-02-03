@@ -2,7 +2,6 @@
 import os
 
 from .base import ResourceManager
-from .base import RMInfo
 
 
 class Cobalt(ResourceManager):
@@ -10,7 +9,9 @@ class Cobalt(ResourceManager):
     def batch_started():
         return bool(os.getenv("COBALT_JOBID"))
 
-    def init_from_scratch(self, rm_info: RMInfo) -> RMInfo:
+    def _initialize(self) -> None:
+        rm_info = self._rm_info
+
         if not rm_info.cores_per_node:
             raise RuntimeError("cores_per_node undetermined")
 
@@ -37,6 +38,4 @@ class Cobalt(ResourceManager):
             raise RuntimeError("no $COBALT_NODEFILE nor $COBALT_PARTNAME set")
 
         rm_info.node_list = self._get_node_list(nodes, rm_info)
-
-        return rm_info
 

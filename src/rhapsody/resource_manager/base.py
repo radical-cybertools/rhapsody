@@ -339,7 +339,6 @@ class ResourceManager:
         self._rm_info = rm_info
 
         # let the RM implementation gather resource information
-        print("initialize")
         self._initialize()
 
         # we expect to have a valid node list now
@@ -459,6 +458,7 @@ class ResourceManager:
             return list(nodes.keys())
 
         except Exception:
+            logger.warning("failed to parse nodefile '%s'", fname, exc_info=True)
             return []
 
     def _get_cores_per_node(self, nodes: list[str]) -> Optional[int]:
@@ -469,12 +469,12 @@ class ResourceManager:
         node list is heterogeneous we will raise an `ValueError`.
         """
 
-        cores_per_node = (node[1] for node in nodes)
+        cores_per_node = list({node[1] for node in nodes})
 
         if len(cores_per_node) == 1:
-            cores_per_node = cores_per_node.pop()
-            logger.debug("found %d [%d cores]", len(nodes), cores_per_node)
-            return cores_per_node
+            cpn = cores_per_node[0]
+            logger.debug("found %d [%d cores]", len(nodes), cpn)
+            return cpn
 
         else:
             raise ValueError("non-uniform node list, cores_per_node invalid")

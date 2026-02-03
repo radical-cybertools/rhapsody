@@ -1,9 +1,11 @@
 
+import logging
 import os
 import subprocess
 
 from .base import ResourceManager
-from .base import RMInfo
+
+logger = logging.getLogger(__name__)
 
 
 class PBSPro(ResourceManager):
@@ -12,7 +14,8 @@ class PBSPro(ResourceManager):
     def batch_started():
         return bool(os.getenv("PBS_JOBID"))
 
-    def init_from_scratch(self, rm_info: RMInfo) -> RMInfo:
+    def _initialize(self) -> None:
+        rm_info = self._rm_info
         nodes = None
 
         try:
@@ -20,13 +23,13 @@ class PBSPro(ResourceManager):
             nodes = [(node, rm_info.cores_per_node) for node in vnodes]
 
         except (IndexError, ValueError):
-            self._log.debug_2("exec_vnodes not detected")
+            logger.debug("exec_vnodes not detected")
 
         except RuntimeError as e:
             err_message = str(e)
             if not err_message.startswith("qstat failed"):
                 raise
-            self._log.debug_1(err_message)
+            logger.debug("%s", err_message)
 
         if not nodes:
             if not rm_info.cores_per_node or "PBS_NODEFILE" not in os.environ:
@@ -39,8 +42,6 @@ class PBSPro(ResourceManager):
             )
 
         rm_info.node_list = self._get_node_list(nodes, rm_info)
-
-        return rm_info
 
     def _parse_pbspro_vnodes(self) -> tuple[list[str], int]:
         # PBS Job ID
@@ -67,7 +68,7 @@ class PBSPro(ResourceManager):
 
         # Get the RHS of the entry
         rhs = vnodes_str.split("=", 1)[1].strip()
-        self._log.debug_1("exec_vnodes: %s", rhs)
+        logger.debug("exec_vnodes: %s", rhs)
 
         nodes_list = []
         # Break up the individual node partitions into vnode slices
@@ -89,8 +90,8 @@ class PBSPro(ResourceManager):
                 vnodes_set.add(vnode)
                 ncpus_set.add(int(ncpus.split("=")[1]))
 
-        self._log.debug_1("vnodes: %s", vnodes_set)
-        self._log.debug_1("ncpus: %s", ncpus_set)
+        logger.debug("vnodes: %s", vnodes_set)
+        logger.debug("ncpus: %s", ncpus_set)
 
         if len(ncpus_set) > 1:
             raise RuntimeError("detected vnodes of different sizes")
