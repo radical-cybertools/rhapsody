@@ -14,4 +14,4 @@ Welcome to RHAPSODY! This section will guide you from installation to running yo
 
 ## Next Steps
 
-Once you've mastered the basics, you can explore the full **[API Reference](../api/)** for detailed module and class documentation.
+Once you've mastered the basics, you can explore the full **[API Reference](../api/index.md)** for detailed module and class documentation.

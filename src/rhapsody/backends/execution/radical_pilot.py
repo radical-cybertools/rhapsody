@@ -12,6 +12,7 @@ import logging
 import os
 import threading
 from collections.abc import Generator
+from typing import Any
 from typing import Callable
 
 import typeguard
@@ -40,7 +41,7 @@ def _get_logger() -> logging.Logger:
     return logging.getLogger(__name__)
 
 
-def service_ready_callback(future: asyncio.Future, task, state) -> None:
+def service_ready_callback(future: asyncio.Future, task: Any, state: str) -> None:
     """Callback for handling service task readiness.
 
     Runs wait_info() in a daemon thread to avoid blocking execution flow.
@@ -638,7 +639,7 @@ class RadicalExecutionBackend(BaseBackend):
         Args:
             src_task (Dict): Source task dictionary containing 'uid' key.
             dst_task (Dict): Destination task dictionary with
-            'task_backend_specific_kwargs' for pre_exec commands.
+                'task_backend_specific_kwargs' for pre_exec commands.
 
         Note:
             - Links all files from source sandbox except the task UID file itself

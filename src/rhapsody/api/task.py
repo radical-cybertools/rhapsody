@@ -21,6 +21,7 @@ import asyncio
 import threading
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Generator
 from typing import Any
 from typing import Callable
 
@@ -225,13 +226,13 @@ class BaseTask(dict, ABC):
         """
         self._future = future
 
-    def __await__(self):
+    def __await__(self) -> Generator[Any, None, Any]:
         """Allow the task object to be awaited directly.
 
         Delegates to the internal future.
 
         Returns:
-            An iterator for the task completion.
+            Generator[Any, None, Any]: An iterator for the task completion.
 
         Raises:
             RuntimeError: If future is not bound (task not submitted).

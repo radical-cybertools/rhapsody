@@ -21,13 +21,14 @@ Note:
 
 import logging
 import sys
+from typing import Any
 from typing import Optional
 
 
 def enable_logging(
     level: int = logging.INFO,
     format_string: Optional[str] = "%(asctime)s | %(levelname)-8s | [%(name)s] | %(message)s",
-    stream=None,
+    stream: Optional[Any] = None,
     force: bool = True,
 ) -> None:
     """Enable logging for RHAPSODY.
