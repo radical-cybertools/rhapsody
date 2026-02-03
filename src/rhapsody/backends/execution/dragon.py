@@ -3206,7 +3206,7 @@ class DragonExecutionBackendV3(BaseBackend):
                         # Batch not done yet, continue to next one
                         continue
                     except Exception as e:
-                        self.logger.error(f"Error while waiting for batch {tuid}: {e}")
+                        self.logger.exception(f"Error while waiting for batch {tuid}: {e}")
                         # Even on error, we should process results to trigger FAILED callbacks
                         self._process_batch_results(compiled_tasks, task_uids)
                         self._monitored_batches.pop(tuid)
@@ -3243,7 +3243,7 @@ class DragonExecutionBackendV3(BaseBackend):
                     task_desc["return_value"] = result
                     self._callback_func(task_desc, "DONE")
                 except Exception as e:
-                    self.logger.error(f"Task {uid} failed: {e}")
+                    self.logger.exception(f"Task {uid} failed: {e}")
                     task_desc["exception"] = e
                     try:
                         stderr = batch_task.stderr.get(timeout=0.01)
@@ -3253,7 +3253,7 @@ class DragonExecutionBackendV3(BaseBackend):
                     self._callback_func(task_desc, "FAILED")
 
             except Exception as e:
-                self.logger.error(f"Batch extraction failed for task {uid}: {e}")
+                self.logger.exception(f"Batch extraction failed for task {uid}: {e}")
                 task_desc["exception"] = e
                 task_desc["stderr"] = str(e)
                 self._callback_func(task_desc, "FAILED")
@@ -3296,8 +3296,7 @@ class DragonExecutionBackendV3(BaseBackend):
             self.logger.info(f"Submitted {len(batch_tasks_data)} individual tasks in stream mode")
         else:
             # Batch mode: one multi-task batch
-            uids = [d[0] for d in batch_tasks_data]
-            btasks = [d[1] for d in batch_tasks_data]
+            uids, btasks = zip(*batch_tasks_data)
             compiled = self.batch.compile(btasks)
             tuid = compiled.core.tuid
             self._monitored_batches[tuid] = (compiled, uids)
@@ -3463,8 +3462,11 @@ class DragonExecutionBackendV3(BaseBackend):
         if self._batch_monitor_thread and self._batch_monitor_thread.is_alive():
             try:
                 self.logger.debug("Waiting for batch monitor thread to stop...")
+                self._batch_monitor_thread.join(timeout=5.0)
+                if self._batch_monitor_thread.is_alive():
+                    self.logger.warning("Batch monitor thread did not stop within timeout")
             except Exception as e:
-                self.logger.warning(f"Error stopping monitor thread: {e}")
+                self.logger.exception(f"Error stopping monitor thread: {e}")
 
         # Close Batch
         if self.batch:

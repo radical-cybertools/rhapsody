@@ -115,6 +115,7 @@ nav:
   - Project:
       - project/index.md
       - Roadmap: project/roadmap.md
+      - Changelog: changelogs.md
       - Publications: project/publications.md
       - NSF Award: project/nsf-award.md
       - Team: project/team.md
