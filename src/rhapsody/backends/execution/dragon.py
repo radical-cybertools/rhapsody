@@ -10,7 +10,6 @@ import tempfile
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from dataclasses import field
 from enum import Enum
@@ -3155,9 +3154,7 @@ class DragonExecutionBackendV3(BaseBackend):
                 if self._batch_monitor_thread is None or not self._batch_monitor_thread.is_alive():
                     self._shutdown_event.clear()
                     self._batch_monitor_thread = threading.Thread(
-                        target=self._monitor_loop, 
-                        name="dragon_monitor_loop",
-                        daemon=True
+                        target=self._monitor_loop, name="dragon_monitor_loop", daemon=True
                     )
                     self._batch_monitor_thread.start()
                     self.logger.debug("Dragon monitor thread started during initialization")
@@ -3174,16 +3171,16 @@ class DragonExecutionBackendV3(BaseBackend):
     def _monitor_loop(self):
         """Single thread to monitor all active batches using public wait() API.
 
-        This uses a polling approach with a small timeout (0.01s) to avoid 
-        busy-waiting while maintaining low latency.
+        This uses a polling approach with a small timeout (0.01s) to avoid busy-waiting while
+        maintaining low latency.
         """
         self.logger.debug("Starting Dragon batch monitor loop (polling mode)")
-        
+
         while not self._shutdown_event.is_set() or self._monitored_batches:
             try:
                 # Iterate over a copy of keys to allow modification during iteration
                 batch_tuids = list(self._monitored_batches.keys())
-                
+
                 if not batch_tuids:
                     # No active batches, sleep briefly to avoid high CPU
                     time.sleep(0.01)
@@ -3192,19 +3189,19 @@ class DragonExecutionBackendV3(BaseBackend):
                 for tuid in batch_tuids:
                     if tuid not in self._monitored_batches:
                         continue
-                        
+
                     compiled_tasks, task_uids = self._monitored_batches[tuid]
-                    
+
                     try:
                         # Public API wait with minimal timeout
                         # Returns quickly if not done, returns instantly if done
                         compiled_tasks.wait(timeout=0.01)
-                        
+
                         # If we reach here, batch is finished (or raised an internal error)
                         self.logger.debug(f"Batch {tuid} complete, processing results")
                         self._process_batch_results(compiled_tasks, task_uids)
                         self._monitored_batches.pop(tuid)
-                        
+
                     except TimeoutError:
                         # Batch not done yet, continue to next one
                         continue
@@ -3251,7 +3248,7 @@ class DragonExecutionBackendV3(BaseBackend):
                     try:
                         stderr = batch_task.stderr.get(timeout=0.01)
                         task_desc["stderr"] = stderr if stderr else str(e)
-                    except:
+                    except Exception:
                         task_desc["stderr"] = str(e)
                     self._callback_func(task_desc, "FAILED")
 
@@ -3306,7 +3303,6 @@ class DragonExecutionBackendV3(BaseBackend):
             self._monitored_batches[tuid] = (compiled, uids)
             compiled.start()
             self.logger.info(f"Submitted {len(btasks)} tasks in a single batch")
-
 
     async def build_task(self, task: dict):
         """Translate AsyncFlow task to Dragon Batch task.
