@@ -70,3 +70,46 @@ class LSF(ResourceManager):
         # The current approach uses "logical" CPU indexing
         # FIXME: set cpu_indexing as a parameter in resource config
 
+    def get_partition_env(
+        self, node_list: list, env: dict, part_id: str | None = None
+    ) -> dict:
+        """
+        Return LSF environment variable changes for a partition.
+
+        Writes a hostfile containing the partition's hostnames and returns
+        environment variable changes for LSB_DJOB_HOSTFILE.
+
+        Args:
+            node_list: List of Node objects in the partition.
+            env: Current environment dict (for reference).
+            part_id: Partition identifier for hostfile naming.
+
+        Returns:
+            Dict with LSB_DJOB_HOSTFILE path (if it exists in env).
+        """
+        if not node_list:
+            return {}
+
+        if part_id is None:
+            raise ValueError("part_id is required for LSF get_partition_env")
+
+        # Write hostfile
+        hostfile_path = self._write_nodefile(part_id, node_list)
+
+        changes = {}
+
+        # Set hostfile path if LSB_DJOB_HOSTFILE exists in env
+        if "LSB_DJOB_HOSTFILE" in env:
+            changes["LSB_DJOB_HOSTFILE"] = hostfile_path
+
+        return changes
+
+    def release_partition_env(self, part_id: str) -> None:
+        """
+        Remove the hostfile created for the given partition.
+
+        Args:
+            part_id: Identifier of the partition being released.
+        """
+        self._remove_nodefile(part_id)
+

@@ -48,3 +48,45 @@ class Slurm(ResourceManager):
 
         rm_info.node_list = self._get_node_list(node_names, rm_info)
 
+    def get_partition_env(
+        self, node_list: list, env: dict, part_id: str | None = None
+    ) -> dict:
+        """
+        Return Slurm environment variable changes for a partition.
+
+        Only returns changes for variables that exist in env and have
+        different values than the partition would require.
+
+        Args:
+            node_list: List of Node objects in the partition.
+            env: Current environment dict (for reference).
+            part_id: Partition identifier (unused for Slurm, which uses
+                     environment variables rather than files).
+
+        Returns:
+            Dict with changed SLURM_NODELIST, SLURM_JOB_NODELIST, SLURM_NNODES,
+            and/or SLURM_JOB_NUM_NODES to reflect the partition.
+        """
+        if not node_list:
+            return {}
+
+        hostnames = [node.name for node in node_list]
+        compacted = self.compactify_hostlist(hostnames)
+        nodelist_str = ",".join(compacted)
+        n_nodes_str = str(len(node_list))
+
+        # Map of env var names to their partition values
+        partition_env = {
+            "SLURM_NODELIST": nodelist_str,
+            "SLURM_JOB_NODELIST": nodelist_str,
+            "SLURM_NNODES": n_nodes_str,
+            "SLURM_JOB_NUM_NODES": n_nodes_str,
+        }
+
+        # Only return changes for vars that exist in env and differ
+        return {
+            key: val
+            for key, val in partition_env.items()
+            if key in env and env[key] != val
+        }
+

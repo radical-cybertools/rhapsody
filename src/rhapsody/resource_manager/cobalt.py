@@ -39,3 +39,52 @@ class Cobalt(ResourceManager):
 
         rm_info.node_list = self._get_node_list(nodes, rm_info)
 
+    def get_partition_env(
+        self, node_list: list, env: dict, part_id: str | None = None
+    ) -> dict:
+        """
+        Return Cobalt environment variable changes for a partition.
+
+        Writes a nodefile containing the partition's hostnames and returns
+        environment variable changes for COBALT_NODEFILE and COBALT_PARTSIZE.
+
+        Args:
+            node_list: List of Node objects in the partition.
+            env: Current environment dict (for reference).
+            part_id: Partition identifier for nodefile naming.
+
+        Returns:
+            Dict with COBALT_NODEFILE path and COBALT_PARTSIZE (if they exist
+            in env and differ from the partition values).
+        """
+        if not node_list:
+            return {}
+
+        if part_id is None:
+            raise ValueError("part_id is required for Cobalt get_partition_env")
+
+        # Write nodefile
+        nodefile_path = self._write_nodefile(part_id, node_list)
+        n_nodes_str = str(len(node_list))
+
+        changes = {}
+
+        # Always set nodefile path if COBALT_NODEFILE exists in env
+        if "COBALT_NODEFILE" in env:
+            changes["COBALT_NODEFILE"] = nodefile_path
+
+        # Only include COBALT_PARTSIZE if it exists and differs
+        if "COBALT_PARTSIZE" in env and env["COBALT_PARTSIZE"] != n_nodes_str:
+            changes["COBALT_PARTSIZE"] = n_nodes_str
+
+        return changes
+
+    def release_partition_env(self, part_id: str) -> None:
+        """
+        Remove the nodefile created for the given partition.
+
+        Args:
+            part_id: Identifier of the partition being released.
+        """
+        self._remove_nodefile(part_id)
+

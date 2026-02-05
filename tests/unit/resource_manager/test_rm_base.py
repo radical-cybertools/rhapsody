@@ -170,5 +170,139 @@ def test_get_hostlist_by_range_invalid_input():
         rm.get_hostlist_by_range("abc", "host", 3)
 
 
+# -----------------------------------------------------------------------------
+# get_partition / get_partition_env tests
+# -----------------------------------------------------------------------------
+
+def test_get_partition_returns_tuple():
+    """Test get_partition returns (node_list, env_changes) tuple."""
+    cfg = rhapsody.RMConfig(requested_nodes=3, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    node_list, env_changes = rm.get_partition("part1", 2)
+
+    assert len(node_list) == 2
+    assert isinstance(env_changes, dict)
+    # Fork uses base class get_partition_env which returns {}
+    assert env_changes == {}
+
+
+def test_get_partition_with_custom_env():
+    """Test get_partition accepts custom env dict."""
+    cfg = rhapsody.RMConfig(requested_nodes=3, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    custom_env = {"CUSTOM_VAR": "value"}
+    node_list, env_changes = rm.get_partition("part1", 2, env=custom_env)
+
+    assert len(node_list) == 2
+    assert env_changes == {}
+
+
+def test_get_partition_zero_nodes():
+    """Test get_partition with zero nodes returns empty tuple elements."""
+    cfg = rhapsody.RMConfig(requested_nodes=3, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    node_list, env_changes = rm.get_partition("part1", 0)
+
+    assert node_list == []
+    assert env_changes == {}
+
+
+def test_get_partition_env_base_returns_empty():
+    """Test base class get_partition_env returns empty dict."""
+    cfg = rhapsody.RMConfig(requested_nodes=3, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    # Get some nodes first
+    node_list, _ = rm.get_partition("part1", 2)
+
+    # Call get_partition_env directly (with part_id)
+    env_changes = rm.get_partition_env(node_list, {"SOME_VAR": "value"}, part_id="part1")
+    assert env_changes == {}
+
+
+def test_release_partition_env_base_noop():
+    """Test base class release_partition_env is a no-op."""
+    cfg = rhapsody.RMConfig(requested_nodes=3, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    # Should not raise any errors
+    rm.release_partition_env("nonexistent_partition")
+
+
+def test_release_partition_cleans_up():
+    """Test release_partition releases nodes."""
+    cfg = rhapsody.RMConfig(requested_nodes=3, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    # Get a partition
+    node_list, _ = rm.get_partition("part1", 2)
+    assert len(node_list) == 2
+
+    # Verify nodes are marked with partition_id
+    for node in node_list:
+        assert node.partition_id == "part1"
+
+    # Release the partition
+    rm.release_partition("part1")
+
+    # Verify nodes are no longer in the partition
+    for node in node_list:
+        assert node.partition_id is None
+
+
+# -----------------------------------------------------------------------------
+# nodefile helper tests
+# -----------------------------------------------------------------------------
+
+def test_get_nodefile_path():
+    """Test _get_nodefile_path returns expected path."""
+    import os
+    cfg = rhapsody.RMConfig(requested_nodes=3, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    path = rm._get_nodefile_path("test_part")
+    assert path == os.path.abspath("partition_test_part.nodes")
+
+
+def test_write_and_remove_nodefile():
+    """Test _write_nodefile and _remove_nodefile work correctly."""
+    import os
+    cfg = rhapsody.RMConfig(requested_nodes=3, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    # Get some nodes
+    node_list, _ = rm.get_partition("test_nodefile", 2)
+
+    # Write nodefile
+    path = rm._write_nodefile("test_nodefile", node_list)
+    assert os.path.exists(path)
+
+    # Read and verify contents
+    with open(path) as f:
+        lines = f.read().strip().split("\n")
+    assert len(lines) == 2
+    assert lines[0] == node_list[0].name
+    assert lines[1] == node_list[1].name
+
+    # Remove nodefile
+    rm._remove_nodefile("test_nodefile")
+    assert not os.path.exists(path)
+
+    # Clean up partition
+    rm.release_partition("test_nodefile")
+
+
+def test_remove_nodefile_nonexistent():
+    """Test _remove_nodefile handles nonexistent files gracefully."""
+    cfg = rhapsody.RMConfig(requested_nodes=3, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    # Should not raise any errors
+    rm._remove_nodefile("nonexistent_partition")
+
+
 if __name__ == "__main__":
     test_rm_base()

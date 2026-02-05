@@ -1,5 +1,6 @@
 
 import logging
+import os
 import re
 import subprocess
 import tempfile
@@ -679,13 +680,28 @@ class ResourceManager:
 
         return sorted(result) if sort else result
 
-    def get_partition(self, part_id: str, n_nodes: int) -> list:
+    def get_partition(
+        self, part_id: str, n_nodes: int, env: dict | None = None
+    ) -> tuple[list, dict]:
         """
-        Find 'n_nodes' which don't yet belong to a partition and return them
+        Find 'n_nodes' which don't yet belong to a partition and return them,
+        along with environment variable changes for external tools.
+
+        Args:
+            part_id: Identifier for the new partition.
+            n_nodes: Number of nodes to allocate.
+            env: Environment dict to base changes on (defaults to os.environ).
+
+        Returns:
+            Tuple of (node_list, env_changes) where env_changes is a dict of
+            environment variables that should be set for external tools to
+            recognize this partition.
         """
+        if env is None:
+            env = os.environ
 
         if n_nodes <= 0:
-            return []
+            return [], {}
 
         node_list = []
         for node in self._rm_info.node_list:
@@ -700,13 +716,100 @@ class ResourceManager:
                 f"not enough free nodes to allocate partition {part_id} ({n_nodes})"
             )
 
-        return node_list
+        env_changes = self.get_partition_env(node_list, env, part_id)
+        return node_list, env_changes
+
+    def get_partition_env(
+        self, node_list: list, env: dict, part_id: str | None = None
+    ) -> dict:
+        """
+        Return environment variable changes for a partition.
+
+        Override in subclasses to provide RM-specific environment variables
+        that external tools need to recognize the partition's nodes.
+
+        Args:
+            node_list: List of Node objects in the partition.
+            env: Current environment dict (for reference).
+            part_id: Partition identifier (needed by file-based RMs for naming).
+
+        Returns:
+            Dict of environment variable names to values. Empty dict means
+            no changes needed (default for base class).
+        """
+        return {}
+
+    def release_partition_env(self, part_id: str) -> None:
+        """
+        Clean up environment artifacts for a released partition.
+
+        Override in subclasses to remove any files or resources created by
+        get_partition_env() (e.g., temporary nodefiles).
+
+        Args:
+            part_id: Identifier of the partition being released.
+        """
+        pass  # No-op in base class
+
+    def _get_nodefile_path(self, part_id: str) -> str:
+        """
+        Return the path to the nodefile for the given partition.
+
+        The nodefile is stored in the current working directory with the name
+        'partition_{part_id}.nodes'.
+
+        Args:
+            part_id: Identifier of the partition.
+
+        Returns:
+            Absolute path to the nodefile.
+        """
+        return os.path.abspath(f"partition_{part_id}.nodes")
+
+    def _write_nodefile(self, part_id: str, node_list: list) -> str:
+        """
+        Write a nodefile for the given partition.
+
+        The nodefile contains one hostname per line.
+
+        Args:
+            part_id: Identifier of the partition.
+            node_list: List of Node objects in the partition.
+
+        Returns:
+            Absolute path to the written nodefile.
+        """
+        path = self._get_nodefile_path(part_id)
+        with open(path, "w") as f:
+            for node in node_list:
+                f.write(f"{node.name}\n")
+        logger.debug("wrote nodefile %s with %d nodes", path, len(node_list))
+        return path
+
+    def _remove_nodefile(self, part_id: str) -> None:
+        """
+        Remove the nodefile for the given partition if it exists.
+
+        Args:
+            part_id: Identifier of the partition.
+        """
+        path = self._get_nodefile_path(part_id)
+        if os.path.exists(path):
+            os.remove(path)
+            logger.debug("removed nodefile %s", path)
 
     def release_partition(self, part_id: str) -> None:
         """
-        Release all nodes belonging to partition 'part_id'
-        """
+        Release all nodes belonging to partition 'part_id' and clean up
+        any associated environment artifacts.
 
+        Args:
+            part_id: Identifier of the partition to release.
+        """
+        # Clean up any environment artifacts (e.g., nodefiles)
+        self.release_partition_env(part_id)
+
+        # Release the nodes
         for node in self._rm_info.node_list:
             if node.partition_id == part_id:
                 node.partition_id = None
