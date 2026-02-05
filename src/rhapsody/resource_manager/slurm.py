@@ -3,14 +3,13 @@ import logging
 import os
 
 from .base import ResourceManager
-from .base import RMInfo
 
 logger = logging.getLogger(__name__)
 
 
 class Slurm(ResourceManager):
 
-    def _initialize(self) -> RMInfo:
+    def _initialize(self) -> None:
         # ensure we run in a SLURM environment
         if "SLURM_JOB_ID" not in os.environ:
             raise RuntimeError("not running in a SLURM job")
@@ -47,7 +46,5 @@ class Slurm(ResourceManager):
                 if gpu_ids:
                     rm_info.gpus_per_node = len(gpu_ids.split(","))
 
-        nodes = [(node, rm_info.cores_per_node) for node in node_names]
-
-        rm_info.node_list = self._get_node_list(nodes, rm_info)
+        rm_info.node_list = self._get_node_list(node_names, rm_info)
 

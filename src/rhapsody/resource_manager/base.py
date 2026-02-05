@@ -1,5 +1,6 @@
 
 import logging
+import re
 import subprocess
 import tempfile
 from collections import defaultdict
@@ -491,38 +492,35 @@ class ResourceManager:
 
         return node_list
 
-    def get_hostlist_by_range(self, hoststring, prefix="", width=0):
+    def get_hostlist_by_range(self, hoststring: str, prefix: str = "", width: int = 0) -> list[str]:
         """Convert string with host IDs into list of hosts.
 
         Example: Cobalt RM would have host template as "nid%05d"
                     get_hostlist_by_range("1-3,5", prefix="nid", width=5) =>
                     ["nid00001", "nid00002", "nid00003", "nid00005"]
         """
-
         if not hoststring.replace("-", "").replace(",", "").isnumeric():
             raise ValueError(f"non numeric set of ranges ({hoststring})")
 
-        host_ids = []
-        id_width = 0
+        # Determine width from input if not specified
+        if not width:
+            for part in hoststring.replace("-", ",").split(","):
+                width = max(width, len(part))
 
-        for num in hoststring.split(","):
-            num_range = num.split("-")
-
-            if len(num_range) > 1:
-                num_lo, num_hi = num_range
-                if not num_lo or not num_hi:
-                    raise ValueError(f"incorrect range format ({num})")
-                host_ids.extend(list(range(int(num_lo), int(num_hi) + 1)))
-
+        # Reformat numeric ranges with zero-padding
+        formatted_parts = []
+        for item in hoststring.split(","):
+            if "-" in item:
+                lo, hi = item.split("-")
+                formatted_parts.append(f"{int(lo):0{width}d}-{int(hi):0{width}d}")
             else:
-                host_ids.append(int(num_range[0]))
+                formatted_parts.append(f"{int(item):0{width}d}")
 
-            id_width = max(id_width, *[len(n) for n in num_range])
+        # Build bracket notation and delegate to expand_hostlist
+        bracket_expr = f"{prefix}[{','.join(formatted_parts)}]"
+        return self.expand_hostlist([bracket_expr], sort=False)
 
-        width = width or id_width
-        return [f"{prefix}{hid:0{width}d}" for hid in host_ids]
-
-    def get_hostlist(self, hoststring):
+    def get_hostlist(self, hoststring: str) -> list[str]:
         """Convert string with hosts (IDs within brackets) into list of hosts.
 
         Example: "node-b1-[1-3,5],node-c1-4,node-d3-3,node-k[10-12,15]" =>
@@ -530,50 +528,156 @@ class ResourceManager:
                   "node-c1-4", "node-d3-3",
                   "node-k10", "node-k11", "node-k12", "node-k15"]
         """
+        # Split hoststring by commas outside brackets
+        parts = self._split_hoststring(hoststring)
+        # Expand bracket notation and return unsorted (preserve input order)
+        return self.expand_hostlist(parts, sort=False)
 
-        output = []
-        hoststring += ","
-        host_group = []
+    @staticmethod
+    def _split_hoststring(hoststring: str) -> list[str]:
+        """Split comma-separated hoststring, respecting brackets.
 
-        idx, idx_stop = 0, len(hoststring)
-        while idx != idx_stop:
-            comma_idx = hoststring.find(",", idx)
-            bracket_idx = hoststring.find("[", idx)
+        Example: "node[1-3],host1,host2" => ["node[1-3]", "host1", "host2"]
+        """
+        parts = []
+        current = []
+        depth = 0
 
-            if comma_idx >= 0 and (bracket_idx == -1 or comma_idx < bracket_idx):
-                if host_group:
-                    prefix = hoststring[idx:comma_idx]
-                    if prefix:
-                        for h_idx in range(len(host_group)):
-                            host_group[h_idx] += prefix
-                    output.extend(host_group)
-                    del host_group[:]
+        for char in hoststring:
+            if char == "[":
+                depth += 1
+                current.append(char)
+            elif char == "]":
+                depth -= 1
+                current.append(char)
+            elif char == "," and depth == 0:
+                if current:
+                    parts.append("".join(current))
+                    current = []
+            else:
+                current.append(char)
 
-                else:
-                    output.append(hoststring[idx:comma_idx])
+        if current:
+            parts.append("".join(current))
 
-                idx = comma_idx + 1
+        return parts
 
-            elif bracket_idx >= 0 and (comma_idx == -1 or bracket_idx < comma_idx):
-                prefix = hoststring[idx:bracket_idx]
-                if not host_group:
-                    host_group.append(prefix)
-                else:
-                    for h_idx in range(len(host_group)):
-                        host_group[h_idx] += prefix
+    @staticmethod
+    def compactify_hostlist(hostnames: list[str]) -> list[str]:
+        """Compactify hostnames by grouping numeric suffixes into bracket notation.
 
-                closed_bracket_idx = hoststring.find("]", bracket_idx)
-                range_set = hoststring[(bracket_idx + 1) : closed_bracket_idx]
+        This is the inverse of get_hostlist().
 
-                host_group_ = []
-                for prefix in host_group:
-                    host_group_.extend(self.get_hostlist_by_range(range_set, prefix))
-                host_group = host_group_
+        Example:
+            ['host001', 'host002', 'host003', 'host007', 'host012', 'host013']
+            -> ['host00[1-3,7]', 'host01[2,3]']
 
-                idx = closed_bracket_idx + 1
+            ['host008', 'host009', 'host010', 'host011']
+            -> ['host0[08-11]']
+        """
+        if not hostnames:
+            return []
 
-        return output
+        # Group by (text_prefix, suffix_width)
+        groups = defaultdict(list)
+        pattern = re.compile(r"^(.*?)(\d+)$")
 
+        for hostname in hostnames:
+            if match := pattern.match(hostname):
+                prefix, num = match.groups()
+                groups[(prefix, len(num))].append(num)
+
+        # Process each group
+        result = []
+        for (prefix, _), nums in sorted(groups.items()):
+            nums = sorted(set(nums), key=int)
+            for num_prefix, bracket in ResourceManager._build_brackets(nums):
+                result.append(f"{prefix}{num_prefix}[{bracket}]")
+
+        return result
+
+    @staticmethod
+    def _build_brackets(nums: list[str]) -> list[tuple[str, str]]:
+        """Build bracket expressions, maximizing ranges across digit boundaries."""
+        # Find consecutive runs
+        runs = []
+        values = [int(n) for n in nums]
+        start = 0
+
+        for i in range(1, len(values) + 1):
+            if i == len(values) or values[i] != values[i - 1] + 1:
+                runs.append(nums[start:i])
+                start = i
+
+        # Group by prefix: long runs (3+) get minimal prefix, others use all-but-last
+        prefix_items = defaultdict(list)
+
+        for run in runs:
+            if len(run) >= 3:
+                # Find minimal prefix that keeps numbers consecutive
+                prefix = ResourceManager._minimal_prefix(run)
+                suffix = [n[len(prefix) :] for n in run]
+                prefix_items[prefix].append(f"{suffix[0]}-{suffix[-1]}")
+            else:
+                # Use all-but-last-digit as prefix
+                for n in run:
+                    p, v = (n[:-1], n[-1]) if len(n) > 1 else ("", n)
+                    prefix_items[p].append(v)
+
+        # Format results, sorting items within each prefix
+        result = []
+        for prefix in sorted(prefix_items.keys()):
+            items = sorted(prefix_items[prefix], key=lambda x: int(x.split("-")[0]))
+            result.append((prefix, ",".join(items)))
+
+        return result
+
+    @staticmethod
+    def _minimal_prefix(run: list[str]) -> str:
+        """Find shortest prefix where suffixes remain consecutive integers."""
+        width = len(run[0])
+
+        for plen in range(width - 1, -1, -1):
+            suffixes = [n[plen:] for n in run]
+            # Check uniform width and consecutive values
+            if len(set(len(s) for s in suffixes)) == 1:
+                vals = [int(s) for s in suffixes]
+                if all(vals[i + 1] == vals[i] + 1 for i in range(len(vals) - 1)):
+                    return run[0][:plen]
+        return ""
+
+    @staticmethod
+    def expand_hostlist(compacted: list[str], sort: bool = True) -> list[str]:
+        """Expand bracket notation back to individual hostnames.
+
+        This is similar to get_hostlist() but takes a list instead of a string.
+
+        Args:
+            compacted: List of hostnames, possibly with bracket notation.
+            sort: If True (default), return sorted results.
+
+        Example:
+            ['host00[1-3,7]', 'host01[2,3]']
+            -> ['host001', 'host002', 'host003', 'host007', 'host012', 'host013']
+        """
+        result = []
+        pattern = re.compile(r"^(.*?)\[([^\]]+)\](.*)$")
+
+        for hostname in compacted:
+            if match := pattern.match(hostname):
+                prefix, spec, suffix = match.groups()
+                for part in spec.split(","):
+                    if "-" in part:
+                        start, end = part.split("-")
+                        width = len(start)
+                        for i in range(int(start), int(end) + 1):
+                            result.append(f"{prefix}{str(i).zfill(width)}{suffix}")
+                    else:
+                        result.append(f"{prefix}{part}{suffix}")
+            else:
+                result.append(hostname)
+
+        return sorted(result) if sort else result
 
     def get_partition(self, part_id: str, n_nodes: int) -> list:
         """
