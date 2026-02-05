@@ -34,10 +34,15 @@ def _get_logger() -> logging.Logger:
 class ConcurrentExecutionBackend(BaseExecutionBackend):
     """Simple async-only concurrent execution backend."""
 
-    def __init__(self, executor: Executor = None):
+    def __init__(self, executor: Executor = None, resources: dict | None = None):
         super().__init__()
 
         self.logger = _get_logger()
+        self._resources = resources or {}
+
+        # Concurrent backend does not support partitions
+        if self._resources.get("partition"):
+            raise ValueError("ConcurrentExecutionBackend does not support partitions")
 
         if not executor:
             executor = ThreadPoolExecutor()

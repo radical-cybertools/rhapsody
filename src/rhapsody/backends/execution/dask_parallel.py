@@ -67,6 +67,11 @@ class DaskExecutionBackend(BaseExecutionBackend):
         self.session = Session()
         self._callback_func = None
         self._resources = resources or {}
+
+        # Dask backend does not support partitions
+        if self._resources.get("partition"):
+            raise ValueError("DaskExecutionBackend does not support partitions")
+
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
 

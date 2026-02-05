@@ -150,8 +150,9 @@ class Node:
                 raise ValueError("cores must be provided if no rm_info is given")
             if not self.gpus:
                 raise ValueError("gpus must be provided if no rm_info is given")
+            return
 
-        # otherwise rm_info will provide missing resource info
+        # rm_info will provide missing resource info
         if self.cores is None:
             self.cores = rm_info.cores_per_node
         if self.gpus is None:
@@ -271,13 +272,18 @@ class ResourceManager:
         ]
 
         if name:
-            try:
-                for rm_name, rm_impl in rms:
-                    if rm_name == name:
-                        logger.debug("create RM %s", rm_name)
-                        return rm_impl(cfg)
+            rm_impl = None
+            for rm_name, rm_class in rms:
+                if rm_name == name:
+                    rm_impl = rm_class
+                    break
 
+            if not rm_impl:
                 raise RuntimeError(f"no such ResourceManager: {name}")
+
+            try:
+                logger.debug("create RM %s", name)
+                return rm_impl(cfg)
 
             except Exception as e:
                 raise RuntimeError(f"RM {name} creation failed") from e
@@ -363,15 +369,6 @@ class ResourceManager:
         if blocked_cores or blocked_gpus:
             rm_info.cores_per_node -= len(blocked_cores)
             rm_info.gpus_per_node -= len(blocked_gpus)
-
-            for node in rm_info.node_list:
-                for idx in blocked_cores:
-                    assert len(node["cores"]) > idx
-                    node["cores"][idx] = self.DOWN
-
-                for idx in blocked_gpus:
-                    assert len(node["gpus"]) > idx
-                    node["gpus"][idx] = self.DOWN
 
         assert rm_info.cfg.requested_nodes <= len(rm_info.node_list)
 

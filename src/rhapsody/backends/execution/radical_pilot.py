@@ -223,16 +223,43 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         return self
 
     async def _initialize(self) -> None:
-        """Initialize Radical Pilot components."""
+        """Initialize Radical Pilot components.
+
+        If partition info is provided in resources, configures the pilot to:
+        - Use only the specified number of nodes
+        - Set partition environment variables via prepare_env
+        """
         try:
             self.tasks = {}
             self.raptor_mode = False
+
+            # Extract and remove partition info from resources
+            partition = self.resources.pop("partition", {})
+            partition_nodelist = partition.get("nodelist", [])
+            partition_env = partition.get("env", {})
+
             self.session = rp.Session(uid=ru.generate_id("rhapsody.session", mode=ru.ID_PRIVATE))
             self.task_manager = rp.TaskManager(self.session)
             self.pilot_manager = rp.PilotManager(self.session)
-            self.resource_pilot = self.pilot_manager.submit_pilots(
-                rp.PilotDescription(self.resources)
-            )
+
+            # Create pilot description
+            pd = rp.PilotDescription(self.resources)
+
+            # Configure partition if specified
+            if partition_nodelist:
+                pd.nodes = len(partition_nodelist)
+
+            if partition_env:
+                # Create shell environment with export directives
+                export_cmds = [f"export {k}={v}" for k, v in partition_env.items()]
+                pd.prepare_env = {
+                    "partition": {
+                        "type": "shell",
+                        "pre_exec": export_cmds,
+                    }
+                }
+
+            self.resource_pilot = self.pilot_manager.submit_pilots(pd)
             self.pilot_manager.register_callback(self.handle_pilot_state_callback)
 
             self.task_manager.add_pilots(self.resource_pilot)

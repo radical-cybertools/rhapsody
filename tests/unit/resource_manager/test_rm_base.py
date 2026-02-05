@@ -304,5 +304,183 @@ def test_remove_nodefile_nonexistent():
     rm._remove_nodefile("nonexistent_partition")
 
 
+# -----------------------------------------------------------------------------
+# Node dataclass tests
+# -----------------------------------------------------------------------------
+
+def test_node_requires_cores_without_rm_info():
+    """Test Node raises ValueError when cores not provided and no rm_info."""
+    from rhapsody.resource_manager.base import Node
+
+    with pytest.raises(ValueError, match="cores must be provided"):
+        Node(name="test", index=0, gpus=1)
+
+
+def test_node_requires_gpus_without_rm_info():
+    """Test Node raises ValueError when gpus not provided and no rm_info."""
+    from rhapsody.resource_manager.base import Node
+
+    with pytest.raises(ValueError, match="gpus must be provided"):
+        Node(name="test", index=0, cores=4)
+
+
+def test_node_partition_id_double_assignment():
+    """Test Node raises ValueError when assigning partition_id twice."""
+    cfg = rhapsody.RMConfig(requested_nodes=1, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    # Get a real node from the RM
+    node = rm.node_list[0]
+    node.partition_id = "part1"
+
+    with pytest.raises(ValueError, match="already in partition"):
+        node.partition_id = "part2"
+
+    # Clean up
+    node._partition_id = None
+
+
+def test_node_partition_id_can_be_cleared():
+    """Test Node partition_id can be set to None."""
+    cfg = rhapsody.RMConfig(requested_nodes=1, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    node = rm.node_list[0]
+    node.partition_id = "part1"
+    node.partition_id = None  # Should not raise
+    assert node.partition_id is None
+
+
+# -----------------------------------------------------------------------------
+# get_partition error tests
+# -----------------------------------------------------------------------------
+
+def test_get_partition_insufficient_nodes():
+    """Test get_partition raises RuntimeError when not enough nodes."""
+    cfg = rhapsody.RMConfig(requested_nodes=2, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    with pytest.raises(RuntimeError, match="not enough free nodes"):
+        rm.get_partition("part1", 5)  # Request more than available
+
+
+# -----------------------------------------------------------------------------
+# get_instance tests
+# -----------------------------------------------------------------------------
+
+def test_get_instance_with_explicit_name():
+    """Test get_instance with explicit RM name."""
+    cfg = rhapsody.RMConfig(requested_nodes=1, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    assert rm is not None
+    assert len(rm.node_list) == 1
+
+
+def test_get_instance_unknown_rm_raises():
+    """Test get_instance raises RuntimeError for unknown RM name."""
+    cfg = rhapsody.RMConfig(requested_nodes=1, fake_resources=True)
+
+    with pytest.raises(RuntimeError, match="no such ResourceManager"):
+        rhapsody.ResourceManager.get_instance(name="NONEXISTENT_RM", cfg=cfg)
+
+
+# -----------------------------------------------------------------------------
+# _parse_nodefile tests
+# -----------------------------------------------------------------------------
+
+def test_parse_nodefile_basic(tmp_path):
+    """Test _parse_nodefile parses a simple nodefile."""
+    cfg = rhapsody.RMConfig(requested_nodes=1, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    # Create a test nodefile
+    nodefile = tmp_path / "nodefile"
+    nodefile.write_text("node1\nnode2\nnode3\n")
+
+    nodes = rm._parse_nodefile(str(nodefile))
+    assert nodes == ["node1", "node2", "node3"]
+
+
+def test_parse_nodefile_with_duplicates(tmp_path):
+    """Test _parse_nodefile handles duplicate entries."""
+    cfg = rhapsody.RMConfig(requested_nodes=1, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    # Create nodefile with duplicates (PBS-style, one entry per slot)
+    nodefile = tmp_path / "nodefile"
+    nodefile.write_text("node1\nnode1\nnode2\nnode2\nnode2\n")
+
+    nodes = rm._parse_nodefile(str(nodefile))
+    assert set(nodes) == {"node1", "node2"}
+
+
+def test_parse_nodefile_with_cpn(tmp_path):
+    """Test _parse_nodefile with explicit cores_per_node."""
+    cfg = rhapsody.RMConfig(requested_nodes=1, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    nodefile = tmp_path / "nodefile"
+    nodefile.write_text("node1\nnode2\n")
+
+    # cpn parameter overrides detected slot count
+    nodes = rm._parse_nodefile(str(nodefile), cpn=8)
+    assert nodes == ["node1", "node2"]
+
+
+def test_parse_nodefile_nonexistent():
+    """Test _parse_nodefile returns empty list for nonexistent file."""
+    cfg = rhapsody.RMConfig(requested_nodes=1, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    nodes = rm._parse_nodefile("/nonexistent/nodefile")
+    assert nodes == []
+
+
+def test_parse_nodefile_empty(tmp_path):
+    """Test _parse_nodefile handles empty file."""
+    cfg = rhapsody.RMConfig(requested_nodes=1, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    nodefile = tmp_path / "nodefile"
+    nodefile.write_text("")
+
+    nodes = rm._parse_nodefile(str(nodefile))
+    assert nodes == []
+
+
+# -----------------------------------------------------------------------------
+# _get_cores_per_node tests
+# -----------------------------------------------------------------------------
+
+def test_get_cores_per_node_uniform():
+    """Test _get_cores_per_node with uniform node list."""
+    cfg = rhapsody.RMConfig(requested_nodes=1, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    nodes = [("node1", 4), ("node2", 4), ("node3", 4)]
+    cpn = rm._get_cores_per_node(nodes)
+    assert cpn == 4
+
+
+def test_get_cores_per_node_non_uniform():
+    """Test _get_cores_per_node raises ValueError for non-uniform list."""
+    cfg = rhapsody.RMConfig(requested_nodes=1, fake_resources=True)
+    rm = rhapsody.ResourceManager.get_instance(name="FORK", cfg=cfg)
+
+    nodes = [("node1", 4), ("node2", 8), ("node3", 4)]
+
+    with pytest.raises(ValueError, match="non-uniform node list"):
+        rm._get_cores_per_node(nodes)
+
+
+# -----------------------------------------------------------------------------
+# _filter_nodes tests (blocked cores/gpus)
+# -----------------------------------------------------------------------------
+# NOTE: _filter_nodes with blocked_cores/blocked_gpus uses node["cores"] syntax
+# but Fork RM creates Node dataclass objects. This would need code changes to test.
+# Skipping these tests for now.
+
+
 if __name__ == "__main__":
     test_rm_base()

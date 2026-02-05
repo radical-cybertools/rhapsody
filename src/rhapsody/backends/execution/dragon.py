@@ -1723,6 +1723,11 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
         self.session = Session()
         self._callback_func: Callable = self._internal_callback
         self._resources = resources or {}
+
+        # Dragon V1 backend does not support partitions
+        if self._resources.get("partition"):
+            raise ValueError("DragonExecutionBackendV1 does not support partitions")
+
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
 
@@ -2276,6 +2281,11 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         self.session = Session()
         self._callback_func: Callable = self._internal_callback
         self._resources = resources or {}
+
+        # Dragon V2 backend does not support partitions
+        if self._resources.get("partition"):
+            raise ValueError("DragonExecutionBackendV2 does not support partitions")
+
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
         self._canceled_tasks = set()
@@ -3059,6 +3069,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         working_directory: Optional[str] = None,
         disable_background_batching: bool = False,
         disable_telemetry: bool = False,
+        resources: Optional[dict] = None,
     ):
         if not Batch:
             raise RuntimeError("Dragon Batch not available")
@@ -3066,6 +3077,12 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         super().__init__()
 
         self.logger = _get_logger()
+        self._resources = resources or {}
+
+        # Dragon V3 backend does not support partitions
+        if self._resources.get("partition"):
+            raise ValueError("DragonExecutionBackendV3 does not support partitions")
+
         self.batch = Batch(
             num_workers=num_workers or 0,
             disable_telem=disable_telemetry,
