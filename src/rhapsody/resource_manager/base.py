@@ -190,7 +190,6 @@ class Node:
 
         self._partition_id = v
 
-# Base class for ResourceManager implementations.
 class ResourceManager:
     """
     The Resource Manager provides fundamental resource information via
@@ -416,25 +415,22 @@ class ResourceManager:
 
     def _parse_nodefile(self, fname: str, cpn: Optional[int] = 0, smt: Optional[int] = 1) -> list:
         """
-        parse the given nodefile and return a list of tuples of the form
+        Parse the given nodefile and return a list of unique node names.
 
-            [["node_1", 42 * 4],
-             ["node_2", 42 * 4],
-             ...
-            ]
+        The nodefile typically contains one hostname per line, possibly with
+        duplicates indicating multiple slots per node. This method extracts
+        unique node names.
 
-        where the first tuple entry is the name of the node found, and the
-        second entry is the number of entries found for this node.  The latter
-        number usually corresponds to the number of process slots available on
-        that node.
+        Args:
+            fname: Path to the nodefile.
+            cpn: Cores per node (unused in return value, kept for interface
+                 compatibility).
+            smt: Threads per core (unused in return value, kept for interface
+                 compatibility).
 
-        Some nodefile formats though have one entry per node, not per slot.  In
-        those cases we"ll use the passed cores per node (`cpn`) to fill the slot
-        count for the returned node list (`cpn` will supercede the detected slot
-        count).
-
-        An invalid or un-parsable file will result in an empty list being
-        returned.
+        Returns:
+            List of unique node names. Empty list if file is invalid or
+            unparsable.
         """
 
         if not smt:
@@ -453,7 +449,6 @@ class ResourceManager:
                 for node in list(nodes.keys()):
                     nodes[node] = cpn
 
-            # convert node dict into tuple list
             return list(nodes.keys())
 
         except Exception:
@@ -462,10 +457,18 @@ class ResourceManager:
 
     def _get_cores_per_node(self, nodes: list[str]) -> Optional[int]:
         """
-        From a node dict as returned by `self._parse_nodefile()`, determine the
-        number of cores per node.  To do so, we check if all nodes have the same
-        number of cores.  If that is the case we return that number.  If the
-        node list is heterogeneous we will raise an `ValueError`.
+        Determine cores per node from a list of (name, core_count) tuples.
+
+        Note: This method expects tuples, not the string list returned by
+        _parse_nodefile(). It is used with data from RM-specific parsing
+        methods that return (node_name, cores) pairs.
+
+        Args:
+            nodes: List of (node_name, core_count) tuples. All nodes must have
+                   the same core count.
+
+        Returns:
+            Core count if uniform, raises ValueError if heterogeneous.
         """
 
         cores_per_node = list({node[1] for node in nodes})

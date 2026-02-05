@@ -20,7 +20,6 @@ class Slurm(ResourceManager):
         if node_list is None:
             raise RuntimeError("$SLURM_*NODELIST not set")
 
-        # Parse SLURM nodefile environment variable
         node_names = self.get_hostlist(node_list)
         logger.debug("found node list %s. Expanded: %s", node_list, node_names)
 
@@ -83,7 +82,6 @@ class Slurm(ResourceManager):
             "SLURM_JOB_NUM_NODES": n_nodes_str,
         }
 
-        # Only return changes for vars that exist in env and differ
         return {
             key: val
             for key, val in partition_env.items()

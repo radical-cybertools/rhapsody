@@ -93,12 +93,10 @@ class LSF(ResourceManager):
         if part_id is None:
             raise ValueError("part_id is required for LSF get_partition_env")
 
-        # Write hostfile
         hostfile_path = self._write_nodefile(part_id, node_list)
 
         changes = {}
 
-        # Set hostfile path if LSB_DJOB_HOSTFILE exists in env
         if "LSB_DJOB_HOSTFILE" in env:
             changes["LSB_DJOB_HOSTFILE"] = hostfile_path
 

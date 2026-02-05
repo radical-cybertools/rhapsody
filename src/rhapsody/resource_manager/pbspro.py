@@ -67,17 +67,14 @@ class PBSPro(ResourceManager):
         if part_id is None:
             raise ValueError("part_id is required for PBSPro get_partition_env")
 
-        # Write nodefile
         nodefile_path = self._write_nodefile(part_id, node_list)
         n_nodes_str = str(len(node_list))
 
         changes = {}
 
-        # Always set nodefile path if PBS_NODEFILE exists in env
         if "PBS_NODEFILE" in env:
             changes["PBS_NODEFILE"] = nodefile_path
 
-        # Only include PBS_NUM_NODES if it exists and differs
         if "PBS_NUM_NODES" in env and env["PBS_NUM_NODES"] != n_nodes_str:
             changes["PBS_NUM_NODES"] = n_nodes_str
 

@@ -63,17 +63,14 @@ class Cobalt(ResourceManager):
         if part_id is None:
             raise ValueError("part_id is required for Cobalt get_partition_env")
 
-        # Write nodefile
         nodefile_path = self._write_nodefile(part_id, node_list)
         n_nodes_str = str(len(node_list))
 
         changes = {}
 
-        # Always set nodefile path if COBALT_NODEFILE exists in env
         if "COBALT_NODEFILE" in env:
             changes["COBALT_NODEFILE"] = nodefile_path
 
-        # Only include COBALT_PARTSIZE if it exists and differs
         if "COBALT_PARTSIZE" in env and env["COBALT_PARTSIZE"] != n_nodes_str:
             changes["COBALT_PARTSIZE"] = n_nodes_str
 
