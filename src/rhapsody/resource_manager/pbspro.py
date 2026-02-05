@@ -1,3 +1,8 @@
+"""
+PBS Professional resource manager implementation.
+
+PBS Pro is a workload management system for HPC environments.
+"""
 
 import logging
 import os
@@ -9,12 +14,30 @@ logger = logging.getLogger(__name__)
 
 
 class PBSPro(ResourceManager):
+    """
+    PBS Professional resource manager implementation.
 
-    @staticmethod
-    def batch_started():
-        return bool(os.getenv("PBS_JOBID"))
+    Discovers resources from PBS Pro batch system environment variables.
+    Attempts to parse exec_vnode information via qstat, falling back to
+    PBS_NODEFILE if unavailable.
+
+    Environment variables:
+        - PBS_JOBID: Job identifier
+        - PBS_NODEFILE: Path to nodefile containing allocated nodes
+        - PBS_NUM_NODES: Number of nodes in allocation
+    """
 
     def _initialize(self) -> None:
+        """
+        Initialize PBS Pro resource manager.
+
+        First attempts to parse vnodes using qstat exec_vnode output.
+        Falls back to PBS_NODEFILE parsing if qstat is unavailable.
+
+        Raises:
+            RuntimeError: If neither exec_vnode nor PBS_NODEFILE is available,
+                or if cores_per_node is not configured when using PBS_NODEFILE.
+        """
         rm_info = self._rm_info
         nodes = None
 
@@ -32,53 +55,30 @@ class PBSPro(ResourceManager):
             logger.debug("%s", err_message)
 
         if not nodes:
-            if not rm_info.cores_per_node or "PBS_NODEFILE" not in os.environ:
+            if "PBS_NODEFILE" not in os.environ:
                 raise RuntimeError(
-                    "resource configuration unknown, either cores_per_node or $PBS_NODEFILE not set"
+                    "resource configuration unknown: $PBS_NODEFILE not set"
                 )
 
-            nodes = self._parse_nodefile(
+            nodes = self._parse_nodefile_and_cpn(
                 os.environ["PBS_NODEFILE"], cpn=rm_info.cores_per_node, smt=rm_info.threads_per_core
             )
 
-        rm_info.node_list = self._get_node_list(nodes, rm_info)
+            if not rm_info.cores_per_node:
+                rm_info.cores_per_node = self._get_cores_per_node(nodes)
+
+        node_names = [n[0] for n in nodes]
+        rm_info.node_list = self._get_node_list(node_names, rm_info)
 
     def get_partition_env(
         self, node_list: list, env: dict, part_id: str | None = None
     ) -> dict:
-        """
-        Return PBS environment variable changes for a partition.
-
-        Writes a nodefile containing the partition's hostnames and returns
-        environment variable changes for PBS_NODEFILE and PBS_NUM_NODES.
-
-        Args:
-            node_list: List of Node objects in the partition.
-            env: Current environment dict (for reference).
-            part_id: Partition identifier for nodefile naming.
-
-        Returns:
-            Dict with PBS_NODEFILE path and PBS_NUM_NODES (if it exists in env
-            and differs from the partition size).
-        """
-        if not node_list:
-            return {}
-
-        if part_id is None:
-            raise ValueError("part_id is required for PBSPro get_partition_env")
-
-        nodefile_path = self._write_nodefile(part_id, node_list)
-        n_nodes_str = str(len(node_list))
-
-        changes = {}
-
-        if "PBS_NODEFILE" in env:
-            changes["PBS_NODEFILE"] = nodefile_path
-
-        if "PBS_NUM_NODES" in env and env["PBS_NUM_NODES"] != n_nodes_str:
-            changes["PBS_NUM_NODES"] = n_nodes_str
-
-        return changes
+        """Return PBS environment variable changes for a partition."""
+        return self._get_partition_env_with_nodefile(
+            node_list, env, part_id,
+            nodefile_var="PBS_NODEFILE",
+            node_count_var="PBS_NUM_NODES"
+        )
 
     def release_partition_env(self, part_id: str) -> None:
         """

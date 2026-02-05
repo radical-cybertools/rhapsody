@@ -1,3 +1,9 @@
+"""
+Slurm resource manager implementation.
+
+Slurm (Simple Linux Utility for Resource Management) is a widely-used
+open-source workload manager for Linux clusters.
+"""
 
 import logging
 import os
@@ -8,8 +14,32 @@ logger = logging.getLogger(__name__)
 
 
 class Slurm(ResourceManager):
+    """
+    Slurm resource manager implementation.
+
+    Discovers resources from Slurm batch system environment variables.
+    Supports both CPU and GPU resource detection.
+
+    Environment variables:
+        - SLURM_JOB_ID: Job identifier
+        - SLURM_NODELIST / SLURM_JOB_NODELIST: Allocated node list
+        - SLURM_CPUS_ON_NODE: Number of CPUs per node
+        - SLURM_GPUS_ON_NODE: Number of GPUs per node (if available)
+        - SLURM_JOB_GPUS / SLURM_STEP_GPUS / GPU_DEVICE_ORDINAL: GPU IDs
+        - SLURM_NNODES / SLURM_JOB_NUM_NODES: Number of nodes
+    """
 
     def _initialize(self) -> None:
+        """
+        Initialize Slurm resource manager.
+
+        Parses Slurm environment variables to discover allocated nodes,
+        cores per node, and GPUs per node.
+
+        Raises:
+            RuntimeError: If not running in a Slurm job, or if required
+                environment variables are not set.
+        """
         # ensure we run in a SLURM environment
         if "SLURM_JOB_ID" not in os.environ:
             raise RuntimeError("not running in a SLURM job")

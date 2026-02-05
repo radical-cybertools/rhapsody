@@ -11,7 +11,6 @@ from dataclasses import InitVar
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
-from typing import Optional
 
 T_NODE_LIST = list[dict[str, Any]]
 
@@ -38,7 +37,7 @@ class RMConfig:
     oversubscribe: bool = False
     fake_resources: bool = False
     exact: bool = False
-    network: Optional[str] = None
+    network: str | None = None
     blocked_cores: list[int] = field(default_factory=list)
     blocked_gpus: list[int] = field(default_factory=list)
 
@@ -88,9 +87,9 @@ class RMInfo:
     backup_list: list[Any] = field(default_factory=list)
 
     cores_per_node: int = 0
-    threads_per_core: Optional[int] = 1
+    threads_per_core: int | None = 1
 
-    gpus_per_node: Optional[int] = 0
+    gpus_per_node: int | None = 0
     threads_per_gpu: int = 1
     mem_per_gpu: int = 0
 
@@ -138,9 +137,9 @@ class Node:
     mem_per_gpu: int | None = None
     lfs_path: str | None = None
 
-    rm_info: InitVar[Optional[RMInfo]]= None
+    rm_info: InitVar[RMInfo | None] = None
 
-    _partition_id: Optional[int] = field(default=None, init=False, repr=False)
+    _partition_id: int | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self, rm_info: RMInfo = None) -> None:
 
@@ -174,11 +173,11 @@ class Node:
 
 
     @property
-    def partition_id(self) -> Optional[str]:
+    def partition_id(self) -> str | None:
         return self._partition_id
 
     @partition_id.setter
-    def partition_id(self, v: Optional[str]) -> None:
+    def partition_id(self, v: str | None) -> None:
 
         if v is None:
             self._partition_id = None
@@ -221,7 +220,10 @@ class ResourceManager:
     BUSY = 1.0
     DOWN = None
 
-    def __init__(self, cfg: Optional[RMConfig] = None) -> None:
+    # configuration constants
+    MAX_CONCURRENT_NODE_CHECKS = 32
+
+    def __init__(self, cfg: RMConfig | None = None) -> None:
         self.name = type(self).__name__
         logger.debug("configuring RM %s", self.name)
 
@@ -243,7 +245,7 @@ class ResourceManager:
     #     rc_cfg.iface = rm_info.details["network"]
 
     @classmethod
-    def get_instance(cls, name=None, cfg: Optional[RMConfig] = None):
+    def get_instance(cls, name=None, cfg: RMConfig | None = None):
         """
         Factory method to create ResourceManager instances.
         """
@@ -289,16 +291,23 @@ class ResourceManager:
 
         else:
             rm = None
+            failures = []
             for rm_name, rm_impl in rms:
                 try:
                     logger.debug("try RM %s", rm_name)
                     rm = rm_impl(cfg)
+                    break  # Success, exit loop
 
                 except Exception as e:
-                    logger.exception("RM %s failed: %s", rm_name, e)
+                    error_msg = f"{rm_name}: {str(e)}"
+                    failures.append(error_msg)
+                    logger.debug("RM %s failed: %s", rm_name, e)
 
             if not rm:
-                raise RuntimeError("no ResourceManager detected")
+                failure_details = "\n  - ".join(failures)
+                raise RuntimeError(
+                    f"no ResourceManager detected. Tried:\n  - {failure_details}"
+                )
 
             return rm
 
@@ -379,8 +388,9 @@ class ResourceManager:
         rm_info.backup_list = []
         if rm_info.cfg.requested_nodes:
             if len(rm_info.node_list) > rm_info.cfg.requested_nodes:
-                rm_info.node_list = rm_info.node_list[:rm_info.cfg.requested_nodes]
+                # Extract backup nodes before truncating the list
                 rm_info.backup_list = rm_info.node_list[rm_info.cfg.requested_nodes:]
+                rm_info.node_list = rm_info.node_list[:rm_info.cfg.requested_nodes]
             if len(rm_info.node_list) < rm_info.cfg.requested_nodes:
                 logger.warning(
                     "requested %d nodes, %d available",
@@ -391,29 +401,36 @@ class ResourceManager:
         if not rm_info.node_list:
             raise RuntimeError("ResourceManager has no nodes left to run tasks")
 
-    def _check_nodes(self, nodes: list[str]) \
-            -> (list[str], list[tuple[str, int, str, str]]):
+    def _check_nodes(self, nodes: list[str]) -> list[str]:
 
         rm_info = self._rm_info
-        max_concurrent = 32  # FIXME: make configurable, likely want larger
 
         def run_cmd(cmd: str, node: str) -> tuple[str, int, str, str]:
            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
            return node, result.returncode, result.stdout, result.stderr
 
         futs = []
-        with ThreadPoolExecutor(max_workers=max_concurrent) as tp_exec:
+        with ThreadPoolExecutor(max_workers=self.MAX_CONCURRENT_NODE_CHECKS) as tp_exec:
             for node in rm_info.node_list:
                 cmd = f"ssh -oBatchMode=yes {node.name} hostname"
                 futs.append(tp_exec.submit(run_cmd, cmd, node.name))
 
         results = [fut.result() for fut in as_completed(futs)]
-        node_ok = [node for node, retval, _, _ in results if retval == 0]
+        node_ok = [node for node, ret, _, _ in results if ret == 0]
         retval  = [node for node in rm_info.node_list if node.name in node_ok]
+        
+        # Log failed nodes
+        for node, ret, stdout, stderr in results:
+            if ret != 0:
+                logger.warning(
+                    "node %s check failed (retval=%d): stdout=%s, stderr=%s",
+                    node, ret, stdout.strip(), stderr.strip()
+                )
+        
 
         return retval
 
-    def _parse_nodefile(self, fname: str, cpn: Optional[int] = 0, smt: Optional[int] = 1) -> list:
+    def _parse_nodefile(self, fname: str, cpn: int | None = 0, smt: int | None = 1) -> list:
         """
         Parse the given nodefile and return a list of unique node names.
 
@@ -433,29 +450,69 @@ class ResourceManager:
             unparsable.
         """
 
-        if not smt:
-            smt = 1
+        assert smt > 0, "smt (threads per core) must be greater than 0"
 
         logger.info("using nodefile: %s", fname)
         try:
-            nodes = defaultdict(int)
+            nodes = set()
             with open(fname, encoding="utf-8") as fin:
                 for line in fin.readlines():
                     node = line.strip()
                     assert " " not in node
-                    nodes[node] += 1
+                    nodes.add(node)
 
-            if cpn:
-                for node in list(nodes.keys()):
-                    nodes[node] = cpn
-
-            return list(nodes.keys())
+            return sorted(nodes)
 
         except Exception:
             logger.warning("failed to parse nodefile '%s'", fname, exc_info=True)
             return []
 
-    def _get_cores_per_node(self, nodes: list[str]) -> Optional[int]:
+    def _parse_nodefile_and_cpn(
+        self, fname: str, cpn: int | None = 0, smt: int | None = 1
+    ) -> list[tuple[str, int]]:
+        """
+        Parse nodefile and return list of (node_name, core_count) tuples.
+
+        This method is used by RMs that need to track cores per node from
+        the nodefile. It counts occurrences of each node and optionally
+        overrides with a specified cores-per-node value.
+
+        Args:
+            fname: Path to the nodefile.
+            cpn: Cores per node to assign (overrides counted occurrences if set).
+            smt: Threads per core (used for validation/filtering).
+
+        Returns:
+            List of (node_name, core_count) tuples. Empty list if file is
+            invalid or unparsable.
+        """
+        assert smt > 0, "smt (threads per core) must be greater than 0"
+
+        # If cpn is specified, we can use the simpler _parse_nodefile
+        # and just pair each node name with the cpn value
+        if cpn:
+            nodes = self._parse_nodefile(fname, cpn, smt)
+            return [(node, cpn) for node in nodes]
+
+        # Otherwise, count occurrences to determine cores per node
+        logger.info("using nodefile: %s", fname)
+        try:
+            nodes = defaultdict(int)  # node_name -> count
+            with open(fname, encoding="utf-8") as fin:
+                for line in fin.readlines():
+                    node = line.strip()
+                    if not node:  # Skip empty lines
+                        continue
+                    assert " " not in node
+                    nodes[node] += 1
+
+            return [(node, count) for node, count in sorted(nodes.items())]
+
+        except Exception:
+            logger.warning("failed to parse nodefile '%s'", fname, exc_info=True)
+            return []
+
+    def _get_cores_per_node(self, nodes: list[str]) -> int | None:
         """
         Determine cores per node from a list of (name, core_count) tuples.
 
@@ -785,6 +842,47 @@ class ResourceManager:
                 f.write(f"{node.name}\n")
         logger.debug("wrote nodefile %s with %d nodes", path, len(node_list))
         return path
+
+    def _get_partition_env_with_nodefile(
+        self, node_list: list, env: dict, part_id: str | None,
+        nodefile_var: str, node_count_var: str | None = None
+    ) -> dict:
+        """
+        Helper method for RMs that use nodefiles for partition environments.
+
+        This method reduces code duplication across Cobalt, LSF, PBSPro, and Torque
+        implementations that all follow the same pattern of writing a nodefile and
+        updating environment variables.
+
+        Args:
+            node_list: List of Node objects in the partition.
+            env: Current environment dict (for reference).
+            part_id: Partition identifier for nodefile naming.
+            nodefile_var: Name of the environment variable for the nodefile path.
+            node_count_var: Optional name of the environment variable for node count.
+
+        Returns:
+            Dict with environment variable changes.
+
+        Raises:
+            ValueError: If part_id is None.
+        """
+        if not node_list:
+            return {}
+
+        if part_id is None:
+            raise ValueError(f"part_id is required for {type(self).__name__} get_partition_env")
+
+        nodefile_path = self._write_nodefile(part_id, node_list)
+        n_nodes_str = str(len(node_list))
+
+        changes = {}
+        if nodefile_var in env:
+            changes[nodefile_var] = nodefile_path
+        if node_count_var and node_count_var in env and env[node_count_var] != n_nodes_str:
+            changes[node_count_var] = n_nodes_str
+
+        return changes
 
     def _remove_nodefile(self, part_id: str) -> None:
         """

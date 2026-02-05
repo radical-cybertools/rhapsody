@@ -1,13 +1,37 @@
+"""
+Fork resource manager implementation.
+
+This resource manager is used for local execution on a single machine,
+primarily for testing and development. It does not interact with any
+batch scheduling system.
+"""
 
 import multiprocessing
 
 from .base import ResourceManager
-from .base import RMInfo
 
 
 class Fork(ResourceManager):
+    """
+    Fork resource manager for local execution.
 
-    def _initialize(self) -> RMInfo:
+    This RM simulates a multi-node environment on a single machine using
+    the 'fake_resources' configuration option. It's primarily used for
+    testing and development purposes.
+
+    Environment variables: None (does not run in batch mode)
+    """
+
+    def _initialize(self) -> None:
+        """
+        Initialize Fork resource manager.
+
+        Detects local CPU count and creates fake nodes if requested.
+        Requires fake_resources=True for multi-node simulation.
+
+        Raises:
+            ValueError: If multiple nodes requested without fake_resources enabled.
+        """
         rm_info = self._rm_info
         rm_cfg = rm_info.cfg
 
@@ -18,7 +42,8 @@ class Fork(ResourceManager):
         fake_resources = rm_cfg.fake_resources
 
         if n_nodes > 1 and not fake_resources:
-            raise ValueError("1 out of {n_nodes} nodes found (fake disabled)")
+            raise ValueError(f"1 out of {n_nodes} nodes found (fake disabled)")
+
 
         nodes = ["localhost" for _ in range(n_nodes)]
 

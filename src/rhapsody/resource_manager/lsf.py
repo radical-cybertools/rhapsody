@@ -1,3 +1,8 @@
+"""
+LSF (Load Sharing Facility) resource manager implementation.
+
+LSF is IBM's workload management platform for distributed HPC environments.
+"""
 
 import logging
 import os
@@ -8,12 +13,28 @@ logger = logging.getLogger(__name__)
 
 
 class LSF(ResourceManager):
+    """
+    LSF (Load Sharing Facility) resource manager implementation.
 
-    @staticmethod
-    def batch_started():
-        return bool(os.getenv("LSB_JOBID"))
+    Discovers resources from LSF batch system environment variables,
+    particularly the LSB_DJOB_HOSTFILE which contains node allocations.
+
+    Environment variables:
+        - LSB_JOBID: Job identifier
+        - LSB_DJOB_HOSTFILE: Path to hostfile containing allocated nodes
+    """
 
     def _initialize(self) -> None:
+        """
+        Initialize LSF resource manager.
+
+        Parses LSB_DJOB_HOSTFILE to discover allocated nodes, filtering out
+        login and batch nodes. Validates cores_per_node configuration.
+
+        Raises:
+            RuntimeError: If LSB_DJOB_HOSTFILE is not set.
+            AssertionError: If configured cores_per_node doesn't match discovered value.
+        """
         rm_info = self._rm_info
 
         # LSF hostfile format:
@@ -33,7 +54,7 @@ class LSF(ResourceManager):
             raise RuntimeError("$LSB_DJOB_HOSTFILE not set")
 
         smt = rm_info.threads_per_core
-        nodes = self._parse_nodefile(hostfile, smt=smt)
+        nodes = self._parse_nodefile_and_cpn(hostfile, smt=smt)
 
         # LSF adds login and batch nodes to the hostfile (with 1 core) which
         # needs filtering out.
@@ -60,7 +81,8 @@ class LSF(ResourceManager):
         # While LSF node names are unique and could serve as node uids, we
         # need an integer index later on for resource set specifications.
         # (LSF starts node indexes at 1, not 0)
-        rm_info.node_list = self._get_node_list(nodes, rm_info)
+        node_names = [n[0] for n in nodes]
+        rm_info.node_list = self._get_node_list(node_names, rm_info)
 
         # NOTE: blocked cores should be in sync with SMT level,
         #       as well with CPU indexing type ("logical" vs "physical").
@@ -73,34 +95,11 @@ class LSF(ResourceManager):
     def get_partition_env(
         self, node_list: list, env: dict, part_id: str | None = None
     ) -> dict:
-        """
-        Return LSF environment variable changes for a partition.
-
-        Writes a hostfile containing the partition's hostnames and returns
-        environment variable changes for LSB_DJOB_HOSTFILE.
-
-        Args:
-            node_list: List of Node objects in the partition.
-            env: Current environment dict (for reference).
-            part_id: Partition identifier for hostfile naming.
-
-        Returns:
-            Dict with LSB_DJOB_HOSTFILE path (if it exists in env).
-        """
-        if not node_list:
-            return {}
-
-        if part_id is None:
-            raise ValueError("part_id is required for LSF get_partition_env")
-
-        hostfile_path = self._write_nodefile(part_id, node_list)
-
-        changes = {}
-
-        if "LSB_DJOB_HOSTFILE" in env:
-            changes["LSB_DJOB_HOSTFILE"] = hostfile_path
-
-        return changes
+        """Return LSF environment variable changes for a partition."""
+        return self._get_partition_env_with_nodefile(
+            node_list, env, part_id,
+            nodefile_var="LSB_DJOB_HOSTFILE"
+        )
 
     def release_partition_env(self, part_id: str) -> None:
         """
