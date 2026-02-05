@@ -24,6 +24,8 @@ from .execution import DragonExecutionBackendV3
 from .execution import DragonTelemetryCollector
 from .execution import RadicalExecutionBackend
 
+from .inference import DragonVllmInferenceBackend
+
 __all__ = [
     "BackendRegistry",
     "get_backend",
@@ -40,4 +42,5 @@ __all__ = [
     "DragonExecutionBackendV2",  # Optional
     "DragonExecutionBackendV3",  # Optional
     "DragonTelemetryCollector",  # Optional
+    "DragonVllmInferenceBackend", # Optional
 ]
