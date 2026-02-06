@@ -19,7 +19,7 @@ from aiohttp import web
 
 try:
     import dragon
-    from ml_inference.dragon_inference_utils import DragonInference
+    from dragon_vllm.dragon_inference_utils import DragonInference
 except ImportError:
     dragon = None
     DragonInference = None
