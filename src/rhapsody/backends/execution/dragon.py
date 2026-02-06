@@ -16,16 +16,13 @@ from dataclasses import field
 from enum import Enum
 from typing import Any
 from typing import Callable
-from typing import Dict
-from typing import List
 from typing import Optional
-from typing import Tuple
+
 
 import psutil
 import typeguard
 
-from ..base import BaseExecutionBackend
-from ..base import Session
+from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
 
@@ -70,8 +67,8 @@ except ImportError:  # pragma: no cover - environment without Dragon
 def _get_logger() -> logging.Logger:
     """Get logger for dragon backend module.
 
-    This function provides lazy logger evaluation, ensuring the logger
-    is created after the user has configured logging, not at module import time.
+    This function provides lazy logger evaluation, ensuring the logger is created after the user has
+    configured logging, not at module import time.
     """
     return logging.getLogger(__name__)
 
@@ -163,8 +160,8 @@ class FunctionTaskCompletionV1:
 class DataReferenceV1:
     """Zero-copy reference to function results stored in DDict.
 
-    Points directly to result keys written by function wrapper.
-    User controls when to resolve and fetch data from DDict.
+    Points directly to result keys written by function wrapper. User controls when to resolve and
+    fetch data from DDict.
     """
 
     def __init__(self, task_uid: str, ranks: int, ddict: DDict, backend_id: str):
@@ -294,9 +291,9 @@ class ResultCollectorV1:
         self.logger = logger
 
         # Track completion for all task types
-        self.completion_counts: Dict[str, int] = {}  # task_uid -> received_count
-        self.expected_counts: Dict[str, int] = {}  # task_uid -> expected_count
-        self.aggregated_results: Dict[str, List] = {}  # task_uid -> [completions]
+        self.completion_counts: dict[str, int] = {}  # task_uid -> received_count
+        self.expected_counts: dict[str, int] = {}  # task_uid -> expected_count
+        self.aggregated_results: dict[str, list] = {}  # task_uid -> [completions]
 
     def register_task(self, task_uid: str, ranks: int):
         """Register any task (executable or function) for result tracking."""
@@ -305,7 +302,10 @@ class ResultCollectorV1:
         self.aggregated_results[task_uid] = []
 
     def try_consume_result(self) -> Optional[str]:
-        """Try to consume one result from queue. Returns task_uid if task completed, None otherwise."""
+        """Try to consume one result from queue.
+
+        Returns task_uid if task completed, None otherwise.
+        """
         try:
             result = self.result_queue.get(block=False)
             if result == "SHUTDOWN":
@@ -314,7 +314,7 @@ class ResultCollectorV1:
             if isinstance(result, (ExecutableTaskCompletionV1, FunctionTaskCompletionV1)):
                 return self._process_completion(result)
 
-        except Exception:
+        except Exception:  # noqa: S110
             # Queue empty
             pass
         return None
@@ -364,7 +364,7 @@ class ResultCollectorV1:
         return result_data
 
     def _aggregate_function_results(
-        self, task_uid: str, results: List[FunctionTaskCompletionV1]
+        self, task_uid: str, results: list[FunctionTaskCompletionV1]
     ) -> dict:
         """Aggregate function task results."""
         if len(results) == 1:
@@ -405,7 +405,7 @@ class ResultCollectorV1:
                 "success": all_successful,
             }
 
-    def _aggregate_executable_results(self, results: List[ExecutableTaskCompletionV1]) -> dict:
+    def _aggregate_executable_results(self, results: list[ExecutableTaskCompletionV1]) -> dict:
         """Aggregate executable task results."""
         if len(results) == 1:
             return results[0].to_result_dict()
@@ -535,14 +535,22 @@ class TaskLauncherV1:
 
         return Process(
             target=_executable_wrapper_v1,
-            args=(self.result_queue, executable, args, uid, rank, self.working_dir, execute_in_shell),
+            args=(
+                self.result_queue,
+                executable,
+                args,
+                uid,
+                rank,
+                self.working_dir,
+                execute_in_shell,
+            ),
         )
 
     async def _add_function_processes_to_group(
         self, group: ProcessGroup, task: dict, ranks: int
     ) -> None:
         """Add function processes to process group."""
-        uid = task["uid"]
+        task["uid"]
         backend_kwargs = task.get("task_backend_specific_kwargs", {})
         use_ddict_storage = backend_kwargs.get("use_ddict_storage", False)
 
@@ -577,7 +585,15 @@ class TaskLauncherV1:
 
             template = ProcessTemplate(
                 target=_executable_wrapper_v1,
-                args=(self.result_queue, executable, args, uid, rank, self.working_dir, execute_in_shell),
+                args=(
+                    self.result_queue,
+                    executable,
+                    args,
+                    uid,
+                    rank,
+                    self.working_dir,
+                    execute_in_shell,
+                ),
                 env=env,
                 cwd=self.working_dir,
             )
@@ -593,7 +609,7 @@ def _executable_wrapper_v1(
     working_dir: str,
     execute_in_shell: bool = False,
 ):
-    """wrapper function that executes executable and pushes completion to queue."""
+    """Wrapper function that executes executable and pushes completion to queue."""
     import subprocess
     import time
 
@@ -602,7 +618,7 @@ def _executable_wrapper_v1(
         if execute_in_shell:
             # Shell mode: join executable and arguments into single command string
             cmd = " ".join([executable] + args)
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: S602
                 cmd,
                 cwd=working_dir,
                 capture_output=True,
@@ -663,10 +679,10 @@ def _executable_wrapper_v1(
 def _function_wrapper_v1(
     result_queue: Queue, ddict: DDict, task: dict, rank: int, use_ddict_storage: bool
 ):
-    """wrapper function that executes user functions and pushes completion to queue.
+    """Wrapper function that executes user functions and pushes completion to queue.
 
-    DDict is only used when user explicitly sets use_ddict_storage=True.
-    Otherwise, return value is sent directly via queue.
+    DDict is only used when user explicitly sets use_ddict_storage=True. Otherwise, return value is
+    sent directly via queue.
     """
     import io
     import traceback
@@ -747,7 +763,7 @@ def _function_wrapper_v1(
         try:
             if stored_in_ddict:
                 ddict.detach()
-        except Exception:
+        except Exception:  # noqa: S110
             pass
 
 
@@ -787,7 +803,7 @@ class WorkerRequestV2:
     task_type: TaskTypeV2
     rank: int
     total_ranks: int
-    gpu_ids: List[int] = field(default_factory=list)
+    gpu_ids: list[int] = field(default_factory=list)
     use_ddict_storage: bool = False
     function: Optional[Callable] = None
     args: tuple = ()
@@ -830,7 +846,7 @@ class TaskInfoV2:
     ranks: int
     start_time: float
     worker_name: str = ""
-    gpu_allocations: Dict[int, List[int]] = field(default_factory=dict)
+    gpu_allocations: dict[int, list[int]] = field(default_factory=dict)
     canceled: bool = False
     completed_ranks: int = 0
 
@@ -877,8 +893,8 @@ class WorkerGroupConfigV2:
 
     name: str
     worker_type: WorkerTypeV2 = WorkerTypeV2.COMPUTE
-    policies: List[PolicyConfigV2] = field(default_factory=list)
-    kwargs: Dict[str, Any] = field(default_factory=dict)
+    policies: list[PolicyConfigV2] = field(default_factory=list)
+    kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """Validate configuration."""
@@ -916,7 +932,7 @@ class DataReferenceV2:
     """Reference to data stored in Cross Node Distributed Dict."""
 
     def __init__(
-        self, ref_id: str, backend_id: str, ddict: DDict, rank_info: Optional[Dict] = None
+        self, ref_id: str, backend_id: str, ddict: DDict, rank_info: Optional[dict] = None
     ):
         self._ref_id = ref_id
         self._backend_id = backend_id
@@ -1124,7 +1140,7 @@ def _worker_loop_v2(
                     if request.execute_in_shell:
                         # Shell mode: join executable and arguments into single command string
                         cmd = " ".join([request.executable] + request.exec_args)
-                        result = subprocess.run(
+                        result = subprocess.run(  # noqa: S602
                             cmd,
                             cwd=request.working_dir,
                             capture_output=True,
@@ -1169,7 +1185,7 @@ def _worker_loop_v2(
     finally:
         try:
             ddict.detach()
-        except Exception:
+        except Exception:  # noqa: S110
             pass
 
 
@@ -1184,7 +1200,7 @@ class WorkerPoolV2:
 
     def __init__(
         self,
-        worker_configs: List[WorkerGroupConfigV2],
+        worker_configs: list[WorkerGroupConfigV2],
         ddict: DDict,
         working_dir: str,
         logger: logging.Logger,
@@ -1199,16 +1215,16 @@ class WorkerPoolV2:
         self.backend_id = backend_id
 
         self.output_queue: Optional[Queue] = None
-        self.worker_queues: Dict[str, Queue] = {}
+        self.worker_queues: dict[str, Queue] = {}
         # CPU slot tracking
-        self.worker_slots: Dict[str, int] = {}
-        self.worker_free_slots: Dict[str, int] = {}
+        self.worker_slots: dict[str, int] = {}
+        self.worker_free_slots: dict[str, int] = {}
         # GPU tracking
-        self.worker_gpus: Dict[str, int] = {}
-        self.worker_free_gpus: Dict[str, List[int]] = {}
-        self.worker_types: Dict[str, WorkerTypeV2] = {}
+        self.worker_gpus: dict[str, int] = {}
+        self.worker_free_gpus: dict[str, list[int]] = {}
+        self.worker_types: dict[str, WorkerTypeV2] = {}
 
-        self.process_groups: List[ProcessGroup] = []
+        self.process_groups: list[ProcessGroup] = []
         self.total_workers = len(worker_configs)
         self.total_slots = sum(cfg.total_slots() for cfg in worker_configs)
         self.total_gpus = sum(cfg.total_gpus() for cfg in worker_configs)
@@ -1401,7 +1417,7 @@ class WorkerPoolV2:
 
     async def reserve_resources(
         self, worker_name: str, ranks: int, gpus_per_rank: int = 0
-    ) -> Tuple[bool, Dict[int, List[int]]]:
+    ) -> tuple[bool, dict[int, list[int]]]:
         """Reserve resources (thread-safe)."""
         async with self._resource_lock:
             if worker_name not in self.worker_free_slots:
@@ -1437,7 +1453,7 @@ class WorkerPoolV2:
             return True, gpu_allocations
 
     async def release_resources(
-        self, worker_name: str, ranks: int, gpu_allocations: Dict[int, List[int]]
+        self, worker_name: str, ranks: int, gpu_allocations: dict[int, list[int]]
     ):
         """Release resources (thread-safe)."""
         async with self._resource_lock:
@@ -1468,7 +1484,7 @@ class WorkerPoolV2:
         """Try to get response from output queue."""
         try:
             return self.output_queue.get(block=False)
-        except:
+        except Exception:
             return None
 
     async def shutdown(self):
@@ -1543,8 +1559,8 @@ class ResultCollectorV2:
         self.logger = logger
 
         # Track task completions
-        self.task_responses: Dict[str, List[WorkerResponseV2]] = {}
-        self.task_expected: Dict[str, int] = {}
+        self.task_responses: dict[str, list[WorkerResponseV2]] = {}
+        self.task_expected: dict[str, int] = {}
 
     def register_task(self, task_uid: str, ranks: int):
         """Register a task for result tracking."""
@@ -1661,8 +1677,8 @@ class TaskStateMapperV3:
 # ============================================================================
 
 
-class DragonExecutionBackendV1(BaseExecutionBackend):
-    """Dragon execution backend with unified queue-based architecture
+class DragonExecutionBackendV1(BaseBackend):
+    """Dragon execution backend with unified queue-based architecture.
 
                 ┌────────────────────────────┐
                 │  DRAGON EXECUTION BACKEND  │
@@ -1708,7 +1724,12 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
     """
 
     @typeguard.typechecked
-    def __init__(self, resources: Optional[dict] = None, ddict: Optional[DDict] = None):
+    def __init__(
+        self,
+        resources: Optional[dict] = None,
+        ddict: Optional[DDict] = None,
+        name: Optional[str] = "dragon",
+    ):
         if dragon is None:
             raise ImportError("Dragon is required for DragonExecutionBackendV1.")
         if DDict is None:
@@ -1716,12 +1737,11 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
         if System is None:
             raise ImportError("Dragon System is required for this backend version.")
 
-        super().__init__()
+        super().__init__(name=name)
 
         self.logger = _get_logger()
         self.tasks: dict[str, dict[str, Any]] = {}
-        self.session = Session()
-        self._callback_func: Callable = self._internal_callback
+        self._callback_func: Callable = lambda t, s: None
         self._resources = resources or {}
 
         # Dragon V1 backend does not support partitions
@@ -1824,7 +1844,9 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
             self.logger.debug("Result queue created successfully")
 
             # Initialize shared memory manager
-            self._shared_memory = SharedMemoryManagerV1(self._ddict, self._system_alloc, self.logger)
+            self._shared_memory = SharedMemoryManagerV1(
+                self._ddict, self._system_alloc, self.logger
+            )
             await self._shared_memory.initialize()
 
             # Initialize utilities
@@ -2020,7 +2042,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
             try:
                 if await self.cancel_task(task_uid):
                     canceled += 1
-            except Exception:
+            except Exception:  # noqa: S110
                 pass
         return canceled
 
@@ -2150,7 +2172,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
                     while True:
                         try:
                             self._result_queue.get(block=False)
-                        except:
+                        except Exception:
                             break
                     self._result_queue = None
                 self.logger.debug("Result queue cleaned up")
@@ -2199,7 +2221,7 @@ class DragonExecutionBackendV1(BaseExecutionBackend):
         return await backend
 
 
-class DragonExecutionBackendV2(BaseExecutionBackend):
+class DragonExecutionBackendV2(BaseBackend):
     """Dragon execution backend with parallel scheduling.
 
     Features:
@@ -2270,16 +2292,20 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
     """
 
     @typeguard.typechecked
-    def __init__(self, resources: Optional[dict] = None, ddict: Optional[DDict] = None):
+    def __init__(
+        self,
+        resources: Optional[dict] = None,
+        ddict: Optional[DDict] = None,
+        name: Optional[str] = "dragon",
+    ):
         if dragon is None:
             raise ImportError("Dragon is required for DragonExecutionBackendV2.")
 
-        super().__init__()
+        super().__init__(name=name)
 
         self.logger = _get_logger()
         self.tasks: dict[str, dict[str, Any]] = {}
-        self.session = Session()
-        self._callback_func: Callable = self._internal_callback
+        self._callback_func: Callable = lambda t, s: None
         self._resources = resources or {}
 
         # Dragon V2 backend does not support partitions
@@ -2318,7 +2344,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         self._scheduler_task: Optional[asyncio.Task] = None
         self._shutdown_event = asyncio.Event()
 
-    def _parse_worker_config(self, resources: dict) -> List[WorkerGroupConfigV2]:
+    def _parse_worker_config(self, resources: dict) -> list[WorkerGroupConfigV2]:
         """Parse worker configuration from resources.
 
         If no workers specified, creates a default compute worker.
@@ -2344,7 +2370,9 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         else:
             # No workers specified - create default compute worker
             slots = int(resources.get("slots", mp.cpu_count() or 1))
-            self.logger.info(f"No workers specified, creating default compute worker with {slots} slots")
+            self.logger.info(
+                f"No workers specified, creating default compute worker with {slots} slots"
+            )
             return [
                 WorkerGroupConfigV2(
                     name="default_worker",
@@ -2483,7 +2511,9 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
         num_scheduler_workers = min(32, max(4, self._total_slots // 4))
 
-        self.logger.info(f"Starting parallel scheduler with {num_scheduler_workers} scheduler workers")
+        self.logger.info(
+            f"Starting parallel scheduler with {num_scheduler_workers} scheduler workers"
+        )
 
         async def scheduler_worker(worker_id: int):
             """Individual scheduler worker."""
@@ -2496,7 +2526,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                     except asyncio.TimeoutError:
                         continue
 
-                    uid = task["uid"]
+                    task["uid"]
                     backend_kwargs = task.get("task_backend_specific_kwargs", {})
                     ranks = int(backend_kwargs.get("ranks", 1))
                     gpus_per_rank = int(backend_kwargs.get("gpus_per_rank", 0))
@@ -2634,7 +2664,9 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                     ranks, gpus_per_rank, worker_type_hint=worker_type_hint
                 )
                 if worker_name:
-                    self.logger.debug(f"Task {task['uid']}: AFFINITY policy - fallback to {worker_name}")
+                    self.logger.debug(
+                        f"Task {task['uid']}: AFFINITY policy - fallback to {worker_name}"
+                    )
                     return worker_name
                 while not worker_name and not self._shutdown_event.is_set():
                     await asyncio.sleep(0.01)
@@ -2644,7 +2676,9 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
                 return worker_name
 
         elif pinning_policy == WorkerPinningPolicyV2.STRICT:
-            self.logger.debug(f"Task {task['uid']}: STRICT policy - waiting for worker {worker_hint}")
+            self.logger.debug(
+                f"Task {task['uid']}: STRICT policy - waiting for worker {worker_hint}"
+            )
             while not self._shutdown_event.is_set():
                 if self._worker_pool.worker_has_capacity(worker_hint, ranks, gpus_per_rank):
                     self.logger.debug(
@@ -2686,7 +2720,9 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
         elif pinning_policy == WorkerPinningPolicyV2.EXCLUSIVE:
             if self._worker_pool.worker_has_capacity(worker_hint, ranks, gpus_per_rank):
-                self.logger.debug(f"Task {task['uid']}: EXCLUSIVE policy - using worker {worker_hint}")
+                self.logger.debug(
+                    f"Task {task['uid']}: EXCLUSIVE policy - using worker {worker_hint}"
+                )
                 return worker_hint
             else:
                 total_capacity = self._worker_pool.worker_slots.get(worker_hint, 0)
@@ -2717,7 +2753,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         task: dict[str, Any],
         worker_name: str,
         ranks: int,
-        gpu_allocations: Dict[int, List[int]],
+        gpu_allocations: dict[int, list[int]],
     ) -> None:
         """Submit task to specific worker."""
         uid = task["uid"]
@@ -2843,6 +2879,7 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a running task.
+
         Note: With worker pool architecture, cancellation is best-effort.
         Workers that already picked up the task will complete it.
         """
@@ -3055,12 +3092,11 @@ class DragonExecutionBackendV2(BaseExecutionBackend):
         return await backend
 
 
-class DragonExecutionBackendV3(BaseExecutionBackend):
-    """
-    Fast Dragon Batch integration using .wait() in threads.
+class DragonExecutionBackendV3(BaseBackend):
+    """Fast Dragon Batch integration using .wait() in threads.
 
-    No polling! Each compiled batch gets a thread that calls .wait()
-    and triggers callbacks when done. This is the Dragon-native way.
+    No polling! Each compiled batch gets a thread that calls .wait() and triggers callbacks when
+    done. This is the Dragon-native way.
     """
 
     def __init__(
@@ -3069,12 +3105,13 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         working_directory: Optional[str] = None,
         disable_background_batching: bool = False,
         disable_telemetry: bool = False,
+        name: Optional[str] = "dragon",
         resources: Optional[dict] = None,
     ):
         if not Batch:
             raise RuntimeError("Dragon Batch not available")
 
-        super().__init__()
+        super().__init__(name=name)
 
         self.logger = _get_logger()
         self._resources = resources or {}
@@ -3089,13 +3126,9 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
             disable_background_batching=disable_background_batching,
         )
 
-        self.session = Session()
-        if working_directory:
-            self.session.path = working_directory
-
         self._backend_state = BackendMainStates.INITIALIZED
-        self._callback_func = self._internal_callback
-        self._task_registry: Dict[str, Any] = {}
+        self._callback_func: Callable = lambda t, s: None
+        self._task_registry: dict[str, Any] = {}
         self._task_states = TaskStateMapperV3()
         self._initialized = False
         self._cancelled_tasks = []
@@ -3150,9 +3183,8 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
                 raise
         return self
 
-    def _wait_for_batch(self, compiled_tasks, task_uids: List[str]):
-        """
-        Wait for batch to complete and trigger callbacks.
+    def _wait_for_batch(self, compiled_tasks, task_uids: list[str]):
+        """Wait for batch to complete and trigger callbacks.
 
         Simple: just wait(), then check results. No state tracking needed.
         """
@@ -3272,8 +3304,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         self._wait_executor.submit(self._wait_for_batch, compiled_tasks, task_uids)
 
     async def build_task(self, task: dict):
-        """
-        Translate AsyncFlow task to Dragon Batch task.
+        """Translate AsyncFlow task to Dragon Batch task.
 
         Translation Priority (in order):
         1. If process_templates (list) provided → Job mode (ignore type='mpi', ignore ranks) [function/executable]
@@ -3288,7 +3319,6 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         - Function Job: batch.job() - function in MPI job with multiple ranks
         - Executable Process: batch.process() - single executable process
         - Executable Job: batch.job() - executable in MPI job with multiple ranks
-
         """
         # Fast path: extract everything upfront
         uid = task["uid"]
@@ -3311,7 +3341,9 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         # Handle async functions
         if is_function and asyncio.iscoroutinefunction(target):
             original_target = target
-            target = lambda *a, **kw: asyncio.run(original_target(*a, **kw))
+
+            def target(*a, **kw):
+                return asyncio.run(original_target(*a, **kw))
 
         # Get template configs once
         process_templates_config = backend_kwargs.get("process_templates")
@@ -3374,7 +3406,7 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         # Register and return
         self._task_registry[uid] = {
             "uid": uid,
-            "description": task.copy(),
+            "description": task,
             "batch_task": batch_task,
         }
 
@@ -3409,7 +3441,8 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
         # NOTE: dragon.batch does not expose nor support
         # process/function/job cancellation, we just notify
         # the asyncflow that the task is cancelled so not to block the flow
-        self._callback_func(self._task_registry[uid]["description"], "CANCELED")
+        task = self._task_registry[uid]["description"]
+        self._callback_func(task, "CANCELED")
         self._cancelled_tasks.append(uid)
 
         return True
@@ -3477,9 +3510,8 @@ class DragonExecutionBackendV3(BaseExecutionBackend):
 
 
 class DragonTelemetryCollector:
-    """
-    Telemetry collection class that spawns one collector process per node to monitor
-    CPU, GPU memory, and RAM utilization.
+    """Telemetry collection class that spawns one collector process per node to monitor CPU, GPU
+    memory, and RAM utilization.
 
     This class integrates with Dragon's built-in Telemetry infrastructure and periodically
     checkpoints all collected metrics (system + user custom) to JSON files for persistence.
@@ -3522,7 +3554,7 @@ class DragonTelemetryCollector:
         self,
         collection_rate: float = 1.0,
         checkpoint_interval: float = 30.0,
-        checkpoint_dir: str = "/tmp",
+        checkpoint_dir: str = "/tmp",  # noqa: S108
         checkpoint_count: int = 5,
         enable_cpu: bool = True,
         enable_gpu: bool = True,
@@ -3537,7 +3569,8 @@ class DragonTelemetryCollector:
         :type checkpoint_interval: float, optional
         :param checkpoint_dir: Directory to write checkpoint files, defaults to "/tmp"
         :type checkpoint_dir: str, optional
-        :param checkpoint_count: Maximum number of checkpoint files to keep (0 for unlimited), defaults to 5
+        :param checkpoint_count: Maximum number of checkpoint files to keep (0 for unlimited),
+            defaults to 5
         :type checkpoint_count: int, optional
         :param enable_cpu: Enable CPU metric collection, defaults to True
         :type enable_cpu: bool, optional
@@ -3577,9 +3610,9 @@ class DragonTelemetryCollector:
     def start(self):
         """Start telemetry collection on all nodes.
 
-        Spawns one collector process per node using Dragon's ProcessGroup.
-        Each collector monitors CPU, GPU, and memory metrics and sends them
-        to Dragon's TSDB while also checkpointing to JSON files.
+        Spawns one collector process per node using Dragon's ProcessGroup. Each collector monitors
+        CPU, GPU, and memory metrics and sends them to Dragon's TSDB while also checkpointing to
+        JSON files.
 
         :raises RuntimeError: if collector is already started
         """
@@ -3631,8 +3664,7 @@ class DragonTelemetryCollector:
     def stop(self, timeout: float = 10.0):
         """Stop telemetry collection with clean shutdown.
 
-        Triggers a final checkpoint before exiting and waits for all
-        collector processes to finish.
+        Triggers a final checkpoint before exiting and waits for all collector processes to finish.
 
         :param timeout: Seconds to wait for processes to finish, defaults to 10.0
         :type timeout: float, optional
@@ -3986,7 +4018,7 @@ class DragonTelemetryCollector:
             try:
                 power_mw = pynvml.nvmlDeviceGetPowerUsage(handle)
                 power_w = power_mw / 1000.0
-            except:
+            except Exception:
                 power_w = 0.0
 
             return {
@@ -4044,7 +4076,7 @@ class DragonTelemetryCollector:
 
         # Run xpu-smi to get metrics for all GPUs
         output = subprocess.run(
-            ["xpu-smi", "dump", "-d", "-1", "-m", "0,1,5", "-n", "1"],
+            ["xpu-smi", "dump", "-d", "-1", "-m", "0,1,5", "-n", "1"],  # noqa: S607
             text=True,
             capture_output=True,
         )
@@ -4198,7 +4230,7 @@ class DragonTelemetryCollector:
                 # Clean up temp file on error
                 try:
                     os.remove(temp_path)
-                except:
+                except Exception:  # noqa: S110
                     pass
                 raise
 

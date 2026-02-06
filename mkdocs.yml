@@ -1,62 +1,97 @@
-site_name: RHAPSODY - Runtime for Heterogeneous Applications, Service Orchestration and Dynamism
-site_description: High-performance runtime system for executing heterogeneous HPC-AI workflows with dynamic task graphs on high-performance computing infrastructures.
+site_name: RHAPSODY
 site_url: https://radical-cybertools.github.io/rhapsody
-repo_url: https://github.com/radical-cybertools/rhapsody
+site_author: RADICAL Cybertools
+site_description: High-performance runtime system for executing heterogeneous HPC-AI workflows.
+
 repo_name: radical-cybertools/rhapsody
+repo_url: https://github.com/radical-cybertools/rhapsody
+
+copyright: Copyright &copy; 2024—Present by <a target="_blank" href="https://radical.rutgers.edu">RADICAL Lab</a>
 
 theme:
   name: material
+  features:
+    - content.code.annotate
+    - content.code.copy
+    - content.code.select
+    - navigation.path
+    - navigation.sections
+    - navigation.tabs
+    - navigation.top
+    - navigation.tracking
+    - navigation.indexes
+    - header.autohide
+    - search.highlight
+    - search.share
+    - search.suggest
+    - toc.follow
+  font:
+    text: Open Sans
+    code: Roboto Mono
   palette:
+    # Palette toggle for automatic mode
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
     # Palette toggle for light mode
-    - scheme: default
-      primary: blue
-      accent: blue
+    - media: "(prefers-color-scheme: light)"
+      primary: blue grey
+      accent: teal
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     # Palette toggle for dark mode
-    - scheme: slate
-      primary: blue
-      accent: blue
+    - media: "(prefers-color-scheme: dark)"
+      primary: blue grey
+      accent: teal
+      scheme: slate
       toggle:
         icon: material/brightness-4
-        name: Switch to light mode
-  features:
-    - navigation.tabs
-    - navigation.sections
-    - navigation.expand
-    - navigation.top
-    - search.highlight
-    - search.share
-    - content.code.copy
-    - content.code.annotate
+        name: Switch to system preference
 
-plugins:
-  - search
-  # - mkdocs-jupyter:
-  #     execute: false
-  #     allow_errors: false
-  #     include_requirejs: true
-  #     include_source: true
-  - mkdocstrings:
-      handlers:
-        python:
-          paths: [src]
-          options:
-            docstring_style: google
-            show_source: true
-            show_root_heading: true
-            show_root_toc_entry: true
-            merge_init_into_class: true
+watch:
+  - mkdocs.yml
+  - README.md
+  - docs/
+  - src/
+
+extra:
+  homepage: landing.html
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/radical-cybertools/rhapsody
+
+extra_css:
+  - stylesheets/extra.css
+
+extra_javascript:
+  - https://unpkg.com/mermaid@10.6.1/dist/mermaid.min.js
+  - javascripts/mermaid-init.js
 
 markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.details
   - pymdownx.highlight:
       anchor_linenums: true
       line_spans: __span
       pygments_lang_class: true
   - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.magiclink:
+      repo_url_shorthand: true
+      user: radical-cybertools
+      repo: rhapsody
+  - pymdownx.mark
+  - pymdownx.smartsymbols
   - pymdownx.snippets:
-      base_path: docs/examples
+      check_paths: true
   - pymdownx.superfences:
       custom_fences:
         - name: mermaid
@@ -66,75 +101,56 @@ markdown_extensions:
       alternate_style: true
   - pymdownx.tasklist:
       custom_checkbox: true
-  - pymdownx.emoji:
-      emoji_index: !!python/name:material.extensions.emoji.twemoji
-      emoji_generator: !!python/name:material.extensions.emoji.to_svg
-  - admonition
-  - pymdownx.details
-  - attr_list
-  - md_in_html
-  - toc:
-      permalink: true
 
 nav:
-  - Home: index.md
-  - About: about.md
-  - Getting Started:
-    - getting-started/index.md
-    - Installation: getting-started/installation.md
-    - Quick Start: getting-started/quick-start.md
-    - First Workflow: getting-started/first-workflow.md
-    - Configuration: getting-started/configuration.md
-  # - User Guide:
-  #   - user-guide/index.md
-  #   - Core Concepts: user-guide/core-concepts.md
-  #   - Execution Backends: user-guide/backends.md
-  #   - Task Definition: user-guide/task-definition.md
-  #   - Workflow Orchestration: user-guide/orchestration.md
-  #   - Platform Support: user-guide/platforms.md
-  #   - AsyncFlow Integration: user-guide/asyncflow-integration.md
-  #   - Troubleshooting: user-guide/troubleshooting.md
-  # - Examples:
-  #   - examples/index.md
-  #   - Basic Examples: examples/basic.md
-  #   - HPC Workflows: examples/hpc.md
-  #   - AI/ML Pipelines: examples/ai-ml.md
-  #   - Heterogeneous Computing: examples/heterogeneous.md
-  - API Reference:
-    - reference/index.md
-    - Core API: reference/core.md
-    - Backends: reference/backends.md
-    - Session Management: reference/session.md
-    - Task Management: reference/task.md
-    - Configuration: reference/configuration.md
-    - Utilities: reference/utilities.md
-  # - Development:
-  #   - development/index.md
-  #   - Contributing: development/contributing.md
-  #   - Architecture: development/architecture.md
-  #   - Backend Development: development/backend-dev.md
-  #   - Testing: development/testing.md
-  #   - Performance: development/performance.md
+  - Home:
+      - Overview: index.md
+      - Get Started: getting-started/index.md
+      - Installation: getting-started/installation.md
+      - Quick Start: getting-started/quick-start.md
+      - Advanced Usage: getting-started/advanced-usage.md
+      - Configuration: getting-started/configuration.md
+      - Contributing: contributing.md
+      - Issues (GitHub): https://github.com/radical-cybertools/rhapsody/issues
   - Project:
-    - project/index.md
-    - NSF Award: project/nsf-award.md
-    - Roadmap: project/roadmap.md
-    - Publications: project/publications.md
-    - Team: project/team.md
+      - project/index.md
+      - Roadmap: project/roadmap.md
+      - Publications: project/publications.md
+      - NSF Award: project/nsf-award.md
+      - Team: project/team.md
+  - API Reference:
+      - Rhapsody: api/
+  - About: about.md
 
-extra:
-  social:
-    - icon: fontawesome/brands/github
-      link: https://github.com/radical-cybertools/rhapsody
-    - icon: fontawesome/solid/globe
-      link: https://radical.rutgers.edu/
-  analytics:
-    provider: google
-    property: !ENV GOOGLE_ANALYTICS_KEY
-
-extra_css:
-  - stylesheets/extra.css
-
-extra_javascript:
-  - https://unpkg.com/mermaid@10.6.1/dist/mermaid.min.js
-  - javascripts/mermaid-init.js
+plugins:
+  - search
+  - gen-files:
+      scripts:
+        - docs/gen_ref_pages.py
+  - literate-nav:
+      nav_file: SUMMARY.md
+  - section-index
+  - mkdocstrings:
+      enable_inventory: true
+      handlers:
+        python:
+          paths: [src]
+          options:
+            annotations_path: brief
+            docstring_section_style: list
+            docstring_style: google
+            inherited_members: yes
+            line_length: 60
+            members_order: source
+            merge_init_into_class: yes
+            separate_signature: yes
+            show_object_full_path: no
+            show_root_full_path: yes
+            show_root_heading: no
+            show_root_members_full_path: no
+            show_root_toc_entry: yes
+            show_signature_annotations: yes
+            show_submodules: no
+            show_symbol_type_heading: yes
+            show_symbol_type_toc: yes
+            signature_crossrefs: yes

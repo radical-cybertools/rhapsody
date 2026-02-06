@@ -23,8 +23,9 @@ class BackendMainStates(Enum):
     """
 
     INITIALIZED = "INITIALIZED"
-    RUNNING     = "RUNNING"
-    SHUTDOWN    = "SHUTDOWN"
+    RUNNING = "RUNNING"
+    SHUTDOWN = "SHUTDOWN"
+
 
 
 class TasksMainStates(Enum):
@@ -216,7 +217,6 @@ class StateMapper:
             shutdown_state=BackendMainStates.SHUTDOWN.value,
         )
 
-
     @classmethod
     def register_backend_tasks_states(
         cls,
@@ -384,7 +384,7 @@ class StateMapper:
         Example:
             ::
 
-                mapper = StateMapper('slurm')
+                mapper = StateMapper('dragon_v3')
                 main_state = mapper.to_main_state('COMPLETED')  # TasksMainStates.DONE
         """
         try:

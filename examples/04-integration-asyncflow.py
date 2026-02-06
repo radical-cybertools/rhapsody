@@ -1,10 +1,14 @@
 import asyncio
+import multiprocessing as mp
 import time
-from rhapsody.backends.execution.dragon import DragonExecutionBackendV3
 
 from radical.asyncflow import WorkflowEngine
 
+from rhapsody.backends import DragonExecutionBackendV3
+
+
 async def main():
+    mp.set_start_method("dragon")
 
     backend = await DragonExecutionBackendV3()
     flow = await WorkflowEngine.create(backend=backend)
@@ -29,23 +33,23 @@ async def main():
     async def task3(*args):
         # Simulate aggregating results from task1 and task2
         sum_data, even_numbers = args
-        print(f"Task 3: Aggregating, sum: {sum_data},"
-              f"even count: {len(even_numbers)}")
+        print(f"Task 3: Aggregating, sum: {sum_data},even count: {len(even_numbers)}")
         # Aggregate results
         return {"total_sum": sum_data, "even_count": len(even_numbers)}
 
     async def run_wf(wf_id):
-        print(f'Starting workflow {wf_id} at {time.time()}')
+        print(f"Starting workflow {wf_id} at {time.time()}")
         t1 = task1()
         t2 = task2(t1)
         t3 = task3(t1, t2)
         result = await t3  # Await the final task
-        print(f'Workflow {wf_id} completed at {time.time()}, result: {result}')
+        print(f"Workflow {wf_id} completed at {time.time()}, result: {result}")
 
     # Run workflows concurrently
     await asyncio.gather(*[run_wf(i) for i in range(1024)])
 
     await flow.shutdown()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     asyncio.run(main())

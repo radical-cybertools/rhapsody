@@ -1,7 +1,5 @@
-"""
-Dragon VLLM Inference Service with Request Batching
-Accumulates incoming requests and submits as batches to pipeline for efficiency
-"""
+"""Dragon VLLM Inference Service with Request Batching Accumulates incoming requests and submits as
+batches to pipeline for efficiency."""
 
 import asyncio
 import copy
@@ -12,6 +10,9 @@ import time
 import uuid
 from dataclasses import dataclass
 from dataclasses import field
+from typing import Any
+from typing import Callable
+from typing import Optional
 
 import yaml
 from aiohttp import web
@@ -23,6 +24,8 @@ except ImportError:
     dragon = None
     DragonInference = None
 
+from rhapsody.backends.base import BaseBackend
+from rhapsody.backends.constants import StateMapper
 
 logger = logging.getLogger(__name__)
 
@@ -32,16 +35,16 @@ _QUEUE_REGISTRY = {}
 
 @dataclass
 class PendingRequest:
-    """Represents a pending inference request"""
+    """Represents a pending inference request."""
 
     prompts: list[str]
     future: asyncio.Future
     timestamp: float = field(default_factory=time.time)
+    task_uid: Optional[str] = None  # UID of the AITask if applicable
 
 
-class DragonVllmInferenceBackend:
-    """
-    Server-side batching VLLM inference backend.
+class DragonVllmInferenceBackend(BaseBackend):
+    """Server-side batching VLLM inference backend.
 
     Key Features:
     - Accumulates individual requests into batches
@@ -70,12 +73,18 @@ class DragonVllmInferenceBackend:
         use_service: bool = True,
         max_batch_size: int = 1024,
         max_batch_wait_ms: int = 500,
+        name: Optional[str] = "vllm",
     ):
         if dragon is None:
             raise ImportError("Dragon is required for DragonVllmInferenceBackend.")
 
         if DragonInference is None:
             raise ImportError("DragonVllm is required for DragonVllmInferenceBackend.")
+
+        super().__init__(name=name)
+
+        # Register states in StateMapper
+        StateMapper.register_backend_tasks_states_with_defaults(self.name)
 
         self.config_file = config_file
         self.model_name = model_name
@@ -109,8 +118,12 @@ class DragonVllmInferenceBackend:
         self._batch_processor_task = None
         self._new_request_event = asyncio.Event()  # Signal when requests arrive
 
+        # Callbacks and state tracking
+        self._callback_func = None
+        self._tasks_in_flight = {}  # UID -> AITask
+
     def update_config(self, base_config):
-        """Update config with custom parameters"""
+        """Update config with custom parameters."""
         config = copy.deepcopy(base_config)
         config["required"]["model_name"] = self.model_name
         config["hardware"]["num_nodes"] = self.num_nodes
@@ -123,7 +136,7 @@ class DragonVllmInferenceBackend:
         return config
 
     def _get_or_create_queues(self):
-        """Get queues from registry or create new ones"""
+        """Get queues from registry or create new ones."""
         if self._instance_id not in _QUEUE_REGISTRY:
             _QUEUE_REGISTRY[self._instance_id] = {"input": mp.Queue(), "response": mp.Queue()}
         return _QUEUE_REGISTRY[self._instance_id]
@@ -136,11 +149,45 @@ class DragonVllmInferenceBackend:
         """Get response queue (lazy)"""
         return self._get_or_create_queues()["response"]
 
+    def register_callback(self, func: Callable[[dict, str], None]) -> None:
+        """Register a callback for task state changes."""
+        self._callback_func = func
+
+    async def submit_tasks(self, tasks: list[dict]) -> None:
+        """Submit AITask objects for inference.
+
+        Each task is decomposed into prompts and added to the batching queue.
+        """
+        if not self.is_initialized:
+            await self.initialize()
+
+        for task in tasks:
+            uid = task["uid"]
+            self._tasks_in_flight[uid] = task
+
+            # Report RUNNING state
+            if self._callback_func:
+                self._callback_func(task, "RUNNING")
+
+            # Extract prompts (can be single str or list[str])
+            prompt = task.get("prompt")
+            prompts = [prompt] if isinstance(prompt, str) else prompt
+
+            # Create a future to track this specific task's completion in batch processor
+            completion_future = asyncio.Future()
+            request = PendingRequest(prompts=prompts, future=completion_future, task_uid=uid)
+
+            # Add to pending queue
+            async with self._batch_lock:
+                self._pending_requests.append(request)
+
+            # Signal processor
+            self._new_request_event.set()
+
+            # We don't await here; the batch processor will update task state and results
+
     async def initialize(self):
-        """
-        Initialize the VLLM pipeline and optionally HTTP server
-        Blocks until service is ready
-        """
+        """Initialize the VLLM pipeline and optionally HTTP server Blocks until service is ready."""
         if self.is_initialized:
             logger.warning("Service already initialized")
             return self
@@ -192,8 +239,7 @@ class DragonVllmInferenceBackend:
         return self
 
     async def _batch_processor(self):
-        """
-        Background task that processes batches of requests.
+        """Background task that processes batches of requests.
 
         Strategy:
         1. Wait for at least one request to arrive
@@ -275,8 +321,18 @@ class DragonVllmInferenceBackend:
                 offset = 0
                 for req, size in zip(batch, request_sizes):
                     req_results = all_results[offset : offset + size]
+
+                    # Store results in future (for direct generate() calls)
                     if not req.future.done():
                         req.future.set_result(req_results)
+
+                    # If this was part of an AITask, update task state and trigger callback
+                    if req.task_uid and req.task_uid in self._tasks_in_flight:
+                        task = self._tasks_in_flight.pop(req.task_uid)
+                        task["return_value"] = req_results
+                        if self._callback_func:
+                            self._callback_func(task, "DONE")
+
                     offset += size
 
                 logger.info(f"Batch complete: {len(all_prompts)} prompts processed")
@@ -288,6 +344,13 @@ class DragonVllmInferenceBackend:
                     for req in self._pending_requests:
                         if not req.future.done():
                             req.future.set_exception(e)
+
+                        if req.task_uid and req.task_uid in self._tasks_in_flight:
+                            task = self._tasks_in_flight.pop(req.task_uid)
+                            task["exception"] = str(e)
+                            if self._callback_func:
+                                self._callback_func(task, "FAILED")
+
                     self._pending_requests.clear()
 
     async def _start_http_server(self):
@@ -317,8 +380,8 @@ class DragonVllmInferenceBackend:
         logger.info("GET  /v1/models (OpenAI compatible)")
 
     async def generate(self, prompts: list[str], timeout: int = 300) -> list[str]:
-        """
-        Generate responses for given prompts.
+        """Generate responses for given prompts.
+
         Queues request for batching instead of immediate submission.
         """
         if not self.is_initialized:
@@ -346,7 +409,7 @@ class DragonVllmInferenceBackend:
             raise TimeoutError(f"Request timed out after {timeout}s")
 
     async def shutdown(self):
-        """Shutdown the service/engine"""
+        """Shutdown the service/engine."""
         if not self.is_initialized:
             return
 
@@ -383,8 +446,8 @@ class DragonVllmInferenceBackend:
         logger.info(f"{mode.capitalize()} shutdown complete")
 
     async def _handle_chat_completions(self, request):
-        """
-        OpenAI-compatible chat completions endpoint.
+        """OpenAI-compatible chat completions endpoint.
+
         Converts OpenAI format to VLLM /generate format.
         """
         try:
@@ -470,7 +533,7 @@ class DragonVllmInferenceBackend:
             )
 
     async def _handle_models(self, request):
-        """OpenAI-compatible models list endpoint"""
+        """OpenAI-compatible models list endpoint."""
         return web.json_response(
             {
                 "object": "list",
@@ -490,7 +553,7 @@ class DragonVllmInferenceBackend:
 
     # HTTP Handlers (only used if use_service=True)
     async def _handle_health(self, request):
-        """Health check endpoint"""
+        """Health check endpoint."""
         async with self._batch_lock:
             queue_size = len(self._pending_requests)
 
@@ -510,7 +573,7 @@ class DragonVllmInferenceBackend:
         )
 
     async def _handle_generate(self, request):
-        """Generate responses via HTTP"""
+        """Generate responses via HTTP."""
         try:
             data = await request.json()
             prompts = data.get("prompts", [])
@@ -543,22 +606,19 @@ class DragonVllmInferenceBackend:
             )
 
     def get_endpoint(self):
-        """
-        Get the service endpoint URL
-        Returns None if use_service=False
-        """
+        """Get the service endpoint URL Returns None if use_service=False."""
         if not self.use_service:
             logger.warning("Engine mode: No HTTP endpoint available")
             return None
         return f"http://{self.hostname}:{self.port}"
 
     async def __aenter__(self):
-        """Async context manager entry"""
+        """Async context manager entry."""
         await self.initialize()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit"""
+        """Async context manager exit."""
         await self.shutdown()
 
     # Serialization support
@@ -582,3 +642,22 @@ class DragonVllmInferenceBackend:
         # These will be lazily re-initialized if needed
         self._batch_lock = asyncio.Lock()
         self._new_request_event = asyncio.Event()
+
+    # BaseBackend abstract methods
+    def state(self) -> str:
+        return "RUNNING" if self.is_initialized else "INITIALIZED"
+
+    def task_state_cb(self, task: dict, state: str) -> None:
+        if self._callback_func:
+            self._callback_func(task, state)
+
+    def get_task_states_map(self) -> Any:
+        # Return a mapper that includes terminal states
+        return StateMapper("vllm")
+
+    def build_task(self, task: dict) -> None:
+        pass
+
+    async def cancel_task(self, uid: str) -> bool:
+        # vLLM/DragonInference doesn't easily support cancellation of single queries
+        return False

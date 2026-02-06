@@ -12,10 +12,7 @@ from functools import wraps
 from typing import Any
 from typing import Callable
 
-import typeguard
-
-from ..base import BaseExecutionBackend
-from ..base import Session
+from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
 
@@ -28,13 +25,13 @@ except ImportError:
 def _get_logger() -> logging.Logger:
     """Get logger for dask backend module.
 
-    This function provides lazy logger evaluation, ensuring the logger
-    is created after the user has configured logging, not at module import time.
+    This function provides lazy logger evaluation, ensuring the logger is created after the user has
+    configured logging, not at module import time.
     """
     return logging.getLogger(__name__)
 
 
-class DaskExecutionBackend(BaseExecutionBackend):
+class DaskExecutionBackend(BaseBackend):
     """An async-only Dask execution backend for distributed task execution.
 
     Handles task submission, cancellation, and proper async event loop handling
@@ -47,33 +44,41 @@ class DaskExecutionBackend(BaseExecutionBackend):
             await backend.submit_tasks(tasks)
     """
 
-    @typeguard.typechecked
-    def __init__(self, resources: dict | None = None):
+    def __init__(
+        self,
+        resources: dict | None = None,
+        name: str = "dask",
+        cluster: Any | None = None,
+        client: Any | None = None,
+    ):
         """Initialize the Dask execution backend (non-async setup only).
 
         Args:
             resources: Dictionary of resource requirements for tasks. Contains
                 configuration parameters for the Dask client initialization.
+            name: Name of the backend.
+            cluster: Optional preconfigured Dask Cluster object.
+            client: Optional preconfigured Dask Client object.
         """
 
         if dask is None:
             raise ImportError("Dask is required for DaskExecutionBackend.")
 
-        super().__init__()
+        super().__init__(name=name)
 
         self.logger = _get_logger()
         self.tasks = {}
         self._client = None
-        self.session = Session()
-        self._callback_func = None
+        self._callback_func: Callable = lambda t, s: None
         self._resources = resources or {}
+        self._cluster_provided = cluster
+        self._client_provided = client
+        self._initialized = False
+        self._backend_state = BackendMainStates.INITIALIZED
 
         # Dask backend does not support partitions
         if self._resources.get("partition"):
             raise ValueError("DaskExecutionBackend does not support partitions")
-
-        self._initialized = False
-        self._backend_state = BackendMainStates.INITIALIZED
 
     def __await__(self):
         """Make DaskExecutionBackend awaitable like Dask Client."""
@@ -121,7 +126,15 @@ class DaskExecutionBackend(BaseExecutionBackend):
             Exception: If Dask client initialization fails.
         """
         try:
-            self._client = await dask.Client(asynchronous=True, **self._resources)
+            if self._client_provided:
+                self._client = self._client_provided
+            elif self._cluster_provided:
+                self._client = await dask.Client(
+                    self._cluster_provided, asynchronous=True, **self._resources
+                )
+            else:
+                self._client = await dask.Client(asynchronous=True, **self._resources)
+
             dashboard_link = self._client.dashboard_link
             self.logger.info(f"Dask backend initialized with dashboard at {dashboard_link}")
         except Exception as e:
@@ -387,16 +400,24 @@ class DaskExecutionBackend(BaseExecutionBackend):
         """Async context manager exit."""
         await self.shutdown()
 
-    # Class method for cleaner instantiation (optional alternative pattern)
     @classmethod
-    async def create(cls, resources: dict | None = None) -> DaskExecutionBackend:
+    async def create(
+        cls,
+        resources: dict | None = None,
+        name: str = "dask",
+        cluster: Any | None = None,
+        client: Any | None = None,
+    ) -> DaskExecutionBackend:
         """Alternative factory method for creating initialized backend.
 
         Args:
             resources: Configuration parameters for Dask client initialization.
+            name: Name of the backend.
+            cluster: Optional preconfigured Dask Cluster object.
+            client: Optional preconfigured Dask Client object.
 
         Returns:
             Fully initialized DaskExecutionBackend instance.
         """
-        backend = cls(resources)
+        backend = cls(resources=resources, name=name, cluster=cluster, client=client)
         return await backend

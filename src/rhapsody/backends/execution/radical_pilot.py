@@ -12,11 +12,12 @@ import logging
 import os
 import threading
 from collections.abc import Generator
+from typing import Any
 from typing import Callable
 
 import typeguard
 
-from ..base import BaseExecutionBackend
+from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
 
@@ -34,13 +35,13 @@ except ImportError:
 def _get_logger() -> logging.Logger:
     """Get logger for radical_pilot backend module.
 
-    This function provides lazy logger evaluation, ensuring the logger
-    is created after the user has configured logging, not at module import time.
+    This function provides lazy logger evaluation, ensuring the logger is created after the user has
+    configured logging, not at module import time.
     """
     return logging.getLogger(__name__)
 
 
-def service_ready_callback(future: asyncio.Future, task, state) -> None:
+def service_ready_callback(future: asyncio.Future, task: Any, state: str) -> None:
     """Callback for handling service task readiness.
 
     Runs wait_info() in a daemon thread to avoid blocking execution flow.
@@ -61,7 +62,7 @@ def service_ready_callback(future: asyncio.Future, task, state) -> None:
     threading.Thread(target=wait_and_set, daemon=True).start()
 
 
-class RadicalExecutionBackend(BaseExecutionBackend):
+class RadicalExecutionBackend(BaseBackend):
     """Radical Pilot-based execution backend for large-scale HPC task execution.
 
     The RadicalExecutionBackend manages computing resources and task execution
@@ -127,7 +128,12 @@ class RadicalExecutionBackend(BaseExecutionBackend):
     """
 
     @typeguard.typechecked
-    def __init__(self, resources: dict = None, raptor_config: dict | None = None) -> None:
+    def __init__(
+        self,
+        resources: dict | None = None,
+        raptor_config: dict | None = None,
+        name: str | None = "radical_pilot",
+    ) -> None:
         """Initialize the RadicalExecutionBackend with resources.
 
         Creates a new Radical Pilot session, initializes task and pilot managers,
@@ -157,17 +163,22 @@ class RadicalExecutionBackend(BaseExecutionBackend):
             - Session UID is generated using radical.utils for uniqueness
         """
 
+        if resources is None:
+            resources = {}
         if rp is None or ru is None:
             raise ImportError(
                 "Radical.Pilot and Radical.utils are required for RadicalExecutionBackend."
             )
 
-        super().__init__()
+        super().__init__(name=name)
 
         self.logger = _get_logger()
         self.resources = resources or {
             "resource": "local.localhost",
-            "runtime": 30, "exit_on_error": True, "cores": os.cpu_count()}
+            "runtime": 30,
+            "exit_on_error": True,
+            "cores": os.cpu_count(),
+        }
         self.raptor_config = raptor_config or {}
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
@@ -263,7 +274,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
             self.pilot_manager.register_callback(self.handle_pilot_state_callback)
 
             self.task_manager.add_pilots(self.resource_pilot)
-            self._callback_func: Callable[[asyncio.Future], None] = lambda f: None
+            self._callback_func: Callable = lambda t, s: None
 
             if self.raptor_config:
                 self.raptor_mode = True
@@ -438,21 +449,47 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         """
         self._callback_func = func
 
-        def backend_callback(task, state) -> None:
+        def backend_callback(rp_task, state) -> None:
             service_callback = None
 
-            if task.mode == rp.TASK_SERVICE and state == rp.AGENT_EXECUTING:
-                service_callback = service_ready_callback
+            try:
+                if rp_task.mode == rp.TASK_SERVICE and state == rp.AGENT_EXECUTING:
+                    service_callback = service_ready_callback
 
-            elif task.mode == rp.TASK_EXECUTABLE and state == rp.FAILED:
-                task = task.as_dict()
-                stderr = task.get("stderr")
-                exception = task.get("exception")
-                if stderr or exception:
-                    task["stderr"] = ", ".join(filter(None, [stderr, exception]))
-                    task["exception"] = ""
+                # Get the original Task object
+                original_task = self.tasks.get(rp_task.uid)
+                if not original_task:
+                    self.logger.warning(f"No original task found for UID {rp_task.uid}")
+                    return
 
-            func(task, state, service_callback=service_callback)
+                # Convert RP task to dict and extract results
+                rp_task_dict = rp_task.as_dict()
+
+                # Update original Task object with results from RP task
+                if "stdout" in rp_task_dict:
+                    original_task["stdout"] = rp_task_dict["stdout"]
+                if "stderr" in rp_task_dict:
+                    stderr = rp_task_dict.get("stderr")
+                    exception = rp_task_dict.get("exception")
+                    if rp_task.mode == rp.TASK_EXECUTABLE and state == rp.FAILED:
+                        if stderr or exception:
+                            original_task["stderr"] = ", ".join(filter(None, [stderr, exception]))
+                    else:
+                        original_task["stderr"] = stderr
+                if "exit_code" in rp_task_dict:
+                    original_task["exit_code"] = rp_task_dict["exit_code"]
+                if "return_value" in rp_task_dict:
+                    original_task["return_value"] = rp_task_dict["return_value"]
+                if "exception" in rp_task_dict and state == rp.FAILED:
+                    original_task["exception"] = rp_task_dict["exception"]
+
+                # Call the registered callback with the original Task object
+                func(original_task, state, service_callback=service_callback)
+            except Exception:
+                self.logger.exception(
+                    f"Backend callback failed for task {getattr(rp_task, 'uid', None)} "
+                    f"in state {state}"
+                )
 
         self.task_manager.register_callback(backend_callback)
 
@@ -530,7 +567,6 @@ class RadicalExecutionBackend(BaseExecutionBackend):
 
             rp_task.raptor_id = next(self.master_selector)
 
-        self.tasks[uid] = rp_task
         return rp_task
 
     def link_explicit_data_deps(
@@ -630,7 +666,7 @@ class RadicalExecutionBackend(BaseExecutionBackend):
         Args:
             src_task (Dict): Source task dictionary containing 'uid' key.
             dst_task (Dict): Destination task dictionary with
-            'task_backend_specific_kwargs' for pre_exec commands.
+                'task_backend_specific_kwargs' for pre_exec commands.
 
         Note:
             - Links all files from source sandbox except the task UID file itself
@@ -696,8 +732,11 @@ class RadicalExecutionBackend(BaseExecutionBackend):
 
         _tasks = []
         for task in tasks:
+            # Store the original Task object (not the RP task)
+            self.tasks[task["uid"]] = task
+
             task_to_submit = self.build_task(
-                task["uid"], task, task["task_backend_specific_kwargs"]
+                task["uid"], task, task.get("task_backend_specific_kwargs", {})
             )
             if not task_to_submit:
                 continue

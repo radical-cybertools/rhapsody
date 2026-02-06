@@ -10,7 +10,7 @@ import importlib
 import re
 from typing import Any
 
-from .base import BaseExecutionBackend
+from .base import BaseBackend
 
 
 class BackendRegistry:
@@ -19,7 +19,7 @@ class BackendRegistry:
     Backends are discovered dynamically by inspecting the rhapsody.backends.execution module.
     """
 
-    _backends: dict[str, type[BaseExecutionBackend]] = {}
+    _backends: dict[str, type[BaseBackend]] = {}
     _initialized: bool = False
 
     @classmethod
@@ -27,8 +27,8 @@ class BackendRegistry:
         """Discover available backends from the execution module.
 
         Dynamically discovers backends by inspecting the __all__ exports from
-        rhapsody.backends.execution module. Automatically derives backend names
-        from class names by converting CamelCase to snake_case.
+        rhapsody.backends.execution module. Automatically derives backend names from class names by
+        converting CamelCase to snake_case.
         """
         if cls._initialized:
             return
@@ -108,7 +108,7 @@ class BackendRegistry:
         return name
 
     @classmethod
-    def get_backend_class(cls, backend_name: str) -> type[BaseExecutionBackend]:
+    def get_backend_class(cls, backend_name: str) -> type[BaseBackend]:
         """Get backend class by name.
 
         Args:
@@ -139,7 +139,9 @@ class BackendRegistry:
                 cls._backends[backend_name] = backend_class
                 return backend_class
             except (ImportError, AttributeError, ValueError) as e:
-                raise ImportError(f"Failed to import backend '{backend_name}' from '{backend_value}': {e}") from e
+                raise ImportError(
+                    f"Failed to import backend '{backend_name}' from '{backend_value}': {e}"
+                ) from e
 
         return backend_value
 
@@ -150,7 +152,7 @@ class BackendRegistry:
         return list(cls._backends.keys())
 
     @classmethod
-    def register_backend(cls, name: str, backend_class: type[BaseExecutionBackend] | str) -> None:
+    def register_backend(cls, name: str, backend_class: type[BaseBackend] | str) -> None:
         """Register a new backend.
 
         Args:
@@ -160,7 +162,7 @@ class BackendRegistry:
         cls._backends[name] = backend_class
 
 
-def get_backend(backend_name: str, *args: Any, **kwargs: Any) -> BaseExecutionBackend:
+def get_backend(backend_name: str, *args: Any, **kwargs: Any) -> BaseBackend:
     """Factory function to create backend instances.
 
     Args:

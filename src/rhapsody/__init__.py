@@ -8,6 +8,16 @@ and distributed computing systems.
 
 from __future__ import annotations
 
+from .api import AITask
+from .api import BackendError
+from .api import BaseTask
+from .api import ComputeTask
+from .api import ResourceError
+from .api import RhapsodyError
+from .api import Session
+from .api import SessionError
+from .api import TaskExecutionError
+from .api import TaskValidationError
 from .backends import BackendRegistry
 from .backends import discover_backends
 from .backends import get_backend
@@ -24,7 +34,20 @@ __all__ = [
     "discover_backends",
     "BackendRegistry",
     "enable_logging",
+    # Resource Manager
     "ResourceManager",
     "RMConfig",
     "RMInfo",
+    # Task API
+    "BaseTask",
+    "ComputeTask",
+    "AITask",
+    "Session",
+    # Errors
+    "RhapsodyError",
+    "BackendError",
+    "TaskValidationError",
+    "TaskExecutionError",
+    "SessionError",
+    "ResourceError",
 ]

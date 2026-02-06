@@ -21,13 +21,14 @@ Note:
 
 import logging
 import sys
+from typing import Any
 from typing import Optional
 
 
 def enable_logging(
     level: int = logging.INFO,
-    format_string: Optional[str] = '%(asctime)s | %(levelname)-8s | [%(name)s] | %(message)s',
-    stream=None,
+    format_string: Optional[str] = "%(asctime)s | %(levelname)-8s | [%(name)s] | %(message)s",
+    stream: Optional[Any] = None,
     force: bool = True,
 ) -> None:
     """Enable logging for RHAPSODY.
@@ -44,10 +45,12 @@ def enable_logging(
                have already configured logging.
 
     Example:
-        >>> import logging
-        >>> import rhapsody
-        >>> rhapsody.enable_logging(logging.DEBUG)
-        >>> backend = await rhapsody.get_backend("dragon_v3")
+        ::
+
+            import logging
+            import rhapsody
+            rhapsody.enable_logging(logging.DEBUG)
+            backend = await rhapsody.get_backend("dragon_v3")
     """
     if format_string is None:
         format_string = "%(asctime)s | %(levelname)-8s | [%(name)s] | %(message)s"

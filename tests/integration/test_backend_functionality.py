@@ -101,15 +101,13 @@ class TestBackendFunctionality:
         try:
             # Create a long-running task
             tasks = [
-                {
-                    "uid": "long_task",
-                    "executable": "/bin/sleep",
-                    "arguments": ["30"],  # 30 second sleep
-                    "state": TasksMainStates.RUNNING,
-                }
+                rhapsody.ComputeTask(
+                    executable="/bin/sleep",
+                    arguments=["30"],  # 30 second sleep
+                )
             ]
 
-            # Submit task
+            # Submit task (Task objects accepted directly)
             await backend.submit_tasks(tasks)
 
             # For most backends, cancellation may not be implemented
@@ -151,19 +149,17 @@ class TestBackendFunctionality:
 
         try:
             # Test each available backend
-            for i, backend_name in enumerate(available_names):
+            for _i, backend_name in enumerate(available_names):
                 try:
                     backend = rhapsody.get_backend(backend_name)
                     backends.append(backend)
 
                     # Submit a simple task to verify backend works
                     tasks = [
-                        {
-                            "uid": f"resource_test_{backend_name}_{i}",
-                            "executable": "/bin/echo",
-                            "arguments": [f"Testing backend {backend_name}"],
-                            "state": TasksMainStates.RUNNING,
-                        }
+                        rhapsody.ComputeTask(
+                            executable="/bin/echo",
+                            arguments=[f"Testing backend {backend_name}"],
+                        )
                     ]
 
                     await backend.submit_tasks(tasks)
@@ -192,14 +188,11 @@ class TestBackendFunctionality:
         backend = await setup_test_backend()
 
         try:
-            task_uid = "state_test_task"
             tasks = [
-                {
-                    "uid": task_uid,
-                    "executable": "/bin/echo",
-                    "arguments": ["State transition test"],
-                    "state": TasksMainStates.RUNNING,
-                }
+                rhapsody.ComputeTask(
+                    executable="/bin/echo",
+                    arguments=["State transition test"],
+                )
             ]
 
             # Submit tasks
@@ -219,18 +212,14 @@ class TestBackendFunctionality:
         try:
             # Mix of good and bad tasks
             tasks = [
-                {
-                    "uid": "good_task",
-                    "executable": "/bin/echo",
-                    "arguments": ["This should work"],
-                    "state": TasksMainStates.RUNNING,
-                },
-                {
-                    "uid": "bad_task",
-                    "executable": "/nonexistent/command",
-                    "arguments": ["This will fail"],
-                    "state": TasksMainStates.RUNNING,
-                },
+                rhapsody.ComputeTask(
+                    executable="/bin/echo",
+                    arguments=["This should work"],
+                ),
+                rhapsody.ComputeTask(
+                    executable="/nonexistent/command",
+                    arguments=["This will fail"],
+                ),
             ]
 
             # Submit tasks
@@ -255,23 +244,19 @@ class TestBackendFunctionality:
         try:
             # Create batch of tasks
             batch_size = 10
-            tasks = []
-
-            for i in range(batch_size):
-                tasks.append(
-                    {
-                        "uid": f"batch_task_{i}",
-                        "executable": "/bin/echo",
-                        "arguments": [f"Batch task {i}"],
-                        "state": TasksMainStates.RUNNING,
-                    }
+            tasks = [
+                rhapsody.ComputeTask(
+                    executable="/bin/echo",
+                    arguments=[f"Batch task {i}"],
                 )
+                for i in range(batch_size)
+            ]
 
             # Submit batch
             await backend.submit_tasks(tasks)
 
             # Wait for all to complete
-            task_uids = [task["uid"] for task in tasks]
+            task_uids = [task.uid for task in tasks]
             # Backend submission completed
             assert True
 
@@ -319,12 +304,10 @@ class TestBackendFunctionality:
             # Submit tasks to backend
             async def submit_to_backend(backend, backend_idx):
                 tasks = [
-                    {
-                        "uid": f"async_test_{backend_idx}",
-                        "executable": "/bin/echo",
-                        "arguments": [f"Async test {backend_idx}"],
-                        "state": TasksMainStates.RUNNING,
-                    }
+                    rhapsody.ComputeTask(
+                        executable="/bin/echo",
+                        arguments=[f"Async test {backend_idx}"],
+                    )
                 ]
 
                 await backend.submit_tasks(tasks)
@@ -388,11 +371,9 @@ class TestBackendCompatibility:
     async def test_backend_switching(self):
         """Test switching between different backends in same workflow."""
         # Create a simple task that should work on any backend
-        test_task = {
-            "uid": "switch_test",
+        test_task_template = {
             "executable": "/bin/echo",
             "arguments": ["Backend switching test"],
-            "state": TasksMainStates.RUNNING,
         }
 
         available_names = get_available_backends_for_mode()
@@ -402,6 +383,9 @@ class TestBackendCompatibility:
             try:
                 # Create backend
                 backend = await rhapsody.get_backend(name)
+
+                # Create a fresh task for this backend
+                test_task = rhapsody.ComputeTask(**test_task_template)
 
                 # Submit task
                 await backend.submit_tasks([test_task])
@@ -440,12 +424,10 @@ async def main():
         backend_name = available_names[0]
         backend = rhapsody.get_backend(backend_name)
         tasks = [
-            {
-                "uid": "test",
-                "executable": "/bin/echo",
-                "arguments": ["test"],
-                "state": TasksMainStates.RUNNING,
-            }
+            rhapsody.ComputeTask(
+                executable="/bin/echo",
+                arguments=["test"],
+            )
         ]
         await backend.submit_tasks(tasks)
         # Backend submission completed

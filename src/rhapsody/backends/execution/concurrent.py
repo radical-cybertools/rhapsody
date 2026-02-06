@@ -11,8 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from typing import Callable
 
-from ..base import BaseExecutionBackend
-from ..base import Session
+from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
 
@@ -25,17 +24,17 @@ except ImportError:
 def _get_logger() -> logging.Logger:
     """Get logger for concurrent backend module.
 
-    This function provides lazy logger evaluation, ensuring the logger
-    is created after the user has configured logging, not at module import time.
+    This function provides lazy logger evaluation, ensuring the logger is created after the user has
+    configured logging, not at module import time.
     """
     return logging.getLogger(__name__)
 
 
-class ConcurrentExecutionBackend(BaseExecutionBackend):
+class ConcurrentExecutionBackend(BaseBackend):
     """Simple async-only concurrent execution backend."""
 
-    def __init__(self, executor: Executor = None, resources: dict | None = None):
-        super().__init__()
+    def __init__(self, executor: Executor = None, name: str = "concurrent", resources: dict | None = None):
+        super().__init__(name=name)
 
         self.logger = _get_logger()
         self._resources = resources or {}
@@ -60,8 +59,7 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
 
         self.executor = executor
         self.tasks: dict[str, asyncio.Task] = {}
-        self.session = Session()
-        self._callback_func: Callable = self._internal_callback
+        self._callback_func: Callable = lambda t, s: None
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
 
@@ -204,6 +202,7 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
         """Handle task execution with callback."""
         try:
             result_task, state = await self._execute_task(task)
+            # Set state on the task object itself before callback
             self._callback_func(result_task, state)
         except Exception as e:
             self.logger.exception(f"Error handling task {task.get('uid')}: {e}")
@@ -241,6 +240,7 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
             task = self.tasks[uid]
             future = task["future"]
             if future and future.cancel():
+                # Set state on the task object itself before callback
                 self._callback_func(task, "CANCELED")
                 return True
         return False
@@ -296,7 +296,7 @@ class ConcurrentExecutionBackend(BaseExecutionBackend):
         await self.shutdown()
 
     @classmethod
-    async def create(cls, executor: Executor):
+    async def create(cls, executor: Executor) -> "ConcurrentExecutionBackend":
         """Alternative factory method for creating initialized backend.
 
         Args:

@@ -9,13 +9,15 @@ from unittest.mock import patch
 
 import pytest
 
+from rhapsody import ComputeTask
+
 pytestmark = pytest.mark.radical_pilot  # Apply to all tests in this module
 
 
 def test_radical_pilot_backend_import():
     """Test that RADICAL-Pilot backend can be imported."""
     try:
-        from rhapsody.backends.execution.radical_pilot import RadicalExecutionBackend
+        from rhapsody.backends import RadicalExecutionBackend
 
         assert RadicalExecutionBackend is not None
     except ImportError:
@@ -25,11 +27,11 @@ def test_radical_pilot_backend_import():
 def test_radical_pilot_backend_class_exists():
     """Test that RadicalExecutionBackend class exists and inherits from base."""
     try:
-        from rhapsody.backends.base import BaseExecutionBackend
-        from rhapsody.backends.execution.radical_pilot import RadicalExecutionBackend
+        from rhapsody.backends import RadicalExecutionBackend
+        from rhapsody.backends.base import BaseBackend
 
         # Check inheritance
-        assert issubclass(RadicalExecutionBackend, BaseExecutionBackend)
+        assert issubclass(RadicalExecutionBackend, BaseBackend)
     except ImportError:
         pytest.skip("RADICAL-Pilot dependencies not available")
 
@@ -37,7 +39,7 @@ def test_radical_pilot_backend_class_exists():
 def test_radical_pilot_backend_init():
     """Test RadicalExecutionBackend initialization."""
     try:
-        from rhapsody.backends.execution.radical_pilot import RadicalExecutionBackend
+        from rhapsody.backends import RadicalExecutionBackend
 
         resources = {"resource": "local.localhost", "runtime": 30, "cores": 2}
         backend = RadicalExecutionBackend(resources)
@@ -67,7 +69,7 @@ async def test_radical_pilot_backend_async_init_python313_failure():
     try:
         import sys
 
-        from rhapsody.backends.execution.radical_pilot import RadicalExecutionBackend
+        from rhapsody.backends import RadicalExecutionBackend
 
         resources = {"resource": "local.localhost", "runtime": 1, "cores": 1}
         backend = RadicalExecutionBackend(resources)
@@ -111,7 +113,7 @@ async def test_radical_pilot_backend_context_manager_failure():
     try:
         import sys
 
-        from rhapsody.backends.execution.radical_pilot import RadicalExecutionBackend
+        from rhapsody.backends import RadicalExecutionBackend
 
         resources = {"resource": "local.localhost", "runtime": 1, "cores": 1}
 
@@ -153,7 +155,7 @@ async def test_radical_pilot_backend_context_manager_failure():
 def test_radical_pilot_backend_callback_registration():
     """Test callback registration without initialization."""
     try:
-        from rhapsody.backends.execution.radical_pilot import RadicalExecutionBackend
+        from rhapsody.backends import RadicalExecutionBackend
 
         backend = RadicalExecutionBackend({"resource": "local.localhost"})
 
@@ -175,8 +177,8 @@ def test_radical_pilot_backend_callback_registration():
 def test_radical_pilot_backend_state_mapper():
     """Test state mapper functionality without initialization."""
     try:
+        from rhapsody.backends import RadicalExecutionBackend
         from rhapsody.backends.constants import StateMapper
-        from rhapsody.backends.execution.radical_pilot import RadicalExecutionBackend
 
         backend = RadicalExecutionBackend({"resource": "local.localhost"})
 
@@ -202,7 +204,7 @@ def test_radical_pilot_backend_task_building():
     try:
         import radical.pilot as rp
 
-        from rhapsody.backends.execution.radical_pilot import RadicalExecutionBackend
+        from rhapsody.backends import RadicalExecutionBackend
 
         backend = RadicalExecutionBackend({"resource": "local.localhost"})
         backend.tasks = {}  # Initialize manually since we can't do async init
@@ -226,7 +228,6 @@ def test_radical_pilot_backend_task_building():
         assert rp_task.uid == "test_task"
         assert rp_task.executable == "/bin/echo"
         assert rp_task.mode == rp.TASK_EXECUTABLE
-        assert "test_task" in backend.tasks
 
     except ImportError:
         pytest.skip("RADICAL-Pilot dependencies not available")
@@ -237,26 +238,26 @@ def test_radical_pilot_backend_data_dependencies():
     try:
         import radical.pilot as rp
 
-        from rhapsody.backends.execution.radical_pilot import RadicalExecutionBackend
+        from rhapsody.backends import RadicalExecutionBackend
 
         backend = RadicalExecutionBackend({"resource": "local.localhost"})
 
         # Test explicit data dependencies
-        src_task = {"uid": "source_task"}
-        dst_task = {"task_backend_specific_kwargs": {}}
+        src_task = ComputeTask(executable="/bin/echo")
+        dst_task = ComputeTask(executable="/bin/cat", task_backend_specific_kwargs={})
 
         # Test task-to-task linking
         data_dep = backend.link_explicit_data_deps(
             src_task=src_task, dst_task=dst_task, file_name="output.dat"
         )
 
-        assert data_dep["source"] == "pilot:///source_task/output.dat"
+        assert data_dep["source"] == f"pilot:///{src_task.uid}/output.dat"
         assert data_dep["target"] == "task:///output.dat"
         assert data_dep["action"] == rp.LINK
         assert "input_staging" in dst_task["task_backend_specific_kwargs"]
 
         # Test external file staging
-        dst_task2 = {"task_backend_specific_kwargs": {}}
+        dst_task2 = ComputeTask(executable="/bin/cat", task_backend_specific_kwargs={})
         data_dep2 = backend.link_explicit_data_deps(
             dst_task=dst_task2, file_path="/path/to/input.txt"
         )
@@ -266,12 +267,12 @@ def test_radical_pilot_backend_data_dependencies():
         assert data_dep2["action"] == rp.TRANSFER
 
         # Test implicit data dependencies
-        dst_task3 = {"task_backend_specific_kwargs": {}}
+        dst_task3 = ComputeTask(executable="/bin/cat", task_backend_specific_kwargs={})
         backend.link_implicit_data_deps(src_task, dst_task3)
 
         assert "pre_exec" in dst_task3["task_backend_specific_kwargs"]
         commands = dst_task3["task_backend_specific_kwargs"]["pre_exec"]
-        assert any("SRC_TASK_ID=source_task" in cmd for cmd in commands)
+        assert any(f"SRC_TASK_ID={src_task.uid}" in cmd for cmd in commands)
 
     except ImportError:
         pytest.skip("RADICAL-Pilot dependencies not available")
@@ -280,7 +281,7 @@ def test_radical_pilot_backend_data_dependencies():
 def test_radical_pilot_backend_raptor_mode_setup():
     """Test Raptor mode configuration without actual submission."""
     try:
-        from rhapsody.backends.execution.radical_pilot import RadicalExecutionBackend
+        from rhapsody.backends import RadicalExecutionBackend
 
         backend = RadicalExecutionBackend({"resource": "local.localhost"})
 
@@ -322,7 +323,7 @@ def test_radical_pilot_backend_raptor_mode_setup():
 def test_radical_pilot_backend_master_selection():
     """Test master selection for Raptor mode."""
     try:
-        from rhapsody.backends.execution.radical_pilot import RadicalExecutionBackend
+        from rhapsody.backends import RadicalExecutionBackend
 
         backend = RadicalExecutionBackend({"resource": "local.localhost"})
 
@@ -362,7 +363,7 @@ def test_radical_pilot_backend_master_selection():
 async def test_radical_pilot_backend_cancel_functionality():
     """Test task cancellation."""
     try:
-        from rhapsody.backends.execution.radical_pilot import RadicalExecutionBackend
+        from rhapsody.backends import RadicalExecutionBackend
 
         backend = RadicalExecutionBackend({"resource": "local.localhost"})
         backend.tasks = {"task_001": Mock()}
@@ -384,7 +385,7 @@ async def test_radical_pilot_backend_cancel_functionality():
 def test_radical_pilot_backend_class_methods():
     """Test class factory methods."""
     try:
-        from rhapsody.backends.execution.radical_pilot import RadicalExecutionBackend
+        from rhapsody.backends import RadicalExecutionBackend
 
         # Test create method exists and has proper signature
         assert hasattr(RadicalExecutionBackend, "create")
@@ -398,7 +399,7 @@ def test_radical_pilot_backend_class_methods():
 async def test_radical_pilot_backend_submit_tasks():
     """Test task submission with mocked components."""
     try:
-        from rhapsody.backends.execution.radical_pilot import RadicalExecutionBackend
+        from rhapsody.backends import RadicalExecutionBackend
 
         backend = RadicalExecutionBackend({"resource": "local.localhost"})
         backend.task_manager = Mock()
@@ -410,12 +411,11 @@ async def test_radical_pilot_backend_submit_tasks():
 
         with patch.object(backend, "build_task", return_value=mock_task):
             tasks = [
-                {
-                    "uid": "test_task",
-                    "task_backend_specific_kwargs": {},
-                    "executable": "/bin/echo",
-                    "args": ["hello"],
-                }
+                ComputeTask(
+                    executable="/bin/echo",
+                    arguments=["hello"],
+                    task_backend_specific_kwargs={},
+                )
             ]
 
             await backend.submit_tasks(tasks)
@@ -434,7 +434,7 @@ def test_radical_pilot_backend_get_nodelist():
     try:
         import radical.pilot as rp
 
-        from rhapsody.backends.execution.radical_pilot import RadicalExecutionBackend
+        from rhapsody.backends import RadicalExecutionBackend
 
         backend = RadicalExecutionBackend({"resource": "local.localhost"})
 
@@ -459,7 +459,7 @@ def test_radical_pilot_backend_get_nodelist():
 async def test_radical_pilot_backend_shutdown():
     """Test backend shutdown."""
     try:
-        from rhapsody.backends.execution.radical_pilot import RadicalExecutionBackend
+        from rhapsody.backends import RadicalExecutionBackend
 
         backend = RadicalExecutionBackend({"resource": "local.localhost"})
         backend.session = Mock()

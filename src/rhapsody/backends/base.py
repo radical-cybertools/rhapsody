@@ -6,32 +6,43 @@ implement.
 
 from __future__ import annotations
 
-import os
 from abc import ABC
 from abc import abstractmethod
+from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
 
+if TYPE_CHECKING:
+    pass
 
-class BaseExecutionBackend(ABC):
-    """Abstract base class for execution backends that manage task execution and state.
 
-    This class defines the interface for execution backends that handle task submission, state
-    management, and dependency linking in a distributed or parallel execution environment.
+class BaseBackend(ABC):
+    """Abstract base class for backends that manage task execution and state.
+
+    This class defines the interface for backends that handle task submission, state management, and
+    lifecycle in a distributed or parallel execution environment.
     """
 
-    def __init__(self):
-        """Initialize the backend with internal result tracking."""
-        self._internal_results = []
+    def __init__(self, name: str | None = None):
+        """Initialize the backend."""
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        """Name of the backend."""
+        if self._name:
+            return self._name
+        return self.__class__.__name__
 
     @abstractmethod
     async def submit_tasks(self, tasks: list[dict]) -> None:
         """Submit a list of tasks for execution.
 
         Args:
-            tasks: A list of dictionaries containing task definitions and metadata.
-                Each task dictionary should contain the necessary information for
-                task execution.
+            tasks: A list of task dictionaries containing task definitions.
+                Task objects (ComputeTask, AITask) inherit from dict and can be
+                passed directly. Each task should contain the necessary information
+                for task execution.
         """
         pass
 
@@ -75,13 +86,7 @@ class BaseExecutionBackend(ABC):
             func: A callable that will be invoked when task states change.
                 The function should accept task and state parameters.
         """
-        internal = self._internal_callback
-
-        def chained_callback(task, state):
-            internal(task, state)  # Always track for wait_tasks()
-            func(task, state)      # User's callback
-
-        self._callback_func = chained_callback
+        self._callback_func = func
 
     @abstractmethod
     def get_task_states_map(self) -> Any:
@@ -102,8 +107,7 @@ class BaseExecutionBackend(ABC):
         """
         pass
 
-    @abstractmethod
-    def link_implicit_data_deps(self, src_task: dict[str, Any], dst_task: dict[str, Any]) -> None:
+    def link_implicit_data_deps(self, src_task: dict[str, Any], dst_task: dict[str, Any]) -> None:  # noqa: B027
         """Link implicit data dependencies between two tasks.
 
         Creates a dependency relationship where the destination task depends on
@@ -116,8 +120,7 @@ class BaseExecutionBackend(ABC):
         """
         pass
 
-    @abstractmethod
-    def link_explicit_data_deps(
+    def link_explicit_data_deps(  # noqa: B027
         self,
         src_task: dict[str, Any] | None = None,
         dst_task: dict[str, Any] | None = None,
@@ -148,132 +151,3 @@ class BaseExecutionBackend(ABC):
             NotImplementedError: If the backend doesn't support cancellation
         """
         raise NotImplementedError("Not implemented in the base backend")
-
-    def _internal_callback(self, task: dict, state: str) -> None:
-        """Internal callback that tracks all task state changes."""
-        self._internal_results.append((task, state))
-
-    async def wait_tasks(
-        self,
-        tasks: list[dict[str, Any]],
-        timeout: float | None = None,
-        sleep_interval: float = 0.1,
-    ) -> dict[str, dict[str, Any]]:
-        """Wait for tasks to complete by monitoring internal callback results.
-
-        This method automatically tracks task completion using internal callbacks.
-        No need to manually register callbacks or track results.
-
-        Args:
-            tasks: List of task dictionaries that were submitted.
-                   Each task dict must contain a 'uid' field.
-            timeout: Optional timeout in seconds. If None, waits indefinitely.
-                    Raises asyncio.TimeoutError if timeout is reached.
-            sleep_interval: Seconds to sleep when no progress is detected (default: 0.1).
-
-        Returns:
-            Dictionary mapping task UIDs to their complete task objects (dicts).
-            Each task dict contains 'uid', 'state', and optionally 'stdout',
-            'stderr', 'return_value', 'exception', etc.
-
-        Raises:
-            asyncio.TimeoutError: If timeout is specified and exceeded.
-            ValueError: If tasks list is empty or tasks missing 'uid' field.
-
-        Example:
-            # Simple usage - no manual callback setup needed!
-            tasks = [
-                {"uid": "task_1", "executable": "echo hello"},
-                {"uid": "task_2", "executable": "echo world"}
-            ]
-
-            await backend.submit_tasks(tasks)
-            completed = await backend.wait_tasks(tasks)
-
-            # Access results
-            for uid, task in completed.items():
-                print(f"{uid}: {task['state']}")
-                if task['state'] == 'DONE':
-                    print(f"  Output: {task.get('stdout', '')}")
-        """
-        import asyncio
-
-        # Validation
-        if not tasks:
-            raise ValueError("tasks list cannot be empty")
-
-        # Get terminal states once (cached after first call)
-        if not hasattr(self, "_terminal_states"):
-            state_mapper = self.get_task_states_map()
-            self._terminal_states = set(state_mapper.terminal_states)
-            # Also support string 'CANCELLED' variant for backward compatibility
-            self._terminal_states.add("CANCELLED")
-
-        num_tasks = len(tasks)
-
-        # Extract task UIDs for tracking
-        task_uids = set()
-        for task in tasks:
-            if "uid" not in task:
-                raise ValueError(f"Task missing 'uid' field: {task}")
-            task_uids.add(task["uid"])
-
-        # Track finished tasks: uid -> task_dict (with state added)
-        finished_tasks = {}
-
-        # Track processed result indices to avoid re-processing
-        processed_index = 0
-
-        # Timeout handling
-        start_time = asyncio.get_event_loop().time() if timeout else None
-
-        while len(finished_tasks) < num_tasks:
-            # Check timeout
-            if timeout is not None:
-                elapsed = asyncio.get_event_loop().time() - start_time
-                if elapsed >= timeout:
-                    raise asyncio.TimeoutError(
-                        f"Timeout after {timeout}s: {len(finished_tasks)}/{num_tasks} tasks completed"
-                    )
-
-            # Process new results only (from processed_index onwards)
-            made_progress = False
-            while processed_index < len(self._internal_results):
-                task, state = self._internal_results[processed_index]
-                processed_index += 1
-
-                # Extract task UID
-                task_uid = task.get("uid") if isinstance(task, dict) else str(task)
-
-                # Only process terminal states for tasks we're waiting for
-                if (
-                    state in self._terminal_states
-                    and task_uid in task_uids
-                    and task_uid not in finished_tasks
-                ):
-                    # Store complete task object with state
-                    task_with_state = task.copy() if isinstance(task, dict) else {"uid": task_uid}
-                    task_with_state["state"] = state
-                    finished_tasks[task_uid] = task_with_state
-                    made_progress = True
-
-            # Sleep only if no progress was made
-            if not made_progress and len(finished_tasks) < num_tasks:
-                await asyncio.sleep(sleep_interval)
-
-        return finished_tasks
-
-
-class Session:
-    """Manages execution session state and working directory.
-
-    This class maintains session-specific information including the current working directory path
-    for task execution.
-    """
-
-    def __init__(self):
-        """Initialize a new session with the current working directory.
-
-        Sets the session path to the current working directory at the time of initialization.
-        """
-        self.path = os.getcwd()

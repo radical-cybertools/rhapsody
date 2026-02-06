@@ -8,11 +8,13 @@ import asyncio
 
 import pytest
 
+from rhapsody import ComputeTask
+
 
 def test_dask_backend_import():
     """Test that DaskExecutionBackend can be imported."""
     try:
-        from rhapsody.backends.execution.dask_parallel import DaskExecutionBackend
+        from rhapsody.backends import DaskExecutionBackend
 
         assert DaskExecutionBackend is not None
     except ImportError:
@@ -22,11 +24,11 @@ def test_dask_backend_import():
 def test_dask_backend_class_exists():
     """Test that DaskExecutionBackend class exists and inherits from base."""
     try:
-        from rhapsody.backends.base import BaseExecutionBackend
-        from rhapsody.backends.execution.dask_parallel import DaskExecutionBackend
+        from rhapsody.backends import DaskExecutionBackend
+        from rhapsody.backends.base import BaseBackend
 
         # Check inheritance
-        assert issubclass(DaskExecutionBackend, BaseExecutionBackend)
+        assert issubclass(DaskExecutionBackend, BaseBackend)
     except ImportError:
         pytest.skip("Dask dependencies not available")
 
@@ -34,7 +36,7 @@ def test_dask_backend_class_exists():
 def test_dask_backend_init():
     """Test DaskExecutionBackend initialization."""
     try:
-        from rhapsody.backends.execution.dask_parallel import DaskExecutionBackend
+        from rhapsody.backends import DaskExecutionBackend
 
         # Test basic initialization
         backend = DaskExecutionBackend()
@@ -61,7 +63,7 @@ def test_dask_backend_import_error():
         pytest.skip("Dask is available, cannot test ImportError scenario")
     except ImportError:
         # Dask is not available, so we should get ImportError
-        from rhapsody.backends.execution.dask_parallel import DaskExecutionBackend
+        from rhapsody.backends import DaskExecutionBackend
 
         with pytest.raises(ImportError, match="Dask is required for DaskExecutionBackend"):
             DaskExecutionBackend()
@@ -71,7 +73,7 @@ def test_dask_backend_import_error():
 async def test_dask_backend_async_init():
     """Test DaskExecutionBackend async initialization."""
     try:
-        from rhapsody.backends.execution.dask_parallel import DaskExecutionBackend
+        from rhapsody.backends import DaskExecutionBackend
 
         backend = DaskExecutionBackend()
 
@@ -103,7 +105,7 @@ async def test_dask_backend_async_init():
 async def test_dask_backend_context_manager():
     """Test DaskExecutionBackend as async context manager."""
     try:
-        from rhapsody.backends.execution.dask_parallel import DaskExecutionBackend
+        from rhapsody.backends import DaskExecutionBackend
 
         try:
             async with DaskExecutionBackend() as backend:
@@ -123,7 +125,7 @@ async def test_dask_backend_context_manager():
 def test_dask_backend_callback_registration():
     """Test callback registration functionality."""
     try:
-        from rhapsody.backends.execution.dask_parallel import DaskExecutionBackend
+        from rhapsody.backends import DaskExecutionBackend
 
         backend = DaskExecutionBackend()
 
@@ -141,7 +143,7 @@ def test_dask_backend_callback_registration():
 def test_dask_backend_state_mapper():
     """Test state mapper functionality."""
     try:
-        from rhapsody.backends.execution.dask_parallel import DaskExecutionBackend
+        from rhapsody.backends import DaskExecutionBackend
 
         backend = DaskExecutionBackend()
 
@@ -157,7 +159,7 @@ def test_dask_backend_state_mapper():
 async def test_dask_backend_task_validation():
     """Test task validation and error handling."""
     try:
-        from rhapsody.backends.execution.dask_parallel import DaskExecutionBackend
+        from rhapsody.backends import DaskExecutionBackend
 
         backend = DaskExecutionBackend()
 
@@ -181,7 +183,7 @@ async def test_dask_backend_task_validation():
 async def test_dask_backend_task_submission_errors():
     """Test task submission error handling."""
     try:
-        from rhapsody.backends.execution.dask_parallel import DaskExecutionBackend
+        from rhapsody.backends import DaskExecutionBackend
 
         # Mock the dask client to avoid needing a real cluster
         backend = DaskExecutionBackend()
@@ -195,38 +197,28 @@ async def test_dask_backend_task_submission_errors():
         backend.register_callback(mock_callback)
 
         # Test executable task (should fail)
-        executable_task = {
-            "uid": "exec_task",
-            "executable": "/bin/echo",
-            "args": ["hello"],
-            "kwargs": {},
-            "task_backend_specific_kwargs": {},
-        }
+        executable_task = ComputeTask(executable="/bin/echo", arguments=["hello"])
 
         await backend.submit_tasks([executable_task])
 
         # Should have received FAILED callback
         assert len(callback_calls) == 1
-        assert callback_calls[0] == ("exec_task", "FAILED")
+        assert callback_calls[0][0].startswith("task.")
+        assert callback_calls[0][1] == "FAILED"
 
         # Test sync function task (should fail)
         def sync_function():
             return "sync"
 
-        sync_task = {
-            "uid": "sync_task",
-            "function": sync_function,
-            "args": [],
-            "kwargs": {},
-            "task_backend_specific_kwargs": {},
-        }
+        sync_task = ComputeTask(function=sync_function, args=[], kwargs={})
 
         callback_calls.clear()
         await backend.submit_tasks([sync_task])
 
         # Should have received FAILED callback
         assert len(callback_calls) == 1
-        assert callback_calls[0] == ("sync_task", "FAILED")
+        assert callback_calls[0][0].startswith("task.")
+        assert callback_calls[0][1] == "FAILED"
 
     except ImportError:
         pytest.skip("Dask dependencies not available")
@@ -236,7 +228,7 @@ async def test_dask_backend_task_submission_errors():
 async def test_dask_backend_cancel_functionality():
     """Test task cancellation functionality."""
     try:
-        from rhapsody.backends.execution.dask_parallel import DaskExecutionBackend
+        from rhapsody.backends import DaskExecutionBackend
 
         backend = DaskExecutionBackend()
         backend._initialized = True  # Bypass initialization
@@ -256,7 +248,7 @@ async def test_dask_backend_cancel_functionality():
 def test_dask_backend_class_methods():
     """Test DaskExecutionBackend class methods."""
     try:
-        from rhapsody.backends.execution.dask_parallel import DaskExecutionBackend
+        from rhapsody.backends import DaskExecutionBackend
 
         # Test that create class method exists
         assert hasattr(DaskExecutionBackend, "create")
@@ -270,7 +262,7 @@ def test_dask_backend_class_methods():
 async def test_dask_backend_shutdown():
     """Test DaskExecutionBackend shutdown functionality."""
     try:
-        from rhapsody.backends.execution.dask_parallel import DaskExecutionBackend
+        from rhapsody.backends import DaskExecutionBackend
 
         backend = DaskExecutionBackend()
 
