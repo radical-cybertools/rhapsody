@@ -47,6 +47,7 @@ dependencies = [
 dask = ["dask[distributed]>=2023.0.0"]
 radical_pilot = ["radical.pilot>=1.30.0"]
 dragon = ["dragonhpc"]  # Requires Python >= 3.10
+mpix = ["pyzmq>=22.0.0"]
 
 # Development and testing
 dev = [
@@ -84,7 +85,7 @@ examples = [
 
 # Complete installation with all backends
 backends = [
-    "rhapsody[dask,radical_pilot,dragon]"
+    "rhapsody[dask,radical_pilot,dragon,mpix]"
 ]
 
 all = [
@@ -100,6 +101,7 @@ Issues = "https://github.com/stride-research/rhapsody/issues"
 [project.entry-points."rhapsody.backends"]
 dask = "rhapsody.backends.execution.dask_parallel:DaskExecutionBackend"
 radical_pilot = "rhapsody.backends.execution.radical_pilot:RadicalExecutionBackend"
+mpix = "rhapsody.backends.execution.mpix:MpixExecutionBackend"
 
 [tool.setuptools.packages.find]
 where = ["src"]

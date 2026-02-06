@@ -41,3 +41,10 @@ try:
     )
 except ImportError:
     pass
+
+try:
+    from .mpix import MpixExecutionBackend  # noqa: F401
+
+    __all__.append("MpixExecutionBackend")
+except ImportError:
+    pass
