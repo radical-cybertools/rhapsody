@@ -307,7 +307,7 @@ class DragonVllmInferenceBackend(BaseBackend):
                 deadline = asyncio.get_event_loop().time() + 300  # 5min timeout
 
                 for i in range(len(all_prompts)):
-                    logger.debug(f"Waiting for response {i+1}/{len(all_prompts)}...")
+                    logger.debug(f"Waiting for response {i + 1}/{len(all_prompts)}...")
                     response_received = False
                     poll_count = 0
 
@@ -316,12 +316,14 @@ class DragonVllmInferenceBackend(BaseBackend):
                         if not response_queue.empty():
                             response = response_queue.get_nowait()
                             all_results.append(response)
-                            logger.debug(f"Received response {i+1}/{len(all_prompts)} after {poll_count} polls")
+                            logger.debug(
+                                f"Received response {i + 1}/{len(all_prompts)} after {poll_count} polls"
+                            )
                             response_received = True
                             break
 
                         if asyncio.get_event_loop().time() > deadline:
-                            error_msg = f"Timeout waiting for response {i+1}/{len(all_prompts)} after 300s ({poll_count} polls)"
+                            error_msg = f"Timeout waiting for response {i + 1}/{len(all_prompts)} after 300s ({poll_count} polls)"
                             logger.error(error_msg)
                             all_results.append(f"ERROR: {error_msg}")
                             break
@@ -329,15 +331,21 @@ class DragonVllmInferenceBackend(BaseBackend):
                         # Log every 10 seconds
                         if poll_count % 10000 == 0:
                             elapsed = asyncio.get_event_loop().time() - (deadline - 300)
-                            logger.debug(f"Still waiting for response {i+1}/{len(all_prompts)} after {elapsed:.1f}s ({poll_count} polls)")
+                            logger.debug(
+                                f"Still waiting for response {i + 1}/{len(all_prompts)} after {elapsed:.1f}s ({poll_count} polls)"
+                            )
 
                         await asyncio.sleep(0.001)  # Async polling
 
                     if not response_received and asyncio.get_event_loop().time() > deadline:
-                        logger.error(f"Batch processing timed out at response {i+1}/{len(all_prompts)}")
+                        logger.error(
+                            f"Batch processing timed out at response {i + 1}/{len(all_prompts)}"
+                        )
                         # Fill remaining responses with errors
-                        for j in range(i+1, len(all_prompts)):
-                            all_results.append(f"ERROR: Batch timeout, response {j+1} not received")
+                        for j in range(i + 1, len(all_prompts)):
+                            all_results.append(
+                                f"ERROR: Batch timeout, response {j + 1} not received"
+                            )
                         break
 
                 # Distribute results back to individual requests
@@ -364,7 +372,7 @@ class DragonVllmInferenceBackend(BaseBackend):
                 logger.error(f"Batch processor error: {e}", exc_info=True)
 
                 # Fail requests in the current batch being processed
-                if 'batch' in locals():
+                if "batch" in locals():
                     for req in batch:
                         if not req.future.done():
                             req.future.set_exception(e)
