@@ -348,12 +348,12 @@ flow = await WorkflowEngine.create(backend=backend)
 !!! note "Task Granularity"
     - AsyncFlow excels at dynamic, fine-grained task graphs
     - For coarse-grained tasks, consider using RHAPSODY's Session API directly
-    - All RHAPSODY API capabilites are exposed to AsyncFlow to launch workloads and workflows.
+    - All RHAPSODY API capabilities are exposed to AsyncFlow to launch workloads and workflows.
 
 
 !!! warning "Dual API Usage"
     It is highly recommended not to combine RHAPSODY
-    API with AsyncFlow API due to the possibility of 
+    API with AsyncFlow API due to the possibility of
     `asyncio.loop` blocking.
 
 For more information on specific backends, see the [Advanced Usage](getting-started/advanced-usage.md) guide.
