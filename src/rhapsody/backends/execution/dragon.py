@@ -3296,7 +3296,7 @@ class DragonExecutionBackendV3(BaseBackend):
             self.logger.info(f"Submitted {len(batch_tasks_data)} individual tasks in stream mode")
         else:
             # Batch mode: one multi-task batch
-            uids, btasks = zip(*batch_tasks_data)
+            uids, btasks = map(list, zip(*batch_tasks_data))
             compiled = self.batch.compile(btasks)
             tuid = compiled.core.tuid
             self._monitored_batches[tuid] = (compiled, uids)
