@@ -23,7 +23,6 @@ from .execution import DragonExecutionBackendV2
 from .execution import DragonExecutionBackendV3
 from .execution import DragonTelemetryCollector
 from .execution import RadicalExecutionBackend
-from .inference.vllm import DragonVllmInferenceBackend
 
 __all__ = [
     "BackendRegistry",
@@ -41,5 +40,12 @@ __all__ = [
     "DragonExecutionBackendV2",  # Optional
     "DragonExecutionBackendV3",  # Optional
     "DragonTelemetryCollector",  # Optional
-    "DragonVllmInferenceBackend",  # Optional
 ]
+
+# Try to import optional inference backends
+try:
+    from .inference.vllm import DragonVllmInferenceBackend  # noqa: F401
+
+    __all__.append("DragonVllmInferenceBackend")
+except ImportError:
+    pass
