@@ -23,7 +23,7 @@ from .execution import DragonExecutionBackendV2
 from .execution import DragonExecutionBackendV3
 from .execution import DragonTelemetryCollector
 from .execution import RadicalExecutionBackend
-from .inference import DragonVllmInferenceBackend
+from .inference.vllm import DragonVllmInferenceBackend
 
 __all__ = [
     "BackendRegistry",
