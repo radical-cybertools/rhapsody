@@ -1,6 +1,6 @@
 # About RHAPSODY
 
-RHAPSODY (**R**untime for **H**eterogeneous **AP**plications, **S**ervice **O**rchestration and **DY**namism) is a cutting-edge runtime system designed to address the evolving challenges of modern scientific computing. As computational workflows become increasingly complex, combining traditional HPC simulations with AI/ML workloads, there is a critical need for systems that can efficiently orchestrate heterogeneous tasks across diverse computing resources.
+RHAPSODY (<b>R</b>untime for <b>H</b>eterogeneous <b>AP</b>plications, <b>S</b>ervice <b>O</b>rchestration and <b>DY</b>namism) is a cutting-edge runtime system designed to address the evolving challenges of modern scientific computing. As computational workflows become increasingly complex, combining traditional HPC simulations with AI/ML workloads, there is a critical need for systems that can efficiently orchestrate heterogeneous tasks across diverse computing resources.
 
 ## Vision
 

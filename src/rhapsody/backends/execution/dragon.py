@@ -10,7 +10,6 @@ import tempfile
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from dataclasses import field
 from enum import Enum
@@ -3094,6 +3093,7 @@ class DragonExecutionBackendV3(BaseBackend):
         working_directory: Optional[str] = None,
         disable_background_batching: bool = False,
         disable_telemetry: bool = False,
+        disable_batch_submission: bool = False,
         name: Optional[str] = "dragon",
     ):
         if not Batch:
@@ -3114,17 +3114,16 @@ class DragonExecutionBackendV3(BaseBackend):
         self._task_states = TaskStateMapperV3()
         self._initialized = False
         self._cancelled_tasks = []
-
-        # Thread pool for waiting on batches
-        self._wait_executor = ThreadPoolExecutor(
-            max_workers=max(8, mp.cpu_count() // 8), thread_name_prefix="dragon_batch_wait"
-        )
+        self._disable_batch_submission = disable_batch_submission
+        # compiled_tuid -> (compiled_task, list_of_tasks)
+        self._monitored_batches = {}
+        self._batch_monitor_thread = None
 
         self._shutdown_event = threading.Event()
 
         self.logger.info(
             f"DragonExecutionBackendV3: {self.batch.num_workers} workers, "
-            f"{self.batch.num_managers} managers"
+            f"{self.batch.num_managers} managers, disable_batch_submission={self._disable_batch_submission}"
         )
 
     def __await__(self):
@@ -3151,11 +3150,15 @@ class DragonExecutionBackendV3(BaseBackend):
                 self.logger.debug("Registering task states...")
                 StateMapper.register_backend_tasks_states_with_defaults(backend=self)
 
-                # Step 3: Set backend state to INITIALIZED
-                self._backend_state = BackendMainStates.INITIALIZED
-                self.logger.debug(f"Backend state set to: {self._backend_state.value}")
+                # Step 4: Start monitor thread
+                if self._batch_monitor_thread is None or not self._batch_monitor_thread.is_alive():
+                    self._shutdown_event.clear()
+                    self._batch_monitor_thread = threading.Thread(
+                        target=self._monitor_loop, name="dragon_monitor_loop", daemon=True
+                    )
+                    self._batch_monitor_thread.start()
+                    self.logger.debug("Dragon monitor thread started during initialization")
 
-                # Step 4: Initialize backend components (V3 is already initialized in __init__)
                 self._initialized = True
                 self.logger.info("Dragon backend V3 fully initialized and ready")
 
@@ -3165,89 +3168,101 @@ class DragonExecutionBackendV3(BaseBackend):
                 raise
         return self
 
-    def _wait_for_batch(self, compiled_tasks, task_uids: list[str]):
-        """Wait for batch to complete and trigger callbacks.
+    def _monitor_loop(self):
+        """Single thread to monitor all active batches using public wait() API.
 
-        Simple: just wait(), then check results. No state tracking needed.
+        This uses a polling approach with a small timeout (0.01s) to avoid busy-waiting while
+        maintaining low latency.
         """
-        try:
-            # Check for shutdown before starting wait
-            if self._shutdown_event.is_set():
-                self.logger.debug(f"Shutdown detected, aborting wait for tasks: {task_uids}")
-                return
+        self.logger.debug("Starting Dragon batch monitor loop (polling mode)")
 
-            self.logger.debug(f"Waiting for batch with tasks: {task_uids}")
-            # Wait for batch with timeout to allow periodic shutdown checks
-            while True:
-                try:
-                    compiled_tasks.wait(timeout=5)
-                    break
-                except TimeoutError:
-                    pass
+        while not self._shutdown_event.is_set() or self._monitored_batches:
+            try:
+                # Iterate over a copy of keys to allow modification during iteration
+                batch_tuids = list(self._monitored_batches.keys())
 
-                # Check if shutdown was requested during wait
-                if self._shutdown_event.is_set():
-                    self.logger.debug(f"Shutdown detected during batch wait for tasks: {task_uids}")
-                    return
-
-            self.logger.debug(f"Batch wait completed for tasks: {task_uids}")
-
-            # Get results for all tasks
-            for uid in task_uids:
-                task_info = self._task_registry.get(uid)
-                if not task_info:
-                    self.logger.warning(f"Task {uid} not found in registry")
+                if not batch_tuids:
+                    # No active batches, sleep briefly to avoid high CPU
+                    time.sleep(0.01)
                     continue
 
-                if uid in self._cancelled_tasks:
-                    self.logger.debug(f"Skipping cancelled task {uid}")
-                    continue
+                for tuid in batch_tuids:
+                    if tuid not in self._monitored_batches:
+                        continue
 
-                batch_task = task_info["batch_task"]
-                task_desc = task_info["description"]
+                    compiled_tasks, task_uids = self._monitored_batches[tuid]
 
+                    try:
+                        # Public API wait with minimal timeout
+                        # Returns quickly if not done, returns instantly if done
+                        compiled_tasks.wait(timeout=0.01)
+
+                        # If we reach here, batch is finished (or raised an internal error)
+                        self.logger.debug(f"Batch {tuid} complete, processing results")
+                        self._process_batch_results(compiled_tasks, task_uids)
+                        self._monitored_batches.pop(tuid)
+
+                    except TimeoutError:
+                        # Batch not done yet, continue to next one
+                        continue
+                    except Exception as e:
+                        self.logger.exception(f"Error while waiting for batch {tuid}: {e}")
+                        # Even on error, we should process results to trigger FAILED callbacks
+                        self._process_batch_results(compiled_tasks, task_uids)
+                        self._monitored_batches.pop(tuid)
+
+                # Small sleep after each full sweep to prevent tight loop if all batches were polled
+                time.sleep(0.005)
+
+            except Exception as e:
+                self.logger.exception(f"Critical error in monitor loop: {e}")
+                time.sleep(0.1)
+
+        self.logger.debug("Dragon batch monitor loop stopped")
+
+    def _process_batch_results(self, compiled_tasks, task_uids):
+        """Extract results from a finished batch and trigger callbacks."""
+        for uid in task_uids:
+            task_info = self._task_registry.get(uid)
+            if not task_info or uid in self._cancelled_tasks:
+                continue
+
+            batch_task = task_info["batch_task"]
+            task_desc = task_info["description"]
+
+            try:
+                # Use small timeout for safety, but data is guaranteed to be local now
                 try:
-                    self.logger.debug(f"Getting stdout for task {uid}")
-                    # Always try to get stdout first (success/failure)
-                    # May be None for failed Python functions
-                    stdout = batch_task.stdout.get()
+                    stdout = batch_task.stdout.get(timeout=0.01)
                     task_desc["stdout"] = stdout if stdout is not None else ""
+                except Exception:
+                    task_desc["stdout"] = ""
 
-                    self.logger.debug(f"Getting result for task {uid}")
-                    # This raises if task failed
-                    result = batch_task.result.get()
+                try:
+                    result = batch_task.result.get(timeout=0.01)
                     task_desc["return_value"] = result
-                    self.logger.debug(f"Task {uid} completed successfully")
                     self._callback_func(task_desc, "DONE")
-
                 except Exception as e:
-                    # Task failed - result.get() raised
-                    self.logger.exception(f"Task {uid} failed with exception: {e}")
+                    self.logger.exception(f"Task {uid} failed: {e}")
                     task_desc["exception"] = e
-
-                    # Try to get stderr, but may be None for failed tasks
-                    stderr = batch_task.stderr.get()
-                    if stderr is None:
-                        # Dragon includes full traceback in exception message
-                        # Extract it for better error reporting
-                        stderr = str(e)
-
-                    task_desc["stderr"] = stderr
+                    try:
+                        stderr = batch_task.stderr.get(timeout=0.01)
+                        task_desc["stderr"] = stderr if stderr else str(e)
+                    except Exception:
+                        task_desc["stderr"] = str(e)
                     self._callback_func(task_desc, "FAILED")
 
-        except Exception as e:
-            # Batch-level failure (wait() failed or catastrophic error)
-            self.logger.error(f"Batch wait failed: {e}", exc_info=True)
-
-            for uid in task_uids:
-                task_info = self._task_registry.get(uid)
-                if task_info:
-                    task_info["description"]["exception"] = e
-                    task_info["description"]["stderr"] = str(e)
-                    self._callback_func(task_info["description"], "FAILED")
+            except Exception as e:
+                self.logger.exception(f"Batch extraction failed for task {uid}: {e}")
+                task_desc["exception"] = e
+                task_desc["stderr"] = str(e)
+                self._callback_func(task_desc, "FAILED")
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
-        """Submit a batch of tasks and start a wait thread for them."""
+        """Submit tasks to the backend.
+
+        :param tasks: List of task descriptions
+        """
         if self._backend_state == BackendMainStates.SHUTDOWN:
             raise RuntimeError("Cannot submit during shutdown")
 
@@ -3256,34 +3271,37 @@ class DragonExecutionBackendV3(BaseBackend):
             self._backend_state = BackendMainStates.RUNNING
             self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
-        # Create Batch tasks (don't start yet)
-        batch_tasks = []
-        task_uids = []
-
+        # Build tasks
+        batch_tasks_data = []
         for task in tasks:
             try:
                 batch_task = await self.build_task(task)
-                batch_tasks.append(batch_task)
+                batch_tasks_data.append((task["uid"], batch_task))
             except Exception as e:
                 self.logger.error(f"Failed to create task {task.get('uid')}: {e}", exc_info=True)
                 task["exception"] = e
                 self._callback_func(task, "FAILED")
 
-            task_uids.append(task["uid"])
-
-        if not batch_tasks:
+        if not batch_tasks_data:
             return
 
-        # Compile into a single batch
-        compiled_tasks = self.batch.compile(batch_tasks)
-
-        # Start the batch
-        compiled_tasks.start()
-
-        self.logger.info(f"Submitted batch of {len(batch_tasks)} tasks for execution")
-
-        # Launch thread to wait for completion
-        self._wait_executor.submit(self._wait_for_batch, compiled_tasks, task_uids)
+        # Choose submission strategy
+        if self._disable_batch_submission:
+            # Stream mode: individual single-task batches
+            for uid, batch_task in batch_tasks_data:
+                compiled = self.batch.compile([batch_task])
+                tuid = compiled.core.tuid
+                self._monitored_batches[tuid] = (compiled, [uid])
+                compiled.start()
+            self.logger.info(f"Submitted {len(batch_tasks_data)} individual tasks in stream mode")
+        else:
+            # Batch mode: one multi-task batch
+            uids, btasks = map(list, zip(*batch_tasks_data))
+            compiled = self.batch.compile(btasks)
+            tuid = compiled.core.tuid
+            self._monitored_batches[tuid] = (compiled, uids)
+            compiled.start()
+            self.logger.info(f"Submitted {len(btasks)} tasks in a single batch")
 
     async def build_task(self, task: dict):
         """Translate AsyncFlow task to Dragon Batch task.
@@ -3430,6 +3448,7 @@ class DragonExecutionBackendV3(BaseBackend):
         return True
 
     async def shutdown(self) -> None:
+        """Shutdown the backend and clean up resources."""
         if self._backend_state == BackendMainStates.SHUTDOWN:
             return
 
@@ -3439,7 +3458,17 @@ class DragonExecutionBackendV3(BaseBackend):
         self.logger.info("Shutting down V3 backend")
         self._shutdown_event.set()
 
-        # Close Batch FIRST to unblock waiting threads
+        # Wait for monitor thread to finish if it exists
+        if self._batch_monitor_thread and self._batch_monitor_thread.is_alive():
+            try:
+                self.logger.debug("Waiting for batch monitor thread to stop...")
+                self._batch_monitor_thread.join(timeout=5.0)
+                if self._batch_monitor_thread.is_alive():
+                    self.logger.warning("Batch monitor thread did not stop within timeout")
+            except Exception as e:
+                self.logger.exception(f"Error stopping monitor thread: {e}")
+
+        # Close Batch
         if self.batch:
             try:
                 self.logger.debug("Closing batch...")
@@ -3453,14 +3482,6 @@ class DragonExecutionBackendV3(BaseBackend):
                     self.batch.terminate()
                 except Exception as te:
                     self.logger.warning(f"Error terminating batch: {te}")
-
-        # Give threads a moment to detect batch closure and exit cleanly
-        time.sleep(0.5)
-
-        # Now shutdown wait executor - threads should be unblocked
-        self.logger.debug("Shutting down wait executor...")
-        self._wait_executor.shutdown(wait=False)
-        self.logger.debug("Wait executor shutdown complete")
 
         self._task_registry.clear()
         self._state = "idle"
@@ -3480,6 +3501,7 @@ class DragonExecutionBackendV3(BaseBackend):
         working_directory: Optional[str] = None,
         disable_background_batching: bool = False,
         disable_telemetry: bool = False,
+        disable_batch_submission: bool = False,
     ):
         """Create and initialize a DragonExecutionBackendV3."""
         backend = cls(
@@ -3487,6 +3509,7 @@ class DragonExecutionBackendV3(BaseBackend):
             working_directory=working_directory,
             disable_background_batching=disable_background_batching,
             disable_telemetry=disable_telemetry,
+            disable_batch_submission=disable_batch_submission,
         )
         return await backend
 
