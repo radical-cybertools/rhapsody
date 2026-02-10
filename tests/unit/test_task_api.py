@@ -365,10 +365,6 @@ class TestAITaskValidation:
         """Test from_dict() reconstructs AITask correctly."""
         original = AITask(prompt="test", model="gpt-4", temperature=0.5, max_tokens=1000)
 
-    def test_from_dict_ai_task(self):
-        """Test from_dict() reconstructs AITask correctly."""
-        original = AITask(prompt="test", model="gpt-4", temperature=0.5, max_tokens=1000)
-
         task_dict = dict(original)
         reconstructed = AITask.from_dict(task_dict)
 

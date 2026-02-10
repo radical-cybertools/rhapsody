@@ -106,7 +106,8 @@ class BaseTask(dict, ABC):
         self["stdout"] = None
         self["stderr"] = None
         self["exit_code"] = None
-        self["return_value"] = None
+        self["return_value"] = None  # Used by ComputeTask for function/executable output
+        self["response"] = None  # Used by AITask for model responses
         self["exception"] = None
 
         # Add any extra fields
@@ -524,7 +525,6 @@ class AITask(BaseTask):
             "top_p": top_p,
             "top_k": top_k,
             "stop_sequences": stop_sequences,
-            "response": None,  # AI model response (set by backend after execution)
         }
 
         # Initialize base with all fields
