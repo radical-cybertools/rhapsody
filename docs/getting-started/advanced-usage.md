@@ -144,11 +144,11 @@ async def mixed_workload():
 
         # Wait for simulation to finish first
         await sim_task
-        print(f"Simulation Done: {sim_task.return_value}")
+        print(f"Simulation Done: {sim_task.return_value}")  # ComputeTask uses .return_value
 
         # Then summarize
-        result = await summary_task
-        print(f"AI Summary: {result}")
+        await summary_task
+        print(f"AI Summary: {summary_task.response}")  # AITask uses .response
 
 asyncio.run(mixed_workload())
 ```

@@ -306,6 +306,10 @@ class ComputeTask(BaseTask):
     Supports both executable-based tasks (shell commands, binaries) and
     function-based tasks (Python callables).
 
+    Result Access:
+        ComputeTask results are accessed via task.return_value (function return value
+        or executable output). For AITask, use task.response instead.
+
     Note:
         Either executable OR function must be specified, but not both.
 
@@ -319,6 +323,7 @@ class ComputeTask(BaseTask):
         output_files: List of output file paths
         working_directory: Working directory for task execution
         shell: Whether to execute command through shell
+        return_value: Task result (populated after execution)
     """
 
     def __init__(
@@ -448,6 +453,10 @@ class AITask(BaseTask):
     Supports various AI inference scenarios with configurable parameters
     for model selection, prompts, and inference settings.
 
+    Result Access:
+        Unlike ComputeTask which uses task.return_value, AITask results are accessed
+        via task.response for semantic clarity (AI model responses).
+
     Attributes (accessible as task.attr or task['attr']):
         prompt: Input prompt for AI model (required)
         model: Model identifier or name (required if inference_endpoint not set)
@@ -458,6 +467,7 @@ class AITask(BaseTask):
         top_p: Nucleus sampling parameter
         top_k: Top-k sampling parameter
         stop_sequences: List of sequences that stop generation
+        response: AI model response (populated after execution)
     """
 
     def __init__(
@@ -514,6 +524,7 @@ class AITask(BaseTask):
             "top_p": top_p,
             "top_k": top_k,
             "stop_sequences": stop_sequences,
+            "response": None,  # AI model response (set by backend after execution)
         }
 
         # Initialize base with all fields

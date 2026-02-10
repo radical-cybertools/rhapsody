@@ -360,7 +360,7 @@ class DragonVllmInferenceBackend(BaseBackend):
                     # If this was part of an AITask, update task state and trigger callback
                     if req.task_uid and req.task_uid in self._tasks_in_flight:
                         task = self._tasks_in_flight.pop(req.task_uid)
-                        task["return_value"] = req_results
+                        task["response"] = req_results  # AITask uses .response for model output
                         if self._callback_func:
                             self._callback_func(task, "DONE")
 

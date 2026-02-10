@@ -93,8 +93,12 @@ async def main():
 
     # Process results
     for i, task in enumerate(results):
-        task_type = "AI" if "prompt" in task else "Compute"
-        print(f"Task {i + 1} [{task_type}]: {task.return_value}")
+        if "prompt" in task:
+            # AITask: use .response for model output
+            print(f"Task {i + 1} [AI]: {task.response}")
+        else:
+            # ComputeTask: use .return_value for function/executable output
+            print(f"Task {i + 1} [Compute]: {task.return_value}")
 
     await session.close()
 
