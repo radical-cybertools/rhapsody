@@ -2,7 +2,8 @@ import asyncio
 import logging
 
 import rhapsody
-from rhapsody.api import ComputeTask, Session
+from rhapsody.api import ComputeTask
+from rhapsody.api import Session
 from rhapsody.backends import DragonExecutionBackendV3
 
 rhapsody.enable_logging(level=logging.DEBUG)
@@ -15,56 +16,46 @@ async def main():
 
     async def single_function():
         import socket
+
         return socket.gethostname()
 
     async def parallel_function():
         import socket
+
         return socket.gethostname()
 
     async def native_function():
         import socket
+
         return socket.gethostname()
 
     tasks = [
-
         # Native function (no backend-specific config)
         ComputeTask(
             function=native_function,
         ),
-
         # Single-process executable
         ComputeTask(
-            executable='/bin/bash',
-            arguments=['-c', 'echo $HOSTNAME'],
-            task_backend_specific_kwargs={
-                "process_template": {}
-            },
+            executable="/bin/bash",
+            arguments=["-c", "echo $HOSTNAME"],
+            task_backend_specific_kwargs={"process_template": {}},
         ),
-
         # Parallel Job executable (2+2 processes)
         ComputeTask(
-            executable='/bin/bash',
-            arguments=['-c', 'echo $HOSTNAME'],
-            task_backend_specific_kwargs={
-                "process_templates": [(2, {}), (2, {})]
-            },
+            executable="/bin/bash",
+            arguments=["-c", "echo $HOSTNAME"],
+            task_backend_specific_kwargs={"process_templates": [(2, {}), (2, {})]},
         ),
-
         # Single-process function
         ComputeTask(
             function=single_function,
-            task_backend_specific_kwargs={
-                "process_template": {}
-            },
+            task_backend_specific_kwargs={"process_template": {}},
         ),
-
         # Parallel Job function (2+2 processes)
         ComputeTask(
             function=parallel_function,
-            task_backend_specific_kwargs={
-                "process_templates": [(2, {}), (2, {})]
-            },
-        )
+            task_backend_specific_kwargs={"process_templates": [(2, {}), (2, {})]},
+        ),
     ]
 
     async with session:
@@ -76,7 +67,10 @@ async def main():
         await asyncio.gather(*futures)  # or tasks both works
 
         for t in tasks:
-            print(f"Task {t.uid}: {t.state} (output: {t.stdout.strip() if t.stdout else t.return_value})")
+            print(
+                f"Task {t.uid}: {t.state} (output: {t.stdout.strip() if t.stdout else t.return_value})"
+            )
+
 
 if __name__ == "__main__":
     asyncio.run(main())
