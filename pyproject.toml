@@ -46,7 +46,11 @@ dependencies = [
 dask = ["dask[distributed]>=2023.0.0"]
 radical_pilot = ["radical.pilot>=1.30.0"]
 dragon = ["dragonhpc"]  # Requires Python >= 3.10
-vllm-dragon = ["aiohttp>=3.8.0", "pyyaml>=6.0"]  # For Dragon-VLLM inference backend
+vllm-dragon = [ 
+    "vllm-dragonhpc @ git+https://github.com/radical-cybertools/vllm-dragonhpc.git@main",
+    "aiohttp>=3.8.0",
+    "pyyaml>=6.0"
+] # For Dragon-VLLM inference backend
 
 # Development and testing
 dev = [
