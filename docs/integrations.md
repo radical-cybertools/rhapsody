@@ -112,6 +112,17 @@ if __name__ == "__main__":
     dragon -m my_script.py
     ```
 
+### Configuration File
+
+The `DragonVllmInferenceBackend` requires a YAML configuration file (`config.yaml`) that defines model settings, hardware allocation, batching behavior, and optional guardrails. A sample configuration is maintained in the [vllm-dragonhpc](https://github.com/radical-cybertools/vllm-dragonhpc) repository:
+
+```bash
+# Download the sample config
+wget https://raw.githubusercontent.com/radical-cybertools/vllm-dragonhpc/main/config.sample -O config.yaml
+```
+
+Edit `config.yaml` to match your environment — at minimum, set `model_name` to your target HuggingFace model and `hf_token` to your access token. The sample includes sections for hardware allocation, LLM parameters (precision, token limits, sampling), input batching, guardrails, and dynamic inference worker scaling. See the [config.sample](https://github.com/radical-cybertools/vllm-dragonhpc/blob/main/config.sample) for all available options and their defaults.
+
 ### Configuration Options
 
 The `DragonVllmInferenceBackend` supports the following parameters:
