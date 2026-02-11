@@ -11,7 +11,7 @@ from rhapsody.backends import DragonExecutionBackendV3
 rhapsody.enable_logging(level=logging.DEBUG)
 
 
-async def func_task():
+def func_task():
     print("Hello from function task")
 
 
