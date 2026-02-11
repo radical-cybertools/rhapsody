@@ -30,10 +30,10 @@ pip install "rhapsody[all]"
 
 You can also install specific backend supports individually:
 
-- **HPC (RADICAL-Pilot)**: `pip install "rhapsody[hpc]"`
 - **Dask**: `pip install "rhapsody[dask]"`
+- **RADICAL-Pilot**: `pip install "rhapsody[radical_pilot]"`
 - **Dragon**: `pip install "rhapsody[dragon]"`
-- **Inference (vLLM)**: `pip install "rhapsody[vllm]"`
+- **Dragon-VLLM Inference**: `pip install "rhapsody[vllm-dragon]"`
 
 ## Verification
 

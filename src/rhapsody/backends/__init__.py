@@ -41,3 +41,11 @@ __all__ = [
     "DragonExecutionBackendV3",  # Optional
     "DragonTelemetryCollector",  # Optional
 ]
+
+# Try to import optional inference backends
+try:
+    from .inference.vllm import DragonVllmInferenceBackend  # noqa: F401
+
+    __all__.append("DragonVllmInferenceBackend")
+except ImportError:
+    pass

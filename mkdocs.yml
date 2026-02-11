@@ -110,6 +110,7 @@ nav:
       - Quick Start: getting-started/quick-start.md
       - Advanced Usage: getting-started/advanced-usage.md
       - Configuration: getting-started/configuration.md
+      - Integrations: integrations.md
       - Contributing: contributing.md
       - Issues (GitHub): https://github.com/radical-cybertools/rhapsody/issues
   - Project:
