@@ -17,6 +17,7 @@ from typing import Any
 from typing import Callable
 from typing import Optional
 
+
 import psutil
 import typeguard
 
@@ -1741,6 +1742,11 @@ class DragonExecutionBackendV1(BaseBackend):
         self.tasks: dict[str, dict[str, Any]] = {}
         self._callback_func: Callable = lambda t, s: None
         self._resources = resources or {}
+
+        # Dragon V1 backend does not support partitions
+        if self._resources.get("partition"):
+            raise ValueError("DragonExecutionBackendV1 does not support partitions")
+
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
 
@@ -2300,6 +2306,11 @@ class DragonExecutionBackendV2(BaseBackend):
         self.tasks: dict[str, dict[str, Any]] = {}
         self._callback_func: Callable = lambda t, s: None
         self._resources = resources or {}
+
+        # Dragon V2 backend does not support partitions
+        if self._resources.get("partition"):
+            raise ValueError("DragonExecutionBackendV2 does not support partitions")
+
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
         self._canceled_tasks = set()
@@ -3095,6 +3106,7 @@ class DragonExecutionBackendV3(BaseBackend):
         disable_telemetry: bool = False,
         disable_batch_submission: bool = False,
         name: Optional[str] = "dragon",
+        resources: Optional[dict] = None,
     ):
         if not Batch:
             raise RuntimeError("Dragon Batch not available")
@@ -3102,6 +3114,12 @@ class DragonExecutionBackendV3(BaseBackend):
         super().__init__(name=name)
 
         self.logger = _get_logger()
+        self._resources = resources or {}
+
+        # Dragon V3 backend does not support partitions
+        if self._resources.get("partition"):
+            raise ValueError("DragonExecutionBackendV3 does not support partitions")
+
         self.batch = Batch(
             num_workers=num_workers or 0,
             disable_telem=disable_telemetry,
