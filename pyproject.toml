@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rhapsody"
+name = "rhapsody-py"
 version = "0.1.0"
 description = "Runtime system for executing heterogeneous HPC-AI workflows with dynamic task graphs on high-performance computing infrastructures."
 license = { text = "MIT" }
@@ -83,16 +83,16 @@ ci = [
 ]
 examples = [
     # Examples may use different backends
-    "rhapsody[dask]",
+    "rhapsody-py[dask]",
 ]
 
 # Complete installation with all backends
 backends = [
-    "rhapsody[dask,radical_pilot,dragon,vllm-dragon]"
+    "rhapsody-py[dask,radical_pilot,dragon,vllm-dragon]"
 ]
 
 all = [
-    "rhapsody[dev,docs,ci,examples,backends]"
+    "rhapsody-py[dev,docs,ci,examples,backends]"
 ]
 
 [project.urls]
