@@ -33,7 +33,7 @@ You can also install specific backend supports individually:
 - **Dask**: `pip install "rhapsody-py[dask]"`
 - **RADICAL-Pilot**: `pip install "rhapsody-py[radical_pilot]"`
 - **Dragon**: `pip install "rhapsody-py[dragon]"`
-- **Dragon-VLLM Inference**: `pip install "rhapsody-py[vllm-dragon]"`
+- **Dragon-VLLM Inference**: `pip install "rhapsody-py[vllm-dragon]"` (also requires `pip install git+https://github.com/radical-cybertools/vllm-dragonhpc.git@main`)
 
 ## Verification
 

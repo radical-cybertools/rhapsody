@@ -21,7 +21,7 @@ The `DragonVllmInferenceBackend` offers:
 Install RHAPSODY with Dragon-VLLM support:
 
 ```bash
-pip install "rhapsody[vllm-dragon]"
+pip install "rhapsody-py[vllm-dragon]"
 ```
 
 !!! warning "Prerequisites"
@@ -218,7 +218,7 @@ Install RHAPSODY with AsyncFlow support:
 
 ```bash
 pip install radical.asyncflow
-pip install "rhapsody[dragon]"  # or your preferred backend
+pip install "rhapsody-py[dragon]"  # or your preferred backend
 ```
 
 ### Basic Usage
