@@ -22,6 +22,7 @@ Install RHAPSODY with Dragon-VLLM support:
 
 ```bash
 pip install "rhapsody-py[vllm-dragon]"
+pip install git+https://github.com/radical-cybertools/vllm-dragonhpc.git@main
 ```
 
 !!! warning "Prerequisites"

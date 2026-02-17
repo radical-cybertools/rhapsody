@@ -17,12 +17,6 @@ from .discovery import get_backend
 
 # Import all execution backends for convenient access
 from .execution import ConcurrentExecutionBackend
-from .execution import DaskExecutionBackend
-from .execution import DragonExecutionBackendV1
-from .execution import DragonExecutionBackendV2
-from .execution import DragonExecutionBackendV3
-from .execution import DragonTelemetryCollector
-from .execution import RadicalExecutionBackend
 
 __all__ = [
     "BackendRegistry",
@@ -32,15 +26,40 @@ __all__ = [
     "Session",
     "TasksMainStates",
     "StateMapper",
-    # Execution backends (imported from .execution)
     "ConcurrentExecutionBackend",
-    "DaskExecutionBackend",  # Optional
-    "RadicalExecutionBackend",  # Optional
-    "DragonExecutionBackendV1",  # Optional
-    "DragonExecutionBackendV2",  # Optional
-    "DragonExecutionBackendV3",  # Optional
-    "DragonTelemetryCollector",  # Optional
 ]
+
+# Try to import optional execution backends
+try:
+    from .execution import DaskExecutionBackend  # noqa: F401
+
+    __all__.append("DaskExecutionBackend")
+except ImportError:
+    pass
+
+try:
+    from .execution import RadicalExecutionBackend  # noqa: F401
+
+    __all__.append("RadicalExecutionBackend")
+except ImportError:
+    pass
+
+try:
+    from .execution import DragonExecutionBackendV1  # noqa: F401
+    from .execution import DragonExecutionBackendV2  # noqa: F401
+    from .execution import DragonExecutionBackendV3  # noqa: F401
+    from .execution import DragonTelemetryCollector  # noqa: F401
+
+    __all__.extend(
+        [
+            "DragonExecutionBackendV1",
+            "DragonExecutionBackendV2",
+            "DragonExecutionBackendV3",
+            "DragonTelemetryCollector",
+        ]
+    )
+except ImportError:
+    pass
 
 # Try to import optional inference backends
 try:
