@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rhapsody-py"
-version = "0.1.1"
+version = "0.1.2"
 description = "Runtime system for executing heterogeneous HPC-AI workflows with dynamic task graphs on high-performance computing infrastructures."
 license = { text = "MIT" }
 authors = [
@@ -95,9 +95,9 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/stride-research/rhapsody"
-Repository = "https://github.com/stride-research/rhapsody"
-Issues = "https://github.com/stride-research/rhapsody/issues"
+Homepage = "https://radical-cybertools.github.io/rhapsody/landing.html"
+Repository = "https://github.com/radical-cybertools/rhapsody"
+Issues = "https://github.com/radical-cybertools/rhapsody/issues"
 
 # Entry points for backend discovery
 [project.entry-points."rhapsody.backends"]
