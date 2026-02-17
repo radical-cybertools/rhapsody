@@ -23,7 +23,7 @@ from .backends import discover_backends
 from .backends import get_backend
 from .logger import enable_logging
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     "__version__",
