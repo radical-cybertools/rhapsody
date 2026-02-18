@@ -242,7 +242,7 @@ async def main():
         },
     )
 
-    # Parallel job: 2 processes each get their own GPU policy
+    # Parallel job: 4 processes in two groups, each group with its own GPU policy
     task_parallel = ComputeTask(
         function=gpu_work,
         task_backend_specific_kwargs={
