@@ -242,13 +242,13 @@ async def main():
         },
     )
 
-    # Parallel job: 2 process gets 2 GPUs
+    # Parallel job: 2 processes each get their own GPU policy
     task_parallel = ComputeTask(
         function=gpu_work,
         task_backend_specific_kwargs={
             "process_templates": [
-                (2, {"policy": policies[0, 1]}),
-                (2, {"policy": policies[2, 3]}),
+                (2, {"policy": policies[0]}),
+                (2, {"policy": policies[1]}),
             ]
         },
     )
