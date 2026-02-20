@@ -112,6 +112,247 @@ if __name__ == "__main__":
     dragon my_workflow.py
     ```
 
+## Dragon Process Templates
+
+When using `DragonExecutionBackendV3`, you can pass Dragon-native process configuration to `ComputeTask` via the `task_backend_specific_kwargs` parameter. This exposes the `process_template` and `process_templates` options, which map directly to Dragon's [ProcessTemplate](https://dragonhpc.github.io/dragon/doc/_build/html/ref/native/dragon.native.process.html#dragon.native.process.ProcessTemplate).
+
+The `ProcessTemplate` accepts the following parameters:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `cwd` | `str`, optional | Current working directory, defaults to `"."` |
+| `env` | `dict`, optional | Environment variables to pass to the process |
+| `stdin` | `int`, optional | Standard input file handling (`PIPE`, `None`) |
+| `stdout` | `int`, optional | Standard output file handling (`PIPE`, `STDOUT`, `None`) |
+| `stderr` | `int`, optional | Standard error file handling (`PIPE`, `STDOUT`, `None`) |
+| `policy` | `Policy`, optional | Determines the placement and resources of the process |
+| `options` | `ProcessOptions`, optional | Process options, such as allowing the process to connect to the infrastructure |
+
+!!! warning "Excluded Parameters"
+    `DragonExecutionBackendV3` manages `target` (the binary or Python callable), `args`, and `kwargs` internally through the `ComputeTask` interface. These three parameters are **not** available in `process_template` / `process_templates` — use `ComputeTask.executable`, `ComputeTask.arguments`, and `ComputeTask.function` instead.
+
+### Single-Process Template
+
+Use `process_template` (singular) to apply a Dragon process configuration to a single task:
+
+```python
+# Single-process executable with a process template
+ComputeTask(
+    executable='/bin/bash',
+    arguments=['-c', 'echo $HOSTNAME'],
+    task_backend_specific_kwargs={
+        "process_template": {}
+    },
+)
+
+# Single-process function with a process template
+ComputeTask(
+    function=my_function,
+    task_backend_specific_kwargs={
+        "process_template": {}
+    },
+)
+```
+
+### Multi-Process (Parallel Job) Templates
+
+Use `process_templates` (plural) to launch a task as a parallel job composed of multiple process groups. Each entry is a tuple of `(num_processes, template_dict)`:
+
+```python
+# Parallel job: 2 groups of 2 processes each (4 total)
+ComputeTask(
+    executable='/bin/bash',
+    arguments=['-c', 'echo $HOSTNAME'],
+    task_backend_specific_kwargs={
+        "process_templates": [(2, {}), (2, {})]
+    },
+)
+
+# Parallel function: 2 groups of 2 processes each
+ComputeTask(
+    function=parallel_function,
+    task_backend_specific_kwargs={
+        "process_templates": [(2, {}), (2, {})]
+    },
+)
+```
+
+### GPU Affinity with Policies
+
+You can use Dragon's `Policy` to control process placement and GPU affinity. This is useful for pinning each worker to a specific GPU across multiple nodes in a round-robin fashion:
+
+```python
+import asyncio
+from dragon.infrastructure.policy import Policy
+
+import rhapsody
+from rhapsody.api import ComputeTask, Session
+from rhapsody.backends import DragonExecutionBackendV3
+
+
+from dragon.native.machine import System, Node
+
+
+def find_gpus():
+
+    all_gpus = []
+    # loop through all nodes Dragon is running on
+    for huid in System().nodes:
+        node = Node(huid)
+        # loop through however many GPUs it may have
+        for gpu_id in node.gpus:
+            all_gpus.append((node.hostname, gpu_id))
+    return all_gpus
+
+
+def make_policies(all_gpus, nprocs=32):
+    """Create per-process policies with round-robin GPU assignment."""
+    policies = []
+    i = 0
+    for worker in range(nprocs):
+        policies.append(
+            Policy(
+                placement=Policy.Placement.HOST_NAME,
+                host_name=all_gpus[i][0],
+                gpu_affinity=[all_gpus[i][1]],
+            )
+        )
+        i += 1
+        if i == len(all_gpus):
+            i = 0
+    return policies
+
+
+async def main():
+    backend = await DragonExecutionBackendV3()
+    session = Session(backends=[backend])
+
+    all_gpus = find_gpus()  # e.g. [("node-0", 0), ("node-0", 1), ("node-1", 0), ...]
+    policies = make_policies(all_gpus, nprocs=4)
+
+    async def gpu_work():
+        import socket
+        return socket.gethostname()
+
+    # Single-process task pinned to a specific GPU
+    task_single = ComputeTask(
+        function=gpu_work,
+        task_backend_specific_kwargs={
+            "process_template": {"policy": policies[0]}
+        },
+    )
+
+    # Parallel job: 4 processes in two groups, each group with its own GPU policy
+    task_parallel = ComputeTask(
+        function=gpu_work,
+        task_backend_specific_kwargs={
+            "process_templates": [
+                (2, {"policy": policies[0]}),
+                (2, {"policy": policies[1]}),
+            ]
+        },
+    )
+
+    async with session:
+        await session.submit_tasks([task_single, task_parallel])
+        await asyncio.gather(task_single, task_parallel)
+
+        for t in [task_single, task_parallel]:
+            print(f"Task {t.uid}: {t.state} (output: {t.return_value})")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+In the example above, `make_policies` assigns GPUs round-robin across all discovered nodes. Each policy is then passed into the `process_template` (or individual entries in `process_templates`) via the `policy` key, giving you fine-grained control over where each process runs and which GPU it uses.
+
+### Full Heterogeneous Workload Example
+
+The following example demonstrates mixing native functions, single-process tasks, and parallel jobs in a single session:
+
+```python
+import asyncio
+import rhapsody
+from rhapsody.api import ComputeTask, Session
+from rhapsody.backends import DragonExecutionBackendV3
+
+
+async def main():
+    backend = await DragonExecutionBackendV3()
+    session = Session(backends=[backend])
+
+    async def single_function():
+        import socket
+        return socket.gethostname()
+
+    async def parallel_function():
+        import socket
+        return socket.gethostname()
+
+    async def native_function():
+        import socket
+        return socket.gethostname()
+
+    tasks = [
+        # Native function (no backend-specific config)
+        ComputeTask(function=native_function),
+
+        # Single-process executable
+        ComputeTask(
+            executable='/bin/bash',
+            arguments=['-c', 'echo $HOSTNAME'],
+            task_backend_specific_kwargs={
+                "process_template": {}
+            },
+        ),
+
+        # Parallel job executable (2+2 processes)
+        ComputeTask(
+            executable='/bin/bash',
+            arguments=['-c', 'echo $HOSTNAME'],
+            task_backend_specific_kwargs={
+                "process_templates": [(2, {}), (2, {})]
+            },
+        ),
+
+        # Single-process function
+        ComputeTask(
+            function=single_function,
+            task_backend_specific_kwargs={
+                "process_template": {}
+            },
+        ),
+
+        # Parallel job function (2+2 processes)
+        ComputeTask(
+            function=parallel_function,
+            task_backend_specific_kwargs={
+                "process_templates": [(2, {}), (2, {})]
+            },
+        ),
+    ]
+
+    async with session:
+        futures = await session.submit_tasks(tasks)
+        await asyncio.gather(*futures)
+
+        for t in tasks:
+            print(
+                f"Task {t.uid}: {t.state} "
+                f"(output: {t.stdout.strip() if t.stdout else t.return_value})"
+            )
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+!!! note "Running Command"
+    This example requires the Dragon runtime:
+    ```bash
+    dragon my_heterogeneous_workload.py
+    ```
+
 ## Mixed HPC and AI Workloads
 
 One of RHAPSODY's most powerful features is the ability to orchestrate traditional binaries alongside AI inference services (like vLLM).
@@ -144,11 +385,11 @@ async def mixed_workload():
 
         # Wait for simulation to finish first
         await sim_task
-        print(f"Simulation Done: {sim_task.return_value}")
+        print(f"Simulation Done: {sim_task.return_value}")  # ComputeTask uses .return_value
 
         # Then summarize
-        result = await summary_task
-        print(f"AI Summary: {result}")
+        await summary_task
+        print(f"AI Summary: {summary_task.response}")  # AITask uses .response
 
 asyncio.run(mixed_workload())
 ```

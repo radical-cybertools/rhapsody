@@ -17,15 +17,15 @@ logger = logging.getLogger(__name__)
 async def main():
     mp.set_start_method("dragon")
 
-    execution_backend = await DragonExecutionBackendV3()
+    execution_backend = await DragonExecutionBackendV3(num_workers=4)
 
     inference_backend = DragonVllmInferenceBackend(
         config_file="config.yaml",
         model_name="Qwen2.5-0.5B-Instruct",
         num_nodes=1,
-        num_gpus=0,
+        num_gpus=1,
         tp_size=1,
-        port=8002,
+        port=8001,
         offset=0,  # Change this to control the number of nodes each inference pipeline takes
     )
 
@@ -48,7 +48,7 @@ async def main():
     session = Session([execution_backend, inference_backend])
 
     # Submit all tasks at once via session - they will be routed correctly!
-    logger.info(f"Submitting {len(tasks)} mixed tasks via Session...")
+    print(f"Submitting {len(tasks)} mixed tasks via Session...")
     await session.submit_tasks(tasks)
 
     # Gather results using standard asyncio
@@ -56,7 +56,7 @@ async def main():
 
     for i, task in enumerate(results):
         rtype = "AI" if "prompt" in task else "Compute"
-        logger.info(f"Task {i + 1} [{rtype}] ({task.get('backend')}): {task.return_value}")
+        print(f"Task {i + 1} [{rtype}] ({task.get('backend')}): {task.return_value}", flush=True)
 
     await session.close()
 

@@ -26,7 +26,7 @@ from .resource_manager import ResourceManager
 from .resource_manager import RMConfig
 from .resource_manager import RMInfo
 
-__version__ = "0.1.0"
+__version__ = "0.1.2"
 
 __all__ = [
     "__version__",

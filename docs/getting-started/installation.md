@@ -12,7 +12,7 @@ RHAPSODY can be installed from source or via pip. We recommend using a virtual e
 To install the core RHAPSODY package:
 
 ```bash
-pip install rhapsody
+pip install rhapsody-py
 ```
 
 ## Complete Installation (Recommended)
@@ -20,7 +20,7 @@ pip install rhapsody
 To install RHAPSODY with all optional backends and dependencies (Dragon, Dask, RADICAL-Pilot, etc.):
 
 ```bash
-pip install "rhapsody[all]"
+pip install "rhapsody-py[all]"
 ```
 
 !!! warning "Backend Dependencies"
@@ -30,10 +30,10 @@ pip install "rhapsody[all]"
 
 You can also install specific backend supports individually:
 
-- **HPC (RADICAL-Pilot)**: `pip install "rhapsody[hpc]"`
-- **Dask**: `pip install "rhapsody[dask]"`
-- **Dragon**: `pip install "rhapsody[dragon]"`
-- **Inference (vLLM)**: `pip install "rhapsody[vllm]"`
+- **Dask**: `pip install "rhapsody-py[dask]"`
+- **RADICAL-Pilot**: `pip install "rhapsody-py[radical_pilot]"`
+- **Dragon**: `pip install "rhapsody-py[dragon]"`
+- **Dragon-VLLM Inference**: `pip install "rhapsody-py[vllm-dragon]"` (also requires `pip install git+https://github.com/radical-cybertools/vllm-dragonhpc.git@main`)
 
 ## Verification
 

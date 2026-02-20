@@ -17,8 +17,10 @@ repos:
       - id: ruff
         args: ["--fix", "--exit-non-zero-on-fix"]
         language_version: python3.12
+        exclude: \.ipynb$
       - id: ruff-format
         language_version: python3.12
+        exclude: \.ipynb$
 
   # - repo: https://github.com/pre-commit/mirrors-mypy
   #   rev: v1.14.0

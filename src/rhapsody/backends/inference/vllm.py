@@ -19,7 +19,7 @@ from aiohttp import web
 
 try:
     import dragon
-    from ml_inference.dragon_inference_utils import DragonInference
+    from dragon_vllm.dragon_inference_utils import DragonInference
 except ImportError:
     dragon = None
     DragonInference = None
@@ -296,26 +296,57 @@ class DragonVllmInferenceBackend(BaseBackend):
                 )
 
                 # Submit to pipeline
-                self.inference_pipeline.query((all_prompts, response_queue))
+                logger.debug("Submitting batch to DragonInference pipeline...")
 
+                # Try to capture return value in case DragonInference returns synchronously
+                query_result = self.inference_pipeline.query((all_prompts, response_queue))
+
+                logger.debug("Batch submitted, waiting for responses...")
                 # Collect responses
                 all_results = []
                 deadline = asyncio.get_event_loop().time() + 300  # 5min timeout
 
                 for i in range(len(all_prompts)):
+                    logger.debug(f"Waiting for response {i + 1}/{len(all_prompts)}...")
+                    response_received = False
+                    poll_count = 0
+
                     while True:
+                        poll_count += 1
                         if not response_queue.empty():
                             response = response_queue.get_nowait()
                             all_results.append(response)
+                            logger.debug(
+                                f"Received response {i + 1}/{len(all_prompts)} after {poll_count} polls"
+                            )
+                            response_received = True
                             break
 
                         if asyncio.get_event_loop().time() > deadline:
-                            error_msg = f"Timeout waiting for response {i}"
+                            error_msg = f"Timeout waiting for response {i + 1}/{len(all_prompts)} after 300s ({poll_count} polls)"
                             logger.error(error_msg)
                             all_results.append(f"ERROR: {error_msg}")
                             break
 
+                        # Log every 10 seconds
+                        if poll_count % 10000 == 0:
+                            elapsed = asyncio.get_event_loop().time() - (deadline - 300)
+                            logger.debug(
+                                f"Still waiting for response {i + 1}/{len(all_prompts)} after {elapsed:.1f}s ({poll_count} polls)"
+                            )
+
                         await asyncio.sleep(0.001)  # Async polling
+
+                    if not response_received and asyncio.get_event_loop().time() > deadline:
+                        logger.error(
+                            f"Batch processing timed out at response {i + 1}/{len(all_prompts)}"
+                        )
+                        # Fill remaining responses with errors
+                        for j in range(i + 1, len(all_prompts)):
+                            all_results.append(
+                                f"ERROR: Batch timeout, response {j + 1} not received"
+                            )
+                        break
 
                 # Distribute results back to individual requests
                 offset = 0
@@ -329,7 +360,7 @@ class DragonVllmInferenceBackend(BaseBackend):
                     # If this was part of an AITask, update task state and trigger callback
                     if req.task_uid and req.task_uid in self._tasks_in_flight:
                         task = self._tasks_in_flight.pop(req.task_uid)
-                        task["return_value"] = req_results
+                        task["response"] = req_results  # AITask uses .response for model output
                         if self._callback_func:
                             self._callback_func(task, "DONE")
 
@@ -339,7 +370,20 @@ class DragonVllmInferenceBackend(BaseBackend):
 
             except Exception as e:
                 logger.error(f"Batch processor error: {e}", exc_info=True)
-                # Fail pending requests
+
+                # Fail requests in the current batch being processed
+                if "batch" in locals():
+                    for req in batch:
+                        if not req.future.done():
+                            req.future.set_exception(e)
+
+                        if req.task_uid and req.task_uid in self._tasks_in_flight:
+                            task = self._tasks_in_flight.pop(req.task_uid)
+                            task["exception"] = str(e)
+                            if self._callback_func:
+                                self._callback_func(task, "FAILED")
+
+                # Fail pending requests still in queue
                 async with self._batch_lock:
                     for req in self._pending_requests:
                         if not req.future.done():

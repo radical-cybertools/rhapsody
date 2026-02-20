@@ -2,7 +2,7 @@ name: Deploy Documentation
 
 on:
   push:
-    branches: [ main, master, feature/docs_polish ]
+    branches: [ main, master]
   workflow_dispatch:
 
 permissions:

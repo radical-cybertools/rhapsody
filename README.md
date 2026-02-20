@@ -2,9 +2,9 @@
 
 [![Build Status](https://github.com/radical-cybertools/rhapsody/actions/workflows/ci.yml/badge.svg)](https://github.com/radical-cybertools/rhapsody/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-latest-brightgreen.svg)](https://radical-cybertools.github.io/rhapsody/)
-[![Python Version](https://img.shields.io/pypi/pyversions/rhapsody.svg)](https://pypi.org/project/rhapsody/)
-[![PyPI Version](https://img.shields.io/pypi/v/rhapsody.svg)](https://pypi.org/project/rhapsody/)
-[![License](https://img.shields.io/pypi/l/rhapsody.svg)](https://github.com/radical-cybertools/rhapsody/blob/main/LICENSE.md)
+[![Python Version](https://img.shields.io/pypi/pyversions/rhapsody-py.svg)](https://pypi.org/project/rhapsody-py/)
+[![PyPI Version](https://img.shields.io/pypi/v/rhapsody-py.svg)](https://pypi.org/project/rhapsody-py/)
+[![License](https://img.shields.io/pypi/l/rhapsody-py.svg)](https://github.com/radical-cybertools/rhapsody/blob/main/LICENSE.md)
 
 **RHAPSODY** – **R**untime for **H**eterogeneous **AP**plications, **S**ervice **O**rchestration and **DY**namism
 
@@ -63,14 +63,14 @@ asyncio.run(main())
 
 ```bash
 # Basic installation
-pip install rhapsody
+pip install rhapsody-py
 
 # With specific backends
-pip install rhapsody[dask]           # Dask distributed computing
-pip install rhapsody[dragon]         # Dragon runtime (Python 3.10-3.12)
+pip install rhapsody-py[dask]           # Dask distributed computing
+pip install rhapsody-py[dragon]         # Dragon runtime (Python 3.10-3.12)
 
 # Development
-pip install rhapsody[dev]
+pip install rhapsody-py[dev]
 ```
 
 

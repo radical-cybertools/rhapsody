@@ -55,12 +55,30 @@ backend = DragonExecutionBackendV3(
     name="dragon",
     num_workers=16,               # Total worker processes
     disable_telemetry=False,       # Enable/disable Dragon telemetry
-    disable_background_batching=False # Enable/disable background monitoring
+    disable_background_batching=False, # Enable/disable background monitoring
+    disable_batch_submission=False # Toggle batch vs individual submission
 )
 ```
 
+!!! note "Batch vs. Stream Submission"
+    The `disable_batch_submission` parameter controls how tasks are sent to the Dragon runtime:
+
+    - **Batch Mode** (`False`): High throughput. Groups tasks into a single multi-task batch.
+    - **Stream Mode** (`True`): Individual monitoring. Each task is submitted and tracked as a separate Dragon batch.
+
+    ```python
+    # Batch Mode (Recommended for many small tasks)
+    backend = await DragonExecutionBackendV3(disable_batch_submission=False)
+    await session.submit_tasks([t1, t2]) # Single submission
+
+    # Stream Mode (Better for isolated task tracking)
+    backend = await DragonExecutionBackendV3(disable_batch_submission=True)
+    await session.submit_tasks([t1, t2]) # Two separate submissions
+    ```
+
+
 !!! note "Dragon Versions"
-    While `DragonExecutionBackendV3` is recommended for most users due to its native batch integration, V1 and V2 are also available for legacy compatibility.
+    While `DragonExecutionBackendV3` is recommended for most users and will be always maintained, V1 and V2 are also available for legacy compatibility.
 
 ### RADICAL-Pilot Backend
 Large-scale HPC execution using RADICAL-Pilot.

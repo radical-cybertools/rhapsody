@@ -110,11 +110,13 @@ nav:
       - Quick Start: getting-started/quick-start.md
       - Advanced Usage: getting-started/advanced-usage.md
       - Configuration: getting-started/configuration.md
+      - Integrations: integrations.md
       - Contributing: contributing.md
       - Issues (GitHub): https://github.com/radical-cybertools/rhapsody/issues
   - Project:
       - project/index.md
       - Roadmap: project/roadmap.md
+      - Changelog: changelogs.md
       - Publications: project/publications.md
       - NSF Award: project/nsf-award.md
       - Team: project/team.md
