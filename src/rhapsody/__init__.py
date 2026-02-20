@@ -22,6 +22,9 @@ from .backends import BackendRegistry
 from .backends import discover_backends
 from .backends import get_backend
 from .logger import enable_logging
+from .resource_manager import ResourceManager
+from .resource_manager import RMConfig
+from .resource_manager import RMInfo
 
 __version__ = "0.1.2"
 
@@ -31,6 +34,10 @@ __all__ = [
     "discover_backends",
     "BackendRegistry",
     "enable_logging",
+    # Resource Manager
+    "ResourceManager",
+    "RMConfig",
+    "RMInfo",
     # Task API
     "BaseTask",
     "ComputeTask",

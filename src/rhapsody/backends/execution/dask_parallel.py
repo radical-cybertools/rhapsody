@@ -76,6 +76,10 @@ class DaskExecutionBackend(BaseBackend):
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
 
+        # Dask backend does not support partitions
+        if self._resources.get("partition"):
+            raise ValueError("DaskExecutionBackend does not support partitions")
+
     def __await__(self):
         """Make DaskExecutionBackend awaitable like Dask Client."""
         return self._async_init().__await__()
