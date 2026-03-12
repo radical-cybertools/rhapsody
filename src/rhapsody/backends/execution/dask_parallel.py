@@ -288,9 +288,15 @@ class DaskExecutionBackend(BaseBackend):
                     del self.tasks[task_uid]
 
         backend_kwargs = dict(task.get("task_backend_specific_kwargs", {}))
-        dask_resources = self._build_dask_resources(task)
-        if dask_resources and "resources" not in backend_kwargs:
-            backend_kwargs["resources"] = dask_resources
+        dask_resources = backend_kwargs.get("resources", {})
+        if dask_resources and not self._check_resources_satisfiable(dask_resources):
+            task["exception"] = RuntimeError(
+                f"No worker can satisfy resources {dask_resources}. "
+                f"Workers must be started with matching --resources flags "
+                f'(e.g. dask worker <scheduler> --resources "GPU=1").'
+            )
+            self._callback_func(task, "FAILED")
+            return
 
         dask_future = self._client.submit(fn, *args, **backend_kwargs)
 
@@ -341,6 +347,18 @@ class DaskExecutionBackend(BaseBackend):
             for k, v in task.get("task_backend_specific_kwargs", {}).items()
             if k not in ("working_directory", "shell")
         }
+        dask_resources = backend_kwargs.get("resources", {})
+        if dask_resources and not self._check_resources_satisfiable(dask_resources):
+            msg = (
+                f"No worker can satisfy resources {dask_resources}. "
+                f"Workers must be started with matching --resources flags "
+                f'(e.g. dask worker <scheduler> --resources "GPU=1").'
+            )
+            task["stderr"] = msg
+            task["exit_code"] = 1
+            self._callback_func(task, "FAILED")
+            return
+
         dask_future = self._client.submit(
             _run_executable,
             task["executable"],
@@ -371,15 +389,31 @@ class DaskExecutionBackend(BaseBackend):
 
         asyncio.create_task(on_done(dask_future))
 
-    @staticmethod
-    def _build_dask_resources(task: dict[str, Any]) -> dict:
-        """Map task resource fields to a Dask resource scheduling dict.
+    def _check_resources_satisfiable(self, resources: dict) -> bool:
+        """Return True if at least one connected worker can satisfy all resource constraints.
 
         Args:
-            task: Task dictionary with optional gpu and cpu_threads fields.
+            resources: Dict of resource requirements (e.g. {"GPU": 1}).
 
         Returns:
-            Dict suitable for passing as resources= to client.submit().
+            True if a qualifying worker exists, False otherwise.
+        """
+        workers = self._client.scheduler_info().get("workers", {})
+        return any(
+            all(w.get("resources", {}).get(k, 0) >= v for k, v in resources.items())
+            for w in workers.values()
+        )
+
+    @staticmethod
+    def _build_dask_resources(task: dict[str, Any]) -> dict:
+        """Extract Dask resource constraints from task_backend_specific_kwargs.
+
+        Args:
+            task: Task dictionary.
+
+        Returns:
+            Dict suitable for passing as resources= to client.submit(),
+            or empty dict if none specified.
         """
         return task.get("task_backend_specific_kwargs", {}).get("resources", {})
 

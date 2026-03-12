@@ -331,11 +331,14 @@ def test_run_executable_captures_stderr_and_nonzero_exit():
 
 
 def test_build_dask_resources_gpu():
-    """GPU count maps to {'GPU': n} for Dask resource scheduling."""
+    """GPU constraint via task_backend_specific_kwargs maps to {'GPU': n}."""
     try:
         from rhapsody.backends import DaskExecutionBackend
 
-        task = ComputeTask(function=lambda: None, gpu=2)
+        task = ComputeTask(
+            function=lambda: None,
+            task_backend_specific_kwargs={"resources": {"GPU": 2}},
+        )
         resources = DaskExecutionBackend._build_dask_resources(task)
         assert resources == {"GPU": 2}
     except ImportError:
@@ -343,11 +346,14 @@ def test_build_dask_resources_gpu():
 
 
 def test_build_dask_resources_cpu_threads():
-    """cpu_threads maps to {'CPU': n} for Dask resource scheduling."""
+    """CPU constraint via task_backend_specific_kwargs maps to {'CPU': n}."""
     try:
         from rhapsody.backends import DaskExecutionBackend
 
-        task = ComputeTask(function=lambda: None, cpu_threads=4)
+        task = ComputeTask(
+            function=lambda: None,
+            task_backend_specific_kwargs={"resources": {"CPU": 4}},
+        )
         resources = DaskExecutionBackend._build_dask_resources(task)
         assert resources == {"CPU": 4}
     except ImportError:
