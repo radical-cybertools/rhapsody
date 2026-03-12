@@ -394,22 +394,81 @@ async def mixed_workload():
 asyncio.run(mixed_workload())
 ```
 
-## Using Dask Preconfigured clusters
+## Dask Distributed Backend
 
-As refactored recently, you can pass existing Dask clusters directly:
+`DaskExecutionBackend` runs tasks on any Dask cluster and is **cluster-agnostic** — the same task code works across `LocalCluster`, `SLURMCluster`, `KubeCluster`, and any other Dask-compatible cluster.
+
+### Supported task types
+
+All three `ComputeTask` types are supported:
 
 ```python
-from dask.distributed import LocalCluster
-from rhapsody.backends.execution import DaskExecutionBackend
+import asyncio
+from rhapsody.api import ComputeTask, Session
+from rhapsody.backends import DaskExecutionBackend
 
-async def custom_cluster_demo():
-    # Outside Rhapsody, you might have a specialized GPU cluster
-    gpu_cluster = await LocalCluster(n_workers=4, threads_per_worker=1, asynchronous=True)
+# Sync function — dispatched natively to Dask workers
+def compute_square(n):
+    return n * n
 
-    # Pass it directly to the Dask backend
-    backend = await DaskExecutionBackend(cluster=gpu_cluster)
+# Async function — wrapped transparently, name visible in Dask dashboard
+async def fetch_data(n):
+    await asyncio.sleep(0.01)
+    return n * 2
 
-    async with Session(backends=[backend]) as session:
-        # Tasks will now run on your pre-allocated GPU workers
-        ...
+async def run():
+    async with DaskExecutionBackend() as backend:
+        session = Session(backends=[backend])
+        tasks = [
+            ComputeTask(function=compute_square, args=(i,)),       # sync fn
+            ComputeTask(function=fetch_data, args=(i,)),           # async fn
+            ComputeTask(executable="/bin/echo", arguments=[f"{i}"]), # executable
+        ]
+        async with session:
+            await session.submit_tasks(tasks)
+            await session.wait_tasks(tasks)
+
+        for t in tasks:
+            result = t.return_value if t.return_value is not None else t.stdout.strip()
+            print(f"{t.uid}: {t.state} -> {result}")
+```
+
+Executable task results are available via `task.stdout`, `task.stderr`, and `task.exit_code`.
+
+### Cluster injection
+
+Pass a pre-configured cluster (or client) via the `cluster=` / `client=` parameters.
+The task submission code is unchanged:
+
+```python
+# SLURM (requires dask-jobqueue)
+from dask_jobqueue import SLURMCluster
+
+cluster = SLURMCluster(cores=4, memory="8GB", walltime="01:00:00")
+cluster.scale(jobs=4)
+backend = await DaskExecutionBackend(cluster=cluster)
+
+# Kubernetes (requires dask-kubernetes)
+from dask_kubernetes.operator import KubeCluster
+
+cluster = KubeCluster(name="rhapsody-workers", n_workers=8)
+backend = await DaskExecutionBackend(cluster=cluster)
+
+# Pre-existing Client
+from dask.distributed import Client
+client = await Client("tcp://scheduler:8786", asynchronous=True)
+backend = await DaskExecutionBackend(client=client)
+```
+
+!!! tip "Default cluster"
+    If `cluster` and `client` are both omitted, Rhapsody creates a `LocalCluster` using the `resources` dict (e.g. `{"n_workers": 4}`).
+
+### GPU and CPU resource scheduling
+
+Set `gpu=` or `cpu_threads=` on a task to restrict it to Dask workers that advertise those resources.
+Workers must be started with `--resources "GPU=1"` (or equivalent in the cluster config).
+
+```python
+ComputeTask(function=my_gpu_fn, args=(x,), gpu=1)         # requires a GPU worker
+ComputeTask(function=my_fn, args=(x,), cpu_threads=4)     # requires 4 CPU slots
 ```
