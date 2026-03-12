@@ -59,8 +59,7 @@ def _run_executable(
     result = subprocess.run(
         cmd if not shell else " ".join(cmd),
         shell=shell,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         cwd=working_directory,
         env=env,
     )

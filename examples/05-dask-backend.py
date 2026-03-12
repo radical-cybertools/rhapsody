@@ -5,18 +5,31 @@ or any other Dask-compatible cluster — no other code changes needed.
 """
 
 import asyncio
+import logging
 
-from rhapsody.api import ComputeTask, Session
+import rhapsody
+from rhapsody.api import ComputeTask
+from rhapsody.api import Session
 from rhapsody.backends import DaskExecutionBackend
+
+rhapsody.enable_logging(level=logging.DEBUG)
+
+logger = logging.getLogger(__name__)
 
 
 def compute_square_sync(n):
     """Sync function — dispatched natively to Dask workers."""
+    import time
+
+    time.sleep(0.1)
     return {"input": n, "result": n * n}
 
 
 async def compute_square_async(n):
     """Async function — wrapped transparently, name visible in Dask dashboard."""
+    import asyncio
+
+    await asyncio.sleep(0.1)
     return {"input": n, "result": n * n}
 
 
