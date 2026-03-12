@@ -465,10 +465,16 @@ backend = await DaskExecutionBackend(client=client)
 
 ### GPU and CPU resource scheduling
 
-Set `gpu=` or `cpu_threads=` on a task to restrict it to Dask workers that advertise those resources.
+Pass Dask resource constraints via `task_backend_specific_kwargs={"resources": {...}}`.
 Workers must be started with `--resources "GPU=1"` (or equivalent in the cluster config).
 
 ```python
-ComputeTask(function=my_gpu_fn, args=(x,), gpu=1)         # requires a GPU worker
-ComputeTask(function=my_fn, args=(x,), cpu_threads=4)     # requires 4 CPU slots
+ComputeTask(
+    function=my_gpu_fn, args=(x,),
+    task_backend_specific_kwargs={"resources": {"GPU": 1}},  # requires a GPU worker
+)
+ComputeTask(
+    executable="/bin/sim", arguments=["--n", "4"],
+    task_backend_specific_kwargs={"resources": {"CPU": 4}, "shell": True},
+)
 ```

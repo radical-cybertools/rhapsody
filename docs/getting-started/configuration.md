@@ -42,11 +42,17 @@ DaskExecutionBackend(
 )
 ```
 
-Supports **sync functions**, **async functions**, and **executable tasks**. Use `gpu=` or `cpu_threads=` on a `ComputeTask` to restrict it to workers advertising those resources:
+Supports **sync functions**, **async functions**, and **executable tasks**. Pass Dask-specific scheduling hints via `task_backend_specific_kwargs`:
 
 ```python
-ComputeTask(function=my_fn, args=(x,), gpu=1)        # scheduled on GPU workers only
-ComputeTask(executable="/bin/sim", arguments=["--n", "4"], cpu_threads=4)
+ComputeTask(
+    function=my_fn, args=(x,),
+    task_backend_specific_kwargs={"resources": {"GPU": 1}},  # GPU worker only
+)
+ComputeTask(
+    executable="/bin/sim", arguments=["--n", "4"],
+    task_backend_specific_kwargs={"resources": {"CPU": 4}, "shell": True},
+)
 ```
 
 !!! tip "Preconfigured Clusters"

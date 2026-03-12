@@ -346,7 +346,7 @@ class DaskExecutionBackend(BaseBackend):
             task["executable"],
             task.get("arguments", []),
             working_directory=task.get("working_directory"),
-            shell=task.get("shell", False),
+            shell=task.get("task_backend_specific_kwargs", {}).get("shell", False),
             **backend_kwargs,
         )
         self.tasks[task["uid"]]["future"] = dask_future
@@ -381,12 +381,7 @@ class DaskExecutionBackend(BaseBackend):
         Returns:
             Dict suitable for passing as resources= to client.submit().
         """
-        resources = {}
-        if task.get("gpu"):
-            resources["GPU"] = task["gpu"]
-        if task.get("cpu_threads"):
-            resources["CPU"] = task["cpu_threads"]
-        return resources
+        return task.get("task_backend_specific_kwargs", {}).get("resources", {})
 
     async def cancel_all_tasks(self) -> int:
         """Cancel all currently running/pending tasks.
