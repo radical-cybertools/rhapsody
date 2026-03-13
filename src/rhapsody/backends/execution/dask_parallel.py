@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from functools import partial
 from functools import wraps
 from typing import Any
 from typing import Callable
@@ -31,11 +32,46 @@ def _get_logger() -> logging.Logger:
     return logging.getLogger(__name__)
 
 
+def _run_executable(
+    executable: str,
+    arguments: list[str],
+    working_directory: str | None = None,
+    env: dict | None = None,
+    shell: bool = False,
+) -> tuple[str, str, int]:
+    """Run a subprocess inside a Dask worker.
+
+    Must be defined at module level for Dask pickling compatibility.
+
+    Args:
+        executable: Path to the executable.
+        arguments: List of command-line arguments.
+        working_directory: Working directory for the subprocess.
+        env: Environment variables dict. None inherits the worker environment.
+        shell: Whether to execute through the shell.
+
+    Returns:
+        Tuple of (stdout, stderr, returncode).
+    """
+    import subprocess
+
+    cmd = [executable] + list(arguments)
+    result = subprocess.run(
+        cmd if not shell else " ".join(cmd),
+        shell=shell,
+        capture_output=True,
+        cwd=working_directory,
+        env=env,
+    )
+    return result.stdout.decode(), result.stderr.decode(), result.returncode
+
+
 class DaskExecutionBackend(BaseBackend):
-    """An async-only Dask execution backend for distributed task execution.
+    """A Dask execution backend for distributed task execution.
 
     Handles task submission, cancellation, and proper async event loop handling
-    for distributed task execution using Dask. All functions must be async.
+    for distributed task execution using Dask. Supports async functions, sync
+    functions, and executable tasks.
 
     Usage:
         backend = await DaskExecutionBackend(resources)
@@ -173,30 +209,27 @@ class DaskExecutionBackend(BaseBackend):
         return False
 
     async def submit_tasks(self, tasks: list[dict[str, Any]]) -> None:
-        """Submit async tasks to Dask cluster.
+        """Submit tasks to the Dask cluster.
 
-        Processes a list of tasks and submits them to the Dask cluster for execution.
-        Filters out future objects from arguments and validates that all functions
-        are async coroutine functions.
+        Dispatches each task to the appropriate submission method based on its type:
+        executable tasks run via subprocess, async functions via an async wrapper,
+        and sync functions are submitted directly to Dask workers.
 
         Args:
             tasks: List of task dictionaries containing:
                 - uid: Unique task identifier
-                - function: Async callable to execute
+                - function: Callable to execute (sync or async)
                 - args: Positional arguments
                 - kwargs: Keyword arguments
-                - executable: Optional executable path (not supported)
-                - task_backend_specific_kwargs: Backend-specific parameters
+                - executable: Path to executable (mutually exclusive with function)
+                - arguments: CLI arguments for executable tasks
+                - task_backend_specific_kwargs: Passed directly to client.submit()
 
         Note:
-            Executable tasks are not supported and will result in FAILED state.
-            Only async functions are supported - sync functions will result in
-            FAILED state.
-            Future objects are filtered out from arguments as they are not picklable.
+            Future objects are filtered out from args as they are not picklable.
         """
         self._ensure_initialized()
 
-        # Set backend state to RUNNING when tasks are submitted
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
             self.logger.debug(f"Backend state set to: {self._backend_state.value}")
@@ -205,26 +238,23 @@ class DaskExecutionBackend(BaseBackend):
             is_func_task = bool(task.get("function"))
             is_exec_task = bool(task.get("executable"))
 
-            if is_exec_task:
-                error_msg = "DaskExecutionBackend does not support executable tasks"
-                task["stderr"] = ValueError(error_msg)
-                self._callback_func(task, "FAILED")
-                continue
-
-            # Validate that function is async
-            if is_func_task and not asyncio.iscoroutinefunction(task["function"]):
-                error_msg = "DaskExecutionBackend only supports async functions"
-                task["exception"] = ValueError(error_msg)
-                self._callback_func(task, "FAILED")
-                continue
-
             self.tasks[task["uid"]] = task
 
-            # Filter out future objects as they are not picklable
-            filtered_args = [arg for arg in task["args"] if not isinstance(arg, asyncio.Future)]
+            # Filter out future objects as they are not picklable for Dask workers
+            filtered_args = [
+                arg for arg in task.get("args", ()) if not isinstance(arg, asyncio.Future)
+            ]
             task["args"] = tuple(filtered_args)
+
             try:
-                await self._submit_async_function(task)
+                if is_exec_task:
+                    await self._submit_executable(task)
+                elif is_func_task and asyncio.iscoroutinefunction(task["function"]):
+                    await self._submit_async_function(task)
+                elif is_func_task:
+                    await self._submit_sync_function(task)
+                else:
+                    raise ValueError("Task must specify either 'function' or 'executable'")
             except Exception as e:
                 task["exception"] = e
                 self._callback_func(task, "FAILED")
@@ -257,7 +287,18 @@ class DaskExecutionBackend(BaseBackend):
                 if task_uid in self.tasks:
                     del self.tasks[task_uid]
 
-        dask_future = self._client.submit(fn, *args, **task["task_backend_specific_kwargs"])
+        backend_kwargs = dict(task.get("task_backend_specific_kwargs", {}))
+        dask_resources = backend_kwargs.get("resources", {})
+        if dask_resources and not self._check_resources_satisfiable(dask_resources):
+            task["exception"] = RuntimeError(
+                f"No worker can satisfy resources {dask_resources}. "
+                f"Workers must be started with matching --resources flags "
+                f'(e.g. dask worker <scheduler> --resources "GPU=1").'
+            )
+            self._callback_func(task, "FAILED")
+            return
+
+        dask_future = self._client.submit(fn, *args, **backend_kwargs)
 
         # Store the future for potential cancellation
         self.tasks[task["uid"]]["future"] = dask_future
@@ -281,6 +322,87 @@ class DaskExecutionBackend(BaseBackend):
             return await task["function"](*task["args"], **task["kwargs"])
 
         await self._submit_to_dask(task, async_wrapper)
+
+    async def _submit_sync_function(self, task: dict[str, Any]) -> None:
+        """Submit a sync (non-coroutine) function to Dask.
+
+        Dask workers run sync functions natively — no async wrapper needed.
+
+        Args:
+            task: Task dictionary containing the sync function and its parameters.
+        """
+        fn = task["function"]
+        if task.get("kwargs"):
+            fn = partial(fn, **task["kwargs"])
+        await self._submit_to_dask(task, fn, *task["args"])
+
+    async def _submit_executable(self, task: dict[str, Any]) -> None:
+        """Submit an executable task to run via subprocess inside a Dask worker.
+
+        Args:
+            task: Task dictionary containing executable path, arguments, and metadata.
+        """
+        bksp = task.get("task_backend_specific_kwargs", {})
+        backend_kwargs = {
+            k: v for k, v in bksp.items() if k not in ("working_directory", "shell", "env")
+        }
+        dask_resources = backend_kwargs.get("resources", {})
+        if dask_resources and not self._check_resources_satisfiable(dask_resources):
+            msg = (
+                f"No worker can satisfy resources {dask_resources}. "
+                f"Workers must be started with matching --resources flags "
+                f'(e.g. dask worker <scheduler> --resources "GPU=1").'
+            )
+            task["stderr"] = msg
+            task["exit_code"] = 1
+            self._callback_func(task, "FAILED")
+            return
+
+        dask_future = self._client.submit(
+            _run_executable,
+            task["executable"],
+            task.get("arguments", []),
+            working_directory=bksp.get("working_directory", task.get("working_directory")),
+            env=bksp.get("env"),
+            shell=bksp.get("shell", False),
+            **backend_kwargs,
+        )
+        self.tasks[task["uid"]]["future"] = dask_future
+
+        async def on_done(f):
+            task_uid = task["uid"]
+            try:
+                stdout, stderr, returncode = await f
+                task["stdout"] = stdout
+                task["stderr"] = stderr
+                task["exit_code"] = returncode
+                state = "DONE" if returncode == 0 else "FAILED"
+                self._callback_func(task, state)
+            except dask.client.FutureCancelledError:
+                self._callback_func(task, "CANCELED")
+            except Exception as e:
+                task["exception"] = e
+                self._callback_func(task, "FAILED")
+            finally:
+                if task_uid in self.tasks:
+                    del self.tasks[task_uid]
+
+        asyncio.create_task(on_done(dask_future))
+
+    def _check_resources_satisfiable(self, resources: dict) -> bool:
+        """Return True if at least one connected worker can satisfy all resource constraints.
+
+        Args:
+            resources: Dict of resource requirements (e.g. {"GPU": 1}).
+
+        Returns:
+            True if a qualifying worker exists, False otherwise.
+        """
+        workers = self._client.scheduler_info().get("workers", {})
+        return any(
+            all(w.get("resources", {}).get(k, 0) >= v for k, v in resources.items())
+            for w in workers.values()
+        )
 
     async def cancel_all_tasks(self) -> int:
         """Cancel all currently running/pending tasks.

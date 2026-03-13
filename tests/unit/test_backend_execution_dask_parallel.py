@@ -180,45 +180,42 @@ async def test_dask_backend_task_validation():
 
 
 @pytest.mark.asyncio
-async def test_dask_backend_task_submission_errors():
-    """Test task submission error handling."""
+async def test_dask_backend_task_submission_routing():
+    """Test that tasks are routed to the correct submission methods."""
     try:
+        from unittest.mock import AsyncMock
+        from unittest.mock import patch
+
         from rhapsody.backends import DaskExecutionBackend
 
-        # Mock the dask client to avoid needing a real cluster
         backend = DaskExecutionBackend()
-        backend._initialized = True  # Bypass initialization for testing
+        backend._initialized = True
 
-        callback_calls = []
+        # Executable tasks route to _submit_executable (not FAILED)
+        with patch.object(backend, "_submit_executable", new_callable=AsyncMock) as mock_exec:
+            executable_task = ComputeTask(executable="/bin/echo", arguments=["hello"])
+            await backend.submit_tasks([executable_task])
+            mock_exec.assert_called_once()
 
-        def mock_callback(task, state):
-            callback_calls.append((task["uid"], state))
+        # Sync function tasks route to _submit_sync_function (not FAILED)
+        with patch.object(backend, "_submit_sync_function", new_callable=AsyncMock) as mock_sync:
 
-        backend.register_callback(mock_callback)
+            def sync_fn():
+                return "sync"
 
-        # Test executable task (should fail)
-        executable_task = ComputeTask(executable="/bin/echo", arguments=["hello"])
+            sync_task = ComputeTask(function=sync_fn, args=[], kwargs={})
+            await backend.submit_tasks([sync_task])
+            mock_sync.assert_called_once()
 
-        await backend.submit_tasks([executable_task])
+        # Async function tasks route to _submit_async_function
+        with patch.object(backend, "_submit_async_function", new_callable=AsyncMock) as mock_async:
 
-        # Should have received FAILED callback
-        assert len(callback_calls) == 1
-        assert callback_calls[0][0].startswith("task.")
-        assert callback_calls[0][1] == "FAILED"
+            async def async_fn():
+                return "async"
 
-        # Test sync function task (should fail)
-        def sync_function():
-            return "sync"
-
-        sync_task = ComputeTask(function=sync_function, args=[], kwargs={})
-
-        callback_calls.clear()
-        await backend.submit_tasks([sync_task])
-
-        # Should have received FAILED callback
-        assert len(callback_calls) == 1
-        assert callback_calls[0][0].startswith("task.")
-        assert callback_calls[0][1] == "FAILED"
+            async_task = ComputeTask(function=async_fn, args=[], kwargs={})
+            await backend.submit_tasks([async_task])
+            mock_async.assert_called_once()
 
     except ImportError:
         pytest.skip("Dask dependencies not available")
@@ -281,5 +278,48 @@ async def test_dask_backend_shutdown():
         assert not backend._initialized
         assert len(backend.tasks) == 0
 
+    except ImportError:
+        pytest.skip("Dask dependencies not available")
+
+
+# ---------------------------------------------------------------------------
+# _run_executable tests
+# ---------------------------------------------------------------------------
+
+
+def test_run_executable_is_picklable():
+    """_run_executable must be picklable so Dask can ship it to workers."""
+    import pickle
+
+    try:
+        from rhapsody.backends.execution.dask_parallel import _run_executable
+
+        pickled = pickle.dumps(_run_executable)
+        assert len(pickled) > 0
+    except ImportError:
+        pytest.skip("Dask dependencies not available")
+
+
+def test_run_executable_captures_stdout():
+    """_run_executable returns (stdout, stderr, returncode) correctly."""
+    try:
+        from rhapsody.backends.execution.dask_parallel import _run_executable
+
+        stdout, stderr, returncode = _run_executable("/bin/echo", ["hello"])
+        assert returncode == 0
+        assert "hello" in stdout
+        assert stderr == ""
+    except ImportError:
+        pytest.skip("Dask dependencies not available")
+
+
+def test_run_executable_captures_stderr_and_nonzero_exit():
+    """_run_executable captures stderr and non-zero exit codes."""
+    try:
+        from rhapsody.backends.execution.dask_parallel import _run_executable
+
+        stdout, stderr, returncode = _run_executable("/bin/bash", ["-c", "echo err >&2; exit 1"])
+        assert returncode == 1
+        assert "err" in stderr
     except ImportError:
         pytest.skip("Dask dependencies not available")

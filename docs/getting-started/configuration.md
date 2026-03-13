@@ -32,18 +32,31 @@ backend = ConcurrentExecutionBackend(name="local", executor=executor)
 ```
 
 ### Dask Backend
-Distributed execution using Dask clusters.
+Distributed execution using any Dask-compatible cluster.
 
 ```python
 DaskExecutionBackend(
-    resources={"n_workers": 4, "memory_limit": "2GB"},
-    cluster=pre_existing_cluster_obj, # Optional
-    client=pre_existing_client_obj    # Optional
+    resources={"n_workers": 4, "memory_limit": "2GB"},  # passed to LocalCluster when no cluster/client given
+    cluster=pre_existing_cluster_obj,  # SLURMCluster, KubeCluster, LocalCluster, …
+    client=pre_existing_client_obj     # pre-existing dask.distributed.Client
+)
+```
+
+Supports **sync functions**, **async functions**, and **executable tasks**. Pass Dask-specific scheduling hints via `task_backend_specific_kwargs`:
+
+```python
+ComputeTask(
+    function=my_fn, args=(x,),
+    task_backend_specific_kwargs={"resources": {"GPU": 1}},  # GPU worker only
+)
+ComputeTask(
+    executable="/bin/sim", arguments=["--n", "4"],
+    task_backend_specific_kwargs={"resources": {"CPU": 4}, "shell": True},
 )
 ```
 
 !!! tip "Preconfigured Clusters"
-    If both `cluster` and `client` are omitted, Rhapsody will create a new `LocalCluster` using the provided `resources`.
+    If both `cluster` and `client` are omitted, Rhapsody creates a new `LocalCluster` using the provided `resources`. Pass `cluster=` to use SLURM, Kubernetes, or any other Dask cluster type.
 
 ### Dragon Backend
 High-performance execution using the Dragon runtime.
