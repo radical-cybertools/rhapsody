@@ -342,10 +342,9 @@ class DaskExecutionBackend(BaseBackend):
         Args:
             task: Task dictionary containing executable path, arguments, and metadata.
         """
+        bksp = task.get("task_backend_specific_kwargs", {})
         backend_kwargs = {
-            k: v
-            for k, v in task.get("task_backend_specific_kwargs", {}).items()
-            if k not in ("working_directory", "shell")
+            k: v for k, v in bksp.items() if k not in ("working_directory", "shell", "env")
         }
         dask_resources = backend_kwargs.get("resources", {})
         if dask_resources and not self._check_resources_satisfiable(dask_resources):
@@ -363,8 +362,9 @@ class DaskExecutionBackend(BaseBackend):
             _run_executable,
             task["executable"],
             task.get("arguments", []),
-            working_directory=task.get("working_directory"),
-            shell=task.get("task_backend_specific_kwargs", {}).get("shell", False),
+            working_directory=bksp.get("working_directory", task.get("working_directory")),
+            env=bksp.get("env"),
+            shell=bksp.get("shell", False),
             **backend_kwargs,
         )
         self.tasks[task["uid"]]["future"] = dask_future
@@ -403,19 +403,6 @@ class DaskExecutionBackend(BaseBackend):
             all(w.get("resources", {}).get(k, 0) >= v for k, v in resources.items())
             for w in workers.values()
         )
-
-    @staticmethod
-    def _build_dask_resources(task: dict[str, Any]) -> dict:
-        """Extract Dask resource constraints from task_backend_specific_kwargs.
-
-        Args:
-            task: Task dictionary.
-
-        Returns:
-            Dict suitable for passing as resources= to client.submit(),
-            or empty dict if none specified.
-        """
-        return task.get("task_backend_specific_kwargs", {}).get("resources", {})
 
     async def cancel_all_tasks(self) -> int:
         """Cancel all currently running/pending tasks.
