@@ -50,8 +50,9 @@ async def main():
     failed = sum(1 for t in tasks if t.state == "FAILED")
     print(f"Done: {done}, Failed: {failed}")
     for t in tasks:
-        result = t.return_value if t.return_value is not None else t.stdout.strip()
-        print(f"  {t.uid} -> {result}")
+        results = t.return_value if t.return_value is not None else t.stdout
+        errors = t.exception if t.exception is not None else t.stderr
+        print(f"{t.uid} -> {results if results else errors}")
 
 
 if __name__ == "__main__":
