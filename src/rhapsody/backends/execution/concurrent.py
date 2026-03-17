@@ -163,6 +163,7 @@ class ConcurrentExecutionBackend(BaseBackend):
         arguments = task.get("arguments", [])
         backend_kwargs = task.get("task_backend_specific_kwargs", {})
         execute_in_shell = backend_kwargs.get("shell", False)
+        cwd = backend_kwargs.get("cwd", task.get("cwd"))
 
         if execute_in_shell:
             # Shell mode: join executable and arguments into single command string
@@ -171,6 +172,7 @@ class ConcurrentExecutionBackend(BaseBackend):
                 cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
             )
         else:
             # Exec mode: pass executable and arguments separately (no shell)
@@ -179,6 +181,7 @@ class ConcurrentExecutionBackend(BaseBackend):
                 *arguments,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
             )
         stdout, stderr = await process.communicate()
 

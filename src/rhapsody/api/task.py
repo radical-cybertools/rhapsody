@@ -322,7 +322,7 @@ class ComputeTask(BaseTask):
         kwargs: Keyword arguments for function tasks
         input_files: List of input file paths
         output_files: List of output file paths
-        working_directory: Working directory for task execution
+        cwd: Working directory for task execution
         shell: Whether to execute command through shell
         return_value: Task result (populated after execution)
     """
@@ -342,7 +342,7 @@ class ComputeTask(BaseTask):
         environment: dict[str, str] | None = None,
         input_files: list[str] | None = None,
         output_files: list[str] | None = None,
-        working_directory: str | None = None,
+        cwd: str | None = None,
         shell: bool = False,
         **extra_kwargs: Any,
     ):
@@ -362,7 +362,7 @@ class ComputeTask(BaseTask):
             environment: Environment variables dict
             input_files: List of input file paths
             output_files: List of output file paths
-            working_directory: Working directory for execution
+            cwd: Working directory for execution
             shell: Execute through shell (for executable tasks)
             **extra_kwargs: Additional custom fields
 
@@ -378,7 +378,7 @@ class ComputeTask(BaseTask):
             "kwargs": kwargs if kwargs is not None else {},
             "input_files": input_files,
             "output_files": output_files,
-            "working_directory": working_directory,
+            "cwd": cwd,
             "shell": shell,
         }
 

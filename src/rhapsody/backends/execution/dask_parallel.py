@@ -344,7 +344,7 @@ class DaskExecutionBackend(BaseBackend):
         """
         bksp = task.get("task_backend_specific_kwargs", {})
         backend_kwargs = {
-            k: v for k, v in bksp.items() if k not in ("working_directory", "shell", "env")
+            k: v for k, v in bksp.items() if k not in ("cwd", "shell", "env")
         }
         dask_resources = backend_kwargs.get("resources", {})
         if dask_resources and not self._check_resources_satisfiable(dask_resources):
@@ -362,7 +362,7 @@ class DaskExecutionBackend(BaseBackend):
             _run_executable,
             task["executable"],
             task.get("arguments", []),
-            working_directory=bksp.get("working_directory", task.get("working_directory")),
+            working_directory=bksp.get("cwd", task.get("cwd")),
             env=bksp.get("env"),
             shell=bksp.get("shell", False),
             **backend_kwargs,

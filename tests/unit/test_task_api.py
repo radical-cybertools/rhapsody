@@ -243,13 +243,13 @@ class TestBackendField:
             executable="/bin/app",
             input_files=["/data/input.txt"],
             output_files=["/data/output.txt"],
-            working_directory="/tmp",
+            cwd="/tmp",
             shell=True,
         )
 
         assert task.input_files == ["/data/input.txt"]
         assert task.output_files == ["/data/output.txt"]
-        assert task.working_directory == "/tmp"
+        assert task.cwd == "/tmp"
         assert task.shell is True
 
 

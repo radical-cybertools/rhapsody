@@ -323,3 +323,121 @@ def test_run_executable_captures_stderr_and_nonzero_exit():
         assert "err" in stderr
     except ImportError:
         pytest.skip("Dask dependencies not available")
+
+
+# ---------------------------------------------------------------------------
+# cwd tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dask_submit_executable_cwd_from_task():
+    """_submit_executable forwards task-level cwd to _run_executable as working_directory."""
+    try:
+        from unittest.mock import MagicMock
+
+        from rhapsody.backends import DaskExecutionBackend
+
+        backend = DaskExecutionBackend()
+        backend._initialized = True
+
+        captured = {}
+
+        def fake_submit(fn, *args, **kwargs):
+            captured.update(kwargs)
+            future = MagicMock()
+            future.__await__ = lambda self: iter([])
+            return future
+
+        backend._client = MagicMock()
+        backend._client.submit = fake_submit
+        backend._client.scheduler_info.return_value = {"workers": {}}
+
+        task = ComputeTask(executable="/bin/pwd", cwd="/tmp")
+        backend.tasks[task["uid"]] = task
+
+        import asyncio
+
+        with asyncio.Runner() as runner:
+            pass  # just ensure asyncio is importable
+
+        # Patch asyncio.create_task to be a no-op so we don't need a running loop for the callback
+        import unittest.mock
+
+        with unittest.mock.patch("asyncio.create_task"):
+            await backend._submit_executable(task)
+
+        assert captured.get("working_directory") == "/tmp"
+
+    except ImportError:
+        pytest.skip("Dask dependencies not available")
+
+
+@pytest.mark.asyncio
+async def test_dask_submit_executable_cwd_from_bksp_overrides_task():
+    """task_backend_specific_kwargs cwd takes priority over task-level cwd."""
+    try:
+        from unittest.mock import MagicMock, patch
+
+        from rhapsody.backends import DaskExecutionBackend
+
+        backend = DaskExecutionBackend()
+        backend._initialized = True
+
+        captured = {}
+
+        def fake_submit(fn, *args, **kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        backend._client = MagicMock()
+        backend._client.submit = fake_submit
+        backend._client.scheduler_info.return_value = {"workers": {}}
+
+        task = ComputeTask(
+            executable="/bin/pwd",
+            cwd="/home",
+            task_backend_specific_kwargs={"cwd": "/var"},
+        )
+        backend.tasks[task["uid"]] = task
+
+        with patch("asyncio.create_task"):
+            await backend._submit_executable(task)
+
+        assert captured.get("working_directory") == "/var"
+
+    except ImportError:
+        pytest.skip("Dask dependencies not available")
+
+
+@pytest.mark.asyncio
+async def test_dask_submit_executable_no_cwd():
+    """When no cwd is set, working_directory is None (no crash)."""
+    try:
+        from unittest.mock import MagicMock, patch
+
+        from rhapsody.backends import DaskExecutionBackend
+
+        backend = DaskExecutionBackend()
+        backend._initialized = True
+
+        captured = {}
+
+        def fake_submit(fn, *args, **kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        backend._client = MagicMock()
+        backend._client.submit = fake_submit
+        backend._client.scheduler_info.return_value = {"workers": {}}
+
+        task = ComputeTask(executable="/bin/pwd")
+        backend.tasks[task["uid"]] = task
+
+        with patch("asyncio.create_task"):
+            await backend._submit_executable(task)
+
+        assert captured.get("working_directory") is None
+
+    except ImportError:
+        pytest.skip("Dask dependencies not available")
