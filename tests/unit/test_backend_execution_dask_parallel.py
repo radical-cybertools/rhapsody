@@ -332,7 +332,7 @@ def test_run_executable_captures_stderr_and_nonzero_exit():
 
 @pytest.mark.asyncio
 async def test_dask_submit_executable_cwd_from_task():
-    """_submit_executable forwards task-level cwd to _run_executable as working_directory."""
+    """_submit_executable forwards task-level cwd to _run_executable as cwd."""
     try:
         from unittest.mock import MagicMock
 
@@ -361,7 +361,7 @@ async def test_dask_submit_executable_cwd_from_task():
         with patch("asyncio.create_task"):
             await backend._submit_executable(task)
 
-        assert captured.get("working_directory") == "/tmp"
+        assert captured.get("cwd") == "/tmp"
 
     except ImportError:
         pytest.skip("Dask dependencies not available")
@@ -399,7 +399,7 @@ async def test_dask_submit_executable_cwd_from_bksp_overrides_task():
         with patch("asyncio.create_task"):
             await backend._submit_executable(task)
 
-        assert captured.get("working_directory") == "/var"
+        assert captured.get("cwd") == "/var"
 
     except ImportError:
         pytest.skip("Dask dependencies not available")
@@ -407,7 +407,7 @@ async def test_dask_submit_executable_cwd_from_bksp_overrides_task():
 
 @pytest.mark.asyncio
 async def test_dask_submit_executable_no_cwd():
-    """When no cwd is set, working_directory is None (no crash)."""
+    """When no cwd is set, cwd is None (no crash)."""
     try:
         from unittest.mock import MagicMock
         from unittest.mock import patch
@@ -433,7 +433,7 @@ async def test_dask_submit_executable_no_cwd():
         with patch("asyncio.create_task"):
             await backend._submit_executable(task)
 
-        assert captured.get("working_directory") is None
+        assert captured.get("cwd") is None
 
     except ImportError:
         pytest.skip("Dask dependencies not available")

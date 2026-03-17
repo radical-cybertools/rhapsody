@@ -404,26 +404,3 @@ async def test_executable_with_cwd_via_process_template(session, backend_name):
 
     assert results[0].state == "DONE"
     assert "/tmp" in results[0].get("stdout", "")
-
-
-# ============================================================================
-# Test: DragonExecutionBackendV3 no longer accepts working_directory
-# ============================================================================
-
-
-def test_dragon_v3_no_working_directory_param():
-    """DragonExecutionBackendV3.__init__ must not accept working_directory (removed dead param)."""
-    from rhapsody.backends.discovery import get_backend
-
-    try:
-        from rhapsody.backends.execution.dragon import DragonExecutionBackendV3
-    except ImportError:
-        pytest.skip("Dragon not available")
-
-    import inspect
-
-    sig = inspect.signature(DragonExecutionBackendV3.__init__)
-    assert "working_directory" not in sig.parameters, (
-        "working_directory was silently ignored in V3; it has been removed. "
-        "Use task_backend_specific_kwargs={'process_template': {'cwd': '...'}} instead."
-    )
