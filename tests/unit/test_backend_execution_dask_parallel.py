@@ -356,15 +356,9 @@ async def test_dask_submit_executable_cwd_from_task():
         task = ComputeTask(executable="/bin/pwd", cwd="/tmp")
         backend.tasks[task["uid"]] = task
 
-        import asyncio
+        from unittest.mock import patch
 
-        with asyncio.Runner() as runner:
-            pass  # just ensure asyncio is importable
-
-        # Patch asyncio.create_task to be a no-op so we don't need a running loop for the callback
-        import unittest.mock
-
-        with unittest.mock.patch("asyncio.create_task"):
+        with patch("asyncio.create_task"):
             await backend._submit_executable(task)
 
         assert captured.get("working_directory") == "/tmp"
