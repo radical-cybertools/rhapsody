@@ -343,9 +343,7 @@ class DaskExecutionBackend(BaseBackend):
             task: Task dictionary containing executable path, arguments, and metadata.
         """
         bksp = task.get("task_backend_specific_kwargs", {})
-        backend_kwargs = {
-            k: v for k, v in bksp.items() if k not in ("cwd", "shell", "env")
-        }
+        backend_kwargs = {k: v for k, v in bksp.items() if k not in ("cwd", "shell", "env")}
         dask_resources = backend_kwargs.get("resources", {})
         if dask_resources and not self._check_resources_satisfiable(dask_resources):
             msg = (

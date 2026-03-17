@@ -1,12 +1,13 @@
 """Unit tests for ConcurrentExecutionBackend."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
+from unittest.mock import MagicMock
+from unittest.mock import patch
 
 import pytest
 
 from rhapsody import ComputeTask
 from rhapsody.backends.execution.concurrent import ConcurrentExecutionBackend
-
 
 # ---------------------------------------------------------------------------
 # cwd tests

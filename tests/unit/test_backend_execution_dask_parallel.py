@@ -377,7 +377,8 @@ async def test_dask_submit_executable_cwd_from_task():
 async def test_dask_submit_executable_cwd_from_bksp_overrides_task():
     """task_backend_specific_kwargs cwd takes priority over task-level cwd."""
     try:
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
+        from unittest.mock import patch
 
         from rhapsody.backends import DaskExecutionBackend
 
@@ -414,7 +415,8 @@ async def test_dask_submit_executable_cwd_from_bksp_overrides_task():
 async def test_dask_submit_executable_no_cwd():
     """When no cwd is set, working_directory is None (no crash)."""
     try:
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
+        from unittest.mock import patch
 
         from rhapsody.backends import DaskExecutionBackend
 
