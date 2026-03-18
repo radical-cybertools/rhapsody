@@ -67,9 +67,8 @@ async def main():
         await asyncio.gather(*futures)  # or tasks both works
 
         for t in tasks:
-            print(
-                f"Task {t.uid}: {t.state} (output: {t.stdout.strip() if t.stdout else t.return_value})"
-            )
+            result = t.return_value if t.function else t.stdout.strip()
+            print(f"Task {t.uid}: {t.state} (output: {result})")
 
 
 if __name__ == "__main__":

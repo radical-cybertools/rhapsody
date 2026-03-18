@@ -18,14 +18,10 @@ async def main():
     # Define tasks (UIDs auto-generated!)
     tasks = [
         ComputeTask(
-            executable="/bin/bash",
-            arguments=["-c", "echo Hello from task 1 on $HOSTNAME"],
-            shell=True,
+            executable="/bin/bash", arguments=["-c", "echo Hello from task 1 on $HOSTNAME"]
         ),
         ComputeTask(
-            executable="/bin/bash",
-            arguments=["-c", "echo Hello from task 2 on $HOSTNAME"],
-            shell=True,
+            executable="/bin/bash", arguments=["-c", "echo Hello from task 2 on $HOSTNAME"]
         ),
     ]
 
