@@ -34,7 +34,7 @@ async def main():
         result = await task
 
         print(f"Task finished with state: {task.state}")
-        print(f"Output: {task.return_value}")
+        print(f"Output: {task.stdout}")
 
 if __name__ == "__main__":
     asyncio.run(main())

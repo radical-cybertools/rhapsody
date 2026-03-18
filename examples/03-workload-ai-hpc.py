@@ -55,8 +55,20 @@ async def main():
     results = await asyncio.gather(*tasks)
 
     for i, task in enumerate(results):
-        rtype = "AI" if "prompt" in task else "Compute"
-        print(f"Task {i + 1} [{rtype}] ({task.get('backend')}): {task.return_value}", flush=True)
+        backend_name = task.get("backend")
+        if isinstance(task, AITask):
+            # AITask: model response is in task.response
+            print(f"Task {i + 1} [AI] ({backend_name}): {task.response}", flush=True)
+        elif task.get("function"):
+            # ComputeTask (function): return value is in task.return_value
+            print(f"Task {i + 1} [Compute/fn] ({backend_name}): {task.return_value}", flush=True)
+        else:
+            # ComputeTask (executable): output is in task.stdout / task.stderr
+            print(
+                f"Task {i + 1} [Compute/exec] ({backend_name}): "
+                f"stdout={task.stdout.strip()!r}  exit_code={task.exit_code}",
+                flush=True,
+            )
 
     await session.close()
 

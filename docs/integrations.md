@@ -98,8 +98,8 @@ async def main():
             # AITask: use .response for model output
             print(f"Task {i + 1} [AI]: {task.response}")
         else:
-            # ComputeTask: use .return_value for function/executable output
-            print(f"Task {i + 1} [Compute]: {task.return_value}")
+            # ComputeTask (executable): use .stdout for output
+            print(f"Task {i + 1} [Compute]: {task.stdout}")
 
     await session.close()
 

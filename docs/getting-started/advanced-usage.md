@@ -338,10 +338,8 @@ async def main():
         await asyncio.gather(*futures)
 
         for t in tasks:
-            print(
-                f"Task {t.uid}: {t.state} "
-                f"(output: {t.stdout.strip() if t.stdout else t.return_value})"
-            )
+            result = t.return_value if t.function else t.stdout.strip()
+            print(f"Task {t.uid}: {t.state} (output: {result})")
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -385,11 +383,11 @@ async def mixed_workload():
 
         # Wait for simulation to finish first
         await sim_task
-        print(f"Simulation Done: {sim_task.return_value}")  # ComputeTask uses .return_value
+        print(f"Simulation Done: {sim_task.stdout}")  # executable ComputeTask: use .stdout
 
         # Then summarize
         await summary_task
-        print(f"AI Summary: {summary_task.response}")  # AITask uses .response
+        print(f"AI Summary: {summary_task.response}")  # AITask: use .response
 
 asyncio.run(mixed_workload())
 ```
@@ -429,7 +427,7 @@ async def run():
             await session.wait_tasks(tasks)
 
         for t in tasks:
-            result = t.return_value if t.return_value is not None else t.stdout.strip()
+            result = t.return_value if t.function else t.stdout.strip()
             print(f"{t.uid}: {t.state} -> {result}")
 ```
 
