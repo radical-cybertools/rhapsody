@@ -109,6 +109,7 @@ nav:
       - Installation: getting-started/installation.md
       - Quick Start: getting-started/quick-start.md
       - Advanced Usage: getting-started/advanced-usage.md
+      - Resource Specification: getting-started/resource-specification.md
       - Configuration: getting-started/configuration.md
       - Integrations: integrations.md
       - Contributing: contributing.md

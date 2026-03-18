@@ -374,3 +374,33 @@ async def test_task_uid_uniqueness(session):
     uids = [r.uid for r in results]
     assert len(set(uids)) == 2
     assert all(uid.startswith("task.") for uid in uids)
+
+
+# ============================================================================
+# Test: cwd via process_template
+# ============================================================================
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_executable_with_cwd_via_process_template(session, backend_name):
+    """Test that cwd is honoured when set via process_template in task_backend_specific_kwargs.
+
+    Only applicable to DragonExecutionBackendV3 — V1 and V2 use a backend-level working_directory
+    and do not support per-task cwd via process_template.
+    """
+    if backend_name in ("dragon_v1", "dragon_v2"):
+        pytest.skip(f"{backend_name} does not support per-task cwd via process_template")
+
+    import sys
+
+    task = ComputeTask(
+        executable=sys.executable,
+        arguments=["-c", "import os; print(os.getcwd())"],
+        task_backend_specific_kwargs={"process_template": {"cwd": "/tmp"}},
+    )
+
+    await session.submit_tasks([task])
+    results = await session.wait_tasks([task])
+
+    assert results[0].state == "DONE"
+    assert "/tmp" in results[0].get("stdout", "")

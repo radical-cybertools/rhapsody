@@ -35,7 +35,7 @@ def _get_logger() -> logging.Logger:
 def _run_executable(
     executable: str,
     arguments: list[str],
-    working_directory: str | None = None,
+    cwd: str | None = None,
     env: dict | None = None,
     shell: bool = False,
 ) -> tuple[str, str, int]:
@@ -46,7 +46,7 @@ def _run_executable(
     Args:
         executable: Path to the executable.
         arguments: List of command-line arguments.
-        working_directory: Working directory for the subprocess.
+        cwd: Working directory for the subprocess.
         env: Environment variables dict. None inherits the worker environment.
         shell: Whether to execute through the shell.
 
@@ -60,7 +60,7 @@ def _run_executable(
         cmd if not shell else " ".join(cmd),
         shell=shell,
         capture_output=True,
-        cwd=working_directory,
+        cwd=cwd,
         env=env,
     )
     return result.stdout.decode(), result.stderr.decode(), result.returncode
@@ -343,9 +343,7 @@ class DaskExecutionBackend(BaseBackend):
             task: Task dictionary containing executable path, arguments, and metadata.
         """
         bksp = task.get("task_backend_specific_kwargs", {})
-        backend_kwargs = {
-            k: v for k, v in bksp.items() if k not in ("working_directory", "shell", "env")
-        }
+        backend_kwargs = {k: v for k, v in bksp.items() if k not in ("cwd", "shell", "env")}
         dask_resources = backend_kwargs.get("resources", {})
         if dask_resources and not self._check_resources_satisfiable(dask_resources):
             msg = (
@@ -362,7 +360,7 @@ class DaskExecutionBackend(BaseBackend):
             _run_executable,
             task["executable"],
             task.get("arguments", []),
-            working_directory=bksp.get("working_directory", task.get("working_directory")),
+            cwd=bksp.get("cwd"),
             env=bksp.get("env"),
             shell=bksp.get("shell", False),
             **backend_kwargs,

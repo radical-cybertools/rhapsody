@@ -149,22 +149,6 @@ class TestComputeTaskValidation:
 
         assert "requires either" in str(exc.value).lower()
 
-    def test_ranks_default(self):
-        """Test ranks defaults to 1."""
-        task = ComputeTask(executable="/bin/echo")
-        assert task.ranks == 1
-
-    def test_ranks_custom(self):
-        """Test custom ranks value."""
-        task = ComputeTask(executable="/bin/echo", ranks=4)
-        assert task.ranks == 4
-
-    def test_ranks_validation(self):
-        """Test ranks validation (must be positive integer)."""
-        with pytest.raises(TaskValidationError) as exc:
-            ComputeTask(executable="/bin/echo", ranks=0)
-        assert "positive integer" in str(exc.value).lower()
-
 
 class TestBackendField:
     """Tests for the 'backend' field in tasks."""
@@ -193,64 +177,16 @@ class TestBackendField:
         assert task.backend is None
         assert task["backend"] is None
 
-        with pytest.raises(TaskValidationError):
-            ComputeTask(executable="/bin/echo", ranks=-1)
-
-    def test_memory_validation(self):
-        """Test memory field validation."""
-        # Valid memory
-        task = ComputeTask(executable="/bin/echo", memory=2048)
-        assert task.memory == 2048
-
-        # Invalid memory (negative)
-        with pytest.raises(TaskValidationError):
-            ComputeTask(executable="/bin/echo", memory=-1)
-
-    def test_gpu_validation(self):
-        """Test GPU field validation."""
-        # Valid GPU
-        task = ComputeTask(executable="/bin/echo", gpu=2)
-        assert task.gpu == 2
-
-        # Invalid GPU (negative)
-        with pytest.raises(TaskValidationError):
-            ComputeTask(executable="/bin/echo", gpu=-1)
-
-    def test_cpu_threads_validation(self):
-        """Test CPU threads validation."""
-        # Valid
-        task = ComputeTask(executable="/bin/echo", cpu_threads=8)
-        assert task.cpu_threads == 8
-
-        # Invalid (zero)
-        with pytest.raises(TaskValidationError):
-            ComputeTask(executable="/bin/echo", cpu_threads=0)
-
-    def test_environment_validation(self):
-        """Test environment dict validation."""
-        # Valid
-        env = {"PATH": "/usr/bin", "HOME": "/home/user"}
-        task = ComputeTask(executable="/bin/echo", environment=env)
-        assert task.environment == env
-
-        # Invalid (not a dict)
-        with pytest.raises(TaskValidationError):
-            ComputeTask(executable="/bin/echo", environment="not_a_dict")
-
     def test_optional_fields(self):
-        """Test optional fields (input_files, output_files, etc.)."""
+        """Test optional fields (input_files, output_files)."""
         task = ComputeTask(
             executable="/bin/app",
             input_files=["/data/input.txt"],
             output_files=["/data/output.txt"],
-            working_directory="/tmp",
-            shell=True,
         )
 
         assert task.input_files == ["/data/input.txt"]
         assert task.output_files == ["/data/output.txt"]
-        assert task.working_directory == "/tmp"
-        assert task.shell is True
 
 
 class TestAITaskValidation:
@@ -346,11 +282,7 @@ class TestAITaskValidation:
 
     def test_from_dict_compute_task(self):
         """Test from_dict() reconstructs ComputeTask correctly."""
-        original = ComputeTask(executable="/bin/echo", arguments=["hello"], ranks=2, memory=2048)
-
-    def test_from_dict_compute_task(self):
-        """Test from_dict() reconstructs ComputeTask correctly."""
-        original = ComputeTask(executable="/bin/echo", arguments=["hello"], ranks=2, memory=2048)
+        original = ComputeTask(executable="/bin/echo", arguments=["hello"])
 
         task_dict = dict(original)
         reconstructed = ComputeTask.from_dict(task_dict)
@@ -358,8 +290,6 @@ class TestAITaskValidation:
         assert reconstructed.uid == original.uid
         assert reconstructed.executable == original.executable
         assert reconstructed.arguments == original.arguments
-        assert reconstructed.ranks == original.ranks
-        assert reconstructed.memory == original.memory
 
     def test_from_dict_ai_task(self):
         """Test from_dict() reconstructs AITask correctly."""
@@ -376,9 +306,7 @@ class TestAITaskValidation:
 
     def test_roundtrip_serialization_compute(self):
         """Test ComputeTask → dict → ComputeTask roundtrip."""
-        original = ComputeTask(
-            executable="/bin/app", arguments=["arg1"], memory=1024, custom_key="custom_value"
-        )
+        original = ComputeTask(executable="/bin/app", arguments=["arg1"], custom_key="custom_value")
 
         # Roundtrip
         task_dict = dict(original)
@@ -390,7 +318,7 @@ class TestAITaskValidation:
 
     def test_roundtrip_serialization_ai(self):
         """Test AITask → dict → AITask roundtrip."""
-        original = AITask(prompt="test", model="gpt-4", temperature=0.7, gpu=1)
+        original = AITask(prompt="test", model="gpt-4", temperature=0.7)
 
         # Roundtrip
         task_dict = dict(original)
@@ -459,14 +387,10 @@ class TestEdgeCases:
 
     def test_none_optional_fields(self):
         """Test None values for optional fields."""
-        task = ComputeTask(
-            executable="/bin/echo", memory=None, gpu=None, cpu_threads=None, environment=None
-        )
+        task = ComputeTask(executable="/bin/echo", input_files=None, output_files=None)
 
-        assert task.memory is None
-        assert task.gpu is None
-        assert task.cpu_threads is None
-        assert task.environment is None
+        assert task.input_files is None
+        assert task.output_files is None
 
     def test_validate_method(self):
         """Test manual validation via validate() method."""
@@ -476,7 +400,7 @@ class TestEdgeCases:
         task.validate()
 
         # Modify to invalid state and validate
-        task.ranks = 0
+        task["uid"] = ""
         with pytest.raises(TaskValidationError):
             task.validate()
 

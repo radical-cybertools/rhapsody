@@ -3085,12 +3085,31 @@ class DragonExecutionBackendV3(BaseBackend):
 
     No polling! Each compiled batch gets a thread that calls .wait() and triggers callbacks when
     done. This is the Dragon-native way.
+
+    Note on working directory:
+        DragonExecutionBackendV3 does not support a backend-level working directory.
+        To set the working directory per task, use ``task_backend_specific_kwargs``
+        with ``process_template`` (single process) or ``process_templates`` (MPI job)::
+
+            ComputeTask(
+                function=my_func,
+                task_backend_specific_kwargs={
+                    "process_template": {"cwd": "/path/to/dir"}
+                },
+            )
+
+            # For MPI jobs:
+            ComputeTask(
+                function=my_func,
+                task_backend_specific_kwargs={
+                    "process_templates": [(nranks, {"cwd": "/path/to/dir"})]
+                },
+            )
     """
 
     def __init__(
         self,
         num_workers: Optional[int] = None,
-        working_directory: Optional[str] = None,
         disable_background_batching: bool = False,
         disable_telemetry: bool = False,
         disable_batch_submission: bool = False,
@@ -3319,6 +3338,17 @@ class DragonExecutionBackendV3(BaseBackend):
         - Function Job: batch.job() - function in MPI job with multiple ranks
         - Executable Process: batch.process() - single executable process
         - Executable Job: batch.job() - executable in MPI job with multiple ranks
+
+        Setting cwd (working directory):
+            Pass ``cwd`` inside ``process_template`` or each entry of ``process_templates``
+            via ``task_backend_specific_kwargs``::
+
+                ComputeTask(
+                    function=my_func,
+                    task_backend_specific_kwargs={
+                        "process_template": {"cwd": "/path/to/dir"}
+                    },
+                )
         """
         # Fast path: extract everything upfront
         uid = task["uid"]
@@ -3498,7 +3528,6 @@ class DragonExecutionBackendV3(BaseBackend):
     async def create(
         cls,
         num_workers: Optional[int] = None,
-        working_directory: Optional[str] = None,
         disable_background_batching: bool = False,
         disable_telemetry: bool = False,
         disable_batch_submission: bool = False,
@@ -3506,7 +3535,6 @@ class DragonExecutionBackendV3(BaseBackend):
         """Create and initialize a DragonExecutionBackendV3."""
         backend = cls(
             num_workers=num_workers,
-            working_directory=working_directory,
             disable_background_batching=disable_background_batching,
             disable_telemetry=disable_telemetry,
             disable_batch_submission=disable_batch_submission,
