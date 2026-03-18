@@ -37,7 +37,7 @@ class BaseTask(dict, ABC):
 
     Attributes:
         uid: Unique identifier for the task (auto-generated if not provided)
-        ranks: Number of parallel ranks for task execution (default: 1)
+        backend: Backend to use for task execution (optional)
     """
 
     # Global UID counter (thread-safe)
@@ -66,11 +66,6 @@ class BaseTask(dict, ABC):
     def __init__(
         self,
         uid: str | None = None,
-        ranks: int = 1,
-        memory: int | None = None,
-        gpu: int | None = None,
-        cpu_threads: int | None = None,
-        environment: dict[str, str] | None = None,
         backend: str | None = None,
         **kwargs: Any,
     ):
@@ -78,27 +73,17 @@ class BaseTask(dict, ABC):
 
         Args:
             uid: Unique identifier for the task (auto-generated if not provided)
-            ranks: Number of parallel ranks (default: 1)
-            memory: Memory requirement in MB (optional)
-            gpu: Number of GPUs required (optional)
-            cpu_threads: Number of CPU threads required (optional)
-            environment: Environment variables dict (optional)
             backend: Backend to use for task execution (optional)
             **kwargs: Additional custom fields
 
         Raises:
-            TaskValidationError: If uid is empty or ranks is invalid
+            TaskValidationError: If uid is empty
         """
         # Initialize as dict first
         super().__init__()
 
         # Set all fields in dict (always initialize to None for consistent access)
         self["uid"] = uid if uid is not None else self._generate_uid()
-        self["ranks"] = ranks
-        self["memory"] = memory
-        self["gpu"] = gpu
-        self["cpu_threads"] = cpu_threads
-        self["environment"] = environment
         self["backend"] = backend
 
         # Initialize result fields (populated by backends after execution)
@@ -172,30 +157,6 @@ class BaseTask(dict, ABC):
         uid = self.get("uid")
         if not uid or not isinstance(uid, str):
             raise TaskValidationError(None, "uid must be a non-empty string")
-
-        ranks = self.get("ranks")
-        if not isinstance(ranks, int) or ranks < 1:
-            raise TaskValidationError(uid, f"ranks must be a positive integer, got {ranks}")
-
-        memory = self.get("memory")
-        if memory is not None and (not isinstance(memory, int) or memory < 0):
-            raise TaskValidationError(
-                uid, f"memory must be a non-negative integer (MB), got {memory}"
-            )
-
-        gpu = self.get("gpu")
-        if gpu is not None and (not isinstance(gpu, int) or gpu < 0):
-            raise TaskValidationError(uid, f"gpu must be a non-negative integer, got {gpu}")
-
-        cpu_threads = self.get("cpu_threads")
-        if cpu_threads is not None and (not isinstance(cpu_threads, int) or cpu_threads < 1):
-            raise TaskValidationError(
-                uid, f"cpu_threads must be a positive integer, got {cpu_threads}"
-            )
-
-        environment = self.get("environment")
-        if environment is not None and not isinstance(environment, dict):
-            raise TaskValidationError(uid, f"environment must be a dict, got {type(environment)}")
 
     @abstractmethod
     def _validate_specific(self) -> None:
@@ -322,9 +283,12 @@ class ComputeTask(BaseTask):
         kwargs: Keyword arguments for function tasks
         input_files: List of input file paths
         output_files: List of output file paths
-        cwd: Working directory for task execution
-        shell: Whether to execute command through shell
         return_value: Task result (populated after execution)
+
+    Note:
+        Execution context (working directory, environment variables, shell mode, resource
+        requirements) is backend-specific and must be passed via ``task_backend_specific_kwargs``.
+        See the Resource Specification Guide for per-backend details.
     """
 
     def __init__(
@@ -335,15 +299,8 @@ class ComputeTask(BaseTask):
         args: tuple | None = None,
         kwargs: dict | None = None,
         uid: str | None = None,
-        ranks: int = 1,
-        memory: int | None = None,
-        gpu: int | None = None,
-        cpu_threads: int | None = None,
-        environment: dict[str, str] | None = None,
         input_files: list[str] | None = None,
         output_files: list[str] | None = None,
-        cwd: str | None = None,
-        shell: bool = False,
         **extra_kwargs: Any,
     ):
         """Initialize compute task.
@@ -355,16 +312,9 @@ class ComputeTask(BaseTask):
             args: Positional arguments for function
             kwargs: Keyword arguments for function
             uid: Unique identifier for the task (auto-generated if not provided)
-            ranks: Number of parallel ranks (default: 1)
-            memory: Memory requirement in MB
-            gpu: Number of GPUs required
-            cpu_threads: Number of CPU threads required
-            environment: Environment variables dict
             input_files: List of input file paths
             output_files: List of output file paths
-            cwd: Working directory for execution
-            shell: Execute through shell (for executable tasks)
-            **extra_kwargs: Additional custom fields
+            **extra_kwargs: Additional custom fields (e.g. task_backend_specific_kwargs)
 
         Raises:
             TaskValidationError: If validation fails
@@ -378,18 +328,11 @@ class ComputeTask(BaseTask):
             "kwargs": kwargs if kwargs is not None else {},
             "input_files": input_files,
             "output_files": output_files,
-            "cwd": cwd,
-            "shell": shell,
         }
 
         # Initialize base with all fields
         super().__init__(
             uid=uid,
-            ranks=ranks,
-            memory=memory,
-            gpu=gpu,
-            cpu_threads=cpu_threads,
-            environment=environment,
             **task_fields,
             **extra_kwargs,
         )
@@ -469,6 +412,11 @@ class AITask(BaseTask):
         top_k: Top-k sampling parameter
         stop_sequences: List of sequences that stop generation
         response: AI model response (populated after execution)
+
+    Note:
+        Resource requirements (GPU count, CPU threads, memory, ranks) are backend-specific
+        and must be specified via ``task_backend_specific_kwargs``. See each backend's
+        documentation for supported resource keys.
     """
 
     def __init__(
@@ -483,11 +431,6 @@ class AITask(BaseTask):
         top_k: int | None = None,
         stop_sequences: list[str] | None = None,
         uid: str | None = None,
-        ranks: int = 1,
-        memory: int | None = None,
-        gpu: int | None = None,
-        cpu_threads: int | None = None,
-        environment: dict[str, str] | None = None,
         backend: str | None = None,
         **extra_kwargs: Any,
     ):
@@ -504,11 +447,7 @@ class AITask(BaseTask):
             top_k: Top-k sampling parameter
             stop_sequences: Sequences that stop generation
             uid: Unique identifier for the task (auto-generated if not provided)
-            ranks: Number of parallel ranks (default: 1)
-            memory: Memory requirement in MB
-            gpu: Number of GPUs required
-            cpu_threads: Number of CPU threads required
-            environment: Environment variables dict
+            backend: Backend to use for task execution (optional)
             **extra_kwargs: Additional custom fields
 
         Raises:
@@ -530,11 +469,6 @@ class AITask(BaseTask):
         # Initialize base with all fields
         super().__init__(
             uid=uid,
-            ranks=ranks,
-            memory=memory,
-            gpu=gpu,
-            cpu_threads=cpu_threads,
-            environment=environment,
             backend=backend,
             **task_fields,
             **extra_kwargs,

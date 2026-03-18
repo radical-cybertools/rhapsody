@@ -331,10 +331,11 @@ def test_run_executable_captures_stderr_and_nonzero_exit():
 
 
 @pytest.mark.asyncio
-async def test_dask_submit_executable_cwd_from_task():
-    """_submit_executable forwards task-level cwd to _run_executable as cwd."""
+async def test_dask_submit_executable_cwd_from_bksp():
+    """_submit_executable forwards cwd from task_backend_specific_kwargs to _run_executable."""
     try:
         from unittest.mock import MagicMock
+        from unittest.mock import patch
 
         from rhapsody.backends import DaskExecutionBackend
 
@@ -353,53 +354,16 @@ async def test_dask_submit_executable_cwd_from_task():
         backend._client.submit = fake_submit
         backend._client.scheduler_info.return_value = {"workers": {}}
 
-        task = ComputeTask(executable="/bin/pwd", cwd="/tmp")
-        backend.tasks[task["uid"]] = task
-
-        from unittest.mock import patch
-
-        with patch("asyncio.create_task"):
-            await backend._submit_executable(task)
-
-        assert captured.get("cwd") == "/tmp"
-
-    except ImportError:
-        pytest.skip("Dask dependencies not available")
-
-
-@pytest.mark.asyncio
-async def test_dask_submit_executable_cwd_from_bksp_overrides_task():
-    """task_backend_specific_kwargs cwd takes priority over task-level cwd."""
-    try:
-        from unittest.mock import MagicMock
-        from unittest.mock import patch
-
-        from rhapsody.backends import DaskExecutionBackend
-
-        backend = DaskExecutionBackend()
-        backend._initialized = True
-
-        captured = {}
-
-        def fake_submit(fn, *args, **kwargs):
-            captured.update(kwargs)
-            return MagicMock()
-
-        backend._client = MagicMock()
-        backend._client.submit = fake_submit
-        backend._client.scheduler_info.return_value = {"workers": {}}
-
         task = ComputeTask(
             executable="/bin/pwd",
-            cwd="/home",
-            task_backend_specific_kwargs={"cwd": "/var"},
+            task_backend_specific_kwargs={"cwd": "/tmp"},
         )
         backend.tasks[task["uid"]] = task
 
         with patch("asyncio.create_task"):
             await backend._submit_executable(task)
 
-        assert captured.get("cwd") == "/var"
+        assert captured.get("cwd") == "/tmp"
 
     except ImportError:
         pytest.skip("Dask dependencies not available")

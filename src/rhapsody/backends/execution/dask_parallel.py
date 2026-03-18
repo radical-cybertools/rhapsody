@@ -360,7 +360,7 @@ class DaskExecutionBackend(BaseBackend):
             _run_executable,
             task["executable"],
             task.get("arguments", []),
-            cwd=bksp.get("cwd", task.get("cwd")),
+            cwd=bksp.get("cwd"),
             env=bksp.get("env"),
             shell=bksp.get("shell", False),
             **backend_kwargs,

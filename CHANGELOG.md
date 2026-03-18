@@ -7,7 +7,8 @@
 - `ConcurrentExecutionBackend`: executable tasks now honour per-task working directory via `task.cwd` (task-level) or `task_backend_specific_kwargs={"cwd": "..."}` (overrides task-level); passed as `cwd=` to `asyncio.create_subprocess_exec` / `asyncio.create_subprocess_shell`.
 - `DaskExecutionBackend`: executable tasks now honour `cwd` from `task_backend_specific_kwargs` (overrides task-level `task.cwd`); forwarded to `_run_executable` which passes it as `cwd=` to `subprocess.run`.
 - `DragonExecutionBackendV3`: documented that per-task working directory must be set via `task_backend_specific_kwargs={"process_template": {"cwd": "..."}}` (or `"process_templates"` for MPI jobs); this is the only supported mechanism in V3.
-- Unit tests for `cwd` behaviour across `ConcurrentExecutionBackend`, `DaskExecutionBackend`, and `DragonExecutionBackendV3`.
+- `ConcurrentExecutionBackend`: executable tasks now honour `env` from `task_backend_specific_kwargs={"env": {...}}`; passed as `env=` to `asyncio.create_subprocess_exec` / `asyncio.create_subprocess_shell`. `None` (default) inherits the parent process environment.
+- Unit tests for `cwd` and `env` behaviour across `ConcurrentExecutionBackend`, `DaskExecutionBackend`, and `DragonExecutionBackendV3`.
 - `DaskExecutionBackend` now supports all three `ComputeTask` types: sync functions, async functions, and executable tasks (via subprocess inside a Dask worker).
 - Cluster-agnostic design: pass `cluster=` or `client=` to target any Dask-compatible cluster (SLURM, Kubernetes, LocalCUDACluster, etc.) without changing task code.
 - Resource scheduling via `task_backend_specific_kwargs={"resources": {"GPU": 1}}` routes tasks to workers advertising matching Dask resources.
@@ -23,6 +24,15 @@
 - `DaskExecutionBackend._build_dask_resources()`: reads from `task_backend_specific_kwargs["resources"]` instead of task-level `gpu` / `cpu_threads` fields.
 - `DaskExecutionBackend._submit_executable()`: `shell=` now reads from `task_backend_specific_kwargs` for consistency.
 - Optimized Dragon backend tests by using module-scoped fixtures, reusing a single backend instance per Dragon version (V1, V2, V3) across all tests instead of creating/destroying one per test.
+
+### Breaking Changes
+
+- **`ComputeTask` and `AITask`**: removed `ranks`, `memory`, `gpu`, `cpu_threads`, and `environment` parameters. These fields were never consumed by any execution backend — they were silently ignored, creating a misleading API. Resource requirements are now backend-specific and must be passed via `task_backend_specific_kwargs`. Migration:
+  - `ComputeTask(executable=..., gpu=2)` → `ComputeTask(executable=..., task_backend_specific_kwargs={"resources": {"GPU": 2}})` (Dask) or `task_backend_specific_kwargs={"process_template": {"gpu": 2}}` (Dragon V3)
+  - `ComputeTask(executable=..., environment={"K": "V"})` → `ComputeTask(executable=..., task_backend_specific_kwargs={"env": {"K": "V"}})` (Concurrent/Dask)
+- **`ComputeTask`**: removed `cwd` and `shell` as named parameters. All execution context is now exclusively specified via `task_backend_specific_kwargs` for consistency. Migration:
+  - `ComputeTask(executable=..., cwd="/path")` → `ComputeTask(executable=..., task_backend_specific_kwargs={"cwd": "/path"})`
+  - `ComputeTask(executable=..., shell=True)` → `ComputeTask(executable=..., task_backend_specific_kwargs={"shell": True})`
 
 ### Fixed
 
