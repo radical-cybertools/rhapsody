@@ -152,6 +152,18 @@ def skip_if_no_radical_pilot(backend_availability):
 
 
 @pytest.fixture
+def skip_if_no_flux():
+    """Fixture that skips test if Flux backend is not available."""
+    from rhapsody.backends.execution.flux.flux_module import FluxModule
+
+    fm = FluxModule()
+    try:
+        fm.verify()
+    except RuntimeError as e:
+        pytest.skip(f"Flux backend not available: {e}")
+
+
+@pytest.fixture
 async def test_backend(skip_if_no_backends, mock_task_callback):
     """Fixture providing a configured backend for testing.
 

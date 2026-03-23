@@ -41,3 +41,10 @@ try:
     )
 except ImportError:
     pass
+
+try:
+    from .flux import FluxExecutionBackend  # noqa: F401
+
+    __all__.append("FluxExecutionBackend")
+except ImportError:
+    pass

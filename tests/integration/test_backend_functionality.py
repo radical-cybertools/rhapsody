@@ -113,11 +113,10 @@ class TestBackendFunctionality:
             # For most backends, cancellation may not be implemented
             # Just verify the backend responds to cancel requests
             try:
-                # Try to cancel the task (may not be implemented)
-                if hasattr(backend, "cancel_tasks"):
-                    # Cancellation may not be supported
-                    canceled = {}
-                    assert isinstance(canceled, (dict, list, bool))
+                # Try to cancel the task
+                if hasattr(backend, "cancel_task"):
+                    canceled = await backend.cancel_task(tasks[0].uid)
+                    assert isinstance(canceled, bool)
             except (NotImplementedError, AttributeError):
                 # Cancellation not implemented - that's okay
                 pass

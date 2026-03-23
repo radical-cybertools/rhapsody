@@ -1987,6 +1987,16 @@ class DragonExecutionBackendV1(BaseBackend):
 
             if success:
                 task_info.canceled = True
+                if uid in self.tasks:
+                    self.tasks[uid]["canceled"] = True
+
+                # Free up slots and remove from running tasks
+                self._free_slots += task_info.ranks
+                self._running_tasks.pop(uid, None)
+
+                # Notify callback
+                if uid in self.tasks:
+                    self._callback_func(self.tasks[uid], "CANCELED")
 
                 # Clean up result collector tracking
                 self._result_collector.cleanup_task(uid)
@@ -2012,16 +2022,16 @@ class DragonExecutionBackendV1(BaseBackend):
         if proc:
             if proc.is_alive:
                 proc.terminate()
-                proc.join(2.0)
+                await asyncio.to_thread(proc.join, timeout=2.0)
                 if proc.is_alive:
                     proc.kill()
-                    proc.join(1.0)
+                    await asyncio.to_thread(proc.join, timeout=1.0)
             return True
 
         if group and not group.inactive_puids:
             try:
-                group.stop()
-                group.close()
+                await asyncio.to_thread(group.stop)
+                await asyncio.to_thread(group.close)
             except DragonUserCodeError:
                 pass
             return True
