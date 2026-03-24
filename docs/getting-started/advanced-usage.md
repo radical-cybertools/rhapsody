@@ -1,6 +1,175 @@
 # Advanced Usage
 
-RHAPSODY excels at orchestrating complex, multi-backend workloads. This guide covers explicit task routing and mixing AI inference with traditional compute.
+RHAPSODY excels at orchestrating complex, multi-backend workloads. This guide covers wait modes, sync/async callable tasks, explicit task routing, and mixing AI inference with traditional compute.
+
+---
+
+## Wait Modes
+
+After calling `submit_tasks`, RHAPSODY gives you three ways to wait for results.
+They differ in whether task failures raise exceptions or are left for you to inspect.
+
+### `await session.wait_tasks(tasks)` — Collect all, inspect states
+
+The session-level helper. It waits for **all** listed tasks to reach a terminal
+state without raising on task failures. Inspect `task.state` afterwards.
+
+```python
+async with Session(backends=[backend]) as session:
+    await session.submit_tasks(tasks)
+    await session.wait_tasks(tasks, timeout=30.0)  # (1)
+
+    for t in tasks:
+        if t.state == "DONE":
+            print(t.return_value or t.stdout)
+        else:
+            print(f"{t.uid} failed: {t.exception or t.stderr}")
+```
+
+1. Raises `asyncio.TimeoutError` if the deadline is exceeded; never raises on task failure.
+
+### `await asyncio.gather(*futures)` — Concurrent, raises on first failure
+
+Use the futures returned by `submit_tasks`. By default `asyncio.gather` re-raises
+the first exception it encounters. Use `return_exceptions=True` to collect all
+outcomes without raising.
+
+```python
+from rhapsody.api.errors import TaskExecutionError
+
+async with Session(backends=[backend]) as session:
+    futures = await session.submit_tasks(tasks)
+
+    # Fail-fast: raises on the first failure
+    try:
+        await asyncio.gather(*futures)
+    except TaskExecutionError as e:          # command task (executable)
+        print(f"Command failed: {e}")
+    except Exception as e:                   # function task raised
+        print(f"Function raised: {e}")
+
+    # --- OR --- collect all, decide per-result
+    results = await asyncio.gather(*futures, return_exceptions=True)
+    for t, r in zip(tasks, results):
+        if isinstance(r, Exception):
+            print(f"{t.uid} → error: {r}")
+        else:
+            print(f"{t.uid} → {t.return_value}")
+```
+
+### `await future` / `await task` — Wait for one specific task
+
+Both the `asyncio.Future` objects returned by `submit_tasks` and the task
+objects themselves are awaitable. Awaiting raises if that task failed.
+
+```python
+async with Session(backends=[backend]) as session:
+    futures = await session.submit_tasks([task_a, task_b])
+
+    result_a = await futures[0]   # raises if task_a failed
+    result_b = await task_b       # task objects are awaitable too
+```
+
+This is ideal for sequential pipelines where the output of one task is the
+input of the next.
+
+### Quick reference
+
+| Mode | Raises on task failure | Raises on timeout | Best for |
+|---|---|---|---|
+| `await session.wait_tasks(tasks)` | No — check `task.state` | Yes | Batch / fire-and-inspect |
+| `await asyncio.gather(*futures)` | Yes (first exception) | No | Fail-fast / concurrent |
+| `await future` / `await task` | Yes | No | Sequential pipelines |
+
+### Exception types
+
+| Situation | Exception raised |
+|---|---|
+| Executable task fails (non-zero exit code) | `TaskExecutionError(uid, stderr, exit_code)` |
+| Function task raises | Original exception propagated as-is |
+| Task not yet submitted | `RuntimeError` — no bound future |
+| Timeout in `wait_tasks` | `asyncio.TimeoutError` |
+
+All RHAPSODY-specific exceptions inherit from `RhapsodyError` and can be
+imported from `rhapsody.api.errors`:
+
+```
+RhapsodyError
+├── BackendError        — backend infrastructure failure
+├── TaskValidationError — invalid task definition
+├── TaskExecutionError  — task ran but failed (command or function)
+├── SessionError        — session-level misuse
+└── ResourceError       — unsatisfiable resource requirements
+```
+
+---
+
+## Sync and Async Callable Tasks
+
+`ComputeTask` accepts **any Python callable** — both regular (synchronous) and
+`async def` functions are dispatched transparently. RHAPSODY detects the
+function type at runtime; no changes to your task definition are needed.
+
+```python
+# Synchronous function
+def compute_pi(n_samples):
+    import random
+    hits = sum(1 for _ in range(n_samples)
+               if random.random()**2 + random.random()**2 < 1)
+    return 4 * hits / n_samples
+
+# Async function
+async def fetch_result(url):
+    import aiohttp
+    async with aiohttp.ClientSession() as s:
+        async with s.get(url) as r:
+            return await r.text()
+
+async with Session(backends=[backend]) as session:
+    tasks = [
+        ComputeTask(function=compute_pi, args=(1_000_000,)),
+        ComputeTask(function=fetch_result, args=("https://example.com",)),
+    ]
+    futures = await session.submit_tasks(tasks)
+    await asyncio.gather(*futures)
+
+    print(tasks[0].return_value)   # ~3.1415...
+    print(tasks[1].return_value)   # HTML string
+```
+
+Both functions run inside the executor (thread or process pool). Async
+functions are driven by an isolated `asyncio.run(...)` call inside the worker
+so they have their own event loop and do not share the session's loop.
+
+### Executor dispatch
+
+| Backend | Executor | Sync function | Async function |
+|---|---|---|---|
+| `ConcurrentExecutionBackend` (default) | `ThreadPoolExecutor` | called directly | run via `asyncio.run` |
+| `ConcurrentExecutionBackend` | `ProcessPoolExecutor` | called directly | run via `asyncio.run` |
+| `DaskExecutionBackend` | Dask workers | submitted natively | wrapped transparently |
+
+!!! note "ProcessPoolExecutor requires cloudpickle"
+    Functions are serialised with `cloudpickle` before being sent to the worker
+    process. Both sync and async callables are supported:
+    ```bash
+    pip install cloudpickle
+    ```
+
+### Result access
+
+After a task completes, results are stored on the task object:
+
+| Task type | Field | Description |
+|---|---|---|
+| Function task (`function=`) | `task.return_value` | the callable's return value |
+| Function task | `task.stdout` | `str(return_value)` |
+| Executable task (`executable=`) | `task.stdout` | captured standard output |
+| Executable task | `task.stderr` | captured standard error |
+| Executable task | `task.exit_code` | process exit code |
+| AI task (`AITask`) | `task.response` | model response string |
+
+---
 
 ## Multiple Execution Backends
 
@@ -475,4 +644,39 @@ ComputeTask(
     executable="/bin/sim", arguments=["--n", "4"],
     task_backend_specific_kwargs={"resources": {"CPU": 4}, "shell": True},
 )
+```
+
+---
+
+## Session API Quick Reference
+
+```python
+from rhapsody.api import Session
+
+session = Session(
+    backends=[backend],   # list of execution / inference backends
+    uid="my-session",     # optional identifier (default: "session.0000")
+    work_dir="/path",     # optional working directory (default: cwd)
+)
+
+# Add a backend after construction
+session.add_backend(another_backend)
+
+# Submit tasks → returns list[asyncio.Future]
+futures = await session.submit_tasks(tasks)
+
+# Wait for all tasks (never raises on task failure, raises TimeoutError)
+await session.wait_tasks(tasks, timeout=30.0)
+
+# Per-task / batch await (raises on failure)
+result  = await futures[0]
+results = await asyncio.gather(*futures)
+
+# Session-wide statistics
+stats = session.get_statistics()
+# stats["counts"]          Counter of terminal states (DONE, FAILED, …)
+# stats["summary"]         avg_total / avg_queue / avg_execution latencies (seconds)
+
+# Shutdown (called automatically when using `async with`)
+await session.close()
 ```

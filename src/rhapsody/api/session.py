@@ -9,6 +9,8 @@ from collections import defaultdict
 from typing import TYPE_CHECKING
 from typing import Any
 
+from rhapsody.api.errors import TaskExecutionError
+
 if TYPE_CHECKING:
     from rhapsody.api.task import BaseTask
     from rhapsody.backends.base import BaseBackend
@@ -68,7 +70,16 @@ class TaskStateManager:
             if uid in self._task_futures:
                 fut = self._task_futures[uid]
                 if not fut.done():
-                    fut.set_result(task)
+                    exc = task.get("exception")
+                    exit_code = task.get("exit_code")
+                    if isinstance(exc, BaseException):
+                        fut.set_exception(exc)
+                    elif exit_code is not None and exit_code != 0:
+                        fut.set_exception(
+                            TaskExecutionError(uid, task.get("stderr") or "", exit_code)
+                        )
+                    else:
+                        fut.set_result(task)
 
     def get_wait_future(self, uid: str, task: dict | BaseTask) -> asyncio.Future:
         """Get or create a future to wait for a specific task."""
@@ -85,9 +96,18 @@ class TaskStateManager:
             else:
                 self._task_futures[uid] = asyncio.Future()
 
-            # If already done before we started waiting, set result immediately
+            # If already done before we started waiting, resolve immediately
             if self._task_states.get(uid) in self._terminal_states:
-                self._task_futures[uid].set_result(task)
+                exc = task.get("exception")
+                exit_code = task.get("exit_code")
+                if isinstance(exc, BaseException):
+                    self._task_futures[uid].set_exception(exc)
+                elif exit_code is not None and exit_code != 0:
+                    self._task_futures[uid].set_exception(
+                        TaskExecutionError(uid, task.get("stderr") or "", exit_code)
+                    )
+                else:
+                    self._task_futures[uid].set_result(task)
 
         return self._task_futures[uid]
 
@@ -240,9 +260,12 @@ class Session:
             uid = task["uid"]
             futures.append(self._state_manager.get_wait_future(uid, task))
 
-        # Wait for all futures
+        # Wait for all futures; return_exceptions=True prevents task failures from
+        # propagating — callers inspect task.state / task.exception directly.
         try:
-            await asyncio.wait_for(asyncio.gather(*futures), timeout=timeout)
+            await asyncio.wait_for(
+                asyncio.gather(*futures, return_exceptions=True), timeout=timeout
+            )
         except asyncio.TimeoutError:
             # Check how many finished
             finished = sum(

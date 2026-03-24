@@ -1,5 +1,7 @@
 """Unit tests for ConcurrentExecutionBackend."""
 
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -165,3 +167,72 @@ async def test_concurrent_execute_command_no_env():
 
     kwargs = mock_exec.call_args[1]
     assert kwargs.get("env") is None
+
+
+# ---------------------------------------------------------------------------
+# Regular function execution tests (Bug 2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_execute_function_regular_sync_function_in_thread():
+    """_execute_function runs a regular (non-async) function in a ThreadPoolExecutor."""
+    backend = ConcurrentExecutionBackend(executor=ThreadPoolExecutor())
+
+    def add(a, b):
+        return a + b
+
+    task = ComputeTask(function=add, args=[3, 4])
+    result_task, state = await backend._execute_function(task)
+
+    assert state == "DONE"
+    assert result_task["return_value"] == 7
+
+
+@pytest.mark.asyncio
+async def test_execute_function_async_function_in_thread():
+    """_execute_function still works for async functions in a ThreadPoolExecutor (regression)."""
+    backend = ConcurrentExecutionBackend(executor=ThreadPoolExecutor())
+
+    async def async_multiply(a, b):
+        return a * b
+
+    task = ComputeTask(function=async_multiply, args=[3, 4])
+    result_task, state = await backend._execute_function(task)
+
+    assert state == "DONE"
+    assert result_task["return_value"] == 12
+
+
+@pytest.mark.asyncio
+async def test_execute_function_regular_sync_function_in_process():
+    """_execute_function runs a regular (non-async) function in a ProcessPoolExecutor."""
+    cloudpickle = pytest.importorskip("cloudpickle", reason="cloudpickle not installed")
+
+    backend = ConcurrentExecutionBackend(executor=ProcessPoolExecutor())
+
+    def multiply(a, b):
+        return a * b
+
+    task = ComputeTask(function=multiply, args=[5, 6])
+    result_task, state = await backend._execute_function(task)
+
+    assert state == "DONE"
+    assert result_task["return_value"] == 30
+
+
+@pytest.mark.asyncio
+async def test_execute_function_async_function_in_process():
+    """_execute_function still works for async functions in a ProcessPoolExecutor (regression)."""
+    cloudpickle = pytest.importorskip("cloudpickle", reason="cloudpickle not installed")
+
+    backend = ConcurrentExecutionBackend(executor=ProcessPoolExecutor())
+
+    async def async_add(a, b):
+        return a + b
+
+    task = ComputeTask(function=async_add, args=[10, 20])
+    result_task, state = await backend._execute_function(task)
+
+    assert state == "DONE"
+    assert result_task["return_value"] == 30

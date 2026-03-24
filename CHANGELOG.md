@@ -4,6 +4,15 @@
 
 ### Added
 
+- `ConcurrentExecutionBackend`: regular (synchronous) functions are now executed correctly in both `ThreadPoolExecutor` and `ProcessPoolExecutor`. Previously, all function tasks were dispatched via `asyncio.run(func(...))`, which raised `ValueError` for non-coroutine callables. The executor now detects `asyncio.iscoroutinefunction` and calls sync functions directly.
+- `Session` / `TaskStateManager`: task futures now propagate exceptions on failure. Previously all futures were resolved with `set_result(task)` regardless of outcome. Failures now resolve as:
+    - Function task raises → original exception propagated via `fut.set_exception(exc)`.
+    - Executable task returns non-zero exit code → `fut.set_exception(TaskExecutionError(uid, stderr, exit_code))`.
+    - Successful tasks → `fut.set_result(task)` (unchanged).
+- `Session.wait_tasks`: replaced bare `except Exception` (which silently swallowed all errors) with `asyncio.gather(*futures, return_exceptions=True)`. Task failures no longer propagate through `wait_tasks`; callers inspect `task.state` / `task.exception` / `task.stderr` directly.
+- API documentation: new **Wait Modes** reference in `docs/api/index.md` with a comparison table of `wait_tasks`, `asyncio.gather(*futures)`, and `await future / await task`, including exception types and when to use each.
+- API documentation: new **Callable Task API** section documenting sync and async function support, executor behaviour, and result access fields.
+- Getting-started guide: new **Wait Modes** and **Sync and Async Callable Tasks** sections added to `docs/getting-started/advanced-usage.md` with runnable code examples.
 - `ConcurrentExecutionBackend`: executable tasks now honour per-task working directory via `task.cwd` (task-level) or `task_backend_specific_kwargs={"cwd": "..."}` (overrides task-level); passed as `cwd=` to `asyncio.create_subprocess_exec` / `asyncio.create_subprocess_shell`.
 - `DaskExecutionBackend`: executable tasks now honour `cwd` from `task_backend_specific_kwargs` (overrides task-level `task.cwd`); forwarded to `_run_executable` which passes it as `cwd=` to `subprocess.run`.
 - `DragonExecutionBackendV3`: documented that per-task working directory must be set via `task_backend_specific_kwargs={"process_template": {"cwd": "..."}}` (or `"process_templates"` for MPI jobs); this is the only supported mechanism in V3.
@@ -15,6 +24,14 @@
 - `shell=True` for executable tasks via `task_backend_specific_kwargs={"shell": True}`.
 - `DaskExecutionBackend._check_resources_satisfiable()`: pre-submit check that immediately fails tasks with unsatisfiable resource constraints instead of hanging indefinitely. Function tasks set `task.exception`; executable tasks set `task.stderr` and `task.exit_code = 1`.
 - Integration tests for Dask backend: end-to-end sync/async/executable task execution, cluster injection (cluster and client), and resource constraint failure behavior.
+
+### Fixed
+
+- `ConcurrentExecutionBackend._run_in_thread`: calling a regular (sync) function no longer raises `ValueError: a coroutine was expected`.
+- `ConcurrentExecutionBackend._run_in_process`: same fix — sync functions are called directly after cloudpickle deserialization.
+- `TaskStateManager._update_task_impl`: futures for failed tasks are now resolved with `set_exception` instead of `set_result`, so `await future` and `await asyncio.gather(*futures)` correctly raise on task failure.
+- `TaskStateManager.get_wait_future`: same fix applied to the race-condition path (task already completed before `get_wait_future` was called).
+- `Session.wait_tasks`: removed `except Exception: logger.error(...)` which was silently eating all non-timeout exceptions including programming errors.
 
 ### Changed
 

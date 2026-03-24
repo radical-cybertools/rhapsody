@@ -121,14 +121,18 @@ class ConcurrentExecutionBackend(BaseBackend):
 
     @staticmethod
     def _run_in_process(func, args, kwargs):
-        """Execute async function in isolated executor process."""
+        """Execute function (sync or async) in isolated executor process."""
         func = cloudpickle.loads(func)
-        return asyncio.run(func(*args, **kwargs))
+        if asyncio.iscoroutinefunction(func):
+            return asyncio.run(func(*args, **kwargs))
+        return func(*args, **kwargs)
 
     @staticmethod
     def _run_in_thread(func, args, kwargs):
-        """Execute async function in isolated executor process."""
-        return asyncio.run(func(*args, **kwargs))
+        """Execute function (sync or async) in isolated executor thread."""
+        if asyncio.iscoroutinefunction(func):
+            return asyncio.run(func(*args, **kwargs))
+        return func(*args, **kwargs)
 
     async def _execute_function(self, task: dict) -> tuple[dict, str]:
         """Execute async function task in Process/Thread PoolExecutor."""
