@@ -72,7 +72,7 @@ class TaskStateManager:
                 if not fut.done():
                     exc = task.get("exception")
                     exit_code = task.get("exit_code")
-                    if exc is not None:
+                    if isinstance(exc, BaseException):
                         fut.set_exception(exc)
                     elif exit_code is not None and exit_code != 0:
                         fut.set_exception(
@@ -100,7 +100,7 @@ class TaskStateManager:
             if self._task_states.get(uid) in self._terminal_states:
                 exc = task.get("exception")
                 exit_code = task.get("exit_code")
-                if exc is not None:
+                if isinstance(exc, BaseException):
                     self._task_futures[uid].set_exception(exc)
                 elif exit_code is not None and exit_code != 0:
                     self._task_futures[uid].set_exception(
