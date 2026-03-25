@@ -3380,7 +3380,7 @@ class DragonExecutionBackendV3(BaseBackend):
         process_template_config = backend_kwargs.get("process_template")
 
         # Single decision tree - no redundant checks
-        if process_templates_config:
+        if process_templates_config is not None:
             # Priority 1: Job with user templates
             process_templates = [
                 (
@@ -3392,7 +3392,7 @@ class DragonExecutionBackendV3(BaseBackend):
             batch_task = self.batch.job(process_templates, name=name, timeout=timeout)
             execution_mode = "job"
 
-        elif process_template_config:
+        elif process_template_config is not None:
             # Priority 2: Process with user template
             batch_task = self.batch.process(
                 ProcessTemplate(

@@ -404,3 +404,203 @@ async def test_executable_with_cwd_via_process_template(session, backend_name):
 
     assert results[0].state == "DONE"
     assert "/tmp" in results[0].get("stdout", "")
+
+
+# ============================================================================
+# Tests: ProcessTemplate spec validation (V3 only)
+# These tests verify that process_template/process_templates dicts are correctly
+# translated into ProcessTemplate objects and passed to Dragon's batch API.
+# ============================================================================
+
+
+def _make_task_dict(fn, args=(), kwargs=None, backend_specific=None):
+    """Build a minimal task dict matching the format expected by build_task."""
+    import uuid
+
+    return {
+        "uid": f"task.test-{uuid.uuid4().hex[:8]}",
+        "function": fn,
+        "args": list(args),
+        "kwargs": kwargs or {},
+        "name": "test",
+        "task_backend_specific_kwargs": backend_specific or {},
+    }
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_process_template_cwd_built_and_passed(session, backend_name):
+    """Test A: process_template with cwd produces a ProcessTemplate with correct cwd."""
+    if backend_name in ("dragon_v1", "dragon_v2"):
+        pytest.skip(f"{backend_name} does not support per-task process_template")
+
+    from unittest.mock import MagicMock
+    from unittest.mock import patch
+
+    from dragon.native.process import ProcessTemplate
+
+    backend = session.backends["dragon"]
+    captured = []
+
+    def capture(pt, **kw):
+        captured.append(pt)
+        return MagicMock()
+
+    task = _make_task_dict(lambda: None, backend_specific={"process_template": {"cwd": "/tmp"}})
+
+    with patch.object(backend.batch, "process", side_effect=capture):
+        await backend.build_task(task)
+
+    assert len(captured) == 1
+    pt = captured[0]
+    assert isinstance(pt, ProcessTemplate)
+    assert pt.cwd == "/tmp"
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_process_template_policy_gpu_affinity_built_and_passed(session, backend_name):
+    """Test B: process_template with policy(gpu_affinity) produces ProcessTemplate with correct policy."""
+    if backend_name in ("dragon_v1", "dragon_v2"):
+        pytest.skip(f"{backend_name} does not support per-task process_template")
+
+    from unittest.mock import MagicMock
+    from unittest.mock import patch
+
+    from dragon.infrastructure.policy import Policy
+    from dragon.native.process import ProcessTemplate
+
+    backend = session.backends["dragon"]
+    captured = []
+
+    def capture(pt, **kw):
+        captured.append(pt)
+        return MagicMock()
+
+    policy = Policy(gpu_affinity=[0, 1, 2, 3])
+    task = _make_task_dict(lambda: None, backend_specific={"process_template": {"policy": policy}})
+
+    with patch.object(backend.batch, "process", side_effect=capture):
+        await backend.build_task(task)
+
+    assert len(captured) == 1
+    pt = captured[0]
+    assert isinstance(pt, ProcessTemplate)
+    assert pt.policy is policy
+    assert pt.policy.gpu_affinity == [0, 1, 2, 3]
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_process_template_empty_dict_uses_process_mode(session, backend_name):
+    """Test C: process_template={} (empty dict) still routes to batch.process(), not batch.function().
+
+    Regression test for Bug 1: truthiness check `elif process_template_config:` would
+    silently fall through on empty dict; `is not None` fix ensures Priority 2 wins.
+    """
+    if backend_name in ("dragon_v1", "dragon_v2"):
+        pytest.skip(f"{backend_name} does not support per-task process_template")
+
+    from unittest.mock import MagicMock
+    from unittest.mock import patch
+
+    backend = session.backends["dragon"]
+    process_calls = []
+    function_calls = []
+
+    def capture_process(pt, **kw):
+        process_calls.append(pt)
+        return MagicMock()
+
+    def capture_function(target, *args, **kw):
+        function_calls.append(target)
+        return MagicMock()
+
+    task = _make_task_dict(lambda: None, backend_specific={"process_template": {}})
+
+    with (
+        patch.object(backend.batch, "process", side_effect=capture_process),
+        patch.object(backend.batch, "function", side_effect=capture_function),
+    ):
+        await backend.build_task(task)
+
+    assert len(process_calls) == 1, "batch.process() should have been called (Priority 2)"
+    assert len(function_calls) == 0, (
+        "batch.function() must NOT be called when process_template is provided"
+    )
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_process_templates_list_built_and_passed_to_job(session, backend_name):
+    """Test D: process_templates list produces correct (nranks, ProcessTemplate) tuples for batch.job()."""
+    if backend_name in ("dragon_v1", "dragon_v2"):
+        pytest.skip(f"{backend_name} does not support per-task process_templates")
+
+    from unittest.mock import MagicMock
+    from unittest.mock import patch
+
+    from dragon.native.process import ProcessTemplate
+
+    backend = session.backends["dragon"]
+    captured_args = []
+
+    def capture_job(templates, **kw):
+        captured_args.append(templates)
+        return MagicMock()
+
+    task = _make_task_dict(
+        lambda: None,
+        backend_specific={"process_templates": [(2, {"cwd": "/tmp"})]},
+    )
+
+    with patch.object(backend.batch, "job", side_effect=capture_job):
+        await backend.build_task(task)
+
+    assert len(captured_args) == 1
+    templates = captured_args[0]
+    assert len(templates) == 1
+    nranks, pt = templates[0]
+    assert nranks == 2
+    assert isinstance(pt, ProcessTemplate)
+    assert pt.cwd == "/tmp"
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_process_template_combined_spec_policy_cwd_args(session, backend_name):
+    """Test E: process_template with policy + cwd all land on the ProcessTemplate correctly."""
+    if backend_name in ("dragon_v1", "dragon_v2"):
+        pytest.skip(f"{backend_name} does not support per-task process_template")
+
+    from unittest.mock import MagicMock
+    from unittest.mock import patch
+
+    from dragon.infrastructure.policy import Policy
+    from dragon.native.process import ProcessTemplate
+
+    backend = session.backends["dragon"]
+    captured = []
+
+    def capture(pt, **kw):
+        captured.append(pt)
+        return MagicMock()
+
+    policy = Policy(gpu_affinity=[0])
+    task = _make_task_dict(
+        lambda x: x,
+        args=(42,),
+        kwargs={"flag": True},
+        backend_specific={"process_template": {"policy": policy, "cwd": "/tmp"}},
+    )
+
+    with patch.object(backend.batch, "process", side_effect=capture):
+        await backend.build_task(task)
+
+    assert len(captured) == 1
+    pt = captured[0]
+    assert isinstance(pt, ProcessTemplate)
+    assert pt.policy is policy
+    assert pt.cwd == "/tmp"
+    # For Python functions Dragon serializes (target, args, kwargs) into pt.argdata via cloudpickle;
+    # pt.args holds the subprocess launch command, not the user's args.
+    import cloudpickle
+
+    _, stored_args, stored_kwargs = cloudpickle.loads(pt.argdata)
+    assert list(stored_args) == [42]
+    assert stored_kwargs == {"flag": True}
