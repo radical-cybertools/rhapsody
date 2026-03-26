@@ -263,3 +263,27 @@ dragon mpi-rhapsody.py
 
 !!! note "Key observation"
     Jobs complete out-of-order because each job gets a random rank count — RHAPSODY's Dragon backend schedules them dynamically across available node resources without any manual placement.
+
+---
+
+## Contributors
+
+<div class="grid cards" markdown>
+
+-   :fontawesome-solid-user-tie: **Aymen Alsaadi**
+
+    ---
+
+    RADICAL Lab, Rutgers University
+
+    [:fontawesome-solid-arrow-up-right-from-square: Profile](https://radical.rutgers.edu/people/aymen-alsaadi)
+
+-   :fontawesome-solid-user-tie: **Andrew Park**
+
+    ---
+
+    RADICAL Lab, Rutgers University
+
+    [:fontawesome-solid-arrow-up-right-from-square: Profile](https://radical.rutgers.edu/people/andrew_park)
+
+</div>

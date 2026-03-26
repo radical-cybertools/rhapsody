@@ -7,8 +7,9 @@ Each guide covers environment setup, module loading, job allocation, and working
 
 ## Supported Machines
 
-| Machine | Facility | MPI Stack | Status |
-|---------|----------|-----------|--------|
-| [NCSA Delta](ncsa-delta.md) | NSF / NCSA | Cray MPICH (PMIx) | Verified |
+| Machine | Facility | Stack | Backend | Status |
+|---------|----------|-------|---------|--------|
+| [NCSA Delta](ncsa-delta.md) | NSF / NCSA | Cray MPICH (PMIx) | `DragonExecutionBackendV3` | Verified |
+| [NERSC Perlmutter](perlmutter.md) | DOE / NERSC | Cray libfabric + CUDA | `DragonVllmInferenceBackend` | Verified |
 
 More machines will be added as they are tested and validated.
