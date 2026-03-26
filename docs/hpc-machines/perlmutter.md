@@ -1,6 +1,6 @@
 # NERSC Perlmutter
 
-[Perlmutter](https://docs.nersc.gov/systems/perlmutter/architecture/) is a HPE Cray EX supercomputer at the National Energy Research Scientific Computing Center (NERSC), DOE. It features both GPU and CPU partitions, with GPU nodes equipped with 4x NVIDIA A100 40GB GPUs each. It runs a Cray PE software stack with Cray MPICH and HPE Cray libfabric for high-speed interconnect.
+[Perlmutter](https://docs.nersc.gov/systems/perlmutter/architecture/) is a Cray EX supercomputer at the National Energy Research Scientific Computing Center (NERSC), DOE. It features both GPU and CPU partitions, with GPU nodes equipped with 4x NVIDIA A100 40GB GPUs each. It runs a Cray PE software stack with Cray MPICH and Cray libfabric for high-speed interconnect.
 
 This guide covers running RHAPSODY's AI inference workloads using the `DragonVllmInferenceBackend` on Perlmutter's GPU partition.
 
