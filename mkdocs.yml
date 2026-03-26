@@ -114,6 +114,9 @@ nav:
       - Integrations: integrations.md
       - Contributing: contributing.md
       - Issues (GitHub): https://github.com/radical-cybertools/rhapsody/issues
+  - HPC Machines:
+      - Overview: hpc-machines/index.md
+      - NCSA Delta: hpc-machines/ncsa-delta.md
   - Project:
       - project/index.md
       - Roadmap: project/roadmap.md
