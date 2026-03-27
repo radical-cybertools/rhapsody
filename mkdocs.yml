@@ -101,6 +101,9 @@ markdown_extensions:
       alternate_style: true
   - pymdownx.tasklist:
       custom_checkbox: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
 
 nav:
   - Home:
@@ -114,6 +117,10 @@ nav:
       - Integrations: integrations.md
       - Contributing: contributing.md
       - Issues (GitHub): https://github.com/radical-cybertools/rhapsody/issues
+  - HPC Machines:
+      - Overview: hpc-machines/index.md
+      - NCSA Delta: hpc-machines/ncsa-delta.md
+      - NERSC Perlmutter: hpc-machines/perlmutter.md
   - Project:
       - project/index.md
       - Roadmap: project/roadmap.md
