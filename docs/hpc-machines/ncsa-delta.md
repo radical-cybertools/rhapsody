@@ -4,35 +4,33 @@
 
 ## Environment Setup
 
-### 1. Create a virtual environment using the system Python
+### 1. Allocate compute nodes
 
-Delta provides a system Python through the Cray PE. Use it with `--system-site-packages` so that Cray-optimized libraries (libfabric, PMIx, etc.) are available inside the venv:
+```bash
+salloc --nodes=2 --exclusive --account=<your_account> --partition=cpu --tasks-per-node=32
+```
+
+### 2. Create a virtual environment using the system Python
+
+Delta provides a system Python through the Cray PE. Use it with `--system-site-packages` so that Cray-optimized libraries (libfabric, PMIx, `mpi4py`, etc.) are inherited inside the venv — no need to rebuild `mpi4py` manually:
 
 ```bash
 /opt/cray/pe/python/3.11.7/bin/python3 -m venv --system-site-packages ~/ve/rhapsody-cray
 ```
 
-### 2. Load the Cray MPICH ABI module
+### 3. Load the Cray MPICH ABI module
 
 ```bash
 module load cray-mpich-abi
 ```
 
 !!! note
-    `cray-mpich-abi` provides the ABI-compatible MPI headers and libraries needed to build `mpi4py` against Cray MPICH.
+    `cray-mpich-abi` provides the ABI-compatible MPI libraries required at runtime. Load it before activating the venv.
 
-### 3. Activate the environment
+### 4. Activate the environment
 
 ```bash
 source ~/ve/rhapsody-cray/bin/activate
-```
-
-### 4. Install mpi4py against Cray MPICH
-
-Build from source so it links against the loaded Cray MPICH:
-
-```bash
-MPICC=mpicc pip install --no-binary=mpi4py mpi4py
 ```
 
 ### 5. Install RHAPSODY with Dragon backend
@@ -41,13 +39,18 @@ MPICC=mpicc pip install --no-binary=mpi4py mpi4py
 pip install "rhapsody-py[dragon]"
 ```
 
-### 6. Allocate compute nodes
+### 6. Configure Dragon for fast interconnect
+
+This step is required for Dragon to use Cray's high-speed libfabric instead of the default transport:
 
 ```bash
-salloc --nodes=2 --exclusive --account=<your_account> --partition=cpu --tasks-per-node=32
+dragon-config add --ofi-runtime-lib=/opt/cray/libfabric/1.22.0/lib64
 ```
 
-Once the allocation is granted, Dragon and RHAPSODY jobs are launched with the standard `dragon` launcher:
+!!! warning
+    Skipping this step will result in Dragon falling back to a slower transport. Always run it before launching jobs on Delta.
+
+### Run
 
 ```bash
 dragon <script.py>
