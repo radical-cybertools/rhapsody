@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from typing import Any
-from typing import Optional
 
 if TYPE_CHECKING:
     from rhapsody.telemetry.manager import TelemetryManager
@@ -38,8 +37,8 @@ class TelemetryReader:
 
     def read_traces(
         self,
-        session_id: Optional[str] = None,
-        task_id: Optional[str] = None,
+        session_id: str | None = None,
+        task_id: str | None = None,
     ) -> tuple:
         """Return finished OTel ReadableSpan objects, optionally filtered.
 
@@ -52,11 +51,7 @@ class TelemetryReader:
         """
         spans = self._manager.read_traces()
         if session_id is not None:
-            spans = tuple(
-                s for s in spans if s.attributes.get("session_id") == session_id
-            )
+            spans = tuple(s for s in spans if s.attributes.get("session_id") == session_id)
         if task_id is not None:
-            spans = tuple(
-                s for s in spans if s.attributes.get("task_id") == task_id
-            )
+            spans = tuple(s for s in spans if s.attributes.get("task_id") == task_id)
         return spans

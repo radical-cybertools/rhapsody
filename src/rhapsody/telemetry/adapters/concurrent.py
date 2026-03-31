@@ -21,7 +21,6 @@ import subprocess
 import threading
 import time
 from typing import TYPE_CHECKING
-from typing import Optional
 
 from rhapsody.telemetry.adapters.base import TelemetryAdapter
 from rhapsody.telemetry.events import ResourceUpdate
@@ -54,14 +53,14 @@ class ConcurrentTelemetryAdapter(TelemetryAdapter):
         backend_name: str,
         interval: float = 5.0,
     ) -> None:
-        self._session_id  = session_id
+        self._session_id = session_id
         self._backend_name = backend_name
-        self._interval    = interval
-        self._manager: Optional[TelemetryManager] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._thread: Optional[threading.Thread] = None
-        self._running     = False
-        self._node_id     = socket.gethostname()
+        self._interval = interval
+        self._manager: TelemetryManager | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._running = False
+        self._node_id = socket.gethostname()
 
     def start(self, manager: TelemetryManager) -> None:
         self._manager = manager
@@ -70,7 +69,7 @@ class ConcurrentTelemetryAdapter(TelemetryAdapter):
         except RuntimeError:
             self._loop = asyncio.get_event_loop()
         self._running = True
-        self._thread  = threading.Thread(
+        self._thread = threading.Thread(
             target=self._collect_loop,
             name="telemetry-concurrent-adapter",
             daemon=True,
@@ -97,21 +96,21 @@ class ConcurrentTelemetryAdapter(TelemetryAdapter):
         psutil.cpu_percent(interval=None)
 
         # Seed disk / net baselines for delta calculations
-        prev_disk: Optional[tuple] = None
-        prev_net:  Optional[tuple] = None
+        prev_disk: tuple | None = None
+        prev_net: tuple | None = None
         try:
             dc = psutil.disk_io_counters()
             prev_disk = (dc.read_bytes, dc.write_bytes) if dc else None
-        except Exception:
+        except Exception:  # noqa: S110
             pass
         try:
             nc = psutil.net_io_counters()
             prev_net = (nc.bytes_sent, nc.bytes_recv) if nc else None
-        except Exception:
+        except Exception:  # noqa: S110
             pass
 
         while self._running:
-            time.sleep(self._interval)          # plain OS sleep — no event loop involved
+            time.sleep(self._interval)  # plain OS sleep — no event loop involved
             if not self._running:
                 break
             try:
@@ -124,10 +123,10 @@ class ConcurrentTelemetryAdapter(TelemetryAdapter):
                 try:
                     dc = psutil.disk_io_counters()
                     if dc and prev_disk is not None:
-                        disk_read  = float(dc.read_bytes  - prev_disk[0])
+                        disk_read = float(dc.read_bytes - prev_disk[0])
                         disk_write = float(dc.write_bytes - prev_disk[1])
                     prev_disk = (dc.read_bytes, dc.write_bytes) if dc else None
-                except Exception:
+                except Exception:  # noqa: S110
                     pass
 
                 try:
@@ -136,7 +135,7 @@ class ConcurrentTelemetryAdapter(TelemetryAdapter):
                         net_sent = float(nc.bytes_sent - prev_net[0])
                         net_recv = float(nc.bytes_recv - prev_net[1])
                     prev_net = (nc.bytes_sent, nc.bytes_recv) if nc else None
-                except Exception:
+                except Exception:  # noqa: S110
                     pass
 
                 event = make_event(
@@ -158,20 +157,22 @@ class ConcurrentTelemetryAdapter(TelemetryAdapter):
             except Exception:
                 logger.debug("ConcurrentTelemetryAdapter collection error", exc_info=True)
 
-    def _try_gpu_percent(self) -> Optional[float]:
-        """Try to get GPU utilization via nvidia-smi. Returns None if unavailable."""
+    def _try_gpu_percent(self) -> float | None:
+        """Try to get GPU utilization via nvidia-smi.
+
+        Returns None if unavailable.
+        """
         try:
             result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=utilization.gpu",
-                 "--format=csv,noheader,nounits"],
+                ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],  # noqa: S607
                 capture_output=True,
                 text=True,
                 timeout=1,
             )
             if result.returncode == 0:
-                lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+                lines = [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip()]
                 if lines:
                     return float(lines[0])
-        except Exception:
+        except Exception:  # noqa: S110
             pass
         return None

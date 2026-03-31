@@ -11,11 +11,10 @@ TaskQueued is optional. TaskStarted is the authoritative "execution began" event
 
 from __future__ import annotations
 
-import uuid
 import time
+import uuid
 from dataclasses import dataclass
 from dataclasses import field
-from typing import Optional
 
 
 def _new_event_id() -> str:
@@ -53,8 +52,8 @@ class BaseEvent:
     emit_time: float
     session_id: str
     backend: str
-    task_id: Optional[str] = None
-    node_id: Optional[str] = None
+    task_id: str | None = None
+    node_id: str | None = None
     attributes: dict = field(default_factory=dict)
 
 
@@ -138,28 +137,27 @@ class TaskFailed(BaseEvent):
 class ResourceUpdate(BaseEvent):
     """Emitted periodically by backend adapters with node resource utilization.
 
-    cpu/memory/gpu values are point-in-time percentages (not deltas).
-    disk/net values are byte deltas since the previous poll.
-    gpu_percent is None when the backend does not expose GPU metrics.
-    disk/net fields are None when psutil is unavailable.
+    cpu/memory/gpu values are point-in-time percentages (not deltas). disk/net values are byte
+    deltas since the previous poll. gpu_percent is None when the backend does not expose GPU
+    metrics. disk/net fields are None when psutil is unavailable.
     """
 
     cpu_percent: float = 0.0
     memory_percent: float = 0.0
-    gpu_percent: Optional[float] = None
-    disk_read_bytes: Optional[float] = None
-    disk_write_bytes: Optional[float] = None
-    net_sent_bytes: Optional[float] = None
-    net_recv_bytes: Optional[float] = None
+    gpu_percent: float | None = None
+    disk_read_bytes: float | None = None
+    disk_write_bytes: float | None = None
+    net_sent_bytes: float | None = None
+    net_recv_bytes: float | None = None
     event_type: str = field(default="ResourceUpdate", init=False)
 
 
 def make_event(cls: type, *, session_id: str, backend: str, **kwargs) -> BaseEvent:
     """Construct any event with auto-generated id and consistent wall-clock timestamps.
 
-    Both event_time and emit_time use time.time() so their difference is
-    interpretable as queue latency in seconds (emit_time >= event_time always holds
-    when event_time is taken from a recent task history entry).
+    Both event_time and emit_time use time.time() so their difference is interpretable as queue
+    latency in seconds (emit_time >= event_time always holds when event_time is taken from a recent
+    task history entry).
     """
     now = time.time()
     return cls(

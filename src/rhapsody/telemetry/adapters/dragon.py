@@ -39,11 +39,9 @@ import asyncio
 import logging
 import os
 import queue as stdlib_queue
-import socket
 import threading
 import time
 from typing import TYPE_CHECKING
-from typing import Optional
 
 from rhapsody.telemetry.adapters.base import TelemetryAdapter
 from rhapsody.telemetry.events import ResourceUpdate
@@ -59,51 +57,46 @@ logger = logging.getLogger(__name__)
 # Per-node worker (top-level so cloudpickle can serialize it)
 # ---------------------------------------------------------------------------
 
+
 def _rhapsody_telemetry_worker(
     result_queue,
+    shutdown_event,
     interval: float,
 ) -> None:
     """Collect CPU/RAM/GPU on one Dragon node and push dps to a Dragon Queue.
 
     Runs inside a Dragon ProcessGroup subprocess on the target node.
-    Uses socket.gethostname() to label results — correct because Dragon's
-    Policy(HOST_NAME) guarantees this process runs on the intended node.
-    Importing ``dragon.telemetry.collector`` triggers the module-level
-    ``find_accelerators()`` call and conditional ``pynvml`` / ``rocm_smi``
-    imports — exactly as Dragon's own Collector does.
+    Uses os.uname().nodename to label results — matches Dragon's own node
+    identification, avoiding FQDN vs short-name mismatches on clusters.
 
-    The process is killed by ProcessGroup.stop() when the adapter is stopped;
-    the ``while True`` loop never needs an explicit shutdown signal.
+    The ``shutdown_event`` (dragon.native.event.Event) is set by the head node
+    when the adapter stops; the worker then exits cleanly with code 0, avoiding
+    the DragonUserCodeError that SIGINT-based stop() would cause.
     """
-    import socket  # noqa: PLC0415
-    import psutil  # noqa: PLC0415
+    import logging as _logging  # noqa: PLC0415
+    import os as _os  # noqa: PLC0415
     import time as _time  # noqa: PLC0415
 
-    hostname = socket.gethostname()
+    import psutil  # noqa: PLC0415
+
+    hostname = _os.uname().nodename
+    _log = _logging.getLogger(__name__)
 
     # Import GPU helpers from Dragon's collector.
-    # The module-level code in collector.py runs find_accelerators() and
-    # conditionally imports pynvml/rocm_smi — same as Dragon's own Collector.
-    # Wrap in try/except: a missing driver or import error must not crash the
-    # worker — CPU/RAM are always collected regardless of GPU availability.
+    # FIXME: We should not do that, but due to a bug in Dragon where if we
+    # enable telemetry everything hangs. Once it is fixed we will rely on
+    # Dragon telemetry and AnalysisClient to get the data from each node
     try:
         from dragon.infrastructure.gpu_desc import AccVendor  # noqa: PLC0415
-        from dragon.telemetry.collector import (  # noqa: PLC0415
-            get_amd_metrics,
-            get_intel_metrics,
-            get_nvidia_metrics,
-            identify_gpu,
-        )
+        from dragon.telemetry.collector import get_amd_metrics  # noqa: PLC0415
+        from dragon.telemetry.collector import get_intel_metrics  # noqa: PLC0415
+        from dragon.telemetry.collector import get_nvidia_metrics  # noqa: PLC0415
+        from dragon.telemetry.collector import identify_gpu  # noqa: PLC0415
+
         _collector_available = True
     except Exception:
         _collector_available = False
 
-    # One-time GPU initialisation.
-    # NVIDIA: calls pynvml.nvmlInit() + nvmlDeviceGetCount()
-    # AMD:    calls rocm_smi.initializeRsmi() + listDevices()
-    # Intel:  reads accelerator.device_list
-    # Wrap in try/except — pynvml.nvmlInit() raises if the driver is absent
-    # or the process lacks GPU access rights.
     gpu_vendor = None
     gpu_count = 0
     if _collector_available:
@@ -112,57 +105,127 @@ def _rhapsody_telemetry_worker(
         except Exception:
             gpu_vendor, gpu_count = None, 0
 
-    while True:  # killed externally by ProcessGroup.stop()
+    # Per-device failure tracking: device index → logged once, then skipped forever
+    _gpu_failed: set = set()
+    # Intel: if the single bulk call fails, disable the whole Intel branch
+    _intel_disabled = False
+
+    # Seed disk / net baselines for delta calculations (bytes-per-interval)
+    _prev_disk: tuple = (0, 0)
+    _prev_net: tuple = (0, 0)
+    try:
+        dc = psutil.disk_io_counters()
+        if dc:
+            _prev_disk = (dc.read_bytes, dc.write_bytes)
+    except Exception:  # noqa: S110
+        pass
+    try:
+        nc = psutil.net_io_counters()
+        if nc:
+            _prev_net = (nc.bytes_sent, nc.bytes_recv)
+    except Exception:  # noqa: S110
+        pass
+
+    # shutdown_event.wait(timeout) blocks for interval seconds, returns True when set.
+    # Replaces time.sleep() so the worker exits cleanly (code 0) on adapter stop.
+    while not shutdown_event.wait(timeout=interval):
         dps = []
-        print('I am a barby GIRL', flush=True)
 
         # CPU and RAM — always collected; psutil does not raise here
         dps.append({"metric": "cpu_percent", "value": psutil.cpu_percent()})
-        dps.append({"metric": "used_RAM",    "value": psutil.virtual_memory().percent})
+        dps.append({"metric": "used_RAM", "value": psutil.virtual_memory().percent})
 
-        # GPU — vendor-dispatched; every call individually guarded
+        # Disk I/O — bytes transferred since last interval
+        try:
+            dc = psutil.disk_io_counters()
+            if dc:
+                dps.append(
+                    {"metric": "disk_read_bytes", "value": float(dc.read_bytes - _prev_disk[0])}
+                )
+                dps.append(
+                    {"metric": "disk_write_bytes", "value": float(dc.write_bytes - _prev_disk[1])}
+                )
+                _prev_disk = (dc.read_bytes, dc.write_bytes)
+        except Exception:  # noqa: S110
+            pass
+
+        # Network I/O — bytes transferred since last interval
+        try:
+            nc = psutil.net_io_counters()
+            if nc:
+                dps.append(
+                    {"metric": "net_sent_bytes", "value": float(nc.bytes_sent - _prev_net[0])}
+                )
+                dps.append(
+                    {"metric": "net_recv_bytes", "value": float(nc.bytes_recv - _prev_net[1])}
+                )
+                _prev_net = (nc.bytes_sent, nc.bytes_recv)
+        except Exception:  # noqa: S110
+            pass
+
+        # GPU — vendor-dispatched; per-device failure logged once, then skipped
         if _collector_available and gpu_vendor is not None:
             try:
                 if gpu_vendor == AccVendor.NVIDIA:
                     for i in range(gpu_count):
+                        if i in _gpu_failed:
+                            continue
                         try:
                             metrics = get_nvidia_metrics(i, telemetry_level=3)
                             if metrics:
                                 dps.extend(metrics)
-                        except Exception:
-                            pass
+                        except Exception as _exc:
+                            _gpu_failed.add(i)
+                            _log.warning(
+                                "GPU %d metrics unavailable on %s (%s) — disabling",
+                                i,
+                                hostname,
+                                _exc,
+                            )
                 elif gpu_vendor == AccVendor.AMD:
                     for device in gpu_count:  # listDevices() returns a list
+                        if device in _gpu_failed:
+                            continue
                         try:
                             metrics = get_amd_metrics(device, telemetry_level=3)
                             if metrics:
                                 dps.extend(metrics)
-                        except Exception:
-                            pass
-                elif gpu_vendor == AccVendor.INTEL:
+                        except Exception as _exc:
+                            _gpu_failed.add(device)
+                            _log.warning(
+                                "GPU %s metrics unavailable on %s (%s) — disabling",
+                                device,
+                                hostname,
+                                _exc,
+                            )
+                elif gpu_vendor == AccVendor.INTEL and not _intel_disabled:
                     try:
                         all_metrics = get_intel_metrics(telemetry_level=3)
                         for metrics_list in all_metrics.values():
                             dps.extend(metrics_list)
-                    except Exception:
-                        pass
-            except Exception:
-                pass  # GPU block failure never silences CPU/RAM
+                    except Exception as _exc:
+                        _intel_disabled = True
+                        _log.warning(
+                            "Intel GPU metrics unavailable on %s (%s) — disabling",
+                            hostname,
+                            _exc,
+                        )
+            except Exception:  # noqa: S110
+                pass  # outer guard: GPU block failure never silences CPU/RAM
 
         try:
             result_queue.put(
                 {"host": hostname, "dps": dps, "ts": int(_time.time())},
                 timeout=5.0,
             )
-        except Exception:
+        except Exception:  # noqa: S110
             pass  # queue full or closed — drop silently
-
-        _time.sleep(interval)
 
 
 # ---------------------------------------------------------------------------
 # Adapter
 # ---------------------------------------------------------------------------
+
 
 class DragonTelemetryAdapter(TelemetryAdapter):
     """Collects node-level resource metrics for Dragon backends.
@@ -192,11 +255,11 @@ class DragonTelemetryAdapter(TelemetryAdapter):
         self._session_id = session_id
         self._backend_name = backend_name
         self._interval = interval
-        self._manager: Optional[TelemetryManager] = None
-        self._thread: Optional[threading.Thread] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._manager: TelemetryManager | None = None
+        self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._running = False
-        self._node_id = socket.gethostname()
+        self._node_id = os.uname().nodename
         self._group = None  # Dragon ProcessGroup — set in _collect_loop, used in stop()
 
     def start(self, manager: TelemetryManager) -> None:
@@ -232,14 +295,11 @@ class DragonTelemetryAdapter(TelemetryAdapter):
 
     def _collect_loop(self) -> None:
         """Daemon thread: spawns one worker per Dragon node, reads ResourceUpdates."""
-        level = int(os.getenv("DRAGON_TELEMETRY_LEVEL", "0"))
-        if level < 1:
-            logger.debug("DRAGON_TELEMETRY_LEVEL < 1 — DragonTelemetryAdapter is a no-op")
-            return
 
         # 1. Discover Dragon nodes + get one Policy per node
         try:
             from dragon.native.machine import System  # noqa: PLC0415
+
             policies = System().hostname_policies()
         except Exception:
             logger.warning(
@@ -248,13 +308,16 @@ class DragonTelemetryAdapter(TelemetryAdapter):
             )
             return
 
-        # 2. Create shared Dragon result queue
+        # 2. Create shared Dragon result queue + cooperative shutdown event
         try:
+            from dragon.native.event import Event as DragonEvent  # noqa: PLC0415
             from dragon.native.queue import Queue as DragonQueue  # noqa: PLC0415
+
             result_queue = DragonQueue(maxsize=max(len(policies) * 40, 400))
+            _shutdown_event = DragonEvent()
         except Exception:
             logger.warning(
-                "DragonTelemetryAdapter: Dragon Queue creation failed — adapter is a no-op",
+                "DragonTelemetryAdapter: Dragon Queue/Event creation failed — adapter is a no-op",
                 exc_info=True,
             )
             return
@@ -270,16 +333,14 @@ class DragonTelemetryAdapter(TelemetryAdapter):
                     nproc=1,
                     template=ProcessTemplate(
                         target=_rhapsody_telemetry_worker,
-                        args=(result_queue, self._interval),
+                        args=(result_queue, _shutdown_event, self._interval),
                         policy=policy,
                     ),
                 )
             grp.init()
             grp.start()
             self._group = grp
-            logger.debug(
-                f"DragonTelemetryAdapter: workers running on {len(policies)} nodes"
-            )
+            logger.debug(f"DragonTelemetryAdapter: workers running on {len(policies)} nodes")
         except Exception:
             logger.warning(
                 "DragonTelemetryAdapter: ProcessGroup spawn failed — adapter is a no-op",
@@ -327,13 +388,20 @@ class DragonTelemetryAdapter(TelemetryAdapter):
                 cpu_percent=vals.get("cpu_percent"),
                 memory_percent=vals.get("used_RAM"),
                 gpu_percent=vals.get("DeviceUtilization"),
+                disk_read_bytes=vals.get("disk_read_bytes"),
+                disk_write_bytes=vals.get("disk_write_bytes"),
+                net_sent_bytes=vals.get("net_sent_bytes"),
+                net_recv_bytes=vals.get("net_recv_bytes"),
             )
             if self._loop and self._loop.is_running():
                 self._loop.call_soon_threadsafe(self._manager.emit, event)
 
-        # 5. Cleanup
+        # 5. Cooperative shutdown: set event so workers exit their while loop cleanly
+        #    (exit code 0), then join. This avoids DragonUserCodeError that grp.stop()
+        #    would cause (SIGINT → exit code -2 → Dragon raises on join).
         try:
-            grp.stop()
-            grp.join()
+            _shutdown_event.set()
+            grp.join(timeout=30.0)
+            grp.close()
         except Exception:
             logger.debug("DragonTelemetryAdapter: ProcessGroup cleanup error", exc_info=True)

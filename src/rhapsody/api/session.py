@@ -9,7 +9,6 @@ from collections import defaultdict
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
-from typing import Optional
 
 from rhapsody.api.errors import TaskExecutionError
 
@@ -36,7 +35,7 @@ class TaskStateManager:
         self._lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         # Telemetry observer — set by Session.enable_telemetry(), None = zero cost
-        self._telemetry_observer: Optional[Callable[[dict, str], None]] = None
+        self._telemetry_observer: Callable[[dict, str], None] | None = None
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Bind an event loop to the manager for thread-safe updates."""
@@ -149,7 +148,7 @@ class Session:
         self.work_dir = work_dir or os.getcwd()
         self._tasks: dict[str, BaseTask | dict] = {}
         self._state_manager = TaskStateManager()
-        self._telemetry: Optional[TelemetryManager] = None
+        self._telemetry: TelemetryManager | None = None
         self._resource_poll_interval: float = 5.0
 
         # Register callbacks with all provided backends
@@ -352,8 +351,8 @@ class Session:
     def enable_telemetry(
         self,
         resource_poll_interval: float = 5.0,
-        checkpoint_interval: Optional[float] = None,
-        checkpoint_path: Optional[str] = None,
+        checkpoint_interval: float | None = None,
+        checkpoint_path: str | None = None,
     ) -> TelemetryManager:
         """Enable telemetry collection for this session.
 
@@ -413,7 +412,7 @@ class Session:
                 if self._telemetry._running:
                     adapter.start(self._telemetry)
                 return
-        except Exception:
+        except Exception:  # noqa: S110
             pass
 
         # Dask — detect by class name to avoid hard import

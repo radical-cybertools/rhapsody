@@ -162,9 +162,10 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["F401", "F841", "F811", "S", "T20", "PT", "B017"]  # Allow unused imports, variables, redefinitions, security, prints, pytest style, broad exceptions in tests
-"docs/*" = ["E402", "F841", "E722", "F401", "T20", "S", "B007"]  # More lenient for docs/examples, allow unused loop variables
-"examples/*" = ["E402", "F841", "E722", "F401", "T20", "S", "B007"]  # More lenient for examples
+"tests/*" = ["F401", "F841", "F811", "S", "T20", "PT", "B017", "E741", "N806"]  # Allow unused imports, variables, redefinitions, security, prints, pytest style, broad exceptions in tests
+"docs/*" = ["E402", "F841", "E722", "F401", "T20", "S", "B007", "E741", "N806", "E702", "I", "F"]  # More lenient for docs
+"examples/*" = ["E402", "F841", "E722", "F401", "T20", "S", "B007", "E741", "N806", "E702", "I", "F"]  # More lenient for examples
+"tutorials/*" = ["E402", "F841", "E722", "F401", "T20", "S", "B007", "E741", "N806", "E702", "I", "F"]  # More lenient for notebooks
 
 [tool.ruff.lint.isort]
 force-single-line = true

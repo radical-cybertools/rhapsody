@@ -14,16 +14,13 @@ import asyncio
 import dataclasses
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
-from typing import Optional
 
 from rhapsody.telemetry.events import BaseEvent
-from rhapsody.telemetry.events import ResourceUpdate
 from rhapsody.telemetry.events import SessionEnded
 from rhapsody.telemetry.events import SessionStarted
 from rhapsody.telemetry.events import TaskCompleted
@@ -68,22 +65,22 @@ class TelemetryManager:
     def __init__(
         self,
         session_id: str,
-        checkpoint_interval: Optional[float] = None,
-        checkpoint_path: Optional[str] = None,
+        checkpoint_interval: float | None = None,
+        checkpoint_path: str | None = None,
     ) -> None:
         self._session_id = session_id
         self._queue: asyncio.Queue[BaseEvent] = asyncio.Queue()
         self._subscribers: list[Callable[[BaseEvent], Any]] = []
         self._adapters: list[TelemetryAdapter] = []
         self._running = False
-        self._dispatch_task: Optional[asyncio.Task] = None
-        self._checkpoint_task: Optional[asyncio.Task] = None
+        self._dispatch_task: asyncio.Task | None = None
+        self._checkpoint_task: asyncio.Task | None = None
         self._session_start_time: float = 0.0
 
         # Checkpoint config
         self._checkpoint_interval = checkpoint_interval
         self._checkpoint_path = checkpoint_path
-        self._checkpoint_file: Optional[Any] = None  # open file handle
+        self._checkpoint_file: Any | None = None  # open file handle
 
         # Raw event log (in-memory, for convenience methods)
         self._event_log: list[BaseEvent] = []
@@ -155,21 +152,25 @@ class TelemetryManager:
             except Exception:
                 logger.exception("Adapter %s failed to start", type(adapter).__name__)
 
-        self.emit(make_event(
-            SessionStarted,
-            session_id=self._session_id,
-            backend="rhapsody",
-        ))
+        self.emit(
+            make_event(
+                SessionStarted,
+                session_id=self._session_id,
+                backend="rhapsody",
+            )
+        )
 
     async def stop(self) -> None:
         """Stop: emit SessionEnded, drain queue, flush file, stop adapters, shutdown OTel."""
         duration = time.time() - self._session_start_time
-        self.emit(make_event(
-            SessionEnded,
-            session_id=self._session_id,
-            backend="rhapsody",
-            duration_seconds=duration,
-        ))
+        self.emit(
+            make_event(
+                SessionEnded,
+                session_id=self._session_id,
+                backend="rhapsody",
+                duration_seconds=duration,
+            )
+        )
 
         self._running = False
 
@@ -210,14 +211,17 @@ class TelemetryManager:
     # ------------------------------------------------------------------
 
     def emit(self, event: BaseEvent) -> None:
-        """Enqueue an event for processing. Non-blocking, O(1), safe to call from any context."""
+        """Enqueue an event for processing.
+
+        Non-blocking, O(1), safe to call from any context.
+        """
         self._queue.put_nowait(event)
 
     def subscribe(self, callback: Callable[[BaseEvent], Any]) -> None:
         """Register a callback to receive every event.
 
-        Callbacks may be sync or async. Async callbacks are fire-and-forget tasks.
-        Exceptions in callbacks never crash the dispatch loop.
+        Callbacks may be sync or async. Async callbacks are fire-and-forget tasks. Exceptions in
+        callbacks never crash the dispatch loop.
         """
         self._subscribers.append(callback)
 
@@ -244,26 +248,26 @@ class TelemetryManager:
     def summary(self) -> dict:
         """Return a plain-dict summary — no OTel knowledge required.
 
-        Includes task counts, duration statistics, session duration, and
-        latest resource utilization per node/backend.
+        Includes task counts, duration statistics, session duration, and latest resource utilization
+        per node/backend.
         """
-        metrics = self.read_metrics()
+        self.read_metrics()
         spans = self.task_spans()
 
         task_counts = self.task_count()
 
         durations = [
-            s["duration_seconds"] for s in spans
-            if s["duration_seconds"] is not None
-            and not s.get("incomplete_lifecycle", False)
+            s["duration_seconds"]
+            for s in spans
+            if s["duration_seconds"] is not None and not s.get("incomplete_lifecycle", False)
         ]
         duration_stats: dict = {}
         if durations:
             duration_stats = {
                 "total_seconds": round(sum(durations), 6),
-                "mean_seconds":  round(sum(durations) / len(durations), 6),
-                "min_seconds":   round(min(durations), 6),
-                "max_seconds":   round(max(durations), 6),
+                "mean_seconds": round(sum(durations) / len(durations), 6),
+                "min_seconds": round(min(durations), 6),
+                "max_seconds": round(max(durations), 6),
             }
 
         # Latest resource reading per (backend, node_id)
@@ -272,23 +276,23 @@ class TelemetryManager:
         for ev in resource_events:
             key = f"{ev.backend}/{ev.node_id}"
             nodes[key] = {
-                "backend":          ev.backend,
-                "node_id":          ev.node_id,
-                "cpu_percent":      ev.cpu_percent,
-                "memory_percent":   ev.memory_percent,
-                "gpu_percent":      ev.gpu_percent,
-                "disk_read_bytes":  ev.disk_read_bytes,
+                "backend": ev.backend,
+                "node_id": ev.node_id,
+                "cpu_percent": ev.cpu_percent,
+                "memory_percent": ev.memory_percent,
+                "gpu_percent": ev.gpu_percent,
+                "disk_read_bytes": ev.disk_read_bytes,
                 "disk_write_bytes": ev.disk_write_bytes,
-                "net_sent_bytes":   ev.net_sent_bytes,
-                "net_recv_bytes":   ev.net_recv_bytes,
+                "net_sent_bytes": ev.net_sent_bytes,
+                "net_recv_bytes": ev.net_recv_bytes,
             }
 
         return {
-            "session_id":        self._session_id,
-            "duration_seconds":  self.session_duration(),
-            "tasks":             task_counts,
-            "duration":          duration_stats,
-            "resources":         nodes,
+            "session_id": self._session_id,
+            "duration_seconds": self.session_duration(),
+            "tasks": task_counts,
+            "duration": duration_stats,
+            "resources": nodes,
         }
 
     def task_count(self) -> dict:
@@ -297,8 +301,8 @@ class TelemetryManager:
         return {
             "submitted": int(_sum_metric(metrics, "tasks_submitted")),
             "completed": int(_sum_metric(metrics, "tasks_completed")),
-            "failed":    int(_sum_metric(metrics, "tasks_failed")),
-            "running":   int(_sum_metric(metrics, "tasks_running")),
+            "failed": int(_sum_metric(metrics, "tasks_failed")),
+            "running": int(_sum_metric(metrics, "tasks_running")),
         }
 
     def task_spans(self) -> list[dict]:
@@ -315,14 +319,14 @@ class TelemetryManager:
             attrs = dict(s.attributes or {})
             dur = (s.end_time - s.start_time) / 1e9 if s.end_time else None
             record: dict = {
-                "task_id":          attrs.get("task_id"),
-                "backend":          attrs.get("backend"),
-                "executable":       attrs.get("executable", ""),
-                "task_type":        attrs.get("task_type", ""),
-                "status":           attrs.get("status"),
+                "task_id": attrs.get("task_id"),
+                "backend": attrs.get("backend"),
+                "executable": attrs.get("executable", ""),
+                "task_type": attrs.get("task_type", ""),
+                "status": attrs.get("status"),
                 "duration_seconds": round(dur, 6) if dur is not None else None,
-                "span_id":          hex(s.context.span_id),
-                "trace_id":         hex(s.context.trace_id),
+                "span_id": hex(s.context.span_id),
+                "trace_id": hex(s.context.trace_id),
             }
             if "error_type" in attrs:
                 record["error_type"] = attrs["error_type"]
@@ -346,30 +350,34 @@ class TelemetryManager:
 
     def _on_task_submitted(self, task: dict) -> None:
         """Called from Session.submit_tasks() after routing sets task['backend']."""
-        self.emit(make_event(
-            TaskSubmitted,
-            session_id=self._session_id,
-            backend=task.get("backend", ""),
-            task_id=task["uid"],
-            event_time=task.get("history", {}).get("submitted", time.time()),
-            attributes={
-                "executable": _task_executable(task),
-                "task_type": task.get("task_type", ""),
-            },
-        ))
+        self.emit(
+            make_event(
+                TaskSubmitted,
+                session_id=self._session_id,
+                backend=task.get("backend", ""),
+                task_id=task["uid"],
+                event_time=task.get("history", {}).get("submitted", time.time()),
+                attributes={
+                    "executable": _task_executable(task),
+                    "task_type": task.get("task_type", ""),
+                },
+            )
+        )
 
     def _on_task_queued(self, task: dict) -> None:
         """Called from Session.submit_tasks() just before backend.submit_tasks()."""
-        self.emit(make_event(
-            TaskQueued,
-            session_id=self._session_id,
-            backend=task.get("backend", ""),
-            task_id=task["uid"],
-            attributes={
-                "executable": _task_executable(task),
-                "task_type": task.get("task_type", ""),
-            },
-        ))
+        self.emit(
+            make_event(
+                TaskQueued,
+                session_id=self._session_id,
+                backend=task.get("backend", ""),
+                task_id=task["uid"],
+                attributes={
+                    "executable": _task_executable(task),
+                    "task_type": task.get("task_type", ""),
+                },
+            )
+        )
 
     def _on_task_state_change(self, task: dict, state: str) -> None:
         """Called from TaskStateManager._update_task_impl — must be non-blocking."""
@@ -381,17 +389,19 @@ class TelemetryManager:
         task_type = task.get("task_type", "")
 
         if state == "RUNNING":
-            self.emit(make_event(
-                TaskStarted,
-                session_id=self._session_id,
-                backend=backend,
-                task_id=task_id,
-                event_time=history.get("RUNNING", now_wall),
-                attributes={
-                    "executable": executable,
-                    "task_type": task_type,
-                },
-            ))
+            self.emit(
+                make_event(
+                    TaskStarted,
+                    session_id=self._session_id,
+                    backend=backend,
+                    task_id=task_id,
+                    event_time=history.get("RUNNING", now_wall),
+                    attributes={
+                        "executable": executable,
+                        "task_type": task_type,
+                    },
+                )
+            )
 
         elif state == "DONE":
             running_ts = history.get("RUNNING")
@@ -401,17 +411,22 @@ class TelemetryManager:
                 attrs: dict = {"executable": executable, "task_type": task_type}
             else:
                 duration = 0.0
-                attrs = {"executable": executable, "task_type": task_type,
-                         "incomplete_lifecycle": True}
-            self.emit(make_event(
-                TaskCompleted,
-                session_id=self._session_id,
-                backend=backend,
-                task_id=task_id,
-                event_time=ended,
-                duration_seconds=duration,
-                attributes=attrs,
-            ))
+                attrs = {
+                    "executable": executable,
+                    "task_type": task_type,
+                    "incomplete_lifecycle": True,
+                }
+            self.emit(
+                make_event(
+                    TaskCompleted,
+                    session_id=self._session_id,
+                    backend=backend,
+                    task_id=task_id,
+                    event_time=ended,
+                    duration_seconds=duration,
+                    attributes=attrs,
+                )
+            )
 
         elif state == "FAILED":
             running_ts = history.get("RUNNING")
@@ -420,22 +435,27 @@ class TelemetryManager:
             error_type = type(exc).__name__ if exc is not None else "unknown"
             if running_ts is not None:
                 duration = max(ended - running_ts, 0.0)
-                attrs = {"executable": executable, "task_type": task_type,
-                         "error_type": error_type}
+                attrs = {"executable": executable, "task_type": task_type, "error_type": error_type}
             else:
                 duration = 0.0
-                attrs = {"executable": executable, "task_type": task_type,
-                         "error_type": error_type, "incomplete_lifecycle": True}
-            self.emit(make_event(
-                TaskFailed,
-                session_id=self._session_id,
-                backend=backend,
-                task_id=task_id,
-                event_time=ended,
-                duration_seconds=duration,
-                error_type=error_type,
-                attributes=attrs,
-            ))
+                attrs = {
+                    "executable": executable,
+                    "task_type": task_type,
+                    "error_type": error_type,
+                    "incomplete_lifecycle": True,
+                }
+            self.emit(
+                make_event(
+                    TaskFailed,
+                    session_id=self._session_id,
+                    backend=backend,
+                    task_id=task_id,
+                    event_time=ended,
+                    duration_seconds=duration,
+                    error_type=error_type,
+                    attributes=attrs,
+                )
+            )
 
     # ------------------------------------------------------------------
     # Internal: OTel instruments
@@ -520,25 +540,29 @@ class TelemetryManager:
 
         elif etype == "TaskStarted":
             executable = event.attributes.get("executable", "")
-            task_type  = event.attributes.get("task_type", "")
-            a = {**attrs, "task_id": event.task_id,
-                 "executable": executable, "task_type": task_type}
+            task_type = event.attributes.get("task_type", "")
+            a = {
+                **attrs,
+                "task_id": event.task_id,
+                "executable": executable,
+                "task_type": task_type,
+            }
             self._c_started.add(1, a)
             self._g_running.add(1, a)
-            ctx = (
-                trace_mod.set_span_in_context(self._session_span)
-                if self._session_span
-                else None
-            )
+            ctx = trace_mod.set_span_in_context(self._session_span) if self._session_span else None
             self._active_spans[event.task_id] = self._tracer.start_span(
                 "task", context=ctx, attributes=a
             )
 
         elif etype == "TaskCompleted":
             executable = event.attributes.get("executable", "")
-            task_type  = event.attributes.get("task_type", "")
-            a = {**attrs, "task_id": event.task_id,
-                 "executable": executable, "task_type": task_type}
+            task_type = event.attributes.get("task_type", "")
+            a = {
+                **attrs,
+                "task_id": event.task_id,
+                "executable": executable,
+                "task_type": task_type,
+            }
             self._c_completed.add(1, a)
             self._h_duration.record(event.duration_seconds, a)
             span = self._active_spans.pop(event.task_id, None)
@@ -558,10 +582,14 @@ class TelemetryManager:
 
         elif etype == "TaskFailed":
             executable = event.attributes.get("executable", "")
-            task_type  = event.attributes.get("task_type", "")
+            task_type = event.attributes.get("task_type", "")
             error_type = event.attributes.get("error_type", event.error_type)
-            a = {**attrs, "task_id": event.task_id,
-                 "executable": executable, "task_type": task_type}
+            a = {
+                **attrs,
+                "task_id": event.task_id,
+                "executable": executable,
+                "task_type": task_type,
+            }
             self._c_failed.add(1, a)
             self._h_duration.record(event.duration_seconds, a)
             span = self._active_spans.pop(event.task_id, None)
@@ -637,7 +665,7 @@ class TelemetryManager:
                         # Histogram data points expose .sum/.count, not .value
                         if hasattr(dps[0], "sum") and not hasattr(dps[0], "value"):
                             snapshot[metric.name + "_count"] = sum(dp.count for dp in dps)
-                            snapshot[metric.name + "_sum"]   = sum(dp.sum   for dp in dps)
+                            snapshot[metric.name + "_sum"] = sum(dp.sum for dp in dps)
                         else:
                             snapshot[metric.name] = sum(dp.value for dp in dps)
         try:
@@ -652,13 +680,13 @@ class TelemetryManager:
         for s in self.read_traces():
             dur = (s.end_time - s.start_time) / 1e6 if s.end_time else None
             record = {
-                "name":         s.name,
-                "span_id":      hex(s.context.span_id),
-                "trace_id":     hex(s.context.trace_id),
-                "start_ns":     s.start_time,
-                "end_ns":       s.end_time,
-                "duration_ms":  round(dur, 3) if dur is not None else None,
-                "attributes":   dict(s.attributes or {}),
+                "name": s.name,
+                "span_id": hex(s.context.span_id),
+                "trace_id": hex(s.context.trace_id),
+                "start_ns": s.start_time,
+                "end_ns": s.end_time,
+                "duration_ms": round(dur, 3) if dur is not None else None,
+                "attributes": dict(s.attributes or {}),
             }
             try:
                 self._write_line("span", record)
@@ -678,6 +706,7 @@ class TelemetryManager:
 # ------------------------------------------------------------------
 # Module-level helper
 # ------------------------------------------------------------------
+
 
 def _sum_metric(metrics_data: Any, name: str) -> float:
     total = 0.0

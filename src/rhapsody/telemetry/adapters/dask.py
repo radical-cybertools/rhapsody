@@ -17,7 +17,6 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 from typing import Any
-from typing import Optional
 
 from rhapsody.telemetry.adapters.base import TelemetryAdapter
 from rhapsody.telemetry.events import ResourceUpdate
@@ -50,16 +49,14 @@ class DaskTelemetryAdapter(TelemetryAdapter):
         self._session_id = session_id
         self._backend_name = backend_name
         self._interval = interval
-        self._manager: Optional[TelemetryManager] = None
-        self._task: Optional[asyncio.Task] = None
+        self._manager: TelemetryManager | None = None
+        self._task: asyncio.Task | None = None
         self._running = False
 
     def start(self, manager: TelemetryManager) -> None:
         self._manager = manager
         self._running = True
-        self._task = asyncio.create_task(
-            self._collect_loop(), name="telemetry-dask-adapter"
-        )
+        self._task = asyncio.create_task(self._collect_loop(), name="telemetry-dask-adapter")
 
     def stop(self) -> None:
         self._running = False
@@ -77,14 +74,16 @@ class DaskTelemetryAdapter(TelemetryAdapter):
                     cpu = m.get("cpu", 0.0)
                     mem_pct = (m.get("memory", 0) / mem_limit) * 100.0
                     node_id = w.get("host", addr)
-                    self._manager.emit(make_event(
-                        ResourceUpdate,
-                        session_id=self._session_id,
-                        backend=self._backend_name,
-                        node_id=node_id,
-                        cpu_percent=cpu,
-                        memory_percent=mem_pct,
-                        gpu_percent=None,  # Dask does not expose GPU via scheduler_info
-                    ))
+                    self._manager.emit(
+                        make_event(
+                            ResourceUpdate,
+                            session_id=self._session_id,
+                            backend=self._backend_name,
+                            node_id=node_id,
+                            cpu_percent=cpu,
+                            memory_percent=mem_pct,
+                            gpu_percent=None,  # Dask does not expose GPU via scheduler_info
+                        )
+                    )
             except Exception:
                 logger.debug("DaskTelemetryAdapter collection error", exc_info=True)
