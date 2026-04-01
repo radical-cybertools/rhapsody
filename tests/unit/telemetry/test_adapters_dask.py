@@ -11,10 +11,10 @@ from rhapsody.telemetry.adapters.dask import DaskTelemetryAdapter
 from rhapsody.telemetry.events import ResourceUpdate
 from rhapsody.telemetry.manager import TelemetryManager
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_client(workers: dict) -> MagicMock:
     """Return a minimal Dask client mock with a fixed scheduler_info()."""
@@ -56,8 +56,8 @@ async def manager():
 # Tests
 # ---------------------------------------------------------------------------
 
-class TestDaskTelemetryAdapter:
 
+class TestDaskTelemetryAdapter:
     async def test_emits_resource_update(self, manager):
         """Adapter emits at least one ResourceUpdate per poll."""
         received = []
@@ -86,14 +86,16 @@ class TestDaskTelemetryAdapter:
         manager.subscribe(lambda e: received.append(e) if isinstance(e, ResourceUpdate) else None)
 
         # memory = 256 MB, limit = 1 GB → 25 %
-        client = _make_client({
-            "tcp://w0:8000": _worker(
-                host="node0",
-                cpu=75.0,
-                memory=256 * 1024 * 1024,
-                memory_limit=1024 * 1024 * 1024,
-            )
-        })
+        client = _make_client(
+            {
+                "tcp://w0:8000": _worker(
+                    host="node0",
+                    cpu=75.0,
+                    memory=256 * 1024 * 1024,
+                    memory_limit=1024 * 1024 * 1024,
+                )
+            }
+        )
         adapter = DaskTelemetryAdapter(
             client=client,
             session_id="test-session",
@@ -116,15 +118,19 @@ class TestDaskTelemetryAdapter:
 
         client = _make_client({"tcp://w0:8000": _worker()})
         adapter = DaskTelemetryAdapter(
-            client=client, session_id="s", backend_name="dask", interval=0.05,
+            client=client,
+            session_id="s",
+            backend_name="dask",
+            interval=0.05,
         )
         adapter.start(manager)
         await asyncio.sleep(0.2)
         adapter.stop()
 
         assert all(e.gpu_percent is None for e in received)
-        assert all(e.gpu_id is None for e in received), \
+        assert all(e.gpu_id is None for e in received), (
             "gpu_id must be None (node-level aggregate, OTel-compatible)"
+        )
 
     async def test_disk_delta_on_second_poll(self, manager):
         """Disk I/O bytes are per-interval deltas, not cumulative totals.
@@ -144,19 +150,30 @@ class TestDaskTelemetryAdapter:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                return {"workers": {"tcp://w0:8000": _worker(
-                    read_bytes=float(base_read), write_bytes=float(base_write)
-                )}}
-            return {"workers": {"tcp://w0:8000": _worker(
-                read_bytes=float(base_read + 2 * 1024 * 1024),
-                write_bytes=float(base_write + 512 * 1024),
-            )}}
+                return {
+                    "workers": {
+                        "tcp://w0:8000": _worker(
+                            read_bytes=float(base_read), write_bytes=float(base_write)
+                        )
+                    }
+                }
+            return {
+                "workers": {
+                    "tcp://w0:8000": _worker(
+                        read_bytes=float(base_read + 2 * 1024 * 1024),
+                        write_bytes=float(base_write + 512 * 1024),
+                    )
+                }
+            }
 
         client = MagicMock()
         client.scheduler_info.side_effect = scheduler_info_side_effect
 
         adapter = DaskTelemetryAdapter(
-            client=client, session_id="s", backend_name="dask", interval=0.05,
+            client=client,
+            session_id="s",
+            backend_name="dask",
+            interval=0.05,
         )
         adapter.start(manager)
         await asyncio.sleep(0.2)
@@ -179,7 +196,10 @@ class TestDaskTelemetryAdapter:
 
         client = _make_client({"tcp://w0:8000": _worker()})
         adapter = DaskTelemetryAdapter(
-            client=client, session_id="s", backend_name="dask", interval=0.05,
+            client=client,
+            session_id="s",
+            backend_name="dask",
+            interval=0.05,
         )
         adapter.start(manager)
         await asyncio.sleep(0.2)
@@ -193,12 +213,17 @@ class TestDaskTelemetryAdapter:
         received = []
         manager.subscribe(lambda e: received.append(e) if isinstance(e, ResourceUpdate) else None)
 
-        client = _make_client({
-            "tcp://w0:8000": _worker(host="node0", cpu=10.0),
-            "tcp://w1:8000": _worker(host="node1", cpu=90.0),
-        })
+        client = _make_client(
+            {
+                "tcp://w0:8000": _worker(host="node0", cpu=10.0),
+                "tcp://w1:8000": _worker(host="node1", cpu=90.0),
+            }
+        )
         adapter = DaskTelemetryAdapter(
-            client=client, session_id="s", backend_name="dask", interval=0.05,
+            client=client,
+            session_id="s",
+            backend_name="dask",
+            interval=0.05,
         )
         adapter.start(manager)
         await asyncio.sleep(0.2)
@@ -217,7 +242,10 @@ class TestDaskTelemetryAdapter:
         client.scheduler_info.side_effect = RuntimeError("scheduler unavailable")
 
         adapter = DaskTelemetryAdapter(
-            client=client, session_id="s", backend_name="dask", interval=0.05,
+            client=client,
+            session_id="s",
+            backend_name="dask",
+            interval=0.05,
         )
         adapter.start(manager)
         await asyncio.sleep(0.2)
@@ -225,10 +253,13 @@ class TestDaskTelemetryAdapter:
         # No crash — received may be empty but no exception propagated
 
     async def test_stop_cancels_task(self, manager):
-        """stop() must cancel the asyncio Task cleanly."""
+        """Stop() must cancel the asyncio Task cleanly."""
         client = _make_client({"tcp://w0:8000": _worker()})
         adapter = DaskTelemetryAdapter(
-            client=client, session_id="s", backend_name="dask", interval=100.0,
+            client=client,
+            session_id="s",
+            backend_name="dask",
+            interval=100.0,
         )
         adapter.start(manager)
         assert adapter._task is not None
@@ -245,7 +276,10 @@ class TestDaskTelemetryAdapter:
 
         client = _make_client({"tcp://w0:8000": _worker(host="nodeA", cpu=33.0)})
         adapter = DaskTelemetryAdapter(
-            client=client, session_id="test-session", backend_name="dask", interval=0.05,
+            client=client,
+            session_id="test-session",
+            backend_name="dask",
+            interval=0.05,
         )
         adapter.start(manager)
         await asyncio.sleep(0.2)

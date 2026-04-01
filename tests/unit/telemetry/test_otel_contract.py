@@ -37,6 +37,7 @@ from .conftest import assert_resource_update_contract
 _dragon_available = False
 try:
     import dragon  # noqa: F401
+
     _dragon_available = os.getenv("DRAGON_DEFAULT_PD") is not None
 except ImportError:
     pass
@@ -53,7 +54,7 @@ _requires_dragon = pytest.mark.skipif(
 CAPS_CONCURRENT = AdapterCapabilities(
     name="concurrent",
     has_node_id=True,
-    has_gpu_aggregate=False,   # pynvml absent on this machine → no GPU
+    has_gpu_aggregate=False,  # pynvml absent on this machine → no GPU
     has_gpu_per_device=False,  # same
     has_disk_io=True,
     has_net_io=True,
@@ -62,16 +63,16 @@ CAPS_CONCURRENT = AdapterCapabilities(
 CAPS_DASK = AdapterCapabilities(
     name="dask",
     has_node_id=True,
-    has_gpu_aggregate=False,   # Dask scheduler_info never exposes GPU
+    has_gpu_aggregate=False,  # Dask scheduler_info never exposes GPU
     has_gpu_per_device=False,
-    has_disk_io=True,          # Dask exposes read_bytes/write_bytes; first poll = None
-    has_net_io=False,          # Dask does not expose net I/O
+    has_disk_io=True,  # Dask exposes read_bytes/write_bytes; first poll = None
+    has_net_io=False,  # Dask does not expose net I/O
 )
 
 CAPS_DRAGON = AdapterCapabilities(
     name="dragon",
     has_node_id=True,
-    has_gpu_aggregate=False,   # GPU absent or driver "Not Supported" on test machine
+    has_gpu_aggregate=False,  # GPU absent or driver "Not Supported" on test machine
     has_gpu_per_device=False,  # same
     has_disk_io=True,
     has_net_io=True,
@@ -81,8 +82,10 @@ CAPS_DRAGON = AdapterCapabilities(
 # Adapter factories
 # ---------------------------------------------------------------------------
 
+
 def _make_concurrent_adapter(session_id: str = "contract-session") -> Any:
     from rhapsody.telemetry.adapters.concurrent import ConcurrentTelemetryAdapter
+
     return ConcurrentTelemetryAdapter(
         session_id=session_id,
         backend_name="concurrent",
@@ -117,6 +120,7 @@ def _make_dask_adapter(session_id: str = "contract-session") -> Any:
 
 def _make_dragon_adapter(session_id: str = "contract-session") -> Any:
     from rhapsody.telemetry.adapters.dragon import DragonTelemetryAdapter
+
     return DragonTelemetryAdapter(
         session_id=session_id,
         backend_name="dragon_v3",
@@ -130,7 +134,7 @@ def _make_dragon_adapter(session_id: str = "contract-session") -> Any:
 
 ADAPTER_PARAMS = [
     pytest.param("concurrent", _make_concurrent_adapter, CAPS_CONCURRENT, id="concurrent"),
-    pytest.param("dask",       _make_dask_adapter,       CAPS_DASK,       id="dask"),
+    pytest.param("dask", _make_dask_adapter, CAPS_DASK, id="dask"),
     pytest.param(
         "dragon",
         _make_dragon_adapter,
@@ -143,6 +147,7 @@ ADAPTER_PARAMS = [
 # ---------------------------------------------------------------------------
 # Shared manager fixture
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 async def manager():
@@ -157,6 +162,7 @@ async def manager():
 # Contract tests
 # ---------------------------------------------------------------------------
 
+
 class TestResourceUpdateOTelContract:
     """Verify that every adapter emits ResourceUpdate events in the correct OTel structure."""
 
@@ -164,9 +170,7 @@ class TestResourceUpdateOTelContract:
     async def test_all_events_satisfy_contract(self, manager, name, make_adapter, caps):
         """Every ResourceUpdate from every adapter must pass assert_resource_update_contract."""
         received: list[ResourceUpdate] = []
-        manager.subscribe(
-            lambda e: received.append(e) if isinstance(e, ResourceUpdate) else None
-        )
+        manager.subscribe(lambda e: received.append(e) if isinstance(e, ResourceUpdate) else None)
 
         wait = 0.3 if name != "dragon" else 15.0
 
@@ -176,8 +180,7 @@ class TestResourceUpdateOTelContract:
             await asyncio.sleep(wait)
             adapter.stop()
 
-        assert len(received) >= 1, \
-            f"{name}: no ResourceUpdate events emitted within {wait}s"
+        assert len(received) >= 1, f"{name}: no ResourceUpdate events emitted within {wait}s"
 
         for ev in received:
             assert_resource_update_contract(ev, caps)
@@ -188,9 +191,7 @@ class TestResourceUpdateOTelContract:
     ):
         """Node-level ResourceUpdate events (gpu_id=None) must never carry a device index."""
         received: list[ResourceUpdate] = []
-        manager.subscribe(
-            lambda e: received.append(e) if isinstance(e, ResourceUpdate) else None
-        )
+        manager.subscribe(lambda e: received.append(e) if isinstance(e, ResourceUpdate) else None)
 
         wait = 0.3 if name != "dragon" else 15.0
 
@@ -204,14 +205,10 @@ class TestResourceUpdateOTelContract:
         assert len(node_events) >= 1, f"{name}: no node-level events (gpu_id=None) emitted"
 
     @pytest.mark.parametrize("name,make_adapter,caps", ADAPTER_PARAMS)
-    async def test_session_id_and_backend_always_set(
-        self, manager, name, make_adapter, caps
-    ):
+    async def test_session_id_and_backend_always_set(self, manager, name, make_adapter, caps):
         """session_id and backend must be set on every event — required for OTel parent linkage."""
         received: list[ResourceUpdate] = []
-        manager.subscribe(
-            lambda e: received.append(e) if isinstance(e, ResourceUpdate) else None
-        )
+        manager.subscribe(lambda e: received.append(e) if isinstance(e, ResourceUpdate) else None)
 
         wait = 0.3 if name != "dragon" else 15.0
 
@@ -223,25 +220,28 @@ class TestResourceUpdateOTelContract:
 
         assert len(received) >= 1
         for ev in received:
-            assert ev.session_id == "contract-session", \
+            assert ev.session_id == "contract-session", (
                 f"{name}: session_id mismatch — got {ev.session_id!r}"
-            assert ev.backend is not None and ev.backend != "", \
+            )
+            assert ev.backend is not None and ev.backend != "", (
                 f"{name}: backend must be non-empty string, got {ev.backend!r}"
+            )
 
-    @pytest.mark.parametrize("name,make_adapter,caps", [
-        pytest.param("concurrent", _make_concurrent_adapter, CAPS_CONCURRENT, id="concurrent"),
-        pytest.param("dask",       _make_dask_adapter,       CAPS_DASK,       id="dask"),
-    ])
+    @pytest.mark.parametrize(
+        "name,make_adapter,caps",
+        [
+            pytest.param("concurrent", _make_concurrent_adapter, CAPS_CONCURRENT, id="concurrent"),
+            pytest.param("dask", _make_dask_adapter, CAPS_DASK, id="dask"),
+        ],
+    )
     async def test_per_device_events_have_null_io(self, manager, name, make_adapter, caps):
         """When gpu_id=N events are emitted, disk/net fields must all be None.
 
-        Only runs for adapters that can emit per-device GPU events (pynvml path).
-        Uses a mocked pynvml with 2 devices to force per-device emission.
+        Only runs for adapters that can emit per-device GPU events (pynvml path). Uses a mocked
+        pynvml with 2 devices to force per-device emission.
         """
         received: list[ResourceUpdate] = []
-        manager.subscribe(
-            lambda e: received.append(e) if isinstance(e, ResourceUpdate) else None
-        )
+        manager.subscribe(lambda e: received.append(e) if isinstance(e, ResourceUpdate) else None)
 
         mock_pynvml = MagicMock()
         mock_pynvml.nvmlDeviceGetCount.return_value = 2
@@ -259,11 +259,15 @@ class TestResourceUpdateOTelContract:
             pytest.skip(f"{name}: no per-device GPU events emitted (pynvml mock may not apply)")
 
         for ev in per_device:
-            assert ev.disk_read_bytes is None, \
+            assert ev.disk_read_bytes is None, (
                 f"{name}: gpu_id={ev.gpu_id} event must have disk_read_bytes=None"
-            assert ev.disk_write_bytes is None, \
+            )
+            assert ev.disk_write_bytes is None, (
                 f"{name}: gpu_id={ev.gpu_id} event must have disk_write_bytes=None"
-            assert ev.net_sent_bytes is None, \
+            )
+            assert ev.net_sent_bytes is None, (
                 f"{name}: gpu_id={ev.gpu_id} event must have net_sent_bytes=None"
-            assert ev.net_recv_bytes is None, \
+            )
+            assert ev.net_recv_bytes is None, (
                 f"{name}: gpu_id={ev.gpu_id} event must have net_recv_bytes=None"
+            )
