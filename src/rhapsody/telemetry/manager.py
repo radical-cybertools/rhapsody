@@ -108,6 +108,10 @@ class TelemetryManager:
         self._active_spans: dict[str, Any] = {}
         self._session_span: Any = None
 
+        # Temporary span context store: task_id → SpanContext, populated in
+        # _process_event() on TaskCompleted/Failed, consumed in _span_ids_for_event().
+        self._completed_span_ctx: dict[str, Any] = {}
+
         # Last-seen resource values for UpDownCounter delta tracking
         self._last: dict[str, dict[str, float]] = {"cpu": {}, "mem": {}, "gpu": {}}
 
@@ -458,6 +462,49 @@ class TelemetryManager:
             )
 
     # ------------------------------------------------------------------
+    # Internal: span correlation
+    # ------------------------------------------------------------------
+
+    def _span_ids_for_event(self, event: BaseEvent) -> tuple[str | None, str | None]:
+        """Return (trace_id_hex, span_id_hex) for the OTel span correlated to this event.
+
+        Must be called AFTER _process_event() so that spans have been created/ended.
+
+        Correlation rules:
+        - TaskStarted/Completed/Failed  → trace_id + span_id of the task span
+        - SessionStarted/SessionEnded   → trace_id + span_id of the session span
+        - TaskSubmitted/TaskQueued      → session trace_id only (span not yet created),
+                                          span_id = None (OTel-aligned: event belongs to
+                                          the trace but precedes the task span)
+        - ResourceUpdate                → (None, None) — node metric, not task-correlated
+        """
+        span_ctx = None
+
+        if event.event_type == "TaskStarted":
+            span = self._active_spans.get(event.task_id)
+            if span:
+                span_ctx = span.get_span_context()
+
+        elif event.event_type in ("TaskCompleted", "TaskFailed"):
+            span_ctx = self._completed_span_ctx.pop(event.task_id, None)
+
+        elif event.event_type in ("SessionStarted", "SessionEnded"):
+            if self._session_span:
+                span_ctx = self._session_span.get_span_context()
+
+        elif event.event_type in ("TaskSubmitted", "TaskQueued"):
+            # No task span exists yet — attach to the session trace so the event
+            # can be stitched into a full timeline; span_id remains None.
+            if self._session_span:
+                session_ctx = self._session_span.get_span_context()
+                if session_ctx.is_valid:
+                    return hex(session_ctx.trace_id), None
+
+        if span_ctx is None or not span_ctx.is_valid:
+            return None, None
+        return hex(span_ctx.trace_id), hex(span_ctx.span_id)
+
+    # ------------------------------------------------------------------
     # Internal: OTel instruments
     # ------------------------------------------------------------------
 
@@ -512,10 +559,15 @@ class TelemetryManager:
             except Exception:
                 logger.exception("Error processing telemetry event %s", event.event_type)
 
-            # Write event line to JSONL file
+            # Write event line to JSONL file — enriched with OTel correlation IDs
             if self._checkpoint_file is not None:
                 try:
-                    self._write_line("event", dataclasses.asdict(event))
+                    d = dataclasses.asdict(event)
+                    trace_id, span_id = self._span_ids_for_event(event)
+                    d["trace_id"] = trace_id
+                    d["span_id"]  = span_id
+                    d["name"]     = event.event_type  # OTel-compatible alias
+                    self._write_line("event", d)
                 except Exception:
                     logger.debug("Failed to write event to checkpoint file", exc_info=True)
 
@@ -579,6 +631,7 @@ class TelemetryManager:
             span.set_attribute("executable", executable)
             span.set_attribute("task_type", task_type)
             span.end()
+            self._completed_span_ctx[event.task_id] = span.get_span_context()
 
         elif etype == "TaskFailed":
             executable = event.attributes.get("executable", "")
@@ -607,6 +660,7 @@ class TelemetryManager:
             span.set_attribute("executable", executable)
             span.set_attribute("task_type", task_type)
             span.end()
+            self._completed_span_ctx[event.task_id] = span.get_span_context()
 
         elif etype == "SessionStarted":
             self._session_span = self._tracer.start_span("session", attributes=attrs)
@@ -680,13 +734,16 @@ class TelemetryManager:
         for s in self.read_traces():
             dur = (s.end_time - s.start_time) / 1e6 if s.end_time else None
             record = {
-                "name": s.name,
-                "span_id": hex(s.context.span_id),
-                "trace_id": hex(s.context.trace_id),
-                "start_ns": s.start_time,
-                "end_ns": s.end_time,
-                "duration_ms": round(dur, 3) if dur is not None else None,
-                "attributes": dict(s.attributes or {}),
+                "name":           s.name,
+                "span_id":        hex(s.context.span_id),
+                "trace_id":       hex(s.context.trace_id),
+                "parent_span_id": hex(s.parent.span_id) if s.parent else None,
+                "start_ns":       s.start_time,
+                "end_ns":         s.end_time,
+                "start_time_s":   s.start_time / 1e9 if s.start_time else None,
+                "end_time_s":     s.end_time   / 1e9 if s.end_time   else None,
+                "duration_ms":    round(dur, 3) if dur is not None else None,
+                "attributes":     dict(s.attributes or {}),
             }
             try:
                 self._write_line("span", record)
