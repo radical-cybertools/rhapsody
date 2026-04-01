@@ -33,10 +33,12 @@ class TestConcurrentTelemetryAdapter:
             interval=0.05,  # fast for testing
         )
 
-        with patch("psutil.cpu_percent", return_value=42.0), \
-             patch("psutil.virtual_memory", return_value=MagicMock(percent=55.0)):
+        with (
+            patch("psutil.cpu_percent", return_value=42.0),
+            patch("psutil.virtual_memory", return_value=MagicMock(percent=55.0)),
+        ):
             adapter.start(manager)
-            await asyncio.sleep(0.3)   # give the daemon thread time to fire
+            await asyncio.sleep(0.3)  # give the daemon thread time to fire
             adapter.stop()
 
         assert len(received) >= 1
@@ -56,9 +58,11 @@ class TestConcurrentTelemetryAdapter:
             interval=0.05,
         )
 
-        with patch("psutil.cpu_percent", return_value=10.0), \
-             patch("psutil.virtual_memory", return_value=MagicMock(percent=20.0)), \
-             patch("subprocess.run", side_effect=FileNotFoundError("nvidia-smi not found")):
+        with (
+            patch("psutil.cpu_percent", return_value=10.0),
+            patch("psutil.virtual_memory", return_value=MagicMock(percent=20.0)),
+            patch("subprocess.run", side_effect=FileNotFoundError("nvidia-smi not found")),
+        ):
             adapter.start(manager)
             await asyncio.sleep(0.3)
             adapter.stop()
@@ -73,17 +77,20 @@ class TestConcurrentTelemetryAdapter:
             backend_name="concurrent",
             interval=100.0,
         )
-        with patch("psutil.cpu_percent", return_value=0.0), \
-             patch("psutil.virtual_memory", return_value=MagicMock(percent=0.0)):
+        with (
+            patch("psutil.cpu_percent", return_value=0.0),
+            patch("psutil.virtual_memory", return_value=MagicMock(percent=0.0)),
+        ):
             adapter.start(manager)
             assert adapter._thread is not None
             assert adapter._thread.is_alive()
-            assert adapter._thread.daemon   # must be daemon so it doesn't block process exit
+            assert adapter._thread.daemon  # must be daemon so it doesn't block process exit
             adapter.stop()
 
     async def test_no_psutil_is_noop(self, manager):
         """If psutil is not importable, adapter should not crash."""
         import builtins
+
         real_import = builtins.__import__
 
         def mock_import(name, *args, **kwargs):

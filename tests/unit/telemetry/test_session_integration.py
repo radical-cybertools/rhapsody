@@ -35,6 +35,7 @@ class TestEnableTelemetry:
     async def test_no_otel_import_before_start(self, backend):
         """enable_telemetry() must not import opentelemetry at call time."""
         import sys
+
         session = Session(backends=[backend])
         before = set(sys.modules.keys())
         session.enable_telemetry()
@@ -133,6 +134,7 @@ class TestEnableTelemetry:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
 
 def _sum_counter(metrics_data, name: str) -> float:
     total = 0.0

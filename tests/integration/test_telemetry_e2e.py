@@ -32,10 +32,7 @@ async def test_telemetry_e2e_20_tasks():
     received = []
     telemetry.subscribe(lambda e: received.append(e))
 
-    tasks = [
-        ComputeTask(executable="/bin/echo", arguments=[str(i)])
-        for i in range(N)
-    ]
+    tasks = [ComputeTask(executable="/bin/echo", arguments=[str(i)]) for i in range(N)]
 
     await session.submit_tasks(tasks)
     await session.wait_tasks(tasks, timeout=30.0)
@@ -58,8 +55,10 @@ async def test_telemetry_e2e_20_tasks():
 
     queued_events = [e for e in received if isinstance(e, TaskQueued)]
     assert len(queued_events) == N
-    assert all(e.attributes.get("executable") != "" or e.attributes.get("task_type") != ""
-               for e in queued_events)
+    assert all(
+        e.attributes.get("executable") != "" or e.attributes.get("task_type") != ""
+        for e in queued_events
+    )
 
     # TaskStarted must be emitted for every task (RUNNING state now added to ConcurrentBackend)
     started_events = [e for e in received if e.event_type == "TaskStarted"]
@@ -154,18 +153,21 @@ async def test_checkpoint_file_e2e():
         filepath = os.path.join(tmpdir, files[0])
         lines = [json.loads(l) for l in open(filepath)]
         sections = {l["section"] for l in lines}
-        assert "event"  in sections
+        assert "event" in sections
         assert "metric" in sections
-        assert "span"   in sections
+        assert "span" in sections
 
         event_types = {l["event_type"] for l in lines if l["section"] == "event"}
         assert "SessionStarted" in event_types
-        assert "TaskSubmitted"  in event_types
-        assert "TaskQueued"     in event_types
-        assert "SessionEnded"   in event_types
+        assert "TaskSubmitted" in event_types
+        assert "TaskQueued" in event_types
+        assert "SessionEnded" in event_types
 
-        task_events = [l for l in lines if l["section"] == "event"
-                       and l["event_type"] in ("TaskCompleted", "TaskFailed")]
+        task_events = [
+            l
+            for l in lines
+            if l["section"] == "event" and l["event_type"] in ("TaskCompleted", "TaskFailed")
+        ]
         assert len(task_events) == 5
         # executable is now in the attributes dict, not a top-level field
         assert all(l.get("attributes", {}).get("executable") is not None for l in task_events)
@@ -175,7 +177,7 @@ async def test_checkpoint_file_e2e():
 
 
 async def test_summary_and_task_spans_e2e():
-    """summary() and task_spans() return correct plain-dict data after session."""
+    """Summary() and task_spans() return correct plain-dict data after session."""
     backend = await ConcurrentExecutionBackend(executor=ThreadPoolExecutor(max_workers=4))
     session = Session(backends=[backend])
     telemetry = session.enable_telemetry()
@@ -204,6 +206,7 @@ async def test_summary_and_task_spans_e2e():
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
 
 def _sum_counter(metrics_data, name: str) -> float:
     total = 0.0

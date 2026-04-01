@@ -21,12 +21,14 @@ async def test_emit_10k_tasks_under_5ms():
     N = 10_000
     start = time.perf_counter()
     for i in range(N):
-        manager.emit(make_event(
-            TaskSubmitted,
-            session_id="perf-session",
-            backend="concurrent",
-            task_id=f"task.{i:06d}",
-        ))
+        manager.emit(
+            make_event(
+                TaskSubmitted,
+                session_id="perf-session",
+                backend="concurrent",
+                task_id=f"task.{i:06d}",
+            )
+        )
     elapsed = time.perf_counter() - start
 
     await manager.stop()
@@ -45,12 +47,14 @@ async def test_queue_drains_fully():
     await manager.start()
 
     for i in range(500):
-        manager.emit(make_event(
-            TaskSubmitted,
-            session_id="drain-session",
-            backend="concurrent",
-            task_id=f"task.{i:04d}",
-        ))
+        manager.emit(
+            make_event(
+                TaskSubmitted,
+                session_id="drain-session",
+                backend="concurrent",
+                task_id=f"task.{i:04d}",
+            )
+        )
 
     await manager.stop()
     assert manager._queue.empty()
@@ -75,12 +79,14 @@ async def test_subscriber_does_not_slow_dispatch():
     # Fire a handful of events — slow_sub runs inline but dispatch loop
     # moves to next event immediately after iterating subscribers.
     for i in range(5):
-        manager.emit(make_event(
-            TaskSubmitted,
-            session_id="sub-perf",
-            backend="concurrent",
-            task_id=f"t{i}",
-        ))
+        manager.emit(
+            make_event(
+                TaskSubmitted,
+                session_id="sub-perf",
+                backend="concurrent",
+                task_id=f"t{i}",
+            )
+        )
 
     await asyncio.sleep(0.5)
     await manager.stop()
@@ -91,6 +97,7 @@ async def test_subscriber_does_not_slow_dispatch():
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
 
 def _sum_counter(metrics_data, name: str) -> float:
     total = 0.0

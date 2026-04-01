@@ -40,42 +40,84 @@ class TestBaseEvent:
         assert TaskSubmitted(**_base_kwargs(), task_id="t1").event_type == "TaskSubmitted"
         assert TaskQueued(**_base_kwargs(), task_id="t1").event_type == "TaskQueued"
         assert TaskStarted(**_base_kwargs(), task_id="t1").event_type == "TaskStarted"
-        assert TaskCompleted(**_base_kwargs(), task_id="t1", duration_seconds=0.5).event_type == "TaskCompleted"
-        assert TaskFailed(**_base_kwargs(), task_id="t1", duration_seconds=0.1, error_type="ValueError").event_type == "TaskFailed"
-        assert ResourceUpdate(**_base_kwargs(), node_id="n1", cpu_percent=10.0, memory_percent=20.0).event_type == "ResourceUpdate"
+        assert (
+            TaskCompleted(**_base_kwargs(), task_id="t1", duration_seconds=0.5).event_type
+            == "TaskCompleted"
+        )
+        assert (
+            TaskFailed(
+                **_base_kwargs(), task_id="t1", duration_seconds=0.1, error_type="ValueError"
+            ).event_type
+            == "TaskFailed"
+        )
+        assert (
+            ResourceUpdate(
+                **_base_kwargs(), node_id="n1", cpu_percent=10.0, memory_percent=20.0
+            ).event_type
+            == "ResourceUpdate"
+        )
 
 
 class TestAttributes:
     def test_task_submitted_carries_attributes(self):
-        e = make_event(TaskSubmitted, session_id="s", backend="b", task_id="t1",
-                       attributes={"executable": "/bin/echo", "task_type": "ComputeTask"})
+        e = make_event(
+            TaskSubmitted,
+            session_id="s",
+            backend="b",
+            task_id="t1",
+            attributes={"executable": "/bin/echo", "task_type": "ComputeTask"},
+        )
         assert e.attributes["executable"] == "/bin/echo"
         assert e.attributes["task_type"] == "ComputeTask"
 
     def test_task_queued_carries_attributes(self):
-        e = make_event(TaskQueued, session_id="s", backend="b", task_id="t1",
-                       attributes={"executable": "/bin/echo", "task_type": "ComputeTask"})
+        e = make_event(
+            TaskQueued,
+            session_id="s",
+            backend="b",
+            task_id="t1",
+            attributes={"executable": "/bin/echo", "task_type": "ComputeTask"},
+        )
         assert e.attributes["executable"] == "/bin/echo"
         assert e.attributes["task_type"] == "ComputeTask"
 
     def test_task_started_carries_attributes(self):
-        e = make_event(TaskStarted, session_id="s", backend="b", task_id="t1",
-                       attributes={"executable": "my_func", "task_type": "FunctionTask"})
+        e = make_event(
+            TaskStarted,
+            session_id="s",
+            backend="b",
+            task_id="t1",
+            attributes={"executable": "my_func", "task_type": "FunctionTask"},
+        )
         assert e.attributes["executable"] == "my_func"
         assert e.attributes["task_type"] == "FunctionTask"
 
     def test_task_completed_carries_attributes(self):
-        e = make_event(TaskCompleted, session_id="s", backend="b", task_id="t1",
-                       duration_seconds=0.5,
-                       attributes={"executable": "/bin/echo", "task_type": "ComputeTask"})
+        e = make_event(
+            TaskCompleted,
+            session_id="s",
+            backend="b",
+            task_id="t1",
+            duration_seconds=0.5,
+            attributes={"executable": "/bin/echo", "task_type": "ComputeTask"},
+        )
         assert e.attributes["executable"] == "/bin/echo"
         assert e.duration_seconds == 0.5
 
     def test_task_failed_carries_attributes(self):
-        e = make_event(TaskFailed, session_id="s", backend="b", task_id="t1",
-                       duration_seconds=0.1, error_type="ValueError",
-                       attributes={"executable": "/bin/false", "task_type": "ComputeTask",
-                                   "error_type": "ValueError"})
+        e = make_event(
+            TaskFailed,
+            session_id="s",
+            backend="b",
+            task_id="t1",
+            duration_seconds=0.1,
+            error_type="ValueError",
+            attributes={
+                "executable": "/bin/false",
+                "task_type": "ComputeTask",
+                "error_type": "ValueError",
+            },
+        )
         assert e.error_type == "ValueError"
         assert e.attributes.get("error_type") == "ValueError"
 
@@ -84,9 +126,14 @@ class TestAttributes:
         assert e.attributes == {}
 
     def test_incomplete_lifecycle_flag(self):
-        e = make_event(TaskCompleted, session_id="s", backend="b", task_id="t1",
-                       duration_seconds=0.0,
-                       attributes={"incomplete_lifecycle": True})
+        e = make_event(
+            TaskCompleted,
+            session_id="s",
+            backend="b",
+            task_id="t1",
+            duration_seconds=0.0,
+            attributes={"incomplete_lifecycle": True},
+        )
         assert e.attributes.get("incomplete_lifecycle") is True
         assert e.duration_seconds == 0.0
 
@@ -103,18 +150,18 @@ class TestClockConsistency:
 
     def test_emit_time_ge_event_time(self):
         """emit_time >= event_time always holds (queue entry >= occurrence)."""
-        e = make_event(TaskCompleted, session_id="s", backend="b", task_id="t1",
-                       duration_seconds=0.5)
+        e = make_event(
+            TaskCompleted, session_id="s", backend="b", task_id="t1", duration_seconds=0.5
+        )
         assert e.emit_time >= e.event_time
 
     def test_same_clock_subtractable(self):
         """emit_time - event_time gives a meaningful (non-negative) latency in seconds."""
         past = time.time() - 0.1
-        e = make_event(TaskStarted, session_id="s", backend="b", task_id="t1",
-                       event_time=past)
+        e = make_event(TaskStarted, session_id="s", backend="b", task_id="t1", event_time=past)
         latency = e.emit_time - e.event_time
         assert latency >= 0.0
-        assert latency < 1.0   # should be well under 1 second in tests
+        assert latency < 1.0  # should be well under 1 second in tests
 
 
 class TestMakeEvent:
@@ -126,7 +173,9 @@ class TestMakeEvent:
         assert len(ids) == 1000
 
     def test_immutable_fan_out(self):
-        e = make_event(TaskCompleted, session_id="s", backend="b", task_id="t1", duration_seconds=1.0)
+        e = make_event(
+            TaskCompleted, session_id="s", backend="b", task_id="t1", duration_seconds=1.0
+        )
         refs = [e, e, e]
         assert all(r is e for r in refs)
 
@@ -141,10 +190,18 @@ class TestResourceUpdate:
         assert e.gpu_percent is None
 
     def test_io_fields_set(self):
-        e = make_event(ResourceUpdate, session_id="s", backend="b", node_id="n1",
-                       cpu_percent=5.0, memory_percent=10.0,
-                       disk_read_bytes=1024.0, disk_write_bytes=512.0,
-                       net_sent_bytes=2048.0, net_recv_bytes=4096.0)
+        e = make_event(
+            ResourceUpdate,
+            session_id="s",
+            backend="b",
+            node_id="n1",
+            cpu_percent=5.0,
+            memory_percent=10.0,
+            disk_read_bytes=1024.0,
+            disk_write_bytes=512.0,
+            net_sent_bytes=2048.0,
+            net_recv_bytes=4096.0,
+        )
         assert e.disk_read_bytes == 1024.0
         assert e.net_recv_bytes == 4096.0
 

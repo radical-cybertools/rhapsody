@@ -40,6 +40,7 @@ from rhapsody.telemetry.adapters.dragon import DragonTelemetryAdapter  # noqa: E
 # Minimal TelemetryManager stand-in
 # ---------------------------------------------------------------------------
 
+
 class _FakeManager:
     """Minimal stand-in for TelemetryManager — records emitted events."""
 
@@ -54,12 +55,14 @@ class _FakeManager:
     def resource_updates(self):
         with self._lock:
             from rhapsody.telemetry.events import ResourceUpdate
+
             return [e for e in self.events if isinstance(e, ResourceUpdate)]
 
 
 # ---------------------------------------------------------------------------
 # Helper: run an async coroutine in a fresh event loop from a sync test
 # ---------------------------------------------------------------------------
+
 
 def _run(coro):
     return asyncio.get_event_loop().run_until_complete(coro)
@@ -68,6 +71,7 @@ def _run(coro):
 # ---------------------------------------------------------------------------
 # Test: no-op when DRAGON_TELEMETRY_LEVEL is 0
 # ---------------------------------------------------------------------------
+
 
 def test_noop_when_telemetry_level_zero():
     """Adapter must silently do nothing when DRAGON_TELEMETRY_LEVEL < 1."""
@@ -91,8 +95,9 @@ def test_noop_when_telemetry_level_zero():
         loop.run_until_complete(_check())
         loop.close()
 
-        assert manager.resource_updates() == [], \
+        assert manager.resource_updates() == [], (
             "No ResourceUpdate events should be emitted when DRAGON_TELEMETRY_LEVEL=0"
+        )
     finally:
         if original is None:
             os.environ.pop("DRAGON_TELEMETRY_LEVEL", None)
@@ -103,6 +108,7 @@ def test_noop_when_telemetry_level_zero():
 # ---------------------------------------------------------------------------
 # Test: adapter emits ResourceUpdate within reasonable time
 # ---------------------------------------------------------------------------
+
 
 @_requires_dragon_runtime
 def test_adapter_emits_resource_update():
@@ -149,14 +155,12 @@ def test_adapter_emits_resource_update():
         assert ev.node_id is not None and ev.node_id != ""
 
         # cpu_percent and memory_percent must be collected at level=1
-        assert ev.cpu_percent is not None, \
-            f"cpu_percent should not be None; event={ev}"
-        assert ev.memory_percent is not None, \
-            f"memory_percent should not be None; event={ev}"
-        assert 0.0 <= ev.cpu_percent <= 100.0, \
-            f"cpu_percent out of range: {ev.cpu_percent}"
-        assert 0.0 <= ev.memory_percent <= 100.0, \
+        assert ev.cpu_percent is not None, f"cpu_percent should not be None; event={ev}"
+        assert ev.memory_percent is not None, f"memory_percent should not be None; event={ev}"
+        assert 0.0 <= ev.cpu_percent <= 100.0, f"cpu_percent out of range: {ev.cpu_percent}"
+        assert 0.0 <= ev.memory_percent <= 100.0, (
             f"memory_percent out of range: {ev.memory_percent}"
+        )
 
     finally:
         if original is None:
@@ -169,9 +173,10 @@ def test_adapter_emits_resource_update():
 # Test: stop() terminates the adapter cleanly
 # ---------------------------------------------------------------------------
 
+
 @_requires_dragon_runtime
 def test_adapter_stops_cleanly():
-    """stop() must cause the daemon thread to exit within a reasonable timeout."""
+    """Stop() must cause the daemon thread to exit within a reasonable timeout."""
     original = os.environ.get("DRAGON_TELEMETRY_LEVEL")
     os.environ["DRAGON_TELEMETRY_LEVEL"] = "1"
     try:
@@ -197,8 +202,9 @@ def test_adapter_stops_cleanly():
         # Thread should exit within a few seconds of stop()
         if adapter._thread is not None:
             adapter._thread.join(timeout=10.0)
-            assert not adapter._thread.is_alive(), \
+            assert not adapter._thread.is_alive(), (
                 "DragonTelemetryAdapter daemon thread did not exit after stop()"
+            )
 
     finally:
         if original is None:
@@ -211,12 +217,13 @@ def test_adapter_stops_cleanly():
 # Test: worker + collector in isolation
 # ---------------------------------------------------------------------------
 
+
 @_requires_dragon_runtime
 def test_collector_worker_puts_on_queue():
     """_rhapsody_telemetry_worker should put at least one dps packet on the queue.
 
-    Runs the worker directly (in-process, no ProcessGroup) to verify that
-    psutil CPU/RAM collection and the DragonQueue.put() path work correctly.
+    Runs the worker directly (in-process, no ProcessGroup) to verify that psutil CPU/RAM collection
+    and the DragonQueue.put() path work correctly.
     """
     import threading
 
@@ -232,6 +239,7 @@ def test_collector_worker_puts_on_queue():
     def _drain():
         """Drain the queue; stop as soon as we get one packet."""
         import queue as stdlib_queue
+
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
             try:
@@ -256,8 +264,7 @@ def test_collector_worker_puts_on_queue():
     drain_thread.join(timeout=15.0)
     _shutdown_event.set()  # signal worker to exit cleanly
 
-    assert len(received) >= 1, \
-        "No data arrived from _rhapsody_telemetry_worker within 15 seconds"
+    assert len(received) >= 1, "No data arrived from _rhapsody_telemetry_worker within 15 seconds"
 
     data = received[0]
     assert "host" in data, f"Missing 'host' key: {data}"
@@ -265,7 +272,5 @@ def test_collector_worker_puts_on_queue():
     assert len(data["dps"]) > 0, f"Empty dps list: {data}"
 
     metrics = {dp["metric"] for dp in data["dps"]}
-    assert "cpu_percent" in metrics, \
-        f"cpu_percent missing from dps metrics: {metrics}"
-    assert "used_RAM" in metrics, \
-        f"used_RAM missing from dps metrics: {metrics}"
+    assert "cpu_percent" in metrics, f"cpu_percent missing from dps metrics: {metrics}"
+    assert "used_RAM" in metrics, f"used_RAM missing from dps metrics: {metrics}"

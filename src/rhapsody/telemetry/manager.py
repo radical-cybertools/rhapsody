@@ -565,8 +565,8 @@ class TelemetryManager:
                     d = dataclasses.asdict(event)
                     trace_id, span_id = self._span_ids_for_event(event)
                     d["trace_id"] = trace_id
-                    d["span_id"]  = span_id
-                    d["name"]     = event.event_type  # OTel-compatible alias
+                    d["span_id"] = span_id
+                    d["name"] = event.event_type  # OTel-compatible alias
                     self._write_line("event", d)
                 except Exception:
                     logger.debug("Failed to write event to checkpoint file", exc_info=True)
@@ -734,16 +734,16 @@ class TelemetryManager:
         for s in self.read_traces():
             dur = (s.end_time - s.start_time) / 1e6 if s.end_time else None
             record = {
-                "name":           s.name,
-                "span_id":        hex(s.context.span_id),
-                "trace_id":       hex(s.context.trace_id),
+                "name": s.name,
+                "span_id": hex(s.context.span_id),
+                "trace_id": hex(s.context.trace_id),
                 "parent_span_id": hex(s.parent.span_id) if s.parent else None,
-                "start_ns":       s.start_time,
-                "end_ns":         s.end_time,
-                "start_time_s":   s.start_time / 1e9 if s.start_time else None,
-                "end_time_s":     s.end_time   / 1e9 if s.end_time   else None,
-                "duration_ms":    round(dur, 3) if dur is not None else None,
-                "attributes":     dict(s.attributes or {}),
+                "start_ns": s.start_time,
+                "end_ns": s.end_time,
+                "start_time_s": s.start_time / 1e9 if s.start_time else None,
+                "end_time_s": s.end_time / 1e9 if s.end_time else None,
+                "duration_ms": round(dur, 3) if dur is not None else None,
+                "attributes": dict(s.attributes or {}),
             }
             try:
                 self._write_line("span", record)
