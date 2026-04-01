@@ -173,7 +173,8 @@ def _rhapsody_telemetry_worker(
                         try:
                             metrics = get_nvidia_metrics(i, telemetry_level=3)
                             if metrics:
-                                dps.extend(metrics)
+                                for m in metrics:
+                                    dps.append({**m, "device_id": i})
                         except Exception as _exc:
                             _gpu_failed.add(i)
                             _log.warning(
@@ -183,13 +184,14 @@ def _rhapsody_telemetry_worker(
                                 _exc,
                             )
                 elif gpu_vendor == AccVendor.AMD:
-                    for device in gpu_count:  # listDevices() returns a list
+                    for idx, device in enumerate(gpu_count):  # listDevices() returns a list
                         if device in _gpu_failed:
                             continue
                         try:
                             metrics = get_amd_metrics(device, telemetry_level=3)
                             if metrics:
-                                dps.extend(metrics)
+                                for m in metrics:
+                                    dps.append({**m, "device_id": idx})
                         except Exception as _exc:
                             _gpu_failed.add(device)
                             _log.warning(
@@ -201,8 +203,9 @@ def _rhapsody_telemetry_worker(
                 elif gpu_vendor == AccVendor.INTEL and not _intel_disabled:
                     try:
                         all_metrics = get_intel_metrics(telemetry_level=3)
-                        for metrics_list in all_metrics.values():
-                            dps.extend(metrics_list)
+                        for dev_idx, metrics_list in enumerate(all_metrics.values()):
+                            for m in metrics_list:
+                                dps.append({**m, "device_id": dev_idx})
                     except Exception as _exc:
                         _intel_disabled = True
                         _log.warning(
@@ -368,33 +371,60 @@ class DragonTelemetryAdapter(TelemetryAdapter):
                 continue
             last_emit[host] = now
 
-            # Aggregate dps: latest value per metric; max GPU% across devices
-            vals: dict = {}
+            # Separate node-level metrics from per-device GPU metrics
+            node_vals: dict = {}
+            per_device: dict[int, dict] = {}  # device_id → {metric: value}
             for dp in data.get("dps", []):
                 metric = dp.get("metric")
                 value = dp.get("value")
+                dev_id = dp.get("device_id")  # None for cpu/ram/disk/net
                 if value is None or metric is None:
                     continue
-                if metric == "DeviceUtilization":
-                    vals[metric] = max(vals.get(metric, 0.0), float(value))
-                elif metric not in vals:
-                    vals[metric] = float(value)
+                if dev_id is not None:
+                    per_device.setdefault(dev_id, {})[metric] = float(value)
+                elif metric not in node_vals:
+                    node_vals[metric] = float(value)
 
-            event = make_event(
-                ResourceUpdate,
-                session_id=self._session_id,
-                backend=self._backend_name,
-                node_id=host,
-                cpu_percent=vals.get("cpu_percent"),
-                memory_percent=vals.get("used_RAM"),
-                gpu_percent=vals.get("DeviceUtilization"),
-                disk_read_bytes=vals.get("disk_read_bytes"),
-                disk_write_bytes=vals.get("disk_write_bytes"),
-                net_sent_bytes=vals.get("net_sent_bytes"),
-                net_recv_bytes=vals.get("net_recv_bytes"),
-            )
+            # GPU aggregate (max across devices) for the node-level event
+            if per_device:
+                node_vals["DeviceUtilization"] = max(
+                    d.get("DeviceUtilization", 0.0) for d in per_device.values()
+                )
+
             if self._loop and self._loop.is_running():
-                self._loop.call_soon_threadsafe(self._manager.emit, event)
+                # Node-level aggregate event (gpu_id=None, backward-compatible)
+                node_event = make_event(
+                    ResourceUpdate,
+                    session_id=self._session_id,
+                    backend=self._backend_name,
+                    node_id=host,
+                    cpu_percent=node_vals.get("cpu_percent"),
+                    memory_percent=node_vals.get("used_RAM"),
+                    gpu_percent=node_vals.get("DeviceUtilization"),
+                    disk_read_bytes=node_vals.get("disk_read_bytes"),
+                    disk_write_bytes=node_vals.get("disk_write_bytes"),
+                    net_sent_bytes=node_vals.get("net_sent_bytes"),
+                    net_recv_bytes=node_vals.get("net_recv_bytes"),
+                )
+                self._loop.call_soon_threadsafe(self._manager.emit, node_event)
+
+                # Per-GPU events — one per device (disk/net are node-level, not per-GPU)
+                for dev_id, dvals in per_device.items():
+                    gpu_event = make_event(
+                        ResourceUpdate,
+                        session_id=self._session_id,
+                        backend=self._backend_name,
+                        node_id=host,
+                        cpu_percent=node_vals.get("cpu_percent"),
+                        memory_percent=node_vals.get("used_RAM"),
+                        gpu_percent=dvals.get("DeviceUtilization"),
+                        gpu_id=dev_id,
+                        disk_read_bytes=None,
+                        disk_write_bytes=None,
+                        net_sent_bytes=None,
+                        net_recv_bytes=None,
+                    )
+                    self._loop.call_soon_threadsafe(self._manager.emit, gpu_event)
 
         # 5. Cooperative shutdown: set event so workers exit their while loop cleanly
         #    (exit code 0), then join. This avoids DragonUserCodeError that grp.stop()

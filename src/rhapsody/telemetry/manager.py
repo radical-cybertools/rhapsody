@@ -500,6 +500,12 @@ class TelemetryManager:
                 if session_ctx.is_valid:
                     return hex(session_ctx.trace_id), None
 
+        elif event.event_type == "ResourceUpdate":
+            # Node/GPU metric belongs to the session scope — attach to the session
+            # span so it is queryable as a child of the root in OTel tools.
+            if self._session_span:
+                span_ctx = self._session_span.get_span_context()
+
         if span_ctx is None or not span_ctx.is_valid:
             return None, None
         return hex(span_ctx.trace_id), hex(span_ctx.span_id)

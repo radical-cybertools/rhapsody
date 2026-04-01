@@ -145,6 +145,7 @@ class ResourceUpdate(BaseEvent):
     cpu_percent: float = 0.0
     memory_percent: float = 0.0
     gpu_percent: float | None = None
+    gpu_id: int | None = None
     disk_read_bytes: float | None = None
     disk_write_bytes: float | None = None
     net_sent_bytes: float | None = None
