@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
-import subprocess
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -95,6 +94,19 @@ class ConcurrentTelemetryAdapter(TelemetryAdapter):
         # Warm up cpu_percent (first call always returns 0.0 on Linux)
         psutil.cpu_percent(interval=None)
 
+        # GPU setup via pynvml — initialized once, not on every poll
+        _nvml_ok = False
+        _gpu_count = 0
+        _gpu_failed: set[int] = set()
+        try:
+            import pynvml
+
+            pynvml.nvmlInit()
+            _gpu_count = pynvml.nvmlDeviceGetCount()
+            _nvml_ok = True
+        except Exception:  # noqa: S110
+            pass  # no NVIDIA GPU or pynvml not installed — GPU metrics skipped
+
         # Seed disk / net baselines for delta calculations
         prev_disk: tuple | None = None
         prev_net: tuple | None = None
@@ -116,7 +128,26 @@ class ConcurrentTelemetryAdapter(TelemetryAdapter):
             try:
                 cpu = psutil.cpu_percent(interval=None)
                 mem = psutil.virtual_memory().percent
-                gpu = self._try_gpu_percent()
+
+                # Per-device GPU utilization via pynvml
+                per_device_gpu: dict[int, float] = {}
+                if _nvml_ok:
+                    for dev_idx in range(_gpu_count):
+                        if dev_idx in _gpu_failed:
+                            continue
+                        try:
+                            handle = pynvml.nvmlDeviceGetHandleByIndex(dev_idx)
+                            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                            per_device_gpu[dev_idx] = float(util.gpu)
+                        except Exception as _exc:
+                            _gpu_failed.add(dev_idx)
+                            logger.warning(
+                                "GPU %d unavailable on %s (%s) — disabling",
+                                dev_idx,
+                                self._node_id,
+                                _exc,
+                            )
+                gpu_aggregate = max(per_device_gpu.values()) if per_device_gpu else None
 
                 disk_read = disk_write = net_sent = net_recv = None
 
@@ -138,41 +169,40 @@ class ConcurrentTelemetryAdapter(TelemetryAdapter):
                 except Exception:  # noqa: S110
                     pass
 
-                event = make_event(
-                    ResourceUpdate,
-                    session_id=self._session_id,
-                    backend=self._backend_name,
-                    node_id=self._node_id,
-                    cpu_percent=cpu,
-                    memory_percent=mem,
-                    gpu_percent=gpu,
-                    disk_read_bytes=disk_read,
-                    disk_write_bytes=disk_write,
-                    net_sent_bytes=net_sent,
-                    net_recv_bytes=net_recv,
-                )
-                # Post back to the asyncio loop — thread-safe
                 if self._loop and self._loop.is_running():
-                    self._loop.call_soon_threadsafe(self._manager.emit, event)
+                    # Node-level aggregate event (gpu_id=None — backward-compatible)
+                    node_event = make_event(
+                        ResourceUpdate,
+                        session_id=self._session_id,
+                        backend=self._backend_name,
+                        node_id=self._node_id,
+                        cpu_percent=cpu,
+                        memory_percent=mem,
+                        gpu_percent=gpu_aggregate,
+                        disk_read_bytes=disk_read,
+                        disk_write_bytes=disk_write,
+                        net_sent_bytes=net_sent,
+                        net_recv_bytes=net_recv,
+                    )
+                    self._loop.call_soon_threadsafe(self._manager.emit, node_event)
+
+                    # Per-device GPU events (disk/net are node-level, not per-GPU)
+                    for dev_idx, gpu_pct in per_device_gpu.items():
+                        gpu_event = make_event(
+                            ResourceUpdate,
+                            session_id=self._session_id,
+                            backend=self._backend_name,
+                            node_id=self._node_id,
+                            cpu_percent=cpu,
+                            memory_percent=mem,
+                            gpu_percent=gpu_pct,
+                            gpu_id=dev_idx,
+                            disk_read_bytes=None,
+                            disk_write_bytes=None,
+                            net_sent_bytes=None,
+                            net_recv_bytes=None,
+                        )
+                        self._loop.call_soon_threadsafe(self._manager.emit, gpu_event)
+
             except Exception:
                 logger.debug("ConcurrentTelemetryAdapter collection error", exc_info=True)
-
-    def _try_gpu_percent(self) -> float | None:
-        """Try to get GPU utilization via nvidia-smi.
-
-        Returns None if unavailable.
-        """
-        try:
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],  # noqa: S607
-                capture_output=True,
-                text=True,
-                timeout=1,
-            )
-            if result.returncode == 0:
-                lines = [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip()]
-                if lines:
-                    return float(lines[0])
-        except Exception:  # noqa: S110
-            pass
-        return None

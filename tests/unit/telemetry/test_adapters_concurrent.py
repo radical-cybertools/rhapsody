@@ -61,14 +61,17 @@ class TestConcurrentTelemetryAdapter:
         with (
             patch("psutil.cpu_percent", return_value=10.0),
             patch("psutil.virtual_memory", return_value=MagicMock(percent=20.0)),
-            patch("subprocess.run", side_effect=FileNotFoundError("nvidia-smi not found")),
+            patch("pynvml.nvmlInit", side_effect=Exception("no NVIDIA GPU")),
         ):
             adapter.start(manager)
             await asyncio.sleep(0.3)
             adapter.stop()
 
         assert len(received) >= 1
-        assert received[0].gpu_percent is None
+        # Filter to node-level event (gpu_id=None); gpu_percent must be None when pynvml fails
+        node_events = [e for e in received if e.gpu_id is None]
+        assert len(node_events) >= 1
+        assert node_events[0].gpu_percent is None
 
     async def test_uses_daemon_thread(self, manager):
         """Adapter must use a daemon thread (not an asyncio task) for Dragon compatibility."""
