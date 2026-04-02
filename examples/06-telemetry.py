@@ -10,11 +10,11 @@ Demonstrates:
 Run:
     python examples/06-telemetry.py
 """
-import os
+
+import json
 import asyncio
 import logging
 
-from dataclasses import asdict
 
 import rhapsody
 from rhapsody.api.session import Session
@@ -25,6 +25,7 @@ rhapsody.enable_logging(level=logging.DEBUG)
 
 # ── main ───────────────────────────────────────────────────────────────────────
 
+
 async def main():
     print("=" * 70)
     print("RHAPSODY Telemetry — full output demo")
@@ -34,21 +35,26 @@ async def main():
     backend = await DragonExecutionBackendV3()
     session = Session(backends=[backend])
 
-    telemetry = session.enable_telemetry(resource_poll_interval=0.1,
-                                         checkpoint_path=f'telemetry-output')
+    telemetry = session.enable_telemetry(
+        resource_poll_interval=0.1, checkpoint_path=f"telemetry-output"
+    )
     await telemetry.start()
 
     # 3. Submit workload
-    tasks = [
-        ComputeTask(executable="./gpu-cuda-stress")
-        for i in range(10)
-    ]
+    tasks = [ComputeTask(executable="./gpu-cuda-stress") for i in range(10)]
 
     await session.submit_tasks(tasks)
 
     await asyncio.gather(*tasks)
 
-    print(telemetry.summary())
+    print("=" * 70, flush=True)
+    print("RHAPSODY Telemetry — Summary")
+    print("=" * 70, flush=True)
+
+    print(json.dumps(telemetry.summary(), indent=4), flush=True)
+
+    print("=" * 70, flush=True)
+    print("=" * 70, flush=True)
 
     await session.close()
 
