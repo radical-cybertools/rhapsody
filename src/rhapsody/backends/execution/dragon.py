@@ -43,7 +43,8 @@ try:
     from dragon.native.process_group import ProcessGroup
     from dragon.native.queue import Queue
     from dragon.telemetry import Telemetry
-    from dragon.workflows.batch import Batch, TaskNotReadyError
+    from dragon.workflows.batch import Batch
+    from dragon.workflows.batch.batch import TaskNotReadyError
 
 except ImportError:  # pragma: no cover - environment without Dragon
     dragon = None
@@ -3189,8 +3190,8 @@ class DragonExecutionBackendV3(BaseBackend):
     def _monitor_loop(self):
         """Single thread to monitor all active tasks using Task.get(block=False).
 
-        Tasks are auto-dispatched by the Batch background thread the moment they are created.
-        This loop polls each registered task non-blocking and fires callbacks when results arrive.
+        Tasks are auto-dispatched by the Batch background thread the moment they are created. This
+        loop polls each registered task non-blocking and fires callbacks when results arrive.
         """
         self.logger.debug("Starting Dragon batch monitor loop (polling mode)")
 
