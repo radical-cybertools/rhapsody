@@ -137,13 +137,24 @@ class TaskFailed(BaseEvent):
 class ResourceUpdate(BaseEvent):
     """Emitted periodically by backend adapters with node resource utilization.
 
-    cpu/memory/gpu values are point-in-time percentages (not deltas). disk/net values are byte
-    deltas since the previous poll. gpu_percent is None when the backend does not expose GPU
-    metrics. disk/net fields are None when psutil is unavailable.
+    Two scopes are distinguished by ``resource_scope`` (computed automatically from ``gpu_id``):
+
+    ``"per_node"`` (``gpu_id=None``)
+        Node-level aggregate: cpu_percent, memory_percent, disk/net deltas, and the
+        aggregate gpu_percent (max across devices) are all populated.
+
+    ``"per_gpu"`` (``gpu_id=N``)
+        Per-device GPU event: only gpu_percent and gpu_id are set; cpu_percent,
+        memory_percent, disk/net bytes are all None.  Consumers that need CPU/RAM
+        for a GPU node should join on (session_id, node_id, event_time) to the
+        corresponding per_node event.
+
+    cpu/memory values are point-in-time percentages (not deltas).
+    disk/net values are byte deltas since the previous poll.
     """
 
-    cpu_percent: float = 0.0
-    memory_percent: float = 0.0
+    cpu_percent: float | None = None
+    memory_percent: float | None = None
     gpu_percent: float | None = None
     gpu_id: int | None = None
     disk_read_bytes: float | None = None
@@ -151,6 +162,14 @@ class ResourceUpdate(BaseEvent):
     net_sent_bytes: float | None = None
     net_recv_bytes: float | None = None
     event_type: str = field(default="ResourceUpdate", init=False)
+    resource_scope: str = field(init=False, default="")
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "resource_scope",
+            "per_gpu" if self.gpu_id is not None else "per_node",
+        )
 
 
 def make_event(cls: type, *, session_id: str, backend: str, **kwargs) -> BaseEvent:

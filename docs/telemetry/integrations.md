@@ -179,7 +179,7 @@ GPU_ALERT_THRESHOLD = 95.0
 def gpu_alert(event):
     if not isinstance(event, ResourceUpdate):
         return
-    if event.gpu_id is not None and event.gpu_percent is not None:
+    if event.resource_scope == "per_gpu" and event.gpu_percent is not None:
         if event.gpu_percent >= GPU_ALERT_THRESHOLD:
             print(
                 f"[ALERT] GPU {event.gpu_id} on {event.node_id}: "
@@ -212,7 +212,7 @@ telemetry.subscribe(mlflow_reporter)
 
 ## Replaying a JSONL checkpoint
 
-The JSONL file can be replayed or analysed offline with any tool that understands newline-delimited JSON.
+The JSONL file can be replayed or analyzed offline with any tool that understands newline-delimited JSON.
 
 ### jq — quick inspection
 
@@ -225,7 +225,7 @@ jq 'select(.section=="span" and .name=="task") | {task_id: .attributes.task_id, 
    run.jsonl | jq -s 'sort_by(.duration_ms) | reverse | .[0:10]'
 
 # Tail resource events live
-tail -f run.jsonl | jq 'select(.event_type=="ResourceUpdate") | {node_id, cpu_percent, gpu_id, gpu_percent}'
+tail -f run.jsonl | jq 'select(.event_type=="ResourceUpdate") | {resource_scope, node_id, gpu_id, cpu_percent, gpu_percent}'
 ```
 
 ### pandas — time-series analysis
@@ -246,7 +246,7 @@ df["ts"] = pd.to_datetime(df["event_time"], unit="s")
 df.set_index("ts", inplace=True)
 
 # Plot CPU per node
-df[df["gpu_id"].isna()].groupby("node_id")["cpu_percent"].plot(legend=True)
+df[df["resource_scope"] == "per_node"].groupby("node_id")["cpu_percent"].plot(legend=True)
 ```
 
 ---
@@ -284,9 +284,9 @@ Trace (one per session)
     │   ⋮
     │
     └── ResourceUpdate events (linked to session span via span_id)
-        ├── node_id=node0, gpu_id=None   (aggregate)
-        ├── node_id=node0, gpu_id=0      (per-GPU)
-        ├── node_id=node0, gpu_id=1      (per-GPU)
+        ├── resource_scope="per_node", node_id=node0, gpu_id=null   (aggregate)
+        ├── resource_scope="per_gpu",  node_id=node0, gpu_id=0
+        ├── resource_scope="per_gpu",  node_id=node0, gpu_id=1
         └── …
 ```
 
@@ -306,9 +306,9 @@ The image below is the plot generated from an actual RHAPSODY session using `pyt
 
 The panels are:
 
-1. **CPU utilization** — per node, node-level events only (`gpu_id=None`)
+1. **CPU utilization** — per node, `resource_scope="per_node"` events only
 2. **Memory utilization** — per node
-3. **GPU utilization** — per device (`gpu_id=N`) with one line per GPU; falls back to aggregate when per-device data is absent
+3. **GPU utilization** — `resource_scope="per_gpu"` events, one line per device; falls back to the `per_node` aggregate `gpu_percent` when per-device data is absent
 4. **Disk I/O** — read and write bytes per interval
 5. **Network I/O** — sent and received bytes per interval
 6. **Tasks running** — concurrent task count over time

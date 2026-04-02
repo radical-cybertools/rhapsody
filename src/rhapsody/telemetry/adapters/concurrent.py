@@ -104,8 +104,14 @@ class ConcurrentTelemetryAdapter(TelemetryAdapter):
             pynvml.nvmlInit()
             _gpu_count = pynvml.nvmlDeviceGetCount()
             _nvml_ok = True
-        except Exception:  # noqa: S110
-            pass  # no NVIDIA GPU or pynvml not installed — GPU metrics skipped
+        except ImportError:
+            pass  # pynvml not installed — GPU metrics skipped silently
+        except Exception as _exc:
+            logger.warning(
+                "pynvml initialization failed on %s — GPU metrics disabled: %s",
+                self._node_id,
+                _exc,
+            )
 
         # Seed disk / net baselines for delta calculations
         prev_disk: tuple | None = None
@@ -186,15 +192,15 @@ class ConcurrentTelemetryAdapter(TelemetryAdapter):
                     )
                     self._loop.call_soon_threadsafe(self._manager.emit, node_event)
 
-                    # Per-device GPU events (disk/net are node-level, not per-GPU)
+                    # Per-device GPU events (cpu/mem/disk/net are per_node scope only)
                     for dev_idx, gpu_pct in per_device_gpu.items():
                         gpu_event = make_event(
                             ResourceUpdate,
                             session_id=self._session_id,
                             backend=self._backend_name,
                             node_id=self._node_id,
-                            cpu_percent=cpu,
-                            memory_percent=mem,
+                            cpu_percent=None,
+                            memory_percent=None,
                             gpu_percent=gpu_pct,
                             gpu_id=dev_idx,
                             disk_read_bytes=None,

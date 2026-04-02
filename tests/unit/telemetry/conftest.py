@@ -69,19 +69,34 @@ def assert_resource_update_contract(event: Any, caps: AdapterCapabilities) -> No
         f"{caps.name}: event_type must be 'ResourceUpdate', got '{event.event_type}'"
     )
 
-    assert isinstance(event.cpu_percent, float), (
-        f"{caps.name}: cpu_percent must be float, got {type(event.cpu_percent)}"
+    # resource_scope must be set and consistent with gpu_id
+    assert event.resource_scope in ("per_node", "per_gpu"), (
+        f"{caps.name}: resource_scope must be 'per_node' or 'per_gpu', got {event.resource_scope!r}"
     )
-    assert 0.0 <= event.cpu_percent <= 100.0, (
-        f"{caps.name}: cpu_percent out of range: {event.cpu_percent}"
-    )
-
-    assert isinstance(event.memory_percent, float), (
-        f"{caps.name}: memory_percent must be float, got {type(event.memory_percent)}"
-    )
-    assert 0.0 <= event.memory_percent <= 100.0, (
-        f"{caps.name}: memory_percent out of range: {event.memory_percent}"
-    )
+    if event.resource_scope == "per_gpu":
+        assert event.gpu_id is not None, f"{caps.name}: resource_scope='per_gpu' but gpu_id is None"
+        assert event.cpu_percent is None, (
+            f"{caps.name}: resource_scope='per_gpu' must have cpu_percent=None"
+        )
+        assert event.memory_percent is None, (
+            f"{caps.name}: resource_scope='per_gpu' must have memory_percent=None"
+        )
+    else:
+        assert event.gpu_id is None, (
+            f"{caps.name}: resource_scope='per_node' but gpu_id={event.gpu_id}"
+        )
+        assert isinstance(event.cpu_percent, float), (
+            f"{caps.name}: cpu_percent must be float on per_node events, got {type(event.cpu_percent)}"
+        )
+        assert 0.0 <= event.cpu_percent <= 100.0, (
+            f"{caps.name}: cpu_percent out of range: {event.cpu_percent}"
+        )
+        assert isinstance(event.memory_percent, float), (
+            f"{caps.name}: memory_percent must be float on per_node events, got {type(event.memory_percent)}"
+        )
+        assert 0.0 <= event.memory_percent <= 100.0, (
+            f"{caps.name}: memory_percent out of range: {event.memory_percent}"
+        )
 
     # ── Node id ───────────────────────────────────────────────────────────
     if caps.has_node_id:

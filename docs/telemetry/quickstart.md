@@ -111,7 +111,7 @@ from rhapsody.telemetry import TaskCompleted, ResourceUpdate
 def on_event(event):
     if isinstance(event, TaskCompleted):
         print(f"Task {event.task_id} done in {event.duration_seconds:.3f}s")
-    elif isinstance(event, ResourceUpdate) and event.gpu_id is not None:
+    elif isinstance(event, ResourceUpdate) and event.resource_scope == "per_gpu":
         print(f"GPU {event.gpu_id} on {event.node_id}: {event.gpu_percent:.1f}%")
 
 telemetry.subscribe(on_event)
@@ -190,4 +190,4 @@ Once `enable_telemetry()` is called, RHAPSODY hooks into the task state manager 
 | Session start / end | ✅ | Emitted in `start()` / `stop()` |
 | Node CPU & memory | ✅ | Polled by the backend adapter on the `resource_poll_interval` |
 | Disk & network I/O | ✅ on Concurrent + Dragon | Not exposed by Dask's `scheduler_info()` for network |
-| Per-GPU utilization | ✅ if `pynvml` installed (Concurrent) or Dragon runtime active | Per-device events with `gpu_id=N` |
+| Per-GPU utilization | ✅ if `pynvml` installed (Concurrent) or Dragon runtime active | `resource_scope="per_gpu"` events with `gpu_id=N` |

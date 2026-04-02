@@ -122,6 +122,7 @@ nav:
       - Events & Metrics Reference: telemetry/reference.md
       - Quick Start: telemetry/quickstart.md
       - Integrations & Extensions: telemetry/integrations.md
+      - FAQ: telemetry/faq.md
   - HPC Machines:
       - Overview: hpc-machines/index.md
       - NCSA Delta: hpc-machines/ncsa-delta.md

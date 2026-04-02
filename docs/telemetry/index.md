@@ -58,6 +58,10 @@ RHAPSODY ships a built-in, zero-configuration telemetry layer (the **Telemetry A
 
     Build dashboards, alerting, and custom analytics on top of RHAPSODY telemetry using Prometheus, Grafana, Jaeger, or your own subscriber.
 
+-   :material-help-circle: **[FAQ](faq.md)**
+
+    Troubleshooting GPU metrics, understanding `resource_scope`, overhead estimates, and other common questions.
+
 </div>
 
 ## How telemetry reuses the backend runtime

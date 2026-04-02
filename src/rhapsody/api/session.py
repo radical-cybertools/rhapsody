@@ -412,8 +412,8 @@ class Session:
                 if self._telemetry._running:
                     adapter.start(self._telemetry)
                 return
-        except Exception:  # noqa: S110
-            pass
+        except Exception:
+            logger.warning("Could not attach ConcurrentTelemetryAdapter", exc_info=True)
 
         # Dask — detect by class name to avoid hard import
         backend_cls = type(backend).__name__
@@ -431,7 +431,7 @@ class Session:
                     if self._telemetry._running:
                         adapter.start(self._telemetry)
             except Exception:
-                logger.debug("Could not attach DaskTelemetryAdapter", exc_info=True)
+                logger.warning("Could not attach DaskTelemetryAdapter", exc_info=True)
             return
 
         # Dragon — detect by class name
@@ -446,7 +446,7 @@ class Session:
                 if self._telemetry._running:
                     adapter.start(self._telemetry)
             except Exception:
-                logger.debug("Could not attach DragonTelemetryAdapter", exc_info=True)
+                logger.warning("Could not attach DragonTelemetryAdapter", exc_info=True)
 
     async def close(self) -> None:
         """Shutdown telemetry (if enabled) then all backends."""

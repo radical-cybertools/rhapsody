@@ -156,46 +156,103 @@ attributes = {
 
 ### `ResourceUpdate`
 
-Emitted periodically by backend adapters (default every 5 s). One event is emitted **per node** for aggregate metrics, and one **per GPU device** for per-device GPU data.
+Emitted periodically by backend adapters (default every 5 s). Every `ResourceUpdate` carries a `resource_scope` discriminator that tells consumers exactly what the event represents and which fields are populated.
 
-| Field | Type | Description |
+| `resource_scope` | `gpu_id` | Populated fields |
 |---|---|---|
-| `cpu_percent` | `float` | Node-level CPU utilization, 0–100 |
-| `memory_percent` | `float` | Node-level memory utilization, 0–100 |
-| `gpu_percent` | `float \| None` | GPU utilization 0–100. `None` when no GPU or adapter does not expose it |
-| `gpu_id` | `int \| None` | **`None`** = node-level aggregate; **`N`** = per-device event for GPU index N |
-| `disk_read_bytes` | `float \| None` | Bytes read since the previous poll (delta, not cumulative). `None` on first poll or when unavailable |
-| `disk_write_bytes` | `float \| None` | Bytes written since the previous poll |
-| `net_sent_bytes` | `float \| None` | Bytes sent since the previous poll |
-| `net_recv_bytes` | `float \| None` | Bytes received since the previous poll |
+| `"per_node"` | `null` | `cpu_percent`, `memory_percent`, `gpu_percent` (aggregate), `disk_*`, `net_*` |
+| `"per_gpu"` | `0..N` | `gpu_percent`, `gpu_id` only — all others are `null` |
+
+`resource_scope` is computed automatically from `gpu_id` and is always present. Consumers should use it as the primary discriminator instead of checking `gpu_id is None`.
+
+#### Full field reference
+
+| Field | Type | `per_node` | `per_gpu` | Description |
+|---|---|:---:|:---:|---|
+| `resource_scope` | `str` | `"per_node"` | `"per_gpu"` | Scope discriminator, always set |
+| `gpu_id` | `int \| None` | `null` | `0..N` | Device index; `null` on node-level events |
+| `cpu_percent` | `float \| None` | ✅ float 0–100 | `null` | Node CPU utilization |
+| `memory_percent` | `float \| None` | ✅ float 0–100 | `null` | Node memory utilization |
+| `gpu_percent` | `float \| None` | ✅ or `null` | ✅ float 0–100 | GPU utilization; `null` on `per_node` when backend has no GPU |
+| `disk_read_bytes` | `float \| None` | ✅ or `null` | `null` | Bytes read since previous poll (delta). `null` on first poll |
+| `disk_write_bytes` | `float \| None` | ✅ or `null` | `null` | Bytes written since previous poll |
+| `net_sent_bytes` | `float \| None` | ✅ or `null` | `null` | Bytes sent since previous poll |
+| `net_recv_bytes` | `float \| None` | ✅ or `null` | `null` | Bytes received since previous poll |
 
 !!! info "OTel correlation"
     `ResourceUpdate` events are **anchored to the session span**, not to a task span. Their `trace_id` and `span_id` in the JSONL file match the root session span, making all resource data queryable within the session's trace in any OTel-compatible tool.
+
+### Schema examples
+
+**`per_node` event (gpu_id=null, no GPU on this node):**
+```json
+{
+  "resource_scope": "per_node",
+  "gpu_id": null,
+  "cpu_percent": 41.2,
+  "memory_percent": 28.7,
+  "gpu_percent": null,
+  "disk_read_bytes": 4096.0,
+  "disk_write_bytes": 0.0,
+  "net_sent_bytes": 512.0,
+  "net_recv_bytes": 1024.0
+}
+```
+
+**`per_node` event (gpu_id=null, aggregate GPU across 4 devices):**
+```json
+{
+  "resource_scope": "per_node",
+  "gpu_id": null,
+  "cpu_percent": 78.3,
+  "memory_percent": 62.1,
+  "gpu_percent": 87.0,
+  "disk_read_bytes": 8192.0,
+  "disk_write_bytes": 2048.0,
+  "net_sent_bytes": 1024.0,
+  "net_recv_bytes": 4096.0
+}
+```
+
+**`per_gpu` event (one per device):**
+```json
+{
+  "resource_scope": "per_gpu",
+  "gpu_id": 2,
+  "cpu_percent": null,
+  "memory_percent": null,
+  "gpu_percent": 75.2,
+  "disk_read_bytes": null,
+  "disk_write_bytes": null,
+  "net_sent_bytes": null,
+  "net_recv_bytes": null
+}
+```
 
 ### Node-level vs per-device semantics
 
 ```
 One poll cycle on a 4-GPU node emits 5 ResourceUpdate events:
 
-  gpu_id=None  → aggregate (cpu, mem, disk, net, max-GPU%)
-  gpu_id=0     → GPU 0 utilization only  (disk/net = None)
-  gpu_id=1     → GPU 1 utilization only  (disk/net = None)
-  gpu_id=2     → GPU 2 utilization only  (disk/net = None)
-  gpu_id=3     → GPU 3 utilization only  (disk/net = None)
+  resource_scope="per_node", gpu_id=null  → cpu, mem, disk, net, max-GPU%
+  resource_scope="per_gpu",  gpu_id=0     → gpu_percent only
+  resource_scope="per_gpu",  gpu_id=1     → gpu_percent only
+  resource_scope="per_gpu",  gpu_id=2     → gpu_percent only
+  resource_scope="per_gpu",  gpu_id=3     → gpu_percent only
 ```
 
-Disk and network I/O always appear on the node-level event (`gpu_id=None`), never on per-device events.
+To get CPU/memory for a specific GPU node, join `per_gpu` events to the `per_node` event on `(session_id, node_id)` within the same poll window.
 
 ### Adapter coverage matrix
 
-| Metric | Concurrent (psutil+pynvml) | Dask (scheduler_info) | Dragon (dps queue) |
-|---|:---:|:---:|:---:|
-| `cpu_percent` | ✅ | ✅ | ✅ |
-| `memory_percent` | ✅ | ✅ | ✅ |
-| `gpu_percent` (aggregate) | ✅ if NVIDIA present | ❌ | ✅ |
-| `gpu_id=N` per-device | ✅ if NVIDIA present | ❌ | ✅ |
-| `disk_read/write_bytes` | ✅ (delta) | ✅ (delta, first poll = None) | ✅ (delta) |
-| `net_sent/recv_bytes` | ✅ (delta) | ❌ | ✅ (delta) |
+| Metric | `resource_scope` | Concurrent | Dask | Dragon |
+|---|---|:---:|:---:|:---:|
+| `cpu_percent` | `per_node` only | ✅ | ✅ | ✅ |
+| `memory_percent` | `per_node` only | ✅ | ✅ | ✅ |
+| `gpu_percent` (aggregate) | `per_node` | ✅ if NVIDIA present | ❌ | ✅ |
+| `gpu_percent` + `gpu_id` | `per_gpu` | ✅ if NVIDIA present | ❌ | ✅ |
+| `disk_read/write_bytes` | `per_node` only | ✅ (delta) | ✅ (delta, first poll = null) | ✅ (delta) |
+| `net_sent/recv_bytes` | `per_node` only | ✅ (delta) | ❌ | ✅ (delta) |
 
 ---
 
@@ -274,8 +331,8 @@ Each line in the `.telemetry.jsonl` file is a JSON object with a `"section"` dis
 ```json
 {"section": "event",  "event_type": "SessionStarted", "trace_id": "0x…", "span_id": "0x…", …}
 {"section": "event",  "event_type": "TaskStarted",    "task_id": "…", "trace_id": "0x…", "span_id": "0x…", …}
-{"section": "event",  "event_type": "ResourceUpdate",  "cpu_percent": 42.3, "gpu_id": null, …}
-{"section": "event",  "event_type": "ResourceUpdate",  "gpu_id": 0, "gpu_percent": 87.0, "disk_read_bytes": null, …}
+{"section": "event", "event_type": "ResourceUpdate", "resource_scope": "per_node", "gpu_id": null, "cpu_percent": 42.3, "memory_percent": 28.7, "gpu_percent": null, "disk_read_bytes": 4096.0, …}
+{"section": "event", "event_type": "ResourceUpdate", "resource_scope": "per_gpu",  "gpu_id": 0,    "cpu_percent": null, "memory_percent": null, "gpu_percent": 75.2, "disk_read_bytes": null, …}
 {"section": "metric", "tasks_submitted": 100, "tasks_completed": 98, "tasks_running": 2, …}
 {"section": "span",   "name": "task", "span_id": "0x…", "trace_id": "0x…", "parent_span_id": "0x…", "duration_ms": 1234.5, …}
 ```

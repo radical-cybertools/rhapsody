@@ -408,15 +408,15 @@ class DragonTelemetryAdapter(TelemetryAdapter):
                 )
                 self._loop.call_soon_threadsafe(self._manager.emit, node_event)
 
-                # Per-GPU events — one per device (disk/net are node-level, not per-GPU)
+                # Per-GPU events — one per device (cpu/mem/disk/net are per_node scope only)
                 for dev_id, dvals in per_device.items():
                     gpu_event = make_event(
                         ResourceUpdate,
                         session_id=self._session_id,
                         backend=self._backend_name,
                         node_id=host,
-                        cpu_percent=node_vals.get("cpu_percent"),
-                        memory_percent=node_vals.get("used_RAM"),
+                        cpu_percent=None,
+                        memory_percent=None,
                         gpu_percent=dvals.get("DeviceUtilization"),
                         gpu_id=dev_id,
                         disk_read_bytes=None,
