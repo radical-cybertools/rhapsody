@@ -615,10 +615,26 @@ def test_v3_deliver_result_stores_value_and_fires_done(backend_v3):
     task_desc = {"uid": uid}
     backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
 
-    backend_v3._deliver_result(uid, result=42)
+    backend_v3._deliver_result(uid, result=42, stdout=None, stderr=None)
 
     assert task_desc["return_value"] == 42
+    assert "stdout" not in task_desc
+    assert "stderr" not in task_desc
     backend_v3._callback_func.assert_called_once_with(task_desc, "DONE")
+    # registry entry removed after delivery
+    assert uid not in backend_v3._task_registry
+
+
+def test_v3_deliver_result_propagates_stdout_stderr(backend_v3):
+    """_deliver_result stores stdout/stderr on task_desc when non-empty."""
+    uid = "task.unit-done-out"
+    task_desc = {"uid": uid}
+    backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
+
+    backend_v3._deliver_result(uid, result="ok", stdout="hello\n", stderr="warn\n")
+
+    assert task_desc["stdout"] == "hello\n"
+    assert task_desc["stderr"] == "warn\n"
 
 
 def test_v3_deliver_failure_stores_exc_and_fires_failed(backend_v3):
@@ -628,11 +644,26 @@ def test_v3_deliver_failure_stores_exc_and_fires_failed(backend_v3):
     backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
     exc = RuntimeError("something went wrong")
 
-    backend_v3._deliver_failure(uid, exc)
+    # Without tb: stderr falls back to str(exc)
+    backend_v3._deliver_failure(uid, exc, tb=None, stdout=None, stderr=None)
 
     assert task_desc["exception"] is exc
     assert "something went wrong" in task_desc["stderr"]
     backend_v3._callback_func.assert_called_once_with(task_desc, "FAILED")
+    assert uid not in backend_v3._task_registry
+
+
+def test_v3_deliver_failure_prefers_traceback_over_str_exc(backend_v3):
+    """_deliver_failure uses Dragon's traceback string when available."""
+    uid = "task.unit-failed-tb"
+    task_desc = {"uid": uid}
+    backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
+    exc = RuntimeError("boom")
+    tb = "Traceback (most recent call last):\n  File ...\nRuntimeError: boom"
+
+    backend_v3._deliver_failure(uid, exc, tb=tb, stdout=None, stderr=None)
+
+    assert task_desc["stderr"] == tb
 
 
 def test_v3_cancelled_task_skips_both_callbacks(backend_v3):
@@ -640,13 +671,18 @@ def test_v3_cancelled_task_skips_both_callbacks(backend_v3):
     uid = "task.unit-cancelled"
     task_desc = {"uid": uid}
     backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
-    backend_v3._cancelled_tasks.append(uid)
+    backend_v3._cancelled_tasks.add(uid)
 
-    backend_v3._deliver_result(uid, result=99)
-    backend_v3._deliver_failure(uid, RuntimeError("ignored"))
+    backend_v3._deliver_result(uid, result=99, stdout=None, stderr=None)
+    # registry is popped on first call; re-register so _deliver_failure can also exercise guard
+    backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
+    backend_v3._cancelled_tasks.add(uid)
+    backend_v3._deliver_failure(uid, RuntimeError("ignored"), tb=None, stdout=None, stderr=None)
 
     backend_v3._callback_func.assert_not_called()
     assert "return_value" not in task_desc
+    # uid cleaned out of _cancelled_tasks by both guards
+    assert uid not in backend_v3._cancelled_tasks
 
 
 def test_v3_fence_delegates_to_batch(backend_v3):

@@ -3134,7 +3134,7 @@ class DragonExecutionBackendV3(BaseBackend):
         self._task_registry: dict[str, Any] = {}
         self._task_states = TaskStateMapperV3()
         self._initialized = False
-        self._cancelled_tasks = []
+        self._cancelled_tasks: set[str] = set()
         self._monitored_batches = {}
         self._batch_monitor_thread = None
 
@@ -3209,22 +3209,20 @@ class DragonExecutionBackendV3(BaseBackend):
                     if tuid not in self._monitored_batches:
                         continue
 
-                    batch_task, uid = self._monitored_batches[tuid]
-
-                    try:
-                        # Non-blocking check: raises TaskNotReadyError if not done yet
-                        result = batch_task.get(block=False)
-                        self._deliver_result(uid, result)
-                        self._monitored_batches.pop(tuid)
-                        self.logger.debug(f"Task {uid} complete")
-
-                    except TaskNotReadyError:
-                        # Task not done yet, continue to next one
+                    # Check DDict directly — avoids exception overhead on the common not-ready path
+                    # and gives us the full (result, tb, raised, stdout, stderr) tuple.
+                    if tuid not in self.batch.results_ddict:
                         continue
-                    except Exception as e:
-                        self._deliver_failure(uid, e)
-                        self._monitored_batches.pop(tuid)
-                        self.logger.exception(f"Error retrieving result for task {uid}: {e}")
+
+                    batch_task, uid = self._monitored_batches.pop(tuid)
+                    result, tb, raised, stdout, stderr = self.batch.results_ddict[tuid]
+
+                    if raised:
+                        self._deliver_failure(uid, result, tb, stdout, stderr)
+                        self.logger.debug(f"Task {uid} failed")
+                    else:
+                        self._deliver_result(uid, result, stdout, stderr)
+                        self.logger.debug(f"Task {uid} complete")
 
                 # Small sleep after each full sweep to prevent tight loop
                 time.sleep(0.005)
@@ -3235,23 +3233,39 @@ class DragonExecutionBackendV3(BaseBackend):
 
         self.logger.debug("Dragon batch monitor loop stopped")
 
-    def _deliver_result(self, uid: str, result: Any) -> None:
+    def _deliver_result(
+        self, uid: str, result: Any, stdout: str | None, stderr: str | None
+    ) -> None:
         """Trigger DONE callback for a successfully completed task."""
-        task_info = self._task_registry.get(uid)
-        if not task_info or uid in self._cancelled_tasks:
+        task_info = self._task_registry.pop(uid, None)
+        if not task_info:
+            return
+        if uid in self._cancelled_tasks:
+            self._cancelled_tasks.discard(uid)
             return
         task_desc = task_info["description"]
         task_desc["return_value"] = result
+        if stdout:
+            task_desc["stdout"] = stdout
+        if stderr:
+            task_desc["stderr"] = stderr
         self._callback_func(task_desc, "DONE")
 
-    def _deliver_failure(self, uid: str, exc: Exception) -> None:
+    def _deliver_failure(
+        self, uid: str, exc: Exception, tb: str | None, stdout: str | None, stderr: str | None
+    ) -> None:
         """Trigger FAILED callback for a task that raised an exception."""
-        task_info = self._task_registry.get(uid)
-        if not task_info or uid in self._cancelled_tasks:
+        task_info = self._task_registry.pop(uid, None)
+        if not task_info:
+            return
+        if uid in self._cancelled_tasks:
+            self._cancelled_tasks.discard(uid)
             return
         task_desc = task_info["description"]
         task_desc["exception"] = exc
-        task_desc["stderr"] = str(exc)
+        task_desc["stderr"] = tb if tb else str(exc)
+        if stdout:
+            task_desc["stdout"] = stdout
         self._callback_func(task_desc, "FAILED")
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
@@ -3439,7 +3453,7 @@ class DragonExecutionBackendV3(BaseBackend):
         # the asyncflow that the task is cancelled so not to block the flow
         task = self._task_registry[uid]["description"]
         self._callback_func(task, "CANCELED")
-        self._cancelled_tasks.append(uid)
+        self._cancelled_tasks.add(uid)
 
         return True
 
