@@ -3188,7 +3188,7 @@ class DragonExecutionBackendV3(BaseBackend):
         return self
 
     def _monitor_loop(self):
-        """Single thread to monitor all active tasks using Task.get(block=False).
+        """Single thread to monitor all active tasks.
 
         Tasks are auto-dispatched by the Batch background thread the moment they are created. This
         loop polls each registered task non-blocking and fires callbacks when results arrive.
