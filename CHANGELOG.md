@@ -8,8 +8,10 @@
 - `DragonExecutionBackendV3`: accepts two new constructor parameters: `num_nodes` (total nodes) and `pool_nodes` (nodes per worker pool), forwarded directly to `Batch()`.
 - `DragonExecutionBackendV3.fence()`: new method that delegates to `batch.fence()`, allowing callers to wait for all in-flight tasks submitted by this client to complete.
 - `DragonExecutionBackendV3.create_ddict()`: new helper that creates a Dragon `DDict` instance directly from the backend.
-- `DragonExecutionBackendV3._deliver_result()` / `_deliver_failure()`: internal helpers that centralise result callback dispatch and cancellation checks, eliminating duplicated logic in the monitor loop.
-- Result monitoring uses `Task.get(block=False)` / `TaskNotReadyError` from `dragon.workflows.batch` — one `_monitored_batches` entry per individual task (was one entry per compiled batch).
+- `DragonExecutionBackendV3._deliver_result()` / `_deliver_failure()`: internal helpers that centralise result callback dispatch and cancellation checks, eliminating duplicated logic in the monitor loop. Both now expose `stdout`, `stderr`, and the full Dragon traceback string to the task description so callers can inspect execution output without polling side-effects.
+- `DragonExecutionBackendV3` result monitoring reads directly from `Batch.results_ddict` (the same distributed dict Dragon workers write to) instead of going through the `Task` object.
+- `DragonExecutionBackendV3._cancelled_tasks` converted from `list` to `set`: O(1) membership checks and automatic deduplication. Cancelled UIDs are now removed from the set once the monitor loop processes the task, preventing unbounded growth.
+- `DragonExecutionBackendV3._task_registry` entries are now removed atomically (via `dict.pop`) on result or failure delivery, eliminating unbounded registry growth for long-running sessions.
 - `ConcurrentExecutionBackend`: regular (synchronous) functions are now executed correctly in both `ThreadPoolExecutor` and `ProcessPoolExecutor`. Previously, all function tasks were dispatched via `asyncio.run(func(...))`, which raised `ValueError` for non-coroutine callables. The executor now detects `asyncio.iscoroutinefunction` and calls sync functions directly.
 - `Session` / `TaskStateManager`: task futures now propagate exceptions on failure. Previously all futures were resolved with `set_result(task)` regardless of outcome. Failures now resolve as:
     - Function task raises → original exception propagated via `fut.set_exception(exc)`.

@@ -3234,7 +3234,7 @@ class DragonExecutionBackendV3(BaseBackend):
         self.logger.debug("Dragon batch monitor loop stopped")
 
     def _deliver_result(
-        self, uid: str, result: Any, stdout: str | None, stderr: str | None
+        self, uid: str, result: Any, stdout: Optional[str], stderr: Optional[str]
     ) -> None:
         """Trigger DONE callback for a successfully completed task."""
         task_info = self._task_registry.pop(uid, None)
@@ -3252,7 +3252,12 @@ class DragonExecutionBackendV3(BaseBackend):
         self._callback_func(task_desc, "DONE")
 
     def _deliver_failure(
-        self, uid: str, exc: Exception, tb: str | None, stdout: str | None, stderr: str | None
+        self,
+        uid: str,
+        exc: Exception,
+        tb: Optional[str],
+        stdout: Optional[str],
+        stderr: Optional[str],
     ) -> None:
         """Trigger FAILED callback for a task that raised an exception."""
         task_info = self._task_registry.pop(uid, None)
