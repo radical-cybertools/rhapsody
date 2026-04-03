@@ -4,6 +4,12 @@
 
 ### Added
 
+- `DragonExecutionBackendV3`: migrated to the Dragon batch.py streaming pipeline. Tasks submitted via `session.submit_tasks()` are dispatched individually by a continuously running background thread — there is no compile or start step.
+- `DragonExecutionBackendV3`: accepts two new constructor parameters: `num_nodes` (total nodes) and `pool_nodes` (nodes per worker pool), forwarded directly to `Batch()`.
+- `DragonExecutionBackendV3.fence()`: new method that delegates to `batch.fence()`, allowing callers to wait for all in-flight tasks submitted by this client to complete.
+- `DragonExecutionBackendV3.create_ddict()`: new helper that creates a Dragon `DDict` instance directly from the backend.
+- `DragonExecutionBackendV3._deliver_result()` / `_deliver_failure()`: internal helpers that centralise result callback dispatch and cancellation checks, eliminating duplicated logic in the monitor loop.
+- Result monitoring uses `Task.get(block=False)` / `TaskNotReadyError` from `dragon.workflows.batch` — one `_monitored_batches` entry per individual task (was one entry per compiled batch).
 - `ConcurrentExecutionBackend`: regular (synchronous) functions are now executed correctly in both `ThreadPoolExecutor` and `ProcessPoolExecutor`. Previously, all function tasks were dispatched via `asyncio.run(func(...))`, which raised `ValueError` for non-coroutine callables. The executor now detects `asyncio.iscoroutinefunction` and calls sync functions directly.
 - `Session` / `TaskStateManager`: task futures now propagate exceptions on failure. Previously all futures were resolved with `set_result(task)` regardless of outcome. Failures now resolve as:
     - Function task raises → original exception propagated via `fut.set_exception(exc)`.
@@ -44,6 +50,10 @@
 
 ### Breaking Changes
 
+- **`DragonExecutionBackendV3`**: removed `num_workers`, `disable_background_batching`, and `disable_batch_submission` constructor parameters. These were incompatible with the new streaming pipeline — the Dragon batch always runs in streaming mode and worker counts are controlled via `num_nodes` / `pool_nodes`. Migration:
+    - `DragonExecutionBackendV3(num_workers=16)` → `DragonExecutionBackendV3(num_nodes=4, pool_nodes=2)` (or simply omit both to let Dragon decide)
+    - `DragonExecutionBackendV3(disable_batch_submission=True)` → remove (streaming is now always on)
+    - `DragonExecutionBackendV3(disable_background_batching=True)` → remove
 - **`ComputeTask` and `AITask`**: removed `ranks`, `memory`, `gpu`, `cpu_threads`, and `environment` parameters. These fields were never consumed by any execution backend — they were silently ignored, creating a misleading API. Resource requirements are now backend-specific and must be passed via `task_backend_specific_kwargs`. Migration:
   - `ComputeTask(executable=..., gpu=2)` → `ComputeTask(executable=..., task_backend_specific_kwargs={"resources": {"GPU": 2}})` (Dask) or `task_backend_specific_kwargs={"process_template": {"gpu": 2}}` (Dragon V3)
   - `ComputeTask(executable=..., environment={"K": "V"})` → `ComputeTask(executable=..., task_backend_specific_kwargs={"env": {"K": "V"}})` (Concurrent/Dask)

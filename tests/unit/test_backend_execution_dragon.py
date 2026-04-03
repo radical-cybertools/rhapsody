@@ -583,10 +583,12 @@ def test_v3_constructor_accepts_new_params_and_forwards_to_batch():
     mock_batch.num_workers = 8
     mock_batch.num_managers = 1
 
-    with patch("rhapsody.backends.execution.dragon.Batch", return_value=mock_batch) as MockBatch:
+    with patch(
+        "rhapsody.backends.execution.dragon.Batch", return_value=mock_batch
+    ) as mock_batch_cls:
         backend = DragonExecutionBackendV3(num_nodes=4, pool_nodes=2, disable_telemetry=True)
 
-    MockBatch.assert_called_once_with(num_nodes=4, pool_nodes=2, disable_telem=True)
+    mock_batch_cls.assert_called_once_with(num_nodes=4, pool_nodes=2, disable_telem=True)
     assert backend.batch is mock_batch
 
 
