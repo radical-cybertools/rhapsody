@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rhapsody-py"
-version = "0.1.2"
+version = "0.2.0"
 description = "Runtime system for executing heterogeneous HPC-AI workflows with dynamic task graphs on high-performance computing infrastructures."
 license = { text = "MIT" }
 authors = [
