@@ -50,7 +50,7 @@ async def main():
     mp.set_start_method("dragon")
 
     # Initialize execution backend for compute tasks
-    execution_backend = await DragonExecutionBackendV3(num_workers=4)
+    execution_backend = await DragonExecutionBackendV3()
 
     # Initialize inference backend for AI tasks
     inference_backend = DragonVllmInferenceBackend(
@@ -348,7 +348,7 @@ backend = await DaskExecutionBackend()
 
 # Dragon HPC
 from rhapsody.backends import DragonExecutionBackendV3
-backend = await DragonExecutionBackendV3(num_workers=2048)
+backend = await DragonExecutionBackendV3()
 
 # Create workflow with chosen backend
 flow = await WorkflowEngine.create(backend=backend)

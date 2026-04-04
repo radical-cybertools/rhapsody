@@ -254,7 +254,6 @@ async def dragon_demo():
     # Initialize the Dragon backend (optimized for HPC)
     # V3 uses native Dragon Batch for high-performance wait/callbacks
     dragon_be = await DragonExecutionBackendV3(
-        num_workers=8,
         name="dragon_hpc"
     )
 
@@ -507,7 +506,7 @@ async def main():
         await asyncio.gather(*futures)
 
         for t in tasks:
-            result = t.return_value if t.function else t.stdout.strip()
+            result = t.return_value if t.function else t.stdout
             print(f"Task {t.uid}: {t.state} (output: {result})")
 
 if __name__ == "__main__":
@@ -596,7 +595,7 @@ async def run():
             await session.wait_tasks(tasks)
 
         for t in tasks:
-            result = t.return_value if t.function else t.stdout.strip()
+            result = t.return_value if t.function else t.stdout
             print(f"{t.uid}: {t.state} -> {result}")
 ```
 

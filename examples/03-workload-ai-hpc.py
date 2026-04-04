@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 async def main():
     mp.set_start_method("dragon")
 
-    execution_backend = await DragonExecutionBackendV3(num_workers=4)
+    execution_backend = await DragonExecutionBackendV3()
 
     inference_backend = DragonVllmInferenceBackend(
         config_file="config.yaml",

@@ -66,29 +66,23 @@ from rhapsody.backends import DragonExecutionBackendV3
 
 backend = DragonExecutionBackendV3(
     name="dragon",
-    num_workers=16,               # Total worker processes
-    disable_telemetry=False,       # Enable/disable Dragon telemetry
-    disable_background_batching=False, # Enable/disable background monitoring
-    disable_batch_submission=False # Toggle batch vs individual submission
+    num_nodes=4,            # Total nodes for the worker pool (optional)
+    pool_nodes=2,           # Nodes per worker pool (optional)
+    disable_telemetry=False,  # Enable/disable Dragon telemetry
 )
 ```
 
-!!! note "Batch vs. Stream Submission"
-    The `disable_batch_submission` parameter controls how tasks are sent to the Dragon runtime:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | `str` | `"dragon"` | Backend identifier used for task routing |
+| `num_nodes` | `int` | `None` | Total number of nodes; forwarded to `Batch(num_nodes=...)` |
+| `pool_nodes` | `int` | `None` | Nodes per worker pool; forwarded to `Batch(pool_nodes=...)` |
+| `disable_telemetry` | `bool` | `False` | Disable Dragon internal telemetry |
 
-    - **Batch Mode** (`False`): High throughput. Groups tasks into a single multi-task batch.
-    - **Stream Mode** (`True`): Individual monitoring. Each task is submitted and tracked as a separate Dragon batch.
-
-    ```python
-    # Batch Mode (Recommended for many small tasks)
-    backend = await DragonExecutionBackendV3(disable_batch_submission=False)
-    await session.submit_tasks([t1, t2]) # Single submission
-
-    # Stream Mode (Better for isolated task tracking)
-    backend = await DragonExecutionBackendV3(disable_batch_submission=True)
-    await session.submit_tasks([t1, t2]) # Two separate submissions
-    ```
-
+!!! note "Streaming pipeline"
+    `DragonExecutionBackendV3` uses Dragon's streaming batch pipeline — tasks submitted via
+    `session.submit_tasks()` are dispatched individually by a continuously running background
+    thread. There is no compile or start step; tasks begin executing as soon as they are submitted.
 
 !!! note "Dragon Versions"
     While `DragonExecutionBackendV3` is recommended for most users and will be always maintained, V1 and V2 are also available for legacy compatibility.

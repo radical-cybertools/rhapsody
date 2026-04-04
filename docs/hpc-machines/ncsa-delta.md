@@ -60,7 +60,7 @@ dragon <script.py>
 
 ## Example
 
-This example runs 32 MPI jobs concurrently using RHAPSODY's `Session` API with the `DragonExecutionBackendV3`. Each job gets a random number of ranks (between 2 and 32), all scheduled across the 2 allocated nodes. Worker count is derived automatically from the available CPUs.
+This example runs 32 MPI jobs concurrently using RHAPSODY's `Session` API with the `DragonExecutionBackendV3`. Each job gets a random number of ranks (between 2 and 32), all scheduled across the 2 allocated nodes. Worker count is determined automatically by Dragon from the allocation.
 
 ```python title="mpi-rhapsody.py"
 import asyncio
@@ -71,7 +71,6 @@ import time
 import rhapsody
 from rhapsody.api import ComputeTask, Session
 from rhapsody.backends import DragonExecutionBackendV3
-from dragon.native.machine import cpu_count
 
 rhapsody.enable_logging(level=logging.DEBUG)
 
@@ -97,9 +96,8 @@ async def main():
     njobs = 32
     sleepsecs = 2
     maxranks = 32
-    numworkers = cpu_count() // 2
 
-    backend = await DragonExecutionBackendV3(num_workers=numworkers)
+    backend = await DragonExecutionBackendV3()
     session = Session(backends=[backend])
 
     print("--- Submitting Tasks ---")
@@ -142,12 +140,10 @@ dragon mpi-rhapsody.py
     2026-03-25 23:07:36,938 | DEBUG    | [api_setup] | got handshake
     2026-03-25 23:07:36,938 | INFO     | [api_setup] | debug entry hooked
     2026-03-25 23:07:36,942 | DEBUG    | [dragon.native.queue] | Created queue {self!r}
-    2026-03-25 23:07:37,648 | INFO     | [rhapsody.backends.execution.dragon] | DragonExecutionBackendV3: 128 workers, 2 managers, disable_batch_submission=False
+    2026-03-25 23:07:37,648 | INFO     | [rhapsody.backends.execution.dragon] | DragonExecutionBackendV3: 128 workers, 2 managers
     2026-03-25 23:07:37,648 | DEBUG    | [rhapsody.backends.execution.dragon] | Starting Dragon backend V3 async initialization...
     2026-03-25 23:07:37,648 | DEBUG    | [rhapsody.backends.execution.dragon] | Registering backend states...
     2026-03-25 23:07:37,649 | DEBUG    | [rhapsody.backends.execution.dragon] | Registering task states...
-    2026-03-25 23:07:37,649 | DEBUG    | [rhapsody.backends.execution.dragon] | Starting Dragon batch monitor loop (polling mode)
-    2026-03-25 23:07:37,649 | DEBUG    | [rhapsody.backends.execution.dragon] | Dragon monitor thread started during initialization
     2026-03-25 23:07:37,650 | INFO     | [rhapsody.backends.execution.dragon] | Dragon backend V3 fully initialized and ready
     2026-03-25 23:07:37,650 | DEBUG    | [rhapsody.api.session] | Setting up backend callback for'dragon' with Session 'session.0000'
     2026-03-25 23:07:37,650 | DEBUG    | [rhapsody.api.session] | Registered backend 'dragon' with Session 'session.0000'
