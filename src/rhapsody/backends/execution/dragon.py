@@ -3252,7 +3252,6 @@ class DragonExecutionBackendV3(BaseBackend):
                     task_desc["stderr"] = stderr
                 self._callback_func(task_desc, "DONE")
 
-
     async def submit_tasks(self, tasks: list[dict]) -> None:
         """Submit tasks to the backend.
 
