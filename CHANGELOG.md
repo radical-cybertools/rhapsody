@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.0] - 2026-04-04
 
 ### Added
 
@@ -21,6 +21,15 @@
     - JSONL checkpoint file (`rhapsody.session.<id>.<ts>.telemetry.jsonl`): line-buffered, readable during a live run; contains `event`, `metric`, and `span` sections.
     - OTel contract test suite: `tests/unit/telemetry/conftest.py` (`AdapterCapabilities`, `assert_resource_update_contract`) + `tests/unit/telemetry/test_otel_contract.py` (parametrized across Concurrent, Dask, Dragon).
     - Full telemetry documentation: `docs/telemetry/` (overview, events & metrics reference, quick start, integrations).
+- `DragonExecutionBackendV3`: migrated to the Dragon batch.py streaming pipeline. Tasks submitted via `session.submit_tasks()` are dispatched individually by a continuously running background thread — there is no compile or start step.
+- `DragonExecutionBackendV3`: accepts two new constructor parameters: `num_nodes` (total nodes) and `pool_nodes` (nodes per worker pool), forwarded directly to `Batch()`.
+- `DragonExecutionBackendV3.fence()`: new method that delegates to `batch.fence()`, allowing callers to wait for all in-flight tasks submitted by this client to complete.
+- `DragonExecutionBackendV3.create_ddict()`: new helper that creates a Dragon `DDict` instance directly from the backend.
+- `DragonExecutionBackendV3._deliver_batch()`: replaces `_deliver_result` / `_deliver_failure`. All tasks that complete within a single monitor sweep are collected into a list and delivered to the asyncio event loop in **one** `call_soon_threadsafe` call instead of one per task — reducing cross-thread wakeups from O(tasks) to O(sweeps).
+- `DragonExecutionBackendV3` result monitoring reads directly from `Batch.results_ddict` (the same distributed dict Dragon workers write to) instead of going through the `Task` object. The membership check and value read are now a single `try/except KeyError` operation, eliminating the redundant `__contains__` network round-trip (was two DDict RTTs per ready task, now one).
+- `DragonExecutionBackendV3`: monitor thread now starts lazily on first `submit_tasks()` call instead of at `_async_init` time, eliminating the idle-spin phase while tasks are being built and registered.
+- `DragonExecutionBackendV3._cancelled_tasks` converted from `list` to `set`: O(1) membership checks and automatic deduplication. Cancelled UIDs are now removed from the set once the monitor loop processes the task, preventing unbounded growth.
+- `DragonExecutionBackendV3._task_registry` entries are now removed atomically (via `dict.pop`) on result or failure delivery, eliminating unbounded registry growth for long-running sessions.
 
 ### Changed
 
@@ -30,7 +39,6 @@
 
 - `ConcurrentTelemetryAdapter`: replaced nvidia-smi subprocess (one blocking call per poll, no per-device breakdown) with pynvml initialized once at thread start. Per-device GPU utilization is now collected with device index matching Dragon's pattern.
 - `ConcurrentTelemetryAdapter`: pynvml driver failure (e.g., driver not loaded, permission denied) now logs a one-time `WARNING` instead of silently disabling GPU metrics with no indication.
-
 - `ConcurrentExecutionBackend`: regular (synchronous) functions are now executed correctly in both `ThreadPoolExecutor` and `ProcessPoolExecutor`. Previously, all function tasks were dispatched via `asyncio.run(func(...))`, which raised `ValueError` for non-coroutine callables. The executor now detects `asyncio.iscoroutinefunction` and calls sync functions directly.
 - `Session` / `TaskStateManager`: task futures now propagate exceptions on failure. Previously all futures were resolved with `set_result(task)` regardless of outcome. Failures now resolve as:
     - Function task raises → original exception propagated via `fut.set_exception(exc)`.
@@ -52,6 +60,26 @@
 - `DaskExecutionBackend._check_resources_satisfiable()`: pre-submit check that immediately fails tasks with unsatisfiable resource constraints instead of hanging indefinitely. Function tasks set `task.exception`; executable tasks set `task.stderr` and `task.exit_code = 1`.
 - Integration tests for Dask backend: end-to-end sync/async/executable task execution, cluster injection (cluster and client), and resource constraint failure behavior.
 
+### Performance
+
+- `DragonExecutionBackendV3._monitor_loop`: eliminated redundant `Batch.results_ddict.__contains__` check — each ready task previously required two distributed DDict network round-trips (membership test + value read); now a single `try/except KeyError` read is used, saving ~570µs per task on HPC interconnects (~5.7s for 10K tasks).
+- `DragonExecutionBackendV3._monitor_loop`: monitor thread now starts lazily at first `submit_tasks()` call instead of at backend initialisation, eliminating ~1.2s of idle spinning while tasks are being built.
+- `DragonExecutionBackendV3._deliver_batch`: cross-thread wakeups reduced from O(tasks) to O(sweeps) — all completions found in a single sweep are batched into one `call_soon_threadsafe` call (~0.78s saved for 10K tasks).
+- `DragonExecutionBackendV3`: removed per-task `logger.debug` calls from the monitor hot path, eliminating 10K f-string allocations per run (29ms at 10K tasks, scales linearly).
+- `TaskStateManager`: removed `_task_states` shadow dict — task state is now read directly from `task["state"]` (single source of truth), eliminating one dict write per task completion.
+- `TaskStateManager._update_task_impl`: `_task_futures` entries are now removed via `dict.pop` on resolution, preventing unbounded memory growth at scale.
+- `Session`: removed history recording (`task["history"]` timestamps) — two `time.time()` syscalls and two dict writes per task eliminated.
+- `Session.get_statistics`: method removed entirely; it depended on history timestamps and iterated all tasks on every call.
+
+Measured on 2 nodes / 128 workers (HPC), 10K function tasks:
+
+| | Run 1 | Run 2 | Run 3 | Run 4 |
+|---|---|---|---|---|
+| Dragon batch only | 9.82s | 10.92s | 9.99s | 10.08s |
+| RHAPSODY + Dragon batch | 10.50s | 12.17s | 9.92s | 11.18s |
+
+RHAPSODY overhead reduced from ~7.8s (before) to ≤1.3s (after) — within normal run-to-run variance of the Dragon batch itself.
+
 ### Fixed
 
 - `ConcurrentExecutionBackend._run_in_thread`: calling a regular (sync) function no longer raises `ValueError: a coroutine was expected`.
@@ -71,6 +99,10 @@
 
 ### Breaking Changes
 
+- **`DragonExecutionBackendV3`**: removed `num_workers`, `disable_background_batching`, and `disable_batch_submission` constructor parameters. These were incompatible with the new streaming pipeline — the Dragon batch always runs in streaming mode and worker counts are controlled via `num_nodes` / `pool_nodes`. Migration:
+    - `DragonExecutionBackendV3(num_workers=16)` → `DragonExecutionBackendV3(num_nodes=4, pool_nodes=2)` (or simply omit both to let Dragon decide)
+    - `DragonExecutionBackendV3(disable_batch_submission=True)` → remove (streaming is now always on)
+    - `DragonExecutionBackendV3(disable_background_batching=True)` → remove
 - **`ComputeTask` and `AITask`**: removed `ranks`, `memory`, `gpu`, `cpu_threads`, and `environment` parameters. These fields were never consumed by any execution backend — they were silently ignored, creating a misleading API. Resource requirements are now backend-specific and must be passed via `task_backend_specific_kwargs`. Migration:
   - `ComputeTask(executable=..., gpu=2)` → `ComputeTask(executable=..., task_backend_specific_kwargs={"resources": {"GPU": 2}})` (Dask) or `task_backend_specific_kwargs={"process_template": {"gpu": 2}}` (Dragon V3)
   - `ComputeTask(executable=..., environment={"K": "V"})` → `ComputeTask(executable=..., task_backend_specific_kwargs={"env": {"K": "V"}})` (Concurrent/Dask)

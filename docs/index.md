@@ -23,7 +23,7 @@ from rhapsody.backends import DragonExecutionBackendV3
 
 async def main():
     # 1. Initialize session with a backend
-    backend = await DragonExecutionBackendV3(num_workers=2048)
+    backend = await DragonExecutionBackendV3()
     async with Session(backends=[backend]) as session:
 
         # 2. Define a task

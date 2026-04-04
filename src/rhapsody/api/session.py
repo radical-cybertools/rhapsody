@@ -3,11 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import time
-from collections import Counter
-from collections import defaultdict
 from typing import TYPE_CHECKING
-from typing import Any
 from typing import Callable
 
 from rhapsody.api.errors import TaskExecutionError
@@ -30,7 +26,6 @@ class TaskStateManager:
 
     def __init__(self):
         self._task_futures: dict[str, asyncio.Future] = {}
-        self._task_states: dict[str, str] = {}
         self._terminal_states = set()  # Will be populated by backends
         self._lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -41,7 +36,7 @@ class TaskStateManager:
         """Bind an event loop to the manager for thread-safe updates."""
         self._loop = loop
 
-    def update_task(self, task: dict | BaseTask, state: str, **kwargs: Any) -> None:
+    def update_task(self, task: dict | BaseTask, state: str, **kwargs: object) -> None:
         """Update task state and notify waiters (thread-safe)."""
         if self._loop and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._update_task_impl, task, state)
@@ -57,26 +52,19 @@ class TaskStateManager:
     def _update_task_impl(self, task: dict | BaseTask, state: str) -> None:
         """Actual update logic, expected to run on the event loop."""
         uid = task["uid"]
-        now = time.time()
 
-        # Update the task object in-place (Single Source of Truth update)
+        # Update the task object in-place (Single Source of Truth)
         task["state"] = state
-
-        # Telemetry: Record transition history
-        if "history" not in task:
-            task["history"] = {}
-        task["history"][state] = now
-
-        self._task_states[uid] = state
 
         # Telemetry hook — O(1) None check, zero cost when not enabled
         if self._telemetry_observer is not None:
             self._telemetry_observer(task, state)
 
+
         # If terminal, notify waiters
         if state in self._terminal_states:
             if uid in self._task_futures:
-                fut = self._task_futures[uid]
+                fut = self._task_futures.pop(uid)
                 if not fut.done():
                     exc = task.get("exception")
                     exit_code = task.get("exit_code")
@@ -105,7 +93,7 @@ class TaskStateManager:
                 self._task_futures[uid] = asyncio.Future()
 
             # If already done before we started waiting, resolve immediately
-            if self._task_states.get(uid) in self._terminal_states:
+            if task.get("state") in self._terminal_states:
                 exc = task.get("exception")
                 exit_code = task.get("exit_code")
                 if isinstance(exc, BaseException):
@@ -199,10 +187,8 @@ class Session:
         if not self.backends:
             raise RuntimeError("No backends configured in Session")
 
-        # Map backends by name for fast lookup
-        tasks_by_backend = defaultdict(list)
-
         # Group tasks by their explicit backend target
+        tasks_by_backend: dict[str, list] = {}
         futures = []
         for task in tasks:
             uid = task["uid"]
@@ -214,16 +200,9 @@ class Session:
                 task.bind_future(fut)
             futures.append(fut)
 
-            # Mark submission time
-            if "history" not in task:
-                task["history"] = {}
-            if "submitted" not in task["history"]:
-                task["history"]["submitted"] = time.time()
-
-            # Stamp task_type once at submission so all telemetry events carry it.
-            # BaseTask inherits from dict so isinstance(task, dict) is always True;
-            # type(task).__name__ correctly returns "ComputeTask", "AITask", etc.
+            # Stamp task_type for telemetry event classification
             task["task_type"] = type(task).__name__
+
 
             # Routing decision
             target_name = task.get("backend")
@@ -243,7 +222,7 @@ class Session:
                     f"Available backends: {available}"
                 )
 
-            tasks_by_backend[target_name].append(task)
+            tasks_by_backend.setdefault(target_name, []).append(task)
 
         # Submit each group to its respective backend concurrently
         submission_tasks = []
@@ -303,50 +282,6 @@ class Session:
             )
 
         return tasks
-
-    def get_statistics(self) -> dict[str, Any]:
-        """Get session-wide delivery and performance statistics.
-
-        Returns:
-            Dictionary containing task counts, success rates, and latencies.
-        """
-        stats: dict[str, Any] = {
-            "counts": Counter(),
-            "latencies": {
-                "total": [],
-                "queue": [],
-                "execution": [],
-            },
-            "summary": {},
-        }
-
-        for task in self._tasks.values():
-            state = task.get("state", "UNKNOWN")
-            stats["counts"][state] += 1
-
-            history = task.get("history", {})
-            submitted = history.get("submitted")
-            running = history.get("RUNNING")
-            done = history.get("DONE") or history.get("FAILED") or history.get("CANCELED")
-
-            if submitted and done:
-                stats["latencies"]["total"].append(done - submitted)
-
-            if submitted and running:
-                stats["latencies"]["queue"].append(running - submitted)
-
-            if running and done:
-                stats["latencies"]["execution"].append(done - running)
-
-        # Calculate averages for summary
-        for key, values in stats["latencies"].items():
-            if values:
-                stats["summary"][f"avg_{key}"] = sum(values) / len(values)
-            else:
-                stats["summary"][f"avg_{key}"] = 0.0
-
-        stats["summary"]["total_tasks"] = len(self._tasks)
-        return stats
 
     def enable_telemetry(
         self,
