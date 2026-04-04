@@ -44,7 +44,6 @@ try:
     from dragon.native.queue import Queue
     from dragon.telemetry import Telemetry
     from dragon.workflows.batch import Batch
-    from dragon.workflows.batch.batch import TaskNotReadyError
 
 except ImportError:  # pragma: no cover - environment without Dragon
     dragon = None
@@ -57,7 +56,6 @@ except ImportError:  # pragma: no cover - environment without Dragon
     System = None
     Policy = None
     Batch = None
-    TaskNotReadyError = None
     Event = None
     Telemetry = None
     AccVendor = None
