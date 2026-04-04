@@ -12,7 +12,7 @@ V3 integration tests — process_template / process_templates routing
 
 V3 unit tests — constructor and internal methods
     Verify the API surface introduced by the batch.py migration (new constructor
-    parameters, _deliver_result, _deliver_failure, fence delegation) with Batch
+    parameters, _deliver_batch, fence delegation) with Batch
     mocked out. No Dragon cluster is required for these tests.
 
 Run with:
@@ -83,6 +83,7 @@ def backend_v3():
         backend = DragonExecutionBackendV3()
 
     backend._callback_func = MagicMock()
+    backend._loop = asyncio.get_event_loop()
     return backend
 
 
@@ -609,43 +610,42 @@ def test_v3_constructor_rejects_removed_params():
             DragonExecutionBackendV3(disable_batch_submission=True)
 
 
-def test_v3_deliver_result_stores_value_and_fires_done(backend_v3):
-    """_deliver_result stores return_value on the task dict and fires the DONE callback."""
+def test_v3_deliver_batch_success_stores_value_and_fires_done(backend_v3):
+    """_deliver_batch stores return_value on the task dict and fires the DONE callback."""
     uid = "task.unit-done"
     task_desc = {"uid": uid}
     backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
 
-    backend_v3._deliver_result(uid, result=42, stdout=None, stderr=None)
+    backend_v3._deliver_batch([(uid, 42, None, False, None, None)])
 
     assert task_desc["return_value"] == 42
     assert "stdout" not in task_desc
     assert "stderr" not in task_desc
     backend_v3._callback_func.assert_called_once_with(task_desc, "DONE")
-    # registry entry removed after delivery
     assert uid not in backend_v3._task_registry
 
 
-def test_v3_deliver_result_propagates_stdout_stderr(backend_v3):
-    """_deliver_result stores stdout/stderr on task_desc when non-empty."""
+def test_v3_deliver_batch_propagates_stdout_stderr(backend_v3):
+    """_deliver_batch stores stdout/stderr on task_desc when non-empty."""
     uid = "task.unit-done-out"
     task_desc = {"uid": uid}
     backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
 
-    backend_v3._deliver_result(uid, result="ok", stdout="hello\n", stderr="warn\n")
+    backend_v3._deliver_batch([(uid, "ok", None, False, "hello\n", "warn\n")])
 
     assert task_desc["stdout"] == "hello\n"
     assert task_desc["stderr"] == "warn\n"
 
 
-def test_v3_deliver_failure_stores_exc_and_fires_failed(backend_v3):
-    """_deliver_failure stores the exception and stderr string, fires the FAILED callback."""
+def test_v3_deliver_batch_failure_stores_exc_and_fires_failed(backend_v3):
+    """_deliver_batch stores the exception and stderr string, fires the FAILED callback."""
     uid = "task.unit-failed"
     task_desc = {"uid": uid}
     backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
     exc = RuntimeError("something went wrong")
 
-    # Without tb: stderr falls back to str(exc)
-    backend_v3._deliver_failure(uid, exc, tb=None, stdout=None, stderr=None)
+    # raised=True, tb=None: stderr falls back to str(exc)
+    backend_v3._deliver_batch([(uid, exc, None, True, None, None)])
 
     assert task_desc["exception"] is exc
     assert "something went wrong" in task_desc["stderr"]
@@ -653,35 +653,30 @@ def test_v3_deliver_failure_stores_exc_and_fires_failed(backend_v3):
     assert uid not in backend_v3._task_registry
 
 
-def test_v3_deliver_failure_prefers_traceback_over_str_exc(backend_v3):
-    """_deliver_failure uses Dragon's traceback string when available."""
+def test_v3_deliver_batch_prefers_traceback_over_str_exc(backend_v3):
+    """_deliver_batch uses Dragon's traceback string when available."""
     uid = "task.unit-failed-tb"
     task_desc = {"uid": uid}
     backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
     exc = RuntimeError("boom")
     tb = "Traceback (most recent call last):\n  File ...\nRuntimeError: boom"
 
-    backend_v3._deliver_failure(uid, exc, tb=tb, stdout=None, stderr=None)
+    backend_v3._deliver_batch([(uid, exc, tb, True, None, None)])
 
     assert task_desc["stderr"] == tb
 
 
-def test_v3_cancelled_task_skips_both_callbacks(backend_v3):
-    """_deliver_result and _deliver_failure are no-ops for UIDs in _cancelled_tasks."""
+def test_v3_cancelled_task_skips_callback(backend_v3):
+    """_deliver_batch is a no-op for UIDs in _cancelled_tasks."""
     uid = "task.unit-cancelled"
     task_desc = {"uid": uid}
     backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
     backend_v3._cancelled_tasks.add(uid)
 
-    backend_v3._deliver_result(uid, result=99, stdout=None, stderr=None)
-    # registry is popped on first call; re-register so _deliver_failure can also exercise guard
-    backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
-    backend_v3._cancelled_tasks.add(uid)
-    backend_v3._deliver_failure(uid, RuntimeError("ignored"), tb=None, stdout=None, stderr=None)
+    backend_v3._deliver_batch([(uid, 99, None, False, None, None)])
 
     backend_v3._callback_func.assert_not_called()
     assert "return_value" not in task_desc
-    # uid cleaned out of _cancelled_tasks by both guards
     assert uid not in backend_v3._cancelled_tasks
 
 

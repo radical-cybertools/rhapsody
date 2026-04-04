@@ -3137,6 +3137,7 @@ class DragonExecutionBackendV3(BaseBackend):
         self._cancelled_tasks: set[str] = set()
         self._monitored_batches = {}
         self._batch_monitor_thread = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         self._shutdown_event = threading.Event()
 
@@ -3169,15 +3170,6 @@ class DragonExecutionBackendV3(BaseBackend):
                 self.logger.debug("Registering task states...")
                 StateMapper.register_backend_tasks_states_with_defaults(backend=self)
 
-                # Step 4: Start monitor thread
-                if self._batch_monitor_thread is None or not self._batch_monitor_thread.is_alive():
-                    self._shutdown_event.clear()
-                    self._batch_monitor_thread = threading.Thread(
-                        target=self._monitor_loop, name="dragon_monitor_loop", daemon=True
-                    )
-                    self._batch_monitor_thread.start()
-                    self.logger.debug("Dragon monitor thread started during initialization")
-
                 self._initialized = True
                 self.logger.info("Dragon backend V3 fully initialized and ready")
 
@@ -3205,24 +3197,22 @@ class DragonExecutionBackendV3(BaseBackend):
                     time.sleep(0.01)
                     continue
 
+                # Collect all completed tasks in this sweep, then deliver in one batch
+                completed = []
                 for tuid in batch_tuids:
                     if tuid not in self._monitored_batches:
                         continue
-
-                    # Check DDict directly — avoids exception overhead on the common not-ready path
-                    # and gives us the full (result, tb, raised, stdout, stderr) tuple.
-                    if tuid not in self.batch.results_ddict:
+                    # Single DDict read: KeyError means not ready yet (avoids redundant __contains__)
+                    try:
+                        result, tb, raised, stdout, stderr = self.batch.results_ddict[tuid]
+                    except KeyError:
                         continue
-
                     batch_task, uid = self._monitored_batches.pop(tuid)
-                    result, tb, raised, stdout, stderr = self.batch.results_ddict[tuid]
+                    completed.append((uid, result, tb, raised, stdout, stderr))
 
-                    if raised:
-                        self._deliver_failure(uid, result, tb, stdout, stderr)
-                        self.logger.debug(f"Task {uid} failed")
-                    else:
-                        self._deliver_result(uid, result, stdout, stderr)
-                        self.logger.debug(f"Task {uid} complete")
+                # One cross-thread wakeup for the entire sweep batch
+                if completed:
+                    self._loop.call_soon_threadsafe(self._deliver_batch, completed)
 
                 # Small sleep after each full sweep to prevent tight loop
                 time.sleep(0.005)
@@ -3233,45 +3223,35 @@ class DragonExecutionBackendV3(BaseBackend):
 
         self.logger.debug("Dragon batch monitor loop stopped")
 
-    def _deliver_result(
-        self, uid: str, result: Any, stdout: Optional[str], stderr: Optional[str]
-    ) -> None:
-        """Trigger DONE callback for a successfully completed task."""
-        task_info = self._task_registry.pop(uid, None)
-        if not task_info:
-            return
-        if uid in self._cancelled_tasks:
-            self._cancelled_tasks.discard(uid)
-            return
-        task_desc = task_info["description"]
-        task_desc["return_value"] = result
-        if stdout:
-            task_desc["stdout"] = stdout
-        if stderr:
-            task_desc["stderr"] = stderr
-        self._callback_func(task_desc, "DONE")
+    def _deliver_batch(self, completions: list) -> None:
+        """Deliver a batch of completed tasks. Runs on the asyncio event loop (via
+        call_soon_threadsafe).
 
-    def _deliver_failure(
-        self,
-        uid: str,
-        exc: Exception,
-        tb: Optional[str],
-        stdout: Optional[str],
-        stderr: Optional[str],
-    ) -> None:
-        """Trigger FAILED callback for a task that raised an exception."""
-        task_info = self._task_registry.pop(uid, None)
-        if not task_info:
-            return
-        if uid in self._cancelled_tasks:
-            self._cancelled_tasks.discard(uid)
-            return
-        task_desc = task_info["description"]
-        task_desc["exception"] = exc
-        task_desc["stderr"] = tb if tb else str(exc)
-        if stdout:
-            task_desc["stdout"] = stdout
-        self._callback_func(task_desc, "FAILED")
+        Called once per monitor sweep with all tasks that completed in that sweep, reducing cross-
+        thread wakeups from O(tasks) to O(sweeps).
+        """
+        for uid, result, tb, raised, stdout, stderr in completions:
+            task_info = self._task_registry.pop(uid, None)
+            if not task_info:
+                continue
+            if uid in self._cancelled_tasks:
+                self._cancelled_tasks.discard(uid)
+                continue
+            task_desc = task_info["description"]
+            if raised:
+                task_desc["exception"] = result
+                task_desc["stderr"] = tb if tb else str(result)
+                if stdout:
+                    task_desc["stdout"] = stdout
+                self._callback_func(task_desc, "FAILED")
+            else:
+                task_desc["return_value"] = result
+                if stdout:
+                    task_desc["stdout"] = stdout
+                if stderr:
+                    task_desc["stderr"] = stderr
+                self._callback_func(task_desc, "DONE")
+
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
         """Submit tasks to the backend.
@@ -3285,6 +3265,18 @@ class DragonExecutionBackendV3(BaseBackend):
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
             self.logger.debug(f"Backend state set to: {self._backend_state.value}")
+
+        # Capture event loop for cross-thread batch delivery
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
+
+        # Start monitor thread on first submission (lazy — avoids idle spin before tasks exist)
+        if self._batch_monitor_thread is None or not self._batch_monitor_thread.is_alive():
+            self._shutdown_event.clear()
+            self._batch_monitor_thread = threading.Thread(
+                target=self._monitor_loop, name="dragon_monitor_loop", daemon=True
+            )
+            self._batch_monitor_thread.start()
 
         # Build tasks
         batch_tasks_data = []
