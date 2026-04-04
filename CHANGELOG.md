@@ -8,8 +8,9 @@
 - `DragonExecutionBackendV3`: accepts two new constructor parameters: `num_nodes` (total nodes) and `pool_nodes` (nodes per worker pool), forwarded directly to `Batch()`.
 - `DragonExecutionBackendV3.fence()`: new method that delegates to `batch.fence()`, allowing callers to wait for all in-flight tasks submitted by this client to complete.
 - `DragonExecutionBackendV3.create_ddict()`: new helper that creates a Dragon `DDict` instance directly from the backend.
-- `DragonExecutionBackendV3._deliver_result()` / `_deliver_failure()`: internal helpers that centralise result callback dispatch and cancellation checks, eliminating duplicated logic in the monitor loop. Both now expose `stdout`, `stderr`, and the full Dragon traceback string to the task description so callers can inspect execution output without polling side-effects.
-- `DragonExecutionBackendV3` result monitoring reads directly from `Batch.results_ddict` (the same distributed dict Dragon workers write to) instead of going through the `Task` object.
+- `DragonExecutionBackendV3._deliver_batch()`: replaces `_deliver_result` / `_deliver_failure`. All tasks that complete within a single monitor sweep are collected into a list and delivered to the asyncio event loop in **one** `call_soon_threadsafe` call instead of one per task — reducing cross-thread wakeups from O(tasks) to O(sweeps).
+- `DragonExecutionBackendV3` result monitoring reads directly from `Batch.results_ddict` (the same distributed dict Dragon workers write to) instead of going through the `Task` object. The membership check and value read are now a single `try/except KeyError` operation, eliminating the redundant `__contains__` network round-trip (was two DDict RTTs per ready task, now one).
+- `DragonExecutionBackendV3`: monitor thread now starts lazily on first `submit_tasks()` call instead of at `_async_init` time, eliminating the idle-spin phase while tasks are being built and registered.
 - `DragonExecutionBackendV3._cancelled_tasks` converted from `list` to `set`: O(1) membership checks and automatic deduplication. Cancelled UIDs are now removed from the set once the monitor loop processes the task, preventing unbounded growth.
 - `DragonExecutionBackendV3._task_registry` entries are now removed atomically (via `dict.pop`) on result or failure delivery, eliminating unbounded registry growth for long-running sessions.
 - `ConcurrentExecutionBackend`: regular (synchronous) functions are now executed correctly in both `ThreadPoolExecutor` and `ProcessPoolExecutor`. Previously, all function tasks were dispatched via `asyncio.run(func(...))`, which raised `ValueError` for non-coroutine callables. The executor now detects `asyncio.iscoroutinefunction` and calls sync functions directly.
@@ -32,6 +33,26 @@
 - `shell=True` for executable tasks via `task_backend_specific_kwargs={"shell": True}`.
 - `DaskExecutionBackend._check_resources_satisfiable()`: pre-submit check that immediately fails tasks with unsatisfiable resource constraints instead of hanging indefinitely. Function tasks set `task.exception`; executable tasks set `task.stderr` and `task.exit_code = 1`.
 - Integration tests for Dask backend: end-to-end sync/async/executable task execution, cluster injection (cluster and client), and resource constraint failure behavior.
+
+### Performance
+
+- `DragonExecutionBackendV3._monitor_loop`: eliminated redundant `Batch.results_ddict.__contains__` check — each ready task previously required two distributed DDict network round-trips (membership test + value read); now a single `try/except KeyError` read is used, saving ~570µs per task on HPC interconnects (~5.7s for 10K tasks).
+- `DragonExecutionBackendV3._monitor_loop`: monitor thread now starts lazily at first `submit_tasks()` call instead of at backend initialisation, eliminating ~1.2s of idle spinning while tasks are being built.
+- `DragonExecutionBackendV3._deliver_batch`: cross-thread wakeups reduced from O(tasks) to O(sweeps) — all completions found in a single sweep are batched into one `call_soon_threadsafe` call (~0.78s saved for 10K tasks).
+- `DragonExecutionBackendV3`: removed per-task `logger.debug` calls from the monitor hot path, eliminating 10K f-string allocations per run (29ms at 10K tasks, scales linearly).
+- `TaskStateManager`: removed `_task_states` shadow dict — task state is now read directly from `task["state"]` (single source of truth), eliminating one dict write per task completion.
+- `TaskStateManager._update_task_impl`: `_task_futures` entries are now removed via `dict.pop` on resolution, preventing unbounded memory growth at scale.
+- `Session`: removed history recording (`task["history"]` timestamps) — two `time.time()` syscalls and two dict writes per task eliminated.
+- `Session.get_statistics`: method removed entirely; it depended on history timestamps and iterated all tasks on every call.
+
+Measured on 2 nodes / 128 workers (HPC), 10K function tasks:
+
+| | Run 1 | Run 2 | Run 3 | Run 4 |
+|---|---|---|---|---|
+| Dragon batch only | 9.82s | 10.92s | 9.99s | 10.08s |
+| RHAPSODY + Dragon batch | 10.50s | 12.17s | 9.92s | 11.18s |
+
+RHAPSODY overhead reduced from ~7.8s (before) to ≤1.3s (after) — within normal run-to-run variance of the Dragon batch itself.
 
 ### Fixed
 
