@@ -60,7 +60,6 @@ class TaskStateManager:
         if self._telemetry_observer is not None:
             self._telemetry_observer(task, state)
 
-
         # If terminal, notify waiters
         if state in self._terminal_states:
             if uid in self._task_futures:
@@ -202,7 +201,6 @@ class Session:
 
             # Stamp task_type for telemetry event classification
             task["task_type"] = type(task).__name__
-
 
             # Routing decision
             target_name = task.get("backend")
