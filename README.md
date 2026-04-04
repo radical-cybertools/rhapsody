@@ -27,7 +27,7 @@ from rhapsody.backends import DragonExecutionBackendV3, DragonVllmInferenceBacke
 
 async def main():
     # Initialize backends
-    hpc_backend = await DragonExecutionBackendV3(name="hpc", num_workers=128)
+    hpc_backend = await DragonExecutionBackendV3(name="hpc")
     ai_backend = await DragonVllmInferenceBackend(name="vllm", model="Qwen2.5-7B")
 
     # Create session with multiple backends

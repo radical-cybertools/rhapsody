@@ -91,7 +91,6 @@ import multiprocessing as mp
 import rhapsody
 from rhapsody.api import AITask, ComputeTask, Session
 from rhapsody.backends import DragonExecutionBackendV3, DragonVllmInferenceBackend
-from dragon.native.machine import cpu_count
 
 rhapsody.enable_logging(level=logging.INFO)
 
@@ -161,9 +160,7 @@ def fine_tune(simulation_outputs: list):
 async def main():
     mp.set_start_method("dragon")
 
-    numworkers = cpu_count() // 2
-
-    execution_backend = await DragonExecutionBackendV3(num_workers=numworkers)
+    execution_backend = await DragonExecutionBackendV3()
 
     inference_backend = await DragonVllmInferenceBackend(
         config_file="config.yaml",
