@@ -3275,6 +3275,9 @@ class DragonExecutionBackendV3(BaseBackend):
             try:
                 batch_task = await self.build_task(task)
                 batch_tasks_data.append((task["uid"], batch_task))
+                # This is the moment Dragon takes ownership was called
+                # inside build_task) and start executing it.
+                self._callback_func(task, "RUNNING")
             except Exception as e:
                 self.logger.error(f"Failed to create task {task.get('uid')}: {e}", exc_info=True)
                 task["exception"] = e

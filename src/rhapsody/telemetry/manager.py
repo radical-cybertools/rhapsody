@@ -108,6 +108,9 @@ class TelemetryManager:
         self._active_spans: dict[str, Any] = {}
         self._session_span: Any = None
 
+        # Wall-clock time recorded when RUNNING is first seen for each task.
+        self._task_start_times: dict[str, float] = {}
+
         # Temporary span context store: task_id → SpanContext, populated in
         # _process_event() on TaskCompleted/Failed, consumed in _span_ids_for_event().
         self._completed_span_ctx: dict[str, Any] = {}
@@ -386,20 +389,22 @@ class TelemetryManager:
     def _on_task_state_change(self, task: dict, state: str) -> None:
         """Called from TaskStateManager._update_task_impl — must be non-blocking."""
         now_wall = time.time()
-        history = task.get("history", {})
         task_id = task["uid"]
         backend = task.get("backend", "")
         executable = _task_executable(task)
         task_type = task.get("task_type", "")
 
         if state == "RUNNING":
+            # Record the wall-clock time we first see RUNNING so we can compute
+            # duration in DONE/FAILED.
+            self._task_start_times[task_id] = now_wall
             self.emit(
                 make_event(
                     TaskStarted,
                     session_id=self._session_id,
                     backend=backend,
                     task_id=task_id,
-                    event_time=history.get("RUNNING", now_wall),
+                    event_time=now_wall,
                     attributes={
                         "executable": executable,
                         "task_type": task_type,
@@ -408,12 +413,18 @@ class TelemetryManager:
             )
 
         elif state == "DONE":
-            running_ts = history.get("RUNNING")
-            ended = history.get("DONE", now_wall)
+            running_ts = self._task_start_times.pop(task_id, None)
+            ended = now_wall
             if running_ts is not None:
                 duration = max(ended - running_ts, 0.0)
                 attrs: dict = {"executable": executable, "task_type": task_type}
             else:
+                # NOTE: RUNNING was never seen for this task (backend did not emit
+                # a RUNNING callback, or the task completed before telemetry started).
+                # ended = now_wall is used as a best-effort event_time, but
+                # duration_seconds = 0.0 and incomplete_lifecycle=True signal that
+                # the true start time is unknown. If all tasks show incomplete_lifecycle,
+                # the backend is likely not emitting a RUNNING callback — add one.
                 duration = 0.0
                 attrs = {
                     "executable": executable,
@@ -433,14 +444,18 @@ class TelemetryManager:
             )
 
         elif state == "FAILED":
-            running_ts = history.get("RUNNING")
-            ended = history.get("FAILED", now_wall)
+            running_ts = self._task_start_times.pop(task_id, None)
+            ended = now_wall
             exc = task.get("exception")
             error_type = type(exc).__name__ if exc is not None else "unknown"
             if running_ts is not None:
                 duration = max(ended - running_ts, 0.0)
                 attrs = {"executable": executable, "task_type": task_type, "error_type": error_type}
             else:
+                # NOTE: RUNNING was never seen for this task — same situation as the
+                # DONE branch above. ended = now_wall, duration_seconds = 0.0,
+                # incomplete_lifecycle=True. Check whether the backend emits "RUNNING"
+                # before reporting this as a data quality issue.
                 duration = 0.0
                 attrs = {
                     "executable": executable,
