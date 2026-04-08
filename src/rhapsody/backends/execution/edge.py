@@ -5,39 +5,25 @@ through the RADICAL Edge bridge/plugin infrastructure.  The Edge node
 runs a Rhapsody plugin with a local backend (e.g. Dragon V3) that
 actually executes the work.
 
-Task flow:
-  EdgeExecutionBackend.submit_tasks()
-    -> serialize task dicts (cloudpickle for callables)
-    -> POST /rhapsody/submit/{sid}  (via bridge -> edge)
-    -> remote RhapsodySession deserializes and delegates to local backend
-    -> SSE notifications stream back state changes
-    -> callback fires locally when task reaches terminal state
+Internally delegates to ``RhapsodyClient`` so all transport-level
+optimizations (template compression, pipelined batching, SSE-based
+wait, batch notifications) are inherited automatically.
 """
 
 import asyncio
-import base64
-import json
 import logging
-import threading
 from typing import Any, Callable
 
 from ..base import BaseBackend
 from ..constants import BackendMainStates, StateMapper
 
 try:
-    import cloudpickle
+    from radical.edge import BridgeClient
 except ImportError:
-    cloudpickle = None
+    BridgeClient = None
 
-try:
-    import httpx
-except ImportError:
-    httpx = None
 
-try:
-    import sseclient
-except ImportError:
-    sseclient = None
+TERMINAL_STATES = {'DONE', 'FAILED', 'CANCELED', 'COMPLETED'}
 
 
 def _get_logger() -> logging.Logger:
@@ -46,6 +32,10 @@ def _get_logger() -> logging.Logger:
 
 class EdgeExecutionBackend(BaseBackend):
     """Execution backend that delegates to a remote RADICAL Edge node.
+
+    Uses ``radical.edge.BridgeClient`` and ``RhapsodyClient`` for all
+    communication — inheriting batching, template compression,
+    pipelined submission, and SSE-based notifications.
 
     Args:
         bridge_url:  URL of the RADICAL Edge bridge
@@ -72,28 +62,25 @@ class EdgeExecutionBackend(BaseBackend):
     ):
         super().__init__(name=name)
 
-        if httpx is None:
-            raise ImportError("EdgeExecutionBackend requires 'httpx'. "
-                              "Install it with: pip install httpx")
+        if BridgeClient is None:
+            raise ImportError(
+                "EdgeExecutionBackend requires 'radical.edge'. "
+                "Install it with: pip install radical.edge")
 
-        self.logger         = _get_logger()
-        self._bridge_url    = bridge_url.rstrip('/')
-        self._edge_name     = edge_name
-        self._plugin_name   = plugin_name
+        self.logger           = _get_logger()
+        self._bridge_url      = bridge_url
+        self._edge_name       = edge_name
+        self._plugin_name     = plugin_name
         self._remote_backends = backends or ['dragon_v3']
-        self._verify_ssl    = verify_ssl
+        self._verify_ssl      = verify_ssl
 
-        self._http           = httpx.Client(verify=verify_ssl, timeout=300)
-        self._sid: str | None = None
-        self._base_url: str | None = None
+        self._bc   = None   # BridgeClient
+        self._rh   = None   # RhapsodyClient (from get_plugin)
+        self._tasks: dict[str, dict] = {}
 
-        self._tasks: dict[str, dict]   = {}
-        self._callback_func: Callable  = lambda t, s: None
-        self._initialized              = False
-        self._backend_state            = BackendMainStates.INITIALIZED
-
-        self._sse_thread: threading.Thread | None = None
-        self._sse_stop   = threading.Event()
+        self._callback_func: Callable = lambda t, s: None
+        self._initialized   = False
+        self._backend_state = BackendMainStates.INITIALIZED
         self._loop: asyncio.AbstractEventLoop | None = None
 
     # ------------------------------------------------------------------
@@ -114,129 +101,39 @@ class EdgeExecutionBackend(BaseBackend):
         StateMapper.register_backend_tasks_states_with_defaults(backend=self)
         self._backend_state = BackendMainStates.INITIALIZED
 
-        # Build base URL for the plugin on this edge
-        self._base_url = (f"{self._bridge_url}/{self._edge_name}"
-                          f"/{self._plugin_name}")
+        # Create BridgeClient → EdgeClient → RhapsodyClient
+        # cert=None disables TLS verification (default for self-signed)
+        self._bc = BridgeClient(url=self._bridge_url)
+        ec = self._bc.get_edge_client(self._edge_name)
+        self._rh = ec.get_plugin(self._plugin_name,
+                                 backends=self._remote_backends)
 
-        # Register a remote session
-        resp = self._http.post(
-            f"{self._base_url}/register_session",
-            json={"backends": self._remote_backends},
-        )
-        resp.raise_for_status()
-        self._sid = resp.json()["sid"]
-        self.logger.info("Remote session registered: %s", self._sid)
-
-        # Start SSE listener for notifications
-        self._start_sse_listener()
+        # Register persistent notification callback for task completions
+        self._rh.register_notification_callback(
+            self._on_task_notification, topic="task_status")
+        self._rh.register_notification_callback(
+            self._on_task_notification, topic="task_status_batch")
 
         self._initialized = True
+        self.logger.info("Edge backend ready: %s/%s (session %s)",
+                         self._edge_name, self._plugin_name,
+                         self._rh.sid)
         return self
 
     # ------------------------------------------------------------------
-    # Task serialization
+    # Notification handling
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _serialize_task(task: dict) -> dict:
-        """Prepare a task dict for JSON transport over REST.
+    def _on_task_notification(self, edge, plugin, topic, data):
+        """SSE callback: update local tasks and fire Rhapsody callback."""
+        if topic == 'task_status_batch':
+            for t in data.get('tasks', []):
+                self._apply_task_update(t)
+        else:
+            self._apply_task_update(data)
 
-        Callables in ``function``, ``args``, ``kwargs`` are encoded with
-        cloudpickle + base64.  Plain JSON-serializable values pass through.
-        """
-        td = dict(task)
-        pickled_fields = []
-
-        # Serialize callable function
-        fn = td.get('function')
-        if callable(fn):
-            if cloudpickle is None:
-                raise RuntimeError(
-                    "cloudpickle is required to serialize function tasks. "
-                    "Install it with: pip install cloudpickle")
-            encoded = base64.b64encode(
-                cloudpickle.dumps(fn)).decode('ascii')
-            td['function'] = 'cloudpickle::' + encoded
-            pickled_fields.append('function')
-
-        # Serialize args/kwargs if they contain non-JSON types
-        for field in ('args', 'kwargs'):
-            val = td.get(field)
-            if val is None:
-                continue
-            try:
-                json.dumps(val)
-            except (TypeError, ValueError):
-                if cloudpickle is None:
-                    raise RuntimeError(
-                        f"cloudpickle required to serialize '{field}'")
-                encoded = base64.b64encode(
-                    cloudpickle.dumps(val)).decode('ascii')
-                td[field] = 'cloudpickle::' + encoded
-                pickled_fields.append(field)
-
-        if pickled_fields:
-            td['_pickled_fields'] = pickled_fields
-
-        # Remove non-serializable internal fields and the local backend
-        # name so the remote session routes to its own default backend.
-        td.pop('future', None)
-        td.pop('_future', None)
-        td.pop('backend', None)
-
-        return td
-
-    # ------------------------------------------------------------------
-    # SSE notification listener
-    # ------------------------------------------------------------------
-
-    def _start_sse_listener(self):
-        """Start a background thread that listens for SSE notifications."""
-        if sseclient is None:
-            self.logger.warning("sseclient not installed — no live "
-                                "notifications (pip install sseclient-py)")
-            return
-
-        self._sse_stop.clear()
-        self._sse_thread = threading.Thread(
-            target=self._sse_loop, daemon=True, name="edge-sse")
-        self._sse_thread.start()
-
-    def _sse_loop(self):
-        """SSE listener loop (runs in background thread)."""
-        import requests as req   # use requests for streaming (httpx SSE
-                                 # support is limited)
-        url = f"{self._bridge_url}/events"
-        try:
-            resp = req.get(url, stream=True,
-                           verify=self._verify_ssl, timeout=None)
-            client = sseclient.SSEClient(resp)
-            for event in client.events():
-                if self._sse_stop.is_set():
-                    break
-                try:
-                    msg = json.loads(event.data)
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                if msg.get('topic') == 'notification':
-                    self._handle_notification(msg['data'])
-        except Exception as e:
-            if not self._sse_stop.is_set():
-                self.logger.warning("SSE listener error: %s", e)
-
-    def _handle_notification(self, data: dict):
-        """Process an SSE notification from the remote plugin."""
-        edge   = data.get('edge')
-        plugin = data.get('plugin')
-        topic  = data.get('topic')
-        body   = data.get('data', {})
-
-        # Filter for our edge/plugin
-        if edge != self._edge_name or plugin != self._plugin_name:
-            return
-        if topic != 'task_status':
-            return
-
+    def _apply_task_update(self, body: dict):
+        """Apply a single task status update from SSE."""
         uid   = body.get('uid')
         state = body.get('state', '')
 
@@ -251,7 +148,7 @@ class EdgeExecutionBackend(BaseBackend):
             if key in body:
                 task[key] = body[key]
 
-        # Fire callback (thread-safe delivery to the event loop)
+        # Fire Rhapsody state callback (thread-safe)
         if self._loop and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(
                 self._callback_func, task, state)
@@ -261,39 +158,30 @@ class EdgeExecutionBackend(BaseBackend):
     # ------------------------------------------------------------------
 
     async def submit_tasks(self, tasks: list[dict[str, Any]]) -> None:
-        """Submit tasks to the remote edge for execution."""
+        """Submit tasks to the remote edge for execution.
+
+        Delegates to ``RhapsodyClient.submit_tasks()`` which handles
+        serialization, template compression, size-aware batching, and
+        concurrent pipelined submission.
+        """
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
 
-        serialized = []
+        # Register tasks locally for notification tracking
+        task_dicts = []
         for task in tasks:
-            td = self._serialize_task(task)
             self._tasks[task['uid']] = task
-            serialized.append(td)
+            task_dicts.append(dict(task))
 
-        resp = self._http.post(
-            f"{self._base_url}/submit/{self._sid}",
-            json={"tasks": serialized},
-        )
-        resp.raise_for_status()
-
-        # Update local UIDs if the remote assigned different ones
-        remote_results = resp.json()
-        if isinstance(remote_results, list):
-            for local, remote in zip(tasks, remote_results):
-                remote_uid = remote.get('uid')
-                if remote_uid and remote_uid != local['uid']:
-                    self._tasks[remote_uid] = self._tasks.pop(local['uid'])
-                    local['uid'] = remote_uid
+        # Delegate to RhapsodyClient — all optimizations apply
+        await asyncio.to_thread(self._rh.submit_tasks, task_dicts)
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a single task on the remote edge."""
         if uid not in self._tasks:
             return False
 
-        resp = self._http.post(
-            f"{self._base_url}/cancel/{self._sid}/{uid}")
-        resp.raise_for_status()
+        await asyncio.to_thread(self._rh.cancel_task, uid)
 
         task = self._tasks[uid]
         task['state'] = 'CANCELED'
@@ -302,29 +190,27 @@ class EdgeExecutionBackend(BaseBackend):
 
     async def cancel_all_tasks(self) -> int:
         """Cancel all non-terminal tasks on the remote edge."""
-        resp = self._http.post(
-            f"{self._base_url}/cancel_all/{self._sid}")
-        resp.raise_for_status()
-        return resp.json().get('canceled', 0)
+        result = await asyncio.to_thread(self._rh.cancel_all_tasks)
+        return result.get('canceled', 0)
 
     async def shutdown(self) -> None:
-        """Unregister the remote session and stop the SSE listener."""
+        """Close the RhapsodyClient session and BridgeClient."""
         self._backend_state = BackendMainStates.SHUTDOWN
 
-        # Stop SSE listener
-        self._sse_stop.set()
-        if self._sse_thread and self._sse_thread.is_alive():
-            self._sse_thread.join(timeout=5)
-
-        # Unregister remote session
-        if self._sid and self._base_url:
+        if self._rh:
             try:
-                self._http.post(
-                    f"{self._base_url}/unregister_session/{self._sid}")
+                self._rh.close()
             except Exception as e:
-                self.logger.warning("Failed to unregister session: %s", e)
+                self.logger.warning("Failed to close session: %s", e)
+            self._rh = None
 
-        self._http.close()
+        if self._bc:
+            try:
+                self._bc.close()
+            except Exception as e:
+                self.logger.warning("Failed to close bridge client: %s", e)
+            self._bc = None
+
         self.logger.info("Edge execution backend shutdown complete")
 
     async def state(self) -> str:
