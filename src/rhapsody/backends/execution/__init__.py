@@ -26,6 +26,13 @@ except ImportError:
     pass
 
 try:
+    from .edge import EdgeExecutionBackend  # noqa: F401
+
+    __all__.append("EdgeExecutionBackend")
+except ImportError:
+    pass
+
+try:
     from .dragon import DragonExecutionBackendV1  # noqa: F401
     from .dragon import DragonExecutionBackendV2  # noqa: F401
     from .dragon import DragonExecutionBackendV3  # noqa: F401
