@@ -23,9 +23,6 @@ except ImportError:
     BridgeClient = None
 
 
-TERMINAL_STATES = {'DONE', 'FAILED', 'CANCELED', 'COMPLETED'}
-
-
 def _get_logger() -> logging.Logger:
     return logging.getLogger(__name__)
 
@@ -45,8 +42,6 @@ class EdgeExecutionBackend(BaseBackend):
                      (default ``"rhapsody"``).
         backends:    Backend names to request on the remote session
                      (default ``["dragon_v3"]``).
-        verify_ssl:  Verify TLS certificates (default ``False`` for
-                     self-signed certs typical in HPC).
         name:        Backend name for Rhapsody registration
                      (default ``"edge"``).
     """
@@ -57,7 +52,6 @@ class EdgeExecutionBackend(BaseBackend):
         edge_name: str,
         plugin_name: str = "rhapsody",
         backends: list[str] | None = None,
-        verify_ssl: bool = False,
         name: str = "edge",
     ):
         super().__init__(name=name)
@@ -72,7 +66,6 @@ class EdgeExecutionBackend(BaseBackend):
         self._edge_name       = edge_name
         self._plugin_name     = plugin_name
         self._remote_backends = backends or ['dragon_v3']
-        self._verify_ssl      = verify_ssl
 
         self._bc   = None   # BridgeClient
         self._rh   = None   # RhapsodyClient (from get_plugin)
@@ -142,6 +135,12 @@ class EdgeExecutionBackend(BaseBackend):
 
         task = self._tasks[uid]
 
+        # Decode base64-encoded return values (bytes results)
+        if body.get('_return_value_encoding') == 'base64':
+            import base64
+            body['return_value'] = base64.b64decode(body['return_value'])
+            del body['_return_value_encoding']
+
         # Update local task dict with remote results
         for key in ('state', 'stdout', 'stderr', 'exit_code',
                     'return_value', 'exception', 'error'):
@@ -166,6 +165,12 @@ class EdgeExecutionBackend(BaseBackend):
         """
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
+
+        # Ensure all tasks have UIDs before registration
+        import uuid
+        for task in tasks:
+            if 'uid' not in task:
+                task['uid'] = f"task.{uuid.uuid4().hex[:8]}"
 
         # Register tasks locally for notification tracking
         task_dicts = []
