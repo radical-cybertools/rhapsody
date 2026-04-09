@@ -70,7 +70,8 @@ class TestDaskTelemetryAdapter:
             backend_name="dask",
             interval=0.05,
         )
-        adapter.start(manager)
+        manager.register_adapter(adapter)
+        adapter.start()
         await asyncio.sleep(0.25)
         adapter.stop()
 
@@ -102,7 +103,8 @@ class TestDaskTelemetryAdapter:
             backend_name="dask",
             interval=0.05,
         )
-        adapter.start(manager)
+        manager.register_adapter(adapter)
+        adapter.start()
         await asyncio.sleep(0.2)
         adapter.stop()
 
@@ -123,7 +125,8 @@ class TestDaskTelemetryAdapter:
             backend_name="dask",
             interval=0.05,
         )
-        adapter.start(manager)
+        manager.register_adapter(adapter)
+        adapter.start()
         await asyncio.sleep(0.2)
         adapter.stop()
 
@@ -175,7 +178,8 @@ class TestDaskTelemetryAdapter:
             backend_name="dask",
             interval=0.05,
         )
-        adapter.start(manager)
+        manager.register_adapter(adapter)
+        adapter.start()
         await asyncio.sleep(0.2)
         adapter.stop()
 
@@ -201,7 +205,8 @@ class TestDaskTelemetryAdapter:
             backend_name="dask",
             interval=0.05,
         )
-        adapter.start(manager)
+        manager.register_adapter(adapter)
+        adapter.start()
         await asyncio.sleep(0.2)
         adapter.stop()
 
@@ -225,7 +230,8 @@ class TestDaskTelemetryAdapter:
             backend_name="dask",
             interval=0.05,
         )
-        adapter.start(manager)
+        manager.register_adapter(adapter)
+        adapter.start()
         await asyncio.sleep(0.2)
         adapter.stop()
 
@@ -247,7 +253,8 @@ class TestDaskTelemetryAdapter:
             backend_name="dask",
             interval=0.05,
         )
-        adapter.start(manager)
+        manager.register_adapter(adapter)
+        adapter.start()
         await asyncio.sleep(0.2)
         adapter.stop()
         # No crash — received may be empty but no exception propagated
@@ -261,7 +268,8 @@ class TestDaskTelemetryAdapter:
             backend_name="dask",
             interval=100.0,
         )
-        adapter.start(manager)
+        manager.register_adapter(adapter)
+        adapter.start()
         assert adapter._task is not None
         assert not adapter._task.done()
 
@@ -281,7 +289,8 @@ class TestDaskTelemetryAdapter:
             backend_name="dask",
             interval=0.05,
         )
-        adapter.start(manager)
+        manager.register_adapter(adapter)
+        adapter.start()
         await asyncio.sleep(0.2)
         adapter.stop()
 

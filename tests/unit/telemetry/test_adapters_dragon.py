@@ -52,6 +52,10 @@ class _FakeManager:
         with self._lock:
             self.events.append(event)
 
+    def register_adapter(self, adapter) -> None:
+        """Inject self as adapter._manager (mirrors TelemetryManager.register_adapter)."""
+        adapter._manager = self
+
     def resource_updates(self):
         with self._lock:
             from rhapsody.telemetry.events import ResourceUpdate
@@ -87,7 +91,8 @@ def test_noop_when_telemetry_level_zero():
         manager = _FakeManager()
 
         async def _check():
-            adapter.start(manager)
+            manager.register_adapter(adapter)
+            adapter.start()
             # Give thread a moment to detect level < 1 and exit
             await asyncio.sleep(0.3)
             adapter.stop()
@@ -131,7 +136,8 @@ def test_adapter_emits_resource_update():
         manager = _FakeManager()
 
         async def _run_adapter():
-            adapter.start(manager)
+            manager.register_adapter(adapter)
+            adapter.start()
             # Wait up to 15 seconds for at least one ResourceUpdate
             deadline = time.monotonic() + 15.0
             while time.monotonic() < deadline:
@@ -191,7 +197,8 @@ def test_adapter_stops_cleanly():
         manager = _FakeManager()
 
         async def _lifecycle():
-            adapter.start(manager)
+            manager.register_adapter(adapter)
+            adapter.start()
             # Wait until at least spawned (give up to 10s)
             await asyncio.sleep(5.0)
             adapter.stop()

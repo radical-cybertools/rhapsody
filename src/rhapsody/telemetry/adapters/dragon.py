@@ -266,7 +266,7 @@ class DragonTelemetryAdapter(TelemetryAdapter):
         self._node_id = os.uname().nodename
         self._group = None  # Dragon ProcessGroup — set in _collect_loop, used in stop()
 
-    def start(self, manager: TelemetryManager) -> None:
+    def start(self) -> None:
         # Guard: Dragon must be importable.
         try:
             import dragon.telemetry  # noqa: F401, PLC0415
@@ -274,7 +274,6 @@ class DragonTelemetryAdapter(TelemetryAdapter):
             logger.debug("Dragon not available — DragonTelemetryAdapter is a no-op")
             return
 
-        self._manager = manager
         self._running = True
 
         try:

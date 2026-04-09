@@ -66,8 +66,7 @@ class DaskTelemetryAdapter(TelemetryAdapter):
         # Per-worker disk I/O baseline for delta calculations: addr → (read, write)
         self._prev_disk: dict[str, tuple[float, float]] = {}
 
-    def start(self, manager: TelemetryManager) -> None:
-        self._manager = manager
+    def start(self) -> None:
         self._running = True
         self._task = asyncio.create_task(self._collect_loop(), name="telemetry-dask-adapter")
 

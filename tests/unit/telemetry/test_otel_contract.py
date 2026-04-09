@@ -176,7 +176,8 @@ class TestResourceUpdateOTelContract:
 
         with patch("pynvml.nvmlInit", side_effect=Exception("no GPU")):
             adapter = make_adapter()
-            adapter.start(manager)
+            manager.register_adapter(adapter)
+            adapter.start()
             await asyncio.sleep(wait)
             adapter.stop()
 
@@ -197,7 +198,8 @@ class TestResourceUpdateOTelContract:
 
         with patch("pynvml.nvmlInit", side_effect=Exception("no GPU")):
             adapter = make_adapter()
-            adapter.start(manager)
+            manager.register_adapter(adapter)
+            adapter.start()
             await asyncio.sleep(wait)
             adapter.stop()
 
@@ -214,7 +216,8 @@ class TestResourceUpdateOTelContract:
 
         with patch("pynvml.nvmlInit", side_effect=Exception("no GPU")):
             adapter = make_adapter(session_id="contract-session")
-            adapter.start(manager)
+            manager.register_adapter(adapter)
+            adapter.start()
             await asyncio.sleep(wait)
             adapter.stop()
 
@@ -250,7 +253,8 @@ class TestResourceUpdateOTelContract:
 
         with patch.dict("sys.modules", {"pynvml": mock_pynvml}):
             adapter = make_adapter()
-            adapter.start(manager)
+            manager.register_adapter(adapter)
+            adapter.start()
             await asyncio.sleep(0.3)
             adapter.stop()
 

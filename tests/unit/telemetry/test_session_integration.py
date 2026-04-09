@@ -144,6 +144,32 @@ class TestStartTelemetry:
         assert telemetry._running is False
         assert session._telemetry is None
 
+    async def test_adapter_start_failure_propagates(self, backend):
+        """An adapter whose start() raises must propagate through start_telemetry()."""
+        from rhapsody.telemetry.adapters.base import TelemetryAdapter
+
+        class BrokenAdapter(TelemetryAdapter):
+            def start(self) -> None:
+                raise RuntimeError("adapter broken")
+
+            def stop(self) -> None:
+                pass
+
+        from rhapsody.telemetry.manager import TelemetryManager
+
+        manager = TelemetryManager(session_id="test-broken")
+        manager.register_adapter(BrokenAdapter())
+        with pytest.raises(RuntimeError, match="adapter broken"):
+            await manager.start()
+        # Manager must not be left in a running state on failure
+        # (dispatch task may have been created — cancel it to avoid task leak)
+        if manager._dispatch_task and not manager._dispatch_task.done():
+            manager._dispatch_task.cancel()
+            try:
+                await manager._dispatch_task
+            except asyncio.CancelledError:
+                pass
+
 
 # ------------------------------------------------------------------
 # Helpers

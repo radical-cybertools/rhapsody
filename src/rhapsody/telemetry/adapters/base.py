@@ -7,7 +7,7 @@ from abc import abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from rhapsody.telemetry.manager import TelemetryManager
+    pass
 
 
 class TelemetryAdapter(ABC):
@@ -24,11 +24,12 @@ class TelemetryAdapter(ABC):
     """
 
     @abstractmethod
-    def start(self, manager: TelemetryManager) -> None:
-        """Start resource collection and attach to manager.
+    def start(self) -> None:
+        """Start resource collection.
 
-        Args:
-            manager: The active TelemetryManager to emit events into.
+        ``self._manager`` is guaranteed to be set before this is called —
+        :meth:`~rhapsody.telemetry.manager.TelemetryManager.register_adapter`
+        injects the back-reference at registration time.
         """
 
     @abstractmethod

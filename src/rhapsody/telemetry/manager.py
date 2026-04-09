@@ -154,10 +154,7 @@ class TelemetryManager:
             )
 
         for adapter in self._adapters:
-            try:
-                adapter.start(self)
-            except Exception:
-                logger.exception("Adapter %s failed to start", type(adapter).__name__)
+            adapter.start()
 
         self.emit(
             make_event(
@@ -233,7 +230,12 @@ class TelemetryManager:
         self._subscribers.append(callback)
 
     def register_adapter(self, adapter: TelemetryAdapter) -> None:
-        """Register a backend telemetry adapter."""
+        """Register a backend telemetry adapter.
+
+        Injects ``self`` as the adapter's manager so :meth:`TelemetryAdapter.start`
+        requires no arguments — the back-reference is set here, once.
+        """
+        adapter._manager = self
         self._adapters.append(adapter)
 
     def read_metrics(self) -> Any:

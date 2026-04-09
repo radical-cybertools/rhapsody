@@ -61,8 +61,7 @@ class ConcurrentTelemetryAdapter(TelemetryAdapter):
         self._running = False
         self._node_id = socket.gethostname()
 
-    def start(self, manager: TelemetryManager) -> None:
-        self._manager = manager
+    def start(self) -> None:
         try:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:

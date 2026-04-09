@@ -360,7 +360,7 @@ class Session:
                 )
                 self._telemetry.register_adapter(adapter)
                 if self._telemetry._running:
-                    adapter.start(self._telemetry)
+                    adapter.start()
                 return
         except Exception:
             logger.warning("Could not attach ConcurrentTelemetryAdapter", exc_info=True)
@@ -379,7 +379,7 @@ class Session:
                     )
                     self._telemetry.register_adapter(adapter)
                     if self._telemetry._running:
-                        adapter.start(self._telemetry)
+                        adapter.start()
             except Exception:
                 logger.warning("Could not attach DaskTelemetryAdapter", exc_info=True)
             return
@@ -394,7 +394,7 @@ class Session:
                 )
                 self._telemetry.register_adapter(adapter)
                 if self._telemetry._running:
-                    adapter.start(self._telemetry)
+                    adapter.start()
             except Exception:
                 logger.warning("Could not attach DragonTelemetryAdapter", exc_info=True)
 

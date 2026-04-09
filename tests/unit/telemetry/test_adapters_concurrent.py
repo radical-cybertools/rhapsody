@@ -37,7 +37,8 @@ class TestConcurrentTelemetryAdapter:
             patch("psutil.cpu_percent", return_value=42.0),
             patch("psutil.virtual_memory", return_value=MagicMock(percent=55.0)),
         ):
-            adapter.start(manager)
+            manager.register_adapter(adapter)
+            adapter.start()
             await asyncio.sleep(0.3)  # give the daemon thread time to fire
             adapter.stop()
 
@@ -63,7 +64,8 @@ class TestConcurrentTelemetryAdapter:
             patch("psutil.virtual_memory", return_value=MagicMock(percent=20.0)),
             patch("pynvml.nvmlInit", side_effect=Exception("no NVIDIA GPU")),
         ):
-            adapter.start(manager)
+            manager.register_adapter(adapter)
+            adapter.start()
             await asyncio.sleep(0.3)
             adapter.stop()
 
@@ -84,7 +86,8 @@ class TestConcurrentTelemetryAdapter:
             patch("psutil.cpu_percent", return_value=0.0),
             patch("psutil.virtual_memory", return_value=MagicMock(percent=0.0)),
         ):
-            adapter.start(manager)
+            manager.register_adapter(adapter)
+            adapter.start()
             assert adapter._thread is not None
             assert adapter._thread.is_alive()
             assert adapter._thread.daemon  # must be daemon so it doesn't block process exit
@@ -107,7 +110,8 @@ class TestConcurrentTelemetryAdapter:
             interval=0.05,
         )
         with patch("builtins.__import__", side_effect=mock_import):
-            adapter.start(manager)
+            manager.register_adapter(adapter)
+            adapter.start()
             await asyncio.sleep(0.15)
             adapter.stop()
         # No exception raised — adapter is a silent no-op
