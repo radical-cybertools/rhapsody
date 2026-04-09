@@ -84,8 +84,9 @@ def _rhapsody_telemetry_worker(
 
     # Import GPU helpers from Dragon's collector.
     # FIXME: We should not do that, but due to a bug in Dragon where if we
-    # enable telemetry everything hangs. Once it is fixed we will rely on
-    # Dragon telemetry and AnalysisClient to get the data from each node
+    # enable telemetry everything hangs (specifically adding the AnalysisClient).
+    # Once it is fixed we will rely on Dragon telemetry and AnalysisClient
+    # to get the data from each node
     try:
         from dragon.infrastructure.gpu_desc import AccVendor  # noqa: PLC0415
         from dragon.telemetry.collector import get_amd_metrics  # noqa: PLC0415

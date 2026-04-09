@@ -363,7 +363,7 @@ class TelemetryManager:
                 session_id=self._session_id,
                 backend=task.get("backend", ""),
                 task_id=task["uid"],
-                event_time=task.get("history", {}).get("submitted", time.time()),
+                event_time=time.time(),
                 attributes={
                     "executable": _task_executable(task),
                     "task_type": task.get("task_type", ""),
@@ -651,6 +651,8 @@ class TelemetryManager:
             span.set_attribute("status", "completed")
             span.set_attribute("executable", executable)
             span.set_attribute("task_type", task_type)
+            if event.attributes.get("incomplete_lifecycle"):
+                span.set_attribute("incomplete_lifecycle", True)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
 
@@ -680,6 +682,8 @@ class TelemetryManager:
             span.set_attribute("error_type", error_type)
             span.set_attribute("executable", executable)
             span.set_attribute("task_type", task_type)
+            if event.attributes.get("incomplete_lifecycle"):
+                span.set_attribute("incomplete_lifecycle", True)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
 

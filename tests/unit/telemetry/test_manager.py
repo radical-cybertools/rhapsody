@@ -400,6 +400,115 @@ class TestCheckpointFile:
         assert m._checkpoint_file is None
 
 
+class TestTaskStateTransitions:
+    """Verify _on_task_state_change handles all RUNNING / DONE / FAILED orderings.
+
+    These tests exercise TelemetryManager directly — no backend required. The RUNNING → DONE/FAILED
+    path reflects how backends that emit an explicit RUNNING callback (e.g. Dragon V3 after
+    build_task) are expected to behave. The DONE/FAILED-without-RUNNING path verifies the
+    incomplete_lifecycle fallback.
+    """
+
+    def _make_task(self, uid: str, exc=None) -> dict:
+        t: dict = {"uid": uid, "backend": "test", "task_type": "FunctionTask"}
+        if exc is not None:
+            t["exception"] = exc
+        return t
+
+    async def test_running_then_done_gives_accurate_duration(self, manager):
+        """RUNNING → DONE: duration_seconds must reflect real elapsed time."""
+        task = self._make_task("t-rd")
+        manager._on_task_state_change(task, "RUNNING")
+        await asyncio.sleep(0.05)
+        manager._on_task_state_change(task, "DONE")
+        await asyncio.sleep(0.1)
+
+        spans = [s for s in manager.read_traces() if s.name == "task"]
+        assert len(spans) == 1
+        dur = (spans[0].end_time - spans[0].start_time) / 1e9
+        assert 0.04 < dur < 5.0, f"Unexpected duration: {dur:.4f}s"
+        assert spans[0].attributes.get("status") == "completed"
+        assert not spans[0].attributes.get("incomplete_lifecycle", False)
+
+    async def test_running_then_failed_gives_accurate_duration(self, manager):
+        """RUNNING → FAILED: duration_seconds must reflect real elapsed time."""
+        task = self._make_task("t-rf", exc=RuntimeError("boom"))
+        manager._on_task_state_change(task, "RUNNING")
+        await asyncio.sleep(0.05)
+        manager._on_task_state_change(task, "FAILED")
+        await asyncio.sleep(0.1)
+
+        spans = [s for s in manager.read_traces() if s.name == "task"]
+        assert len(spans) == 1
+        dur = (spans[0].end_time - spans[0].start_time) / 1e9
+        assert 0.04 < dur < 5.0, f"Unexpected duration: {dur:.4f}s"
+        assert spans[0].attributes.get("status") == "failed"
+        assert spans[0].attributes.get("error_type") == "RuntimeError"
+        assert not spans[0].attributes.get("incomplete_lifecycle", False)
+
+    async def test_done_without_running_sets_incomplete_lifecycle(self, manager):
+        """DONE without prior RUNNING: incomplete_lifecycle=True is set."""
+        task = self._make_task("t-d-no-run")
+        manager._on_task_state_change(task, "DONE")
+        await asyncio.sleep(0.1)
+
+        spans = manager.task_spans()
+        assert len(spans) == 1
+        assert spans[0].get("incomplete_lifecycle") is True
+        assert _sum_counter(manager.read_metrics(), "tasks_completed") >= 1
+
+    async def test_failed_without_running_sets_incomplete_lifecycle(self, manager):
+        """FAILED without prior RUNNING: incomplete_lifecycle=True, error_type preserved."""
+        task = self._make_task("t-f-no-run", exc=ValueError("no start seen"))
+        manager._on_task_state_change(task, "FAILED")
+        await asyncio.sleep(0.1)
+
+        spans = manager.task_spans()
+        assert len(spans) == 1
+        assert spans[0].get("incomplete_lifecycle") is True
+        assert spans[0]["status"] == "failed"
+        assert spans[0]["error_type"] == "ValueError"
+
+    async def test_start_time_cleared_after_done(self, manager):
+        """_task_start_times must not leak entries after DONE."""
+        task = self._make_task("t-leak-done")
+        manager._on_task_state_change(task, "RUNNING")
+        assert "t-leak-done" in manager._task_start_times
+        manager._on_task_state_change(task, "DONE")
+        await asyncio.sleep(0.05)
+        assert "t-leak-done" not in manager._task_start_times
+
+    async def test_start_time_cleared_after_failed(self, manager):
+        """_task_start_times must not leak entries after FAILED."""
+        task = self._make_task("t-leak-fail", exc=Exception("x"))
+        manager._on_task_state_change(task, "RUNNING")
+        assert "t-leak-fail" in manager._task_start_times
+        manager._on_task_state_change(task, "FAILED")
+        await asyncio.sleep(0.05)
+        assert "t-leak-fail" not in manager._task_start_times
+
+    async def test_concurrent_tasks_tracked_independently(self, manager):
+        """Multiple in-flight tasks must not cross-contaminate durations."""
+        t1 = self._make_task("conc-1")
+        t2 = self._make_task("conc-2")
+        manager._on_task_state_change(t1, "RUNNING")
+        await asyncio.sleep(0.03)
+        manager._on_task_state_change(t2, "RUNNING")
+        await asyncio.sleep(0.05)
+        manager._on_task_state_change(t1, "DONE")
+        await asyncio.sleep(0.04)
+        manager._on_task_state_change(t2, "DONE")
+        await asyncio.sleep(0.1)
+
+        assert manager._task_start_times == {}
+
+        spans = {s["task_id"]: s for s in manager.task_spans()}
+        assert "conc-1" in spans
+        assert "conc-2" in spans
+        for tid, span in spans.items():
+            assert not span.get("incomplete_lifecycle"), f"{tid} wrongly marked incomplete"
+
+
 # ------------------------------------------------------------------
 # Helpers to navigate OTel MetricsData
 # ------------------------------------------------------------------
