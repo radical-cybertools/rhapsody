@@ -1,4 +1,4 @@
-"""Unit tests for Session.enable_telemetry() integration."""
+"""Unit tests for Session.start_telemetry() integration."""
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -20,34 +20,52 @@ async def backend():
     await b.shutdown()
 
 
-class TestEnableTelemetry:
+class TestStartTelemetry:
     async def test_returns_telemetry_manager(self, backend):
         session = Session(backends=[backend])
-        telemetry = session.enable_telemetry()
+        telemetry = await session.start_telemetry()
         assert isinstance(telemetry, TelemetryManager)
         assert session._telemetry is telemetry
+        await session.close()
 
     async def test_observer_wired(self, backend):
         session = Session(backends=[backend])
-        telemetry = session.enable_telemetry()
+        telemetry = await session.start_telemetry()
         assert session._state_manager._telemetry_observer == telemetry._on_task_state_change
+        await session.close()
 
-    async def test_no_otel_import_before_start(self, backend):
-        """enable_telemetry() must not import opentelemetry at call time."""
+    async def test_no_otel_import_before_start_telemetry(self, backend):
+        """Session creation must not import opentelemetry before start_telemetry() is called."""
         import sys
 
-        session = Session(backends=[backend])
         before = set(sys.modules.keys())
-        session.enable_telemetry()
+        session = Session(backends=[backend])
         after = set(sys.modules.keys())
         new_modules = after - before
-        # opentelemetry.sdk should not be imported yet
         assert not any("opentelemetry.sdk" in m for m in new_modules)
+
+    async def test_already_started_on_return(self, backend):
+        """start_telemetry() must return an already-running manager (no separate start needed)."""
+        session = Session(backends=[backend])
+        telemetry = await session.start_telemetry()
+        assert telemetry._running is True
+        await session.close()
+
+    async def test_get_telemetry_returns_manager(self, backend):
+        session = Session(backends=[backend])
+        await session.start_telemetry()
+        telemetry = session.get_telemetry()
+        assert isinstance(telemetry, TelemetryManager)
+        await session.close()
+
+    async def test_get_telemetry_raises_if_not_started(self, backend):
+        session = Session(backends=[backend])
+        with pytest.raises(RuntimeError, match="start_telemetry"):
+            session.get_telemetry()
 
     async def test_task_submitted_event(self, backend):
         session = Session(backends=[backend])
-        telemetry = session.enable_telemetry()
-        await telemetry.start()
+        telemetry = await session.start_telemetry()
 
         received = []
         telemetry.subscribe(lambda e: received.append(e))
@@ -63,8 +81,7 @@ class TestEnableTelemetry:
 
     async def test_full_lifecycle_events(self, backend):
         session = Session(backends=[backend])
-        telemetry = session.enable_telemetry()
-        await telemetry.start()
+        telemetry = await session.start_telemetry()
 
         received = []
         telemetry.subscribe(lambda e: received.append(e))
@@ -86,8 +103,7 @@ class TestEnableTelemetry:
 
     async def test_read_metrics_after_tasks(self, backend):
         session = Session(backends=[backend])
-        telemetry = session.enable_telemetry()
-        await telemetry.start()
+        telemetry = await session.start_telemetry()
 
         tasks = [ComputeTask(executable="/bin/echo", arguments=[str(i)]) for i in range(5)]
         await session.submit_tasks(tasks)
@@ -106,8 +122,7 @@ class TestEnableTelemetry:
 
     async def test_read_traces_after_tasks(self, backend):
         session = Session(backends=[backend])
-        telemetry = session.enable_telemetry()
-        await telemetry.start()
+        telemetry = await session.start_telemetry()
 
         tasks = [ComputeTask(executable="/bin/echo", arguments=[str(i)]) for i in range(3)]
         await session.submit_tasks(tasks)
@@ -123,8 +138,7 @@ class TestEnableTelemetry:
 
     async def test_close_stops_telemetry(self, backend):
         session = Session(backends=[backend])
-        telemetry = session.enable_telemetry()
-        await telemetry.start()
+        telemetry = await session.start_telemetry()
         assert telemetry._running is True
         await session.close()
         assert telemetry._running is False

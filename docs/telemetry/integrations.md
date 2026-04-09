@@ -18,7 +18,7 @@ RHAPSODY uses `opentelemetry-sdk` internally with **in-memory providers** (no ex
 
 ### Connecting an OTLP exporter (Jaeger, Tempo, Dynatrace…)
 
-Because RHAPSODY uses the standard OTel SDK, you can add any exporter **before** calling `telemetry.start()`:
+Because RHAPSODY uses the standard OTel SDK, you can add any exporter **before** calling `start_telemetry()`:
 
 ```python
 from opentelemetry.sdk.trace import TracerProvider
@@ -31,14 +31,13 @@ provider.add_span_processor(
     BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317"))
 )
 
-# Inject it before start
+# Inject it before start_telemetry()
 from opentelemetry import trace
 trace.set_tracer_provider(provider)
 
-telemetry = session.enable_telemetry(checkpoint_path="./tel/")
-await telemetry.start()
+telemetry = await session.start_telemetry(checkpoint_path="./tel/")
 # … run session …
-await telemetry.stop()
+await session.close()   # stops telemetry automatically
 ```
 
 All task spans will now appear in Jaeger / Grafana Tempo alongside the in-memory copy.
@@ -95,11 +94,10 @@ provider = MeterProvider(metric_readers=[reader])
 from opentelemetry import metrics
 metrics.set_meter_provider(provider)
 
-telemetry = session.enable_telemetry(
+telemetry = await session.start_telemetry(
     resource_poll_interval=5.0,
     checkpoint_path="./tel/",
 )
-await telemetry.start()
 ```
 
 ### Step 4 — import the Grafana dashboard
@@ -157,15 +155,14 @@ class SLAMonitor:
 
 
 # Usage
-telemetry = session.enable_telemetry()
-await telemetry.start()
+telemetry = await session.start_telemetry()
 monitor = SLAMonitor(telemetry)
 
 async with session:
     await session.submit_tasks(tasks)
     await session.wait_tasks(tasks)
+# session.close() called by async with — stops telemetry automatically
 
-await telemetry.stop()
 monitor.report()
 ```
 

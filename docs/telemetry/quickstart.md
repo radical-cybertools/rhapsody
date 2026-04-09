@@ -23,20 +23,18 @@ async def main():
     backend = ConcurrentExecutionBackend(num_workers=4)
     session = Session(backends=[backend])
 
-    # 1. Enable telemetry — returns a TelemetryManager
-    telemetry = session.enable_telemetry(
+    # 1. Start telemetry — single await, returns TelemetryManager
+    telemetry = await session.start_telemetry(
         resource_poll_interval=2.0,      # collect node metrics every 2 s
         checkpoint_path="./telemetry/",  # write a JSONL file here
     )
-    await telemetry.start()
 
     # 2. Submit your workload
     tasks = [ComputeTask(executable="/bin/sleep", arguments=["0.1"]) for _ in range(20)]
     async with session:
         await session.submit_tasks(tasks)
         await session.wait_tasks(tasks)
-
-    await telemetry.stop()
+    # session.close() (called by async with) stops telemetry automatically
 
     # 3. Inspect results — no OTel knowledge required
     print(telemetry.summary())
@@ -170,19 +168,21 @@ This produces a multi-panel PNG (shown in [Integrations — Real Run Visualizati
 
 ---
 
-## `enable_telemetry` parameters
+## `start_telemetry` parameters
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `resource_poll_interval` | `float` | `5.0` | Seconds between resource metric polls |
-| `checkpoint_interval` | `float \| None` | `None` | Seconds between periodic metric+span flushes. `None` = flush only at `stop()` |
+| `checkpoint_interval` | `float \| None` | `None` | Seconds between periodic metric+span flushes. `None` = flush only at session end |
 | `checkpoint_path` | `str \| None` | `None` | Directory for the JSONL file. `None` = no file output |
+
+To access the manager after the initial call use `session.get_telemetry()`.
 
 ---
 
 ## What gets collected automatically
 
-Once `enable_telemetry()` is called, RHAPSODY hooks into the task state manager and registers the appropriate backend adapter. You do not need to instrument individual tasks.
+Once `await session.start_telemetry()` is called, RHAPSODY hooks into the task state manager and registers the appropriate backend adapter. You do not need to instrument individual tasks.
 
 | Source | Automatic? | Notes |
 |---|---|---|

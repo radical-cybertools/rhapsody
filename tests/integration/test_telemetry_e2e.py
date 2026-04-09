@@ -26,8 +26,7 @@ N = 20
 async def test_telemetry_e2e_20_tasks():
     backend = await ConcurrentExecutionBackend(executor=ThreadPoolExecutor(max_workers=8))
     session = Session(backends=[backend])
-    telemetry = session.enable_telemetry(resource_poll_interval=0.1)
-    await telemetry.start()
+    telemetry = await session.start_telemetry(resource_poll_interval=0.1)
 
     received = []
     telemetry.subscribe(lambda e: received.append(e))
@@ -96,8 +95,7 @@ async def test_telemetry_e2e_20_tasks():
 async def test_subscriber_receives_all_events():
     backend = await ConcurrentExecutionBackend(executor=ThreadPoolExecutor(max_workers=4))
     session = Session(backends=[backend])
-    telemetry = session.enable_telemetry()
-    await telemetry.start()
+    telemetry = await session.start_telemetry()
 
     received = []
     telemetry.subscribe(lambda e: received.append(e))
@@ -112,13 +110,12 @@ async def test_subscriber_receives_all_events():
     assert len(received) >= 12
 
 
-async def test_enable_telemetry_after_backend_added():
-    """enable_telemetry() called after add_backend() must still attach adapters."""
+async def test_start_telemetry_after_backend_added():
+    """start_telemetry() called after add_backend() must still attach adapters."""
     backend = await ConcurrentExecutionBackend(executor=ThreadPoolExecutor(max_workers=2))
     session = Session()
     session.add_backend(backend)
-    telemetry = session.enable_telemetry()
-    await telemetry.start()
+    telemetry = await session.start_telemetry()
 
     # ConcurrentTelemetryAdapter should have been registered
     assert len(telemetry._adapters) >= 1
@@ -134,11 +131,10 @@ async def test_checkpoint_file_e2e():
     with tempfile.TemporaryDirectory() as tmpdir:
         backend = await ConcurrentExecutionBackend(executor=ThreadPoolExecutor(max_workers=4))
         session = Session(backends=[backend])
-        telemetry = session.enable_telemetry(
+        telemetry = await session.start_telemetry(
             resource_poll_interval=0.1,
             checkpoint_path=tmpdir,
         )
-        await telemetry.start()
 
         tasks = [ComputeTask(executable="/bin/echo", arguments=[str(i)]) for i in range(5)]
         await session.submit_tasks(tasks)
@@ -180,8 +176,7 @@ async def test_summary_and_task_spans_e2e():
     """Summary() and task_spans() return correct plain-dict data after session."""
     backend = await ConcurrentExecutionBackend(executor=ThreadPoolExecutor(max_workers=4))
     session = Session(backends=[backend])
-    telemetry = session.enable_telemetry()
-    await telemetry.start()
+    telemetry = await session.start_telemetry()
 
     tasks = [ComputeTask(executable="/bin/echo", arguments=[str(i)]) for i in range(4)]
     tasks.append(ComputeTask(executable="/bin/false"))  # intentional failure

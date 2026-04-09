@@ -129,11 +129,10 @@ At default settings (5 s poll, checkpoint on stop), telemetry overhead is neglig
 Yes. Omit `checkpoint_path`:
 
 ```python
-telemetry = session.enable_telemetry(resource_poll_interval=5.0)
-await telemetry.start()
+telemetry = await session.start_telemetry(resource_poll_interval=5.0)
 ```
 
-All in-memory data (metrics, spans, event log) remains available via `telemetry.summary()`, `telemetry.read_metrics()`, and `telemetry.read_traces()` until `stop()` is called.
+All in-memory data (metrics, spans, event log) remains available via `telemetry.summary()`, `telemetry.read_metrics()`, and `telemetry.read_traces()` until `session.close()` is called.
 
 ---
 

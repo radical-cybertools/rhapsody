@@ -281,21 +281,22 @@ class Session:
 
         return tasks
 
-    def enable_telemetry(
+    async def start_telemetry(
         self,
         resource_poll_interval: float = 5.0,
         checkpoint_interval: float | None = None,
         checkpoint_path: str | None = None,
     ) -> TelemetryManager:
-        """Enable telemetry collection for this session.
+        """Enable and start telemetry collection for this session in one call.
 
         Creates a :class:`~rhapsody.telemetry.manager.TelemetryManager`, wires it
-        into the task state manager, and registers backend-specific adapters.
+        into the task state manager, registers backend-specific adapters, and starts
+        the async dispatch loop — all in a single ``await``.
 
-        Must be called **before** ``await session.submit_tasks()``. Call
-        ``await telemetry.start()`` to activate the dispatch loop before submitting
-        tasks, or let it be started automatically when the session context manager
-        is entered.
+        Telemetry stops automatically when :meth:`close` is called. There is no need
+        to call ``stop()`` on the returned manager separately.
+
+        Must be called **before** ``await session.submit_tasks()``.
 
         Args:
             resource_poll_interval: Seconds between resource metric polls (default: 5.0).
@@ -306,6 +307,9 @@ class Session:
 
         Returns:
             The active :class:`~rhapsody.telemetry.manager.TelemetryManager`.
+            Use it for optional advanced operations: ``subscribe()``, ``summary()``,
+            ``task_spans()``, ``read_metrics()``, ``read_traces()``.
+            Or retrieve it later via :meth:`get_telemetry`.
         """
         from rhapsody.telemetry.manager import TelemetryManager  # deferred import
 
@@ -320,6 +324,19 @@ class Session:
         for backend in self.backends.values():
             self._attach_telemetry_adapter(backend)
 
+        await self._telemetry.start()
+        return self._telemetry
+
+    def get_telemetry(self) -> TelemetryManager:
+        """Return the active TelemetryManager.
+
+        Raises:
+            RuntimeError: If telemetry has not been started via :meth:`start_telemetry`.
+        """
+        if self._telemetry is None:
+            raise RuntimeError(
+                "Telemetry not started. Call `await session.start_telemetry()` first."
+            )
         return self._telemetry
 
     def _attach_telemetry_adapter(self, backend: BaseBackend) -> None:

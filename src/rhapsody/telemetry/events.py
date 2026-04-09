@@ -4,8 +4,9 @@ All telemetry originates from these normalized events. Frozen dataclasses ensure
 immutability and safe zero-copy fan-out to multiple subscribers.
 
 Canonical lifecycle:
-    TaskSubmitted → (TaskQueued) → TaskStarted → TaskCompleted | TaskFailed
+    (TaskCreated) → TaskSubmitted → (TaskQueued) → TaskStarted → TaskCompleted | TaskFailed
 
+TaskCreated is optional (DAG-aware runtimes only, e.g. AsyncFlow).
 TaskQueued is optional. TaskStarted is the authoritative "execution began" event.
 """
 
@@ -70,6 +71,20 @@ class SessionEnded(BaseEvent):
 
     duration_seconds: float = 0.0
     event_type: str = field(default="SessionEnded", init=False)
+
+
+@dataclass(frozen=True)
+class TaskCreated(BaseEvent):
+    """Emitted when a task object is created and registered, before backend submission.
+
+    Used by DAG-aware runtimes (e.g. AsyncFlow) where a future is created at DAG
+    node definition time — before dependencies are resolved or the task is submitted.
+    Also useful in Session contexts for tracking the registration-to-submission latency.
+
+    attributes keys: executable, task_type, dag_dependencies (DAG contexts only)
+    """
+
+    event_type: str = field(default="TaskCreated", init=False)
 
 
 @dataclass(frozen=True)

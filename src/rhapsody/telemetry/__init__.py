@@ -6,8 +6,7 @@ metrics and traces backend (in-memory, no exporters).
 Usage::
 
     session = Session(backends=[backend])
-    telemetry = session.enable_telemetry()
-    await telemetry.start()
+    telemetry = await session.start_telemetry(checkpoint_path="./out/")
 
     telemetry.subscribe(lambda e: print(e.event_type))
 
@@ -17,6 +16,7 @@ Usage::
 
     spans   = telemetry.read_traces()
     metrics = telemetry.read_metrics()
+    # telemetry stops automatically when session.close() is called
 
 Install::
 
@@ -28,6 +28,7 @@ from rhapsody.telemetry.events import ResourceUpdate
 from rhapsody.telemetry.events import SessionEnded
 from rhapsody.telemetry.events import SessionStarted
 from rhapsody.telemetry.events import TaskCompleted
+from rhapsody.telemetry.events import TaskCreated
 from rhapsody.telemetry.events import TaskFailed
 from rhapsody.telemetry.events import TaskQueued
 from rhapsody.telemetry.events import TaskStarted
@@ -43,6 +44,7 @@ __all__ = [
     "BaseEvent",
     "SessionStarted",
     "SessionEnded",
+    "TaskCreated",
     "TaskSubmitted",
     "TaskQueued",
     "TaskStarted",
