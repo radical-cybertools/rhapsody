@@ -58,9 +58,13 @@ class EdgeExecutionBackend(BaseBackend):
                        (default 0.05).  Set to 0 to disable batching.
         batch_limit:   Max tasks per batch — triggers an immediate flush
                        when reached (default 1024).
+        notify_batch_window:  Edge-side notification batch window
+                       (seconds).  ``None`` uses server default.
+        notify_batch_size:    Edge-side notification batch size.
+                       ``None`` uses server default.
     """
 
-    _DEFAULT_BATCH_WINDOW = 0.05
+    _DEFAULT_BATCH_WINDOW = 0.25
 
     def __init__(
         self,
@@ -71,6 +75,8 @@ class EdgeExecutionBackend(BaseBackend):
         name: str = "edge",
         batch_window: float | None = None,
         batch_limit: int = 1024,
+        notify_batch_window: float | None = None,
+        notify_batch_size: int | None = None,
     ):
         super().__init__(name=name)
 
@@ -83,7 +89,9 @@ class EdgeExecutionBackend(BaseBackend):
         self._bridge_url      = bridge_url
         self._edge_name       = edge_name
         self._plugin_name     = plugin_name
-        self._remote_backends = backends or ['dragon_v3']
+        self._remote_backends      = backends or ['dragon_v3']
+        self._notify_batch_window  = notify_batch_window
+        self._notify_batch_size    = notify_batch_size
 
         self._bc   = None   # BridgeClient
         self._rh   = None   # RhapsodyClient (from get_plugin)
@@ -128,8 +136,14 @@ class EdgeExecutionBackend(BaseBackend):
         # cert=None disables TLS verification (default for self-signed)
         self._bc = BridgeClient(url=self._bridge_url)
         ec = self._bc.get_edge_client(self._edge_name)
-        self._rh = ec.get_plugin(self._plugin_name,
-                                 backends=self._remote_backends)
+
+        session_kwargs = {'backends': self._remote_backends}
+        if self._notify_batch_window is not None:
+            session_kwargs['notify_batch_window'] = self._notify_batch_window
+        if self._notify_batch_size is not None:
+            session_kwargs['notify_batch_size'] = self._notify_batch_size
+
+        self._rh = ec.get_plugin(self._plugin_name, **session_kwargs)
 
         # Register persistent notification callback for task completions
         self._rh.register_notification_callback(
