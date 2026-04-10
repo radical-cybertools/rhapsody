@@ -322,7 +322,12 @@ class Session:
         self._state_manager._telemetry_observer = self._telemetry._on_task_state_change
 
         for backend in self.backends.values():
-            self._attach_telemetry_adapter(backend)
+            self._telemetry.attach_backend(
+                backend,
+                session_id=self.uid,
+                backend_name=backend.name,
+                interval=resource_poll_interval,
+            )
 
         await self._telemetry.start()
         return self._telemetry
@@ -338,65 +343,6 @@ class Session:
                 "Telemetry not started. Call `await session.start_telemetry()` first."
             )
         return self._telemetry
-
-    def _attach_telemetry_adapter(self, backend: BaseBackend) -> None:
-        """Register the appropriate telemetry adapter for a backend."""
-        if self._telemetry is None:
-            return
-
-        from rhapsody.backends.execution.concurrent import ConcurrentExecutionBackend
-        from rhapsody.telemetry.adapters.concurrent import ConcurrentTelemetryAdapter
-        from rhapsody.telemetry.adapters.dask import DaskTelemetryAdapter
-        from rhapsody.telemetry.adapters.dragon import DragonTelemetryAdapter
-
-        interval = self._resource_poll_interval
-
-        try:
-            if isinstance(backend, ConcurrentExecutionBackend):
-                adapter = ConcurrentTelemetryAdapter(
-                    session_id=self.uid,
-                    backend_name=backend.name,
-                    interval=interval,
-                )
-                self._telemetry.register_adapter(adapter)
-                if self._telemetry._running:
-                    adapter.start()
-                return
-        except Exception:
-            logger.warning("Could not attach ConcurrentTelemetryAdapter", exc_info=True)
-
-        # Dask — detect by class name to avoid hard import
-        backend_cls = type(backend).__name__
-        if backend_cls == "DaskExecutionBackend":
-            try:
-                client = getattr(backend, "_client", None) or getattr(backend, "client", None)
-                if client is not None:
-                    adapter = DaskTelemetryAdapter(
-                        client=client,
-                        session_id=self.uid,
-                        backend_name=backend.name,
-                        interval=interval,
-                    )
-                    self._telemetry.register_adapter(adapter)
-                    if self._telemetry._running:
-                        adapter.start()
-            except Exception:
-                logger.warning("Could not attach DaskTelemetryAdapter", exc_info=True)
-            return
-
-        # Dragon — detect by class name
-        if "Dragon" in backend_cls:
-            try:
-                adapter = DragonTelemetryAdapter(
-                    session_id=self.uid,
-                    backend_name=backend.name,
-                    interval=interval,
-                )
-                self._telemetry.register_adapter(adapter)
-                if self._telemetry._running:
-                    adapter.start()
-            except Exception:
-                logger.warning("Could not attach DragonTelemetryAdapter", exc_info=True)
 
     async def close(self) -> None:
         """Shutdown telemetry (if enabled) then all backends."""

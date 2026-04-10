@@ -238,6 +238,76 @@ class TelemetryManager:
         adapter._manager = self
         self._adapters.append(adapter)
 
+    def attach_backend(
+        self,
+        backend,
+        *,
+        session_id: str,
+        backend_name: str,
+        interval: float = 5.0,
+    ) -> None:
+        """Detect backend type and register the appropriate telemetry adapter.
+
+        Silently skips backends with no adapter (LocalExecutionBackend,
+        NoopExecutionBackend, unknown types). Safe to call before or after
+        start(); if already running the adapter is started immediately.
+        """
+        try:
+            from rhapsody.backends.execution.concurrent import ConcurrentExecutionBackend
+            from rhapsody.telemetry.adapters.concurrent import ConcurrentTelemetryAdapter
+
+            if isinstance(backend, ConcurrentExecutionBackend):
+                adapter = ConcurrentTelemetryAdapter(
+                    session_id=session_id,
+                    backend_name=backend_name,
+                    interval=interval,
+                )
+                self.register_adapter(adapter)
+                if self._running:
+                    adapter.start()
+                return
+        except Exception:
+            logger.warning("Could not attach ConcurrentTelemetryAdapter", exc_info=True)
+
+        backend_cls = type(backend).__name__
+
+        if backend_cls == "DaskExecutionBackend":
+            try:
+                from rhapsody.telemetry.adapters.dask import DaskTelemetryAdapter
+
+                client = getattr(backend, "_client", None) or getattr(backend, "client", None)
+                if client is not None:
+                    adapter = DaskTelemetryAdapter(
+                        client=client,
+                        session_id=session_id,
+                        backend_name=backend_name,
+                        interval=interval,
+                    )
+                    self.register_adapter(adapter)
+                    if self._running:
+                        adapter.start()
+            except Exception:
+                logger.warning("Could not attach DaskTelemetryAdapter", exc_info=True)
+            return
+
+        if "Dragon" in backend_cls:
+            try:
+                from rhapsody.telemetry.adapters.dragon import DragonTelemetryAdapter
+
+                adapter = DragonTelemetryAdapter(
+                    session_id=session_id,
+                    backend_name=backend_name,
+                    interval=interval,
+                )
+                self.register_adapter(adapter)
+                if self._running:
+                    adapter.start()
+            except Exception:
+                logger.warning("Could not attach DragonTelemetryAdapter", exc_info=True)
+            return
+
+        # LocalExecutionBackend, NoopExecutionBackend, unknown — silently skip.
+
     def read_metrics(self) -> Any:
         """Return current OTel MetricsData snapshot (InMemoryMetricReader)."""
         if self._metric_reader is None:
