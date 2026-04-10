@@ -4,12 +4,14 @@ import asyncio
 import logging
 import os
 from typing import TYPE_CHECKING
+from typing import Callable
 
 from rhapsody.api.errors import TaskExecutionError
 
 if TYPE_CHECKING:
     from rhapsody.api.task import BaseTask
     from rhapsody.backends.base import BaseBackend
+    from rhapsody.telemetry.manager import TelemetryManager
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +29,8 @@ class TaskStateManager:
         self._terminal_states = set()  # Will be populated by backends
         self._lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Telemetry observer — set by Session.enable_telemetry(), None = zero cost
+        self._telemetry_observer: Callable[[dict, str], None] | None = None
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Bind an event loop to the manager for thread-safe updates."""
@@ -51,6 +55,10 @@ class TaskStateManager:
 
         # Update the task object in-place (Single Source of Truth)
         task["state"] = state
+
+        # Telemetry hook — O(1) None check, zero cost when not enabled
+        if self._telemetry_observer is not None:
+            self._telemetry_observer(task, state)
 
         # If terminal, notify waiters
         if state in self._terminal_states:
@@ -127,6 +135,8 @@ class Session:
         self.work_dir = work_dir or os.getcwd()
         self._tasks: dict[str, BaseTask | dict] = {}
         self._state_manager = TaskStateManager()
+        self._telemetry: TelemetryManager | None = None
+        self._resource_poll_interval: float = 5.0
 
         # Register callbacks with all provided backends
         backends_list = backends or []
@@ -153,6 +163,10 @@ class Session:
             self._state_manager._terminal_states.update(state_mapper.terminal_states)
 
         logger.debug(f"Registered backend '{backend.name}' with Session '{self.uid}'")
+
+        # Register a telemetry adapter if telemetry is already enabled
+        if self._telemetry is not None:
+            self._attach_telemetry_adapter(backend)
 
     async def submit_tasks(self, tasks: list[dict | BaseTask]) -> list[asyncio.Future]:
         """Submit tasks to execution backends and return futures.
@@ -185,12 +199,19 @@ class Session:
                 task.bind_future(fut)
             futures.append(fut)
 
+            # Stamp task_type for telemetry event classification
+            task["task_type"] = type(task).__name__
+
             # Routing decision
             target_name = task.get("backend")
             if not target_name:
                 # If no backend specified, use the first one as default
                 target_name = next(iter(self.backends))
                 task["backend"] = target_name  # Ensure it's recorded
+
+            # Emit TaskSubmitted AFTER routing so task["backend"] is always set.
+            if self._telemetry is not None:
+                self._telemetry._on_task_submitted(task)
 
             if target_name not in self.backends:
                 available = list(self.backends.keys())
@@ -205,6 +226,10 @@ class Session:
         submission_tasks = []
         for name, backend_tasks in tasks_by_backend.items():
             backend = self.backends[name]
+            # Emit TaskQueued at the backend boundary (after routing, before execution)
+            if self._telemetry is not None:
+                for task in backend_tasks:
+                    self._telemetry._on_task_queued(task)
             submission_tasks.append(backend.submit_tasks(backend_tasks))
 
         if submission_tasks:
@@ -256,8 +281,74 @@ class Session:
 
         return tasks
 
+    async def start_telemetry(
+        self,
+        resource_poll_interval: float = 5.0,
+        checkpoint_interval: float | None = None,
+        checkpoint_path: str | None = None,
+    ) -> TelemetryManager:
+        """Enable and start telemetry collection for this session in one call.
+
+        Creates a :class:`~rhapsody.telemetry.manager.TelemetryManager`, wires it
+        into the task state manager, registers backend-specific adapters, and starts
+        the async dispatch loop — all in a single ``await``.
+
+        Telemetry stops automatically when :meth:`close` is called. There is no need
+        to call ``stop()`` on the returned manager separately.
+
+        Must be called **before** ``await session.submit_tasks()``.
+
+        Args:
+            resource_poll_interval: Seconds between resource metric polls (default: 5.0).
+            checkpoint_interval:    Seconds between metric+span flushes to disk.
+                                    None = no periodic flush (file still written at stop).
+            checkpoint_path:        Directory for the JSONL checkpoint file.
+                                    None = no file output.
+
+        Returns:
+            The active :class:`~rhapsody.telemetry.manager.TelemetryManager`.
+            Use it for optional advanced operations: ``subscribe()``, ``summary()``,
+            ``task_spans()``, ``read_metrics()``, ``read_traces()``.
+            Or retrieve it later via :meth:`get_telemetry`.
+        """
+        from rhapsody.telemetry.manager import TelemetryManager  # deferred import
+
+        self._resource_poll_interval = resource_poll_interval
+        self._telemetry = TelemetryManager(
+            session_id=self.uid,
+            checkpoint_interval=checkpoint_interval,
+            checkpoint_path=checkpoint_path,
+        )
+        self._state_manager._telemetry_observer = self._telemetry._on_task_state_change
+
+        for backend in self.backends.values():
+            self._telemetry.attach_backend(
+                backend,
+                session_id=self.uid,
+                backend_name=backend.name,
+                interval=resource_poll_interval,
+            )
+
+        await self._telemetry.start()
+        return self._telemetry
+
+    def get_telemetry(self) -> TelemetryManager:
+        """Return the active TelemetryManager.
+
+        Raises:
+            RuntimeError: If telemetry has not been started via :meth:`start_telemetry`.
+        """
+        if self._telemetry is None:
+            raise RuntimeError(
+                "Telemetry not started. Call `await session.start_telemetry()` first."
+            )
+        return self._telemetry
+
     async def close(self) -> None:
-        """Shutdown all backends."""
+        """Shutdown telemetry (if enabled) then all backends."""
+        if self._telemetry is not None:
+            await self._telemetry.stop()
+            self._telemetry = None
         for backend in self.backends.values():
             await backend.shutdown()
 
