@@ -244,10 +244,11 @@ class BaseTask(dict, ABC):
         Raises:
             TaskValidationError: If required fields are missing or invalid
         """
-        # Determine task type based on fields present
-        if "prompt" in data:
+        # Determine task type based on fields present (use .get() so that
+        # None-valued keys don't misroute the task class selection).
+        if data.get("prompt"):
             return AITask(**data)
-        elif "executable" in data or "function" in data:
+        elif data.get("executable") or data.get("function"):
             return ComputeTask(**data)
         else:
             raise TaskValidationError(

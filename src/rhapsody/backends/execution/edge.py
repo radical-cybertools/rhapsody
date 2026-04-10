@@ -143,7 +143,7 @@ class EdgeExecutionBackend(BaseBackend):
 
         # Update local task dict with remote results
         for key in ('state', 'stdout', 'stderr', 'exit_code',
-                    'return_value', 'exception', 'error'):
+                    'return_value', 'exception', 'traceback', 'error'):
             if key in body:
                 task[key] = body[key]
 

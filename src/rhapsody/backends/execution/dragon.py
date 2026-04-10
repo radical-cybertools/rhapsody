@@ -374,6 +374,7 @@ class ResultCollectorV1:
                 "exit_code": result.exit_code,
                 "return_value": result.return_value,
                 "exception": result.exception,
+                "traceback": result.traceback,
                 "success": result.success,
             }
         else:
@@ -400,6 +401,10 @@ class ResultCollectorV1:
                 "exception": None
                 if all_successful
                 else "; ".join(str(r.exception) for r in results if not r.success),
+                "traceback": None
+                if all_successful
+                else "\n".join(r.traceback for r in results
+                               if not r.success and r.traceback),
                 "success": all_successful,
             }
 
