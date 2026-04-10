@@ -248,9 +248,9 @@ class TelemetryManager:
     ) -> None:
         """Detect backend type and register the appropriate telemetry adapter.
 
-        Silently skips backends with no adapter (LocalExecutionBackend,
-        NoopExecutionBackend, unknown types). Safe to call before or after
-        start(); if already running the adapter is started immediately.
+        Silently skips backends with no adapter (LocalExecutionBackend, NoopExecutionBackend,
+        unknown types). Safe to call before or after start(); if already running the adapter is
+        started immediately.
         """
         try:
             from rhapsody.backends.execution.concurrent import ConcurrentExecutionBackend
