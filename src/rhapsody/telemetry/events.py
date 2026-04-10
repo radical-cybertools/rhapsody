@@ -12,6 +12,7 @@ TaskQueued is optional. TaskStarted is the authoritative "execution began" event
 
 from __future__ import annotations
 
+import dataclasses
 import time
 import uuid
 from dataclasses import dataclass
@@ -185,6 +186,88 @@ class ResourceUpdate(BaseEvent):
             "resource_scope",
             "per_gpu" if self.gpu_id is not None else "per_node",
         )
+
+
+def define_event(name: str, **fields) -> type:
+    """Dynamically create a custom BaseEvent subclass — no RHAPSODY edits required.
+
+    Designed for higher-layer runtimes (AsyncFlow, user applications) that need
+    domain-specific events without modifying RHAPSODY's event schema.
+
+    Rules
+    -----
+    ``name`` **must be namespaced** (contain at least one ``"."``) to prevent
+    collisions across systems::
+
+        # bad  — rejected
+        define_event("DataQualityChecked", ...)
+
+        # good — accepted
+        define_event("asyncflow.DataQualityChecked", ...)
+
+    Field names **must not shadow** any core :class:`BaseEvent` field
+    (``event_id``, ``event_time``, ``emit_time``, ``session_id``, ``backend``,
+    ``task_id``, ``node_id``, ``attributes``, ``event_type``).
+    Doing so raises :exc:`ValueError` at definition time.
+
+    Field values can be:
+      - A type alone (``float``, ``int``, ``str``, ``bool``): a zero/empty default
+        is inferred.
+      - A ``(type, default)`` tuple: explicit default value.
+
+    The returned class is a proper frozen dataclass that inherits ``BaseEvent``.
+    It is compatible with :func:`make_event` and any
+    :class:`~rhapsody.telemetry.manager.TelemetryManager`.
+
+    Example::
+
+        DataQualityChecked = define_event(
+            "asyncflow.DataQualityChecked",
+            score=float,
+            rows_checked=int,
+            label=(str, "unknown"),
+        )
+
+        telemetry.emit(
+            make_event(
+                DataQualityChecked,
+                session_id=telemetry._session_id,
+                backend="application",
+                score=0.97,
+                rows_checked=1000,
+            )
+        )
+    """
+    if "." not in name:
+        raise ValueError(
+            f"define_event: name {name!r} must be namespaced (e.g. 'asyncflow.{name}'). "
+            "Flat names risk collisions across systems."
+        )
+
+    base_fields = frozenset(f.name for f in dataclasses.fields(BaseEvent))
+    reserved = base_fields.intersection(fields)
+    if reserved:
+        raise ValueError(
+            f"define_event: fields {sorted(reserved)} shadow core BaseEvent fields. "
+            "Custom events must not redefine the base schema."
+        )
+
+    primitive_defaults = {float: 0.0, int: 0, str: "", bool: False}
+
+    field_specs = []
+    for fname, spec in fields.items():
+        if isinstance(spec, tuple):
+            ftype, default = spec
+            field_specs.append((fname, ftype, dataclasses.field(default=default)))
+        else:
+            ftype = spec
+            default = primitive_defaults.get(ftype)  # None for unknown types
+            field_specs.append((fname, ftype, dataclasses.field(default=default)))
+
+    # Override event_type — init=False, mirrors every concrete BaseEvent subclass.
+    field_specs.append(("event_type", str, dataclasses.field(default=name, init=False)))
+
+    return dataclasses.make_dataclass(name, fields=field_specs, bases=(BaseEvent,), frozen=True)
 
 
 def make_event(cls: type, *, session_id: str, backend: str, **kwargs) -> BaseEvent:

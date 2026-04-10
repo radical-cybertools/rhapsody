@@ -33,6 +33,7 @@ from rhapsody.telemetry.events import TaskFailed
 from rhapsody.telemetry.events import TaskQueued
 from rhapsody.telemetry.events import TaskStarted
 from rhapsody.telemetry.events import TaskSubmitted
+from rhapsody.telemetry.events import define_event
 from rhapsody.telemetry.interfaces.reader import TelemetryReader
 from rhapsody.telemetry.interfaces.subscriber import TelemetrySubscriber
 from rhapsody.telemetry.manager import TelemetryManager
@@ -42,6 +43,7 @@ __all__ = [
     "TelemetryReader",
     "TelemetrySubscriber",
     "BaseEvent",
+    "define_event",
     "SessionStarted",
     "SessionEnded",
     "TaskCreated",
