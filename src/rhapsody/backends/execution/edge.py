@@ -55,10 +55,12 @@ class EdgeExecutionBackend(BaseBackend):
         name:          Backend name for Rhapsody registration
                        (default ``"edge"``).
         batch_window:  Seconds to collect tasks before flushing
-                       (default 0.1).  Set to 0 to disable batching.
+                       (default 0.05).  Set to 0 to disable batching.
         batch_limit:   Max tasks per batch — triggers an immediate flush
                        when reached (default 1024).
     """
+
+    _DEFAULT_BATCH_WINDOW = 0.05
 
     def __init__(
         self,
@@ -67,7 +69,7 @@ class EdgeExecutionBackend(BaseBackend):
         plugin_name: str = "rhapsody",
         backends: list[str] | None = None,
         name: str = "edge",
-        batch_window: float = 0.1,
+        batch_window: float | None = None,
         batch_limit: int = 1024,
     ):
         super().__init__(name=name)
@@ -93,7 +95,8 @@ class EdgeExecutionBackend(BaseBackend):
         self._loop: asyncio.AbstractEventLoop | None = None
 
         # -- submission batching --
-        self._batch_window = batch_window
+        self._batch_window = batch_window if batch_window is not None \
+                             else self._DEFAULT_BATCH_WINDOW
         self._batch_limit  = batch_limit
         self._batch_buffer: list[dict] = []
         self._batch_lock   = asyncio.Lock()
