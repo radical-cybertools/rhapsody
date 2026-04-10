@@ -210,7 +210,7 @@ class Session:
         if submission_tasks:
             await asyncio.gather(*submission_tasks)
 
-        logger.info(f"Successfully submitted {len(tasks)} tasks")
+        logger.debug(f"Successfully submitted {len(tasks)} tasks")
 
         return futures
 

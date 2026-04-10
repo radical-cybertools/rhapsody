@@ -22,6 +22,11 @@ try:
 except ImportError:
     BridgeClient = None
 
+try:
+    import radical.prof as rprof
+except ImportError:
+    rprof = None
+
 
 def _get_logger() -> logging.Logger:
     return logging.getLogger(__name__)
@@ -34,16 +39,25 @@ class EdgeExecutionBackend(BaseBackend):
     communication — inheriting batching, template compression,
     pipelined submission, and SSE-based notifications.
 
+    When tasks are submitted individually (one at a time), a batching
+    layer collects them over a short time window (default 0.1 s) and
+    flushes them as a single bulk request, dramatically reducing
+    per-task HTTP round-trip overhead.
+
     Args:
-        bridge_url:  URL of the RADICAL Edge bridge
-                     (e.g. ``"https://localhost:8000"``).
-        edge_name:   Name of the edge to target.
-        plugin_name: Name of the Rhapsody plugin on the edge
-                     (default ``"rhapsody"``).
-        backends:    Backend names to request on the remote session
-                     (default ``["dragon_v3"]``).
-        name:        Backend name for Rhapsody registration
-                     (default ``"edge"``).
+        bridge_url:    URL of the RADICAL Edge bridge
+                       (e.g. ``"https://localhost:8000"``).
+        edge_name:     Name of the edge to target.
+        plugin_name:   Name of the Rhapsody plugin on the edge
+                       (default ``"rhapsody"``).
+        backends:      Backend names to request on the remote session
+                       (default ``["dragon_v3"]``).
+        name:          Backend name for Rhapsody registration
+                       (default ``"edge"``).
+        batch_window:  Seconds to collect tasks before flushing
+                       (default 0.1).  Set to 0 to disable batching.
+        batch_limit:   Max tasks per batch — triggers an immediate flush
+                       when reached (default 1024).
     """
 
     def __init__(
@@ -53,6 +67,8 @@ class EdgeExecutionBackend(BaseBackend):
         plugin_name: str = "rhapsody",
         backends: list[str] | None = None,
         name: str = "edge",
+        batch_window: float = 0.1,
+        batch_limit: int = 1024,
     ):
         super().__init__(name=name)
 
@@ -75,6 +91,17 @@ class EdgeExecutionBackend(BaseBackend):
         self._initialized   = False
         self._backend_state = BackendMainStates.INITIALIZED
         self._loop: asyncio.AbstractEventLoop | None = None
+
+        # -- submission batching --
+        self._batch_window = batch_window
+        self._batch_limit  = batch_limit
+        self._batch_buffer: list[dict] = []
+        self._batch_lock   = asyncio.Lock()
+        self._flush_handle: asyncio.TimerHandle | None = None
+
+        # -- profiling --
+        self._prof = rprof.Profiler('client.task', ns='radical.edge') \
+                     if rprof else None
 
     # ------------------------------------------------------------------
     # Async init
@@ -147,6 +174,10 @@ class EdgeExecutionBackend(BaseBackend):
             if key in body:
                 task[key] = body[key]
 
+        # Profile task completion on client side
+        if self._prof:
+            self._prof.prof('task_complete', uid=uid, state=state)
+
         # Fire Rhapsody state callback (thread-safe)
         if self._loop and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(
@@ -159,9 +190,13 @@ class EdgeExecutionBackend(BaseBackend):
     async def submit_tasks(self, tasks: list[dict[str, Any]]) -> None:
         """Submit tasks to the remote edge for execution.
 
-        Delegates to ``RhapsodyClient.submit_tasks()`` which handles
-        serialization, template compression, size-aware batching, and
-        concurrent pipelined submission.
+        When batching is enabled (batch_window > 0), tasks are collected
+        in an internal buffer and flushed after the window expires or the
+        buffer reaches ``batch_limit``.  This turns many small individual
+        submissions into fewer bulk HTTP requests.
+
+        When batching is disabled (batch_window == 0), delegates directly
+        to ``RhapsodyClient.submit_tasks()``.
         """
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
@@ -173,13 +208,70 @@ class EdgeExecutionBackend(BaseBackend):
                 task['uid'] = f"task.{uuid.uuid4().hex[:8]}"
 
         # Register tasks locally for notification tracking
-        task_dicts = []
+        prof = self._prof
         for task in tasks:
             self._tasks[task['uid']] = task
-            task_dicts.append(dict(task))
+            if prof:
+                prof.prof('task_submit', uid=task['uid'])
 
-        # Delegate to RhapsodyClient — all optimizations apply
-        await asyncio.to_thread(self._rh.submit_tasks, task_dicts)
+        # No batching — submit immediately
+        if self._batch_window <= 0:
+            task_dicts = [dict(t) for t in tasks]
+            if prof:
+                for t in tasks:
+                    prof.prof('task_batch_flush', uid=t['uid'])
+            await asyncio.to_thread(self._rh.submit_tasks, task_dicts)
+            return
+
+        # Batching — collect and schedule flush
+        async with self._batch_lock:
+            self._batch_buffer.extend(dict(t) for t in tasks)
+
+            if len(self._batch_buffer) >= self._batch_limit:
+                # Buffer full — flush now
+                await self._flush_batch()
+            elif self._flush_handle is None:
+                # Start the timer for the first task in this window
+                loop = asyncio.get_running_loop()
+                self._flush_handle = loop.call_later(
+                    self._batch_window, self._trigger_flush)
+
+    def _trigger_flush(self):
+        """Timer callback — schedule the async flush on the event loop."""
+        asyncio.ensure_future(self._timed_flush())
+
+    async def _timed_flush(self):
+        """Flush the batch buffer (called from timer)."""
+        async with self._batch_lock:
+            await self._flush_batch()
+
+    async def _flush_batch(self):
+        """Send all buffered tasks in one bulk request.
+
+        Must be called while holding ``_batch_lock``.
+        """
+        if not self._batch_buffer:
+            return
+
+        batch = self._batch_buffer
+        self._batch_buffer = []
+
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
+
+        prof = self._prof
+        if prof:
+            for t in batch:
+                prof.prof('task_batch_flush', uid=t.get('uid', '?'))
+
+        self.logger.debug("Flushing batch of %d tasks", len(batch))
+        await asyncio.to_thread(self._rh.submit_tasks, batch)
+
+    async def _force_flush(self):
+        """Force-flush any pending batched tasks."""
+        async with self._batch_lock:
+            await self._flush_batch()
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a single task on the remote edge."""
@@ -199,7 +291,8 @@ class EdgeExecutionBackend(BaseBackend):
         return result.get('canceled', 0)
 
     async def shutdown(self) -> None:
-        """Close the RhapsodyClient session and BridgeClient."""
+        """Flush pending tasks, close session and BridgeClient."""
+        await self._force_flush()
         self._backend_state = BackendMainStates.SHUTDOWN
 
         if self._rh:
@@ -215,6 +308,9 @@ class EdgeExecutionBackend(BaseBackend):
             except Exception as e:
                 self.logger.warning("Failed to close bridge client: %s", e)
             self._bc = None
+
+        if self._prof:
+            self._prof.close()
 
         self.logger.info("Edge execution backend shutdown complete")
 
