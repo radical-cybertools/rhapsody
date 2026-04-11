@@ -127,9 +127,8 @@ def _rhapsody_telemetry_worker(
     except Exception:  # noqa: S110
         pass
 
-    # shutdown_event.wait(timeout) blocks for interval seconds, returns True when set.
-    # Replaces time.sleep() so the worker exits cleanly (code 0) on adapter stop.
-    while not shutdown_event.wait(timeout=interval):
+    def _collect_and_push() -> None:
+        nonlocal _prev_disk, _prev_net, _intel_disabled
         dps = []
 
         # CPU and RAM — always collected; psutil does not raise here
@@ -224,6 +223,15 @@ def _rhapsody_telemetry_worker(
             )
         except Exception:  # noqa: S110
             pass  # queue full or closed — drop silently
+
+    # Emit one sample immediately so resource coverage starts at t=0,
+    # not one full interval later.
+    _collect_and_push()
+
+    # shutdown_event.wait(timeout) blocks for interval seconds, returns True when set.
+    # Replaces time.sleep() so the worker exits cleanly (code 0) on adapter stop.
+    while not shutdown_event.wait(timeout=interval):
+        _collect_and_push()
 
 
 # ---------------------------------------------------------------------------

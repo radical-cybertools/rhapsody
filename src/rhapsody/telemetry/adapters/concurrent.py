@@ -126,10 +126,9 @@ class ConcurrentTelemetryAdapter(TelemetryAdapter):
         except Exception:  # noqa: S110
             pass
 
-        while self._running:
-            time.sleep(self._interval)  # plain OS sleep — no event loop involved
-            if not self._running:
-                break
+        def _poll() -> None:
+            """Collect one sample and emit ResourceUpdate events."""
+            nonlocal prev_disk, prev_net
             try:
                 cpu = psutil.cpu_percent(interval=None)
                 mem = psutil.virtual_memory().percent
@@ -211,3 +210,14 @@ class ConcurrentTelemetryAdapter(TelemetryAdapter):
 
             except Exception:
                 logger.debug("ConcurrentTelemetryAdapter collection error", exc_info=True)
+
+        # Emit one sample immediately so resource coverage starts at t=0,
+        # not one full interval later. Disk/net deltas are None on this first
+        # call (baselines were just seeded above) which is correct.
+        _poll()
+
+        while self._running:
+            time.sleep(self._interval)  # plain OS sleep — no event loop involved
+            if not self._running:
+                break
+            _poll()

@@ -76,8 +76,7 @@ class DaskTelemetryAdapter(TelemetryAdapter):
             self._task.cancel()
 
     async def _collect_loop(self) -> None:
-        while self._running:
-            await asyncio.sleep(self._interval)
+        async def _poll() -> None:
             try:
                 workers = self._client.scheduler_info().get("workers", {})
                 for addr, w in workers.items():
@@ -116,3 +115,11 @@ class DaskTelemetryAdapter(TelemetryAdapter):
                     )
             except Exception:
                 logger.debug("DaskTelemetryAdapter collection error", exc_info=True)
+
+        # Emit one sample immediately so resource coverage starts at t=0,
+        # not one full interval later.
+        await _poll()
+
+        while self._running:
+            await asyncio.sleep(self._interval)
+            await _poll()
