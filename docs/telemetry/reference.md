@@ -325,7 +325,7 @@ duration_ms = (time.time() - t0) * 1000
 telemetry.emit(
     make_event(
         LineTimer,
-        session_id=telemetry._session_id,
+        session_id=telemetry.session_id,
         backend="app",
         label="my_block",
         duration_ms=duration_ms,

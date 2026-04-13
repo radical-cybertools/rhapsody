@@ -205,7 +205,7 @@ DataQualityChecked = define_event(
 telemetry.emit(
     make_event(
         DataQualityChecked,
-        session_id=telemetry._session_id,
+        session_id=telemetry.session_id,
         backend="app",
         score=0.97,
         rows_checked=50_000,

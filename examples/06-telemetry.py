@@ -35,10 +35,9 @@ async def main():
     backend = await DragonExecutionBackendV3()
     session = Session(backends=[backend])
 
-    telemetry = session.enable_telemetry(
+    telemetry = await session.start_telemetry(
         resource_poll_interval=0.1, checkpoint_path=f"telemetry-output"
     )
-    await telemetry.start()
 
     # 3. Submit workload
     tasks = [ComputeTask(executable="./gpu-cuda-stress") for i in range(10)]

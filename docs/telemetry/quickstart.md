@@ -144,7 +144,7 @@ t0 = time.time()
 telemetry.emit(
     make_event(
         LineTimer,
-        session_id=telemetry._session_id,
+        session_id=telemetry.session_id,
         backend="app",
         label="preprocessing",
         duration_ms=(time.time() - t0) * 1000,

@@ -121,6 +121,15 @@ class TelemetryManager:
         self._last: dict[str, dict[str, float]] = {"cpu": {}, "mem": {}, "gpu": {}}
 
     # ------------------------------------------------------------------
+    # Public properties
+    # ------------------------------------------------------------------
+
+    @property
+    def session_id(self) -> str:
+        """The session identifier shared by all events from this manager."""
+        return self._session_id
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
