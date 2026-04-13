@@ -7,7 +7,7 @@ RHAPSODY ships a built-in, zero-configuration telemetry layer (the **Telemetry A
 | Layer | What is collected |
 |---|---|
 | **Session** | Start / end timestamps, total duration, session span (root of the OTel trace) |
-| **Tasks** | Full lifecycle events (Submitted → Queued → Started → Completed / Failed) with wall-clock timestamps, per-task duration, backend, executable identity |
+| **Tasks** | Full lifecycle events (Created → Submitted → Queued → Started → Completed / Failed) with wall-clock timestamps, per-task duration, backend, executable identity |
 | **Resources** | Per-node CPU %, memory %, disk I/O bytes/interval, network I/O bytes/interval, per-GPU utilization % with device index |
 | **OTel SDK** | Counters, gauges, histograms, and traces stored in-memory and written to a JSONL checkpoint file |
 
@@ -24,17 +24,17 @@ RHAPSODY ships a built-in, zero-configuration telemetry layer (the **Telemetry A
 │                           │  │ EventBus    │  │  MeterProvider│  │  │
 │  ┌───────────────────┐    │  │  (Queue)    │  │  Tracer       │  │  │
 │  │ Backend Adapters  │    │  └──────┬──────┘  └───────┬───────┘  │  │
-│  │  ┌─────────────┐  │    │         │                  │          │  │
-│  │  │ Concurrent  │  │    │  ┌──────▼──────────────────▼───────┐  │  │
-│  │  │  (psutil +  │  │    │  │         Dispatch Loop           │  │  │
-│  │  │   pynvml)   │  │    │  │  • Update OTel instruments      │  │  │
-│  │  ├─────────────┤  │    │  │  • Open / close task spans      │  │  │
-│  │  │  Dask       │  │    │  │  • Attach trace_id / span_id    │  │  │
-│  │  │ (scheduler  │  │    │  │  • Fan-out to subscribers       │  │  │
-│  │  │   _info)    │  │    │  │  • Write JSONL checkpoint       │  │  │
-│  │  ├─────────────┤  │    │  └─────────────────────────────────┘  │  │
-│  │  │  Dragon     │  │    └──────────────────────────────────────┘  │
-│  │  │ (dps queue) │  │                                               │
+│  │  ┌─────────────┐  │    │         │                 │          │  │
+│  │  │ Concurrent  │  │    │  ┌──────▼─────────────────▼───────┐  │  │
+│  │  │  (psutil +  │  │    │  │         Dispatch Loop          │  │  │
+│  │  │   pynvml)   │  │    │  │  • Update OTel instruments     │  │  │
+│  │  ├─────────────┤  │    │  │  • Open / close task spans     │  │  │
+│  │  │  Dask       │  │    │  │  • Attach trace_id / span_id   │  │  │
+│  │  │ (scheduler  │  │    │  │  • Fan-out to subscribers      │  │  │
+│  │  │   _info)    │  │    │  │  • Write JSONL checkpoint      │  │  │
+│  │  ├─────────────┤  │    │  └────────────────────────────────┘  │  │
+│  │  │  Dragon     │  │    └────────────────────────────────────-─┘  │
+│  │  │ (dps queue) │  │                                              │
 │  │  └─────────────┘  │    ┌─────────────┐  ┌──────────────────────┐ │
 │  └───────────────────┘    │  Subscribers│  │  JSONL Checkpoint    │ │
 │                           │  (push API) │  │  .telemetry.jsonl    │ │

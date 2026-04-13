@@ -27,6 +27,7 @@ from rhapsody.telemetry.events import BaseEvent
 from rhapsody.telemetry.events import ResourceUpdate
 from rhapsody.telemetry.events import SessionEnded
 from rhapsody.telemetry.events import SessionStarted
+from rhapsody.telemetry.events import TaskCanceled
 from rhapsody.telemetry.events import TaskCompleted
 from rhapsody.telemetry.events import TaskCreated
 from rhapsody.telemetry.events import TaskFailed
@@ -52,5 +53,6 @@ __all__ = [
     "TaskStarted",
     "TaskCompleted",
     "TaskFailed",
+    "TaskCanceled",
     "ResourceUpdate",
 ]

@@ -104,12 +104,10 @@ for span in telemetry.task_spans():
 ## Subscribing to live events
 
 ```python
-from rhapsody.telemetry import TaskCompleted, ResourceUpdate
-
 def on_event(event):
-    if isinstance(event, TaskCompleted):
+    if event.event_type == "TaskCompleted":
         print(f"Task {event.task_id} done in {event.duration_seconds:.3f}s")
-    elif isinstance(event, ResourceUpdate) and event.resource_scope == "per_gpu":
+    elif event.event_type == "ResourceUpdate" and event.resource_scope == "per_gpu":
         print(f"GPU {event.gpu_id} on {event.node_id}: {event.gpu_percent:.1f}%")
 
 telemetry.subscribe(on_event)
@@ -125,6 +123,38 @@ telemetry.subscribe(async_handler)
 ```
 
 Exceptions inside a subscriber are caught and logged — they never crash the dispatch loop.
+
+---
+
+## Emitting custom events
+
+Application code can define and emit its own event types through the same telemetry bus without modifying RHAPSODY source:
+
+```python
+import time
+from rhapsody.telemetry import define_event
+from rhapsody.telemetry.events import make_event
+
+# Define once at module level — name must be namespaced (contain a dot)
+LineTimer = define_event("myapp.LineTimer", label=str, duration_ms=float)
+
+# Emit from application code
+t0 = time.time()
+# ... work ...
+telemetry.emit(
+    make_event(
+        LineTimer,
+        session_id=telemetry._session_id,
+        backend="app",
+        label="preprocessing",
+        duration_ms=(time.time() - t0) * 1000,
+    )
+)
+```
+
+`telemetry.emit()` is synchronous. Custom events flow through the same subscriber callbacks and appear in the JSONL checkpoint file.
+
+See [Events & Metrics Reference — Custom events](reference.md#custom-events-define_event) for the full API.
 
 ---
 

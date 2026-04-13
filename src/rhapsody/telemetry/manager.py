@@ -23,7 +23,9 @@ from typing import Callable
 from rhapsody.telemetry.events import BaseEvent
 from rhapsody.telemetry.events import SessionEnded
 from rhapsody.telemetry.events import SessionStarted
+from rhapsody.telemetry.events import TaskCanceled
 from rhapsody.telemetry.events import TaskCompleted
+from rhapsody.telemetry.events import TaskCreated
 from rhapsody.telemetry.events import TaskFailed
 from rhapsody.telemetry.events import TaskQueued
 from rhapsody.telemetry.events import TaskStarted
@@ -381,6 +383,7 @@ class TelemetryManager:
             "submitted": int(_sum_metric(metrics, "tasks_submitted")),
             "completed": int(_sum_metric(metrics, "tasks_completed")),
             "failed": int(_sum_metric(metrics, "tasks_failed")),
+            "canceled": int(_sum_metric(metrics, "tasks_canceled")),
             "running": int(_sum_metric(metrics, "tasks_running")),
         }
 
@@ -426,6 +429,22 @@ class TelemetryManager:
     # ------------------------------------------------------------------
     # Internal: event bridge (called from TaskStateManager observer slot)
     # ------------------------------------------------------------------
+
+    def _on_task_created(self, task: dict) -> None:
+        """Called from Session.submit_tasks() when the future is created and the task is
+        registered."""
+        self.emit(
+            make_event(
+                TaskCreated,
+                session_id=self._session_id,
+                backend=task.get("backend", ""),
+                task_id=task["uid"],
+                attributes={
+                    "executable": _task_executable(task),
+                    "task_type": task.get("task_type", ""),
+                },
+            )
+        )
 
     def _on_task_submitted(self, task: dict) -> None:
         """Called from Session.submit_tasks() after routing sets task['backend']."""
@@ -548,6 +567,31 @@ class TelemetryManager:
                 )
             )
 
+        elif state == "CANCELED":
+            running_ts = self._task_start_times.pop(task_id, None)
+            ended = now_wall
+            if running_ts is not None:
+                duration = max(ended - running_ts, 0.0)
+                attrs = {"executable": executable, "task_type": task_type}
+            else:
+                duration = 0.0
+                attrs = {
+                    "executable": executable,
+                    "task_type": task_type,
+                    "incomplete_lifecycle": True,
+                }
+            self.emit(
+                make_event(
+                    TaskCanceled,
+                    session_id=self._session_id,
+                    backend=backend,
+                    task_id=task_id,
+                    event_time=ended,
+                    duration_seconds=duration,
+                    attributes=attrs,
+                )
+            )
+
     # ------------------------------------------------------------------
     # Internal: span correlation
     # ------------------------------------------------------------------
@@ -572,7 +616,7 @@ class TelemetryManager:
             if span:
                 span_ctx = span.get_span_context()
 
-        elif event.event_type in ("TaskCompleted", "TaskFailed"):
+        elif event.event_type in ("TaskCompleted", "TaskFailed", "TaskCanceled"):
             span_ctx = self._completed_span_ctx.pop(event.task_id, None)
 
         elif event.event_type in ("SessionStarted", "SessionEnded"):
@@ -613,6 +657,9 @@ class TelemetryManager:
         )
         self._c_failed = self._meter.create_counter(
             "tasks_failed", description="Total tasks failed"
+        )
+        self._c_canceled = self._meter.create_counter(
+            "tasks_canceled", description="Total tasks canceled"
         )
         self._g_running = self._meter.create_up_down_counter(
             "tasks_running", description="Tasks currently running"
@@ -752,6 +799,35 @@ class TelemetryManager:
                 span = self._tracer.start_span("task", context=ctx, attributes=a)
             span.set_attribute("status", "failed")
             span.set_attribute("error_type", error_type)
+            span.set_attribute("executable", executable)
+            span.set_attribute("task_type", task_type)
+            if event.attributes.get("incomplete_lifecycle"):
+                span.set_attribute("incomplete_lifecycle", True)
+            span.end()
+            self._completed_span_ctx[event.task_id] = span.get_span_context()
+
+        elif etype == "TaskCanceled":
+            executable = event.attributes.get("executable", "")
+            task_type = event.attributes.get("task_type", "")
+            a = {
+                **attrs,
+                "task_id": event.task_id,
+                "executable": executable,
+                "task_type": task_type,
+            }
+            self._c_canceled.add(1, a)
+            self._h_duration.record(event.duration_seconds, a)
+            span = self._active_spans.pop(event.task_id, None)
+            if span is not None:
+                self._g_running.add(-1, a)
+            else:
+                ctx = (
+                    trace_mod.set_span_in_context(self._session_span)
+                    if self._session_span
+                    else None
+                )
+                span = self._tracer.start_span("task", context=ctx, attributes=a)
+            span.set_attribute("status", "canceled")
             span.set_attribute("executable", executable)
             span.set_attribute("task_type", task_type)
             if event.attributes.get("incomplete_lifecycle"):

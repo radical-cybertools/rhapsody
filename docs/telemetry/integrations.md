@@ -186,6 +186,52 @@ def gpu_alert(event):
 telemetry.subscribe(gpu_alert)
 ```
 
+### Example: custom application event
+
+Use `define_event()` to add application-domain observability without touching RHAPSODY source. The event flows through the same bus and appears in the JSONL checkpoint alongside system events.
+
+```python
+from rhapsody.telemetry import define_event
+from rhapsody.telemetry.events import make_event
+
+# Define a typed event class — name must be namespaced (dot required)
+DataQualityChecked = define_event(
+    "myapp.DataQualityChecked",
+    score=float,
+    rows_checked=int,
+)
+
+# Emit it from application code (after telemetry is started)
+telemetry.emit(
+    make_event(
+        DataQualityChecked,
+        session_id=telemetry._session_id,
+        backend="app",
+        score=0.97,
+        rows_checked=50_000,
+    )
+)
+
+# Receive it in any subscriber
+def on_event(event):
+    if event.event_type == "myapp.DataQualityChecked":
+        if event.score < 0.95:
+            print(f"[ALERT] Data quality below threshold: {event.score:.2%}")
+
+telemetry.subscribe(on_event)
+```
+
+Orchestration layers use the same mechanism for layer-specific events. For example, AsyncFlow defines `asyncflow.TaskResolved` (emitted when all dependencies of a task are satisfied) using `define_event` rather than adding it to RHAPSODY core:
+
+```python
+# Inside AsyncFlow WorkflowEngine.start_telemetry()
+TaskResolved = define_event("asyncflow.TaskResolved")
+```
+
+This keeps RHAPSODY's core event schema stable while allowing arbitrary layers to add their own semantics.
+
+---
+
 ### Example: forwarding to MLflow
 
 ```python

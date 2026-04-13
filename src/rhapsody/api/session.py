@@ -202,6 +202,10 @@ class Session:
             # Stamp task_type for telemetry event classification
             task["task_type"] = type(task).__name__
 
+            # TaskCreated: task is registered and future is bound; backend not yet assigned.
+            if self._telemetry is not None:
+                self._telemetry._on_task_created(task)
+
             # Routing decision
             target_name = task.get("backend")
             if not target_name:

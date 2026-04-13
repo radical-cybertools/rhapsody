@@ -4,9 +4,9 @@ All telemetry originates from these normalized events. Frozen dataclasses ensure
 immutability and safe zero-copy fan-out to multiple subscribers.
 
 Canonical lifecycle:
-    (TaskCreated) → TaskSubmitted → (TaskQueued) → TaskStarted → TaskCompleted | TaskFailed
+    (TaskCreated) → TaskSubmitted → (TaskQueued) → TaskStarted → TaskCompleted | TaskFailed | TaskCanceled
 
-TaskCreated is optional (DAG-aware runtimes only, e.g. AsyncFlow).
+TaskCreated is emitted by Session.submit_tasks() when the future is created.
 TaskQueued is optional. TaskStarted is the authoritative "execution began" event.
 """
 
@@ -147,6 +147,21 @@ class TaskFailed(BaseEvent):
     duration_seconds: float = 0.0
     error_type: str = "unknown"
     event_type: str = field(default="TaskFailed", init=False)
+
+
+@dataclass(frozen=True)
+class TaskCanceled(BaseEvent):
+    """Emitted when a task reaches CANCELED state.
+
+    Cancellation is intentional (user-initiated or backend-level) — distinct from TaskFailed, which
+    represents an unexpected error. No error_type field.
+
+    duration_seconds is 0.0 when RUNNING was never recorded (task canceled before execution
+    started); incomplete_lifecycle=True is set in attributes in that case.
+    """
+
+    duration_seconds: float = 0.0
+    event_type: str = field(default="TaskCanceled", init=False)
 
 
 @dataclass(frozen=True)

@@ -63,11 +63,25 @@ The `span_id` in the JSONL file matches the session span that is closed at this 
 The canonical lifecycle is:
 
 ```
-TaskSubmitted → TaskQueued → TaskStarted → TaskCompleted
-                                        ↘ TaskFailed
+(TaskCreated) → TaskSubmitted → (TaskQueued) → TaskStarted → TaskCompleted
+                                                           ↘ TaskFailed
+                                                           ↘ TaskCanceled
 ```
 
-`TaskQueued` is optional (not all backends emit it).
+### `TaskCreated`
+
+Emitted by `Session.submit_tasks()` when the future is bound and the task is registered, before backend routing and submission.
+
+```
+attributes = {
+    "executable": str,   # function name or binary path
+    "task_type":  str,   # "compute", "function", etc.
+}
+```
+
+Because `TaskCreated` fires before routing, its `backend` field is empty (`""`). The assigned backend appears on the subsequent `TaskSubmitted` event.
+
+---
 
 ### `TaskSubmitted`
 
@@ -149,6 +163,27 @@ attributes = {
     "incomplete_lifecycle": True,
 }
 ```
+
+---
+
+### `TaskCanceled`
+
+Emitted when a task reaches `CANCELED` state (user-initiated cancellation or backend-level abort). Distinct from `TaskFailed` — cancellation is intentional, not an error.
+
+| Extra field | Type | Description |
+|---|---|---|
+| `duration_seconds` | `float` | Wall-clock time from `RUNNING` → `CANCELED`. `0.0` if RUNNING was never recorded. |
+
+```
+attributes = {
+    "executable": str,
+    "task_type":  str,
+    # optionally:
+    "incomplete_lifecycle": True,   # task canceled before RUNNING was seen
+}
+```
+
+No `error_type` field. To distinguish cancellations from failures in a subscriber, filter on `event.event_type == "TaskCanceled"`.
 
 ---
 
@@ -256,6 +291,89 @@ To get CPU/memory for a specific GPU node, join `per_gpu` events to the `per_nod
 
 ---
 
+## Custom events — `define_event()`
+
+Application code and orchestration layers can define their own event types and emit them through the same telemetry bus — without modifying RHAPSODY source.
+
+```python
+from rhapsody.telemetry import define_event
+from rhapsody.telemetry.events import make_event
+
+# Define a typed event class at module level
+LineTimer = define_event(
+    "myapp.LineTimer",
+    label=str,
+    duration_ms=float,
+)
+```
+
+`define_event(name, **fields)` creates a frozen `BaseEvent` subclass at runtime via `dataclasses.make_dataclass`. It enforces two rules:
+
+1. **Namespace required** — `name` must contain a `.` (e.g. `"myapp.LineTimer"`). This prevents collisions with RHAPSODY's own event names.
+2. **Base fields protected** — fields declared on `BaseEvent` (`event_id`, `event_time`, `session_id`, etc.) cannot be shadowed. Attempting to do so raises `ValueError` at definition time.
+
+### Emitting a custom event
+
+```python
+import time
+from rhapsody.telemetry.events import make_event
+
+t0 = time.time()
+# ... your code ...
+duration_ms = (time.time() - t0) * 1000
+
+telemetry.emit(
+    make_event(
+        LineTimer,
+        session_id=telemetry._session_id,
+        backend="app",
+        label="my_block",
+        duration_ms=duration_ms,
+    )
+)
+```
+
+`make_event(cls, *, session_id, backend, **fields)` stamps the event with a fresh `event_id`, `event_time`, and `emit_time`. Pass `event_time=t0` explicitly if you want the event timestamped to when the block *started* rather than when it was emitted.
+
+`telemetry.emit()` is **synchronous** — no `await` needed.
+
+### Receiving custom events in a subscriber
+
+```python
+def on_event(event):
+    if event.event_type == "myapp.LineTimer":
+        print(f"{event.label}: {event.duration_ms:.1f} ms")
+
+telemetry.subscribe(on_event)
+```
+
+Custom events flow through the same dispatch loop as system events and appear in the JSONL checkpoint file with their full field set.
+
+### Field type defaults
+
+When `define_event` is called with a bare type (not a `(type, default)` tuple), defaults are assigned automatically:
+
+| Field type | Default |
+|---|---|
+| `float` | `0.0` |
+| `int` | `0` |
+| `str` | `""` |
+| `bool` | `False` |
+| Any other type | `None` |
+
+To specify a custom default, pass a `(type, default)` tuple:
+
+```python
+Checkpoint = define_event(
+    "myapp.Checkpoint",
+    step=(int, -1),           # default -1
+    loss=(float, float("inf")),
+    label=str,                # default ""
+)
+```
+
+---
+
 ## OTel metrics instruments
 
 The `TelemetryManager` registers the following instruments on a `rhapsody` meter:
@@ -266,6 +384,7 @@ The `TelemetryManager` registers the following instruments on a `rhapsody` meter
 | `tasks_started` | Counter | tasks | Total tasks that transitioned to RUNNING |
 | `tasks_completed` | Counter | tasks | Total tasks that reached DONE |
 | `tasks_failed` | Counter | tasks | Total tasks that reached FAILED |
+| `tasks_canceled` | Counter | tasks | Total tasks that reached CANCELED |
 | `tasks_running` | UpDownCounter | tasks | Tasks currently in RUNNING state |
 | `task_duration_seconds` | Histogram | seconds | Per-task execution duration (RUNNING → DONE/FAILED) |
 | `node_cpu_utilization` | UpDownCounter | % | Current CPU % per node (last-seen delta tracking) |
