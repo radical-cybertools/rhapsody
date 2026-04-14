@@ -12,6 +12,12 @@ Starts a `Session` with `start_telemetry()`, submits a batch of `ComputeTask`s,
 waits for completion, then prints the session summary via `telemetry.summary()`.
 **Use it to:** verify your telemetry setup works end-to-end and see what the summary output looks like.
 
+
+You must compile the `gpu-cuda-stress.cu` as follows to be usable by the `00-telemetry.py` example:
+
+```
+nvcc gpu-cuda-stress.cu -o gpu-cuda-stress
+```
 ---
 
 ### `plot_dashboard.py` — Telemetry Dashboard
