@@ -19,7 +19,7 @@ import logging
 import rhapsody
 from rhapsody.api.session import Session
 from rhapsody.api.task import ComputeTask
-from rhapsody.backends import DragonExecutionBackendV3, ConcurrentExecutionBackend
+from rhapsody.backends import ConcurrentExecutionBackend
 
 rhapsody.enable_logging(level=logging.DEBUG)
 
