@@ -9,7 +9,7 @@ Scripts for collecting, visualising, and understanding RHAPSODY telemetry output
 ### `00-telemetry.py`
 End-to-end example of enabling telemetry on a live session.
 Starts a `TelemetryManager`, subscribes a callback, runs a small task graph,
-then prints the session summary.  
+then prints the session summary.
 **Use it to:** understand the telemetry API, verify your setup produces events,
 and see what fields each event carries.
 
