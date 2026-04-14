@@ -19,7 +19,7 @@ import logging
 import rhapsody
 from rhapsody.api.session import Session
 from rhapsody.api.task import ComputeTask
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackendV3, ConcurrentExecutionBackend
 
 rhapsody.enable_logging(level=logging.DEBUG)
 
@@ -32,7 +32,7 @@ async def main():
     print("=" * 70)
 
     # 1. Build session with telemetry enabled
-    backend = await DragonExecutionBackendV3()
+    backend = await ConcurrentExecutionBackend()
     session = Session(backends=[backend])
 
     telemetry = await session.start_telemetry(
