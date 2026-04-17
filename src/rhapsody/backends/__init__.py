@@ -45,19 +45,11 @@ except ImportError:
     pass
 
 try:
-    from .execution import DragonExecutionBackendV1  # noqa: F401
-    from .execution import DragonExecutionBackendV2  # noqa: F401
     from .execution import DragonExecutionBackendV3  # noqa: F401
-    from .execution import DragonTelemetryCollector  # noqa: F401
+    from .execution import DragonExecutionBackendV3Client  # noqa: F401
 
-    __all__.extend(
-        [
-            "DragonExecutionBackendV1",
-            "DragonExecutionBackendV2",
-            "DragonExecutionBackendV3",
-            "DragonTelemetryCollector",
-        ]
-    )
+    __all__.append("DragonExecutionBackendV3")
+    __all__.append("DragonExecutionBackendV3Client")
 except ImportError:
     pass
 

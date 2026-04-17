@@ -1,14 +1,15 @@
 import asyncio
-import json
 import logging
-import multiprocessing as mp
 
 import rhapsody
 from rhapsody.api import ComputeTask
 from rhapsody.api import Session
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DaskExecutionBackend
+from rhapsody.backends import ConcurrentExecutionBackend
+from rhapsody.backends import DragonExecutionBackendV3Client
 
-rhapsody.enable_logging(level=logging.DEBUG)
+from concurrent.futures import ProcessPoolExecutor
+#rhapsody.enable_logging(level=logging.DEBUG)
 
 
 def func_task():
@@ -16,23 +17,27 @@ def func_task():
 
 
 async def main():
-    # Initialize session with Concurrent backend
-    backend = await DragonExecutionBackendV3()
-    session = Session(backends=[backend])
+    # DragonExecutionBackendV3Client launches Dragon in a worker subprocess via ZMQ.
+    # This process stays clean — no Dragon mp patches — so ProcessPoolExecutor coexists.
+    drag_b = await DragonExecutionBackendV3Client()
+    conc_b = await ConcurrentExecutionBackend(ProcessPoolExecutor())
+    dask_b = await DaskExecutionBackend()
+    session = Session(backends=[drag_b, conc_b, dask_b])
 
     print("--- Submitting Tasks ---")
-    tasks = [ComputeTask(function=func_task) for i in range(1024)]
-
+    tasks = [ComputeTask(function=func_task, backend=drag_b.name) for i in range(512)]
+    tasks.extend(ComputeTask(function=func_task, backend=conc_b.name) for i in range(512))
+    tasks.extend(ComputeTask(function=func_task, backend=dask_b.name) for i in range(512))
+    
     async with session:
-        # returns futures
         futures = await session.submit_tasks(tasks)
 
         print(f"Submitted {len(tasks)} tasks. Received {len(futures)} futures.")
 
-        await asyncio.gather(*futures)  # or tasks both works
+        await asyncio.gather(*futures)
 
         for t in tasks:
-            print(f"Task {t.uid}: {t.state} (output: {t.stdout.strip() if t.stdout else 'N/A'})")
+            print(f"Task {t.uid}: {t.state} on backend {t.backend}")
 
 
 if __name__ == "__main__":
