@@ -301,6 +301,7 @@ class ComputeTask(BaseTask):
         uid: str | None = None,
         input_files: list[str] | None = None,
         output_files: list[str] | None = None,
+        capture_stdio: bool = False,
         **extra_kwargs: Any,
     ):
         """Initialize compute task.
@@ -328,6 +329,7 @@ class ComputeTask(BaseTask):
             "kwargs": kwargs if kwargs is not None else {},
             "input_files": input_files,
             "output_files": output_files,
+            "capture_stdio": capture_stdio,
         }
 
         # Initialize base with all fields

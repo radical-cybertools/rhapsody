@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `ComputeTask`: new `capture_stdio: bool = False` parameter. When `True`, stdout and stderr from executable tasks are redirected directly to files (`{work_dir}/{session_uid}/{task_uid}.stdout` / `.stderr`) with zero in-memory buffering. `task.stdout` and `task.stderr` then hold file paths instead of decoded strings. Function tasks are unaffected regardless of the flag value.
+- `ConcurrentExecutionBackend`: honours `capture_stdio` by passing open file handles to `asyncio.create_subprocess_exec` / `asyncio.create_subprocess_shell`; the kernel writes directly, no Python-level buffering.
+- `DaskExecutionBackend`: honours `capture_stdio` in the module-level `_run_executable` function; file handles are passed to `subprocess.run` inside the worker process.
+- `DragonExecutionBackendV3`: honours `capture_stdio` by wrapping the command in `bash -c "cmd 1>out 2>err"`, bypassing Dragon's internal PIPE infrastructure entirely.
+- `BaseBackend`: added `_work_dir: str` (defaults to `os.getcwd()`) and `is_attached: bool = False`. `Session.add_backend()` is now the single authority that sets `_work_dir = {session.work_dir}/{session.uid}` and flips `is_attached = True`.
+- `Session.add_backend()`: raises `RuntimeError` if the same backend instance is added to more than one session, preventing silent sharing bugs.
+- Unit tests for `capture_stdio` across `ConcurrentExecutionBackend` and `DaskExecutionBackend`.
+- Getting-started guide: new **Capturing stdout/stderr to Files** section in `docs/getting-started/advanced-usage.md`.
+
 ## [0.2.0] - 2026-04-04
 
 ### Added

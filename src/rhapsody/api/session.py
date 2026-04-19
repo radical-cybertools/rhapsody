@@ -139,7 +139,20 @@ class Session:
 
         Args:
             backend: The execution or inference backend to add.
+
+        Raises:
+            ValueError: If the backend already belongs to another session.
         """
+        if backend.is_attached:
+            raise RuntimeError(
+                f"Backend '{backend.name}' is already attached to a session. "
+                "A backend cannot be shared across sessions."
+            )
+
+        backend._work_dir = os.path.join(self.work_dir, self.uid)
+        os.makedirs(backend._work_dir, exist_ok=True)
+        backend.is_attached = True
+
         self.backends[backend.name] = backend
 
         # Register state manager callback
