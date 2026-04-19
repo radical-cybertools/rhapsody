@@ -3364,18 +3364,23 @@ class DragonExecutionBackendV3(BaseBackend):
         # then invoke it as `bash script.sh`.  Dragon's forced stdout PIPE sees an
         # empty stream → immediate EOF → no hang.  Files are written by the script.
         redirect = task.get("capture_stdio") and not is_function
-        stdout_path = stderr_path = None
+        stdout_path = stderr_path = script_path = None
         if redirect:
             stdout_path = os.path.join(self._work_dir, f"{uid}.stdout")
             stderr_path = os.path.join(self._work_dir, f"{uid}.stderr")
+            script_path = os.path.join(self._work_dir, f"{uid}.sh")
             cmd_line = " ".join(
                 [shlex.quote(str(target))] + [shlex.quote(str(a)) for a in task_args]
             )
+            with open(script_path, "w") as _f:
+                _f.write(
+                    f"#!/usr/bin/bash\n"
+                    f"{cmd_line}"
+                    f" 1>{shlex.quote(stdout_path)}"
+                    f" 2>{shlex.quote(stderr_path)}\n"
+                )
             target = "/bin/bash"
-            task_args = (
-                "-c",
-                f"{cmd_line} 1>{shlex.quote(stdout_path)} 2>{shlex.quote(stderr_path)}",
-            )
+            task_args = (script_path,)
 
         # Single decision tree - no redundant checks
         if process_templates_config is not None:
@@ -3438,6 +3443,7 @@ class DragonExecutionBackendV3(BaseBackend):
             "batch_task": batch_task,
             "stdout_path": stdout_path,
             "stderr_path": stderr_path,
+            "script_path": script_path,
         }
 
         self.logger.debug(f"Created {execution_mode} task: {uid}")
