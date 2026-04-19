@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from typing import TYPE_CHECKING
 
 from rhapsody.api.errors import TaskExecutionError
@@ -123,7 +124,7 @@ class Session:
             uid: Optional unique identifier for the session.
             work_dir: working directory (default: cwd).
         """
-        self.uid = uid or "session.0000"
+        self.uid = uid or f"rhapsody.session.{uuid.uuid4().hex[:8]}"
         self.work_dir = work_dir or os.getcwd()
         self._tasks: dict[str, BaseTask | dict] = {}
         self._state_manager = TaskStateManager()
