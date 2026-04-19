@@ -236,3 +236,73 @@ async def test_execute_function_async_function_in_process():
 
     assert state == "DONE"
     assert result_task["return_value"] == 30
+
+
+# ---------------------------------------------------------------------------
+# capture_stdio tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_capture_stdio_writes_files(tmp_path):
+    """capture_stdio=True writes stdout/stderr to files and stores paths in task."""
+    backend = ConcurrentExecutionBackend()
+    backend._work_dir = str(tmp_path)
+
+    task = ComputeTask(
+        executable="/bin/bash",
+        arguments=["-c", "echo hello; echo err >&2"],
+        capture_stdio=True,
+    )
+
+    result_task, state = await backend._execute_command(task)
+
+    assert state == "DONE"
+    stdout_path = result_task["stdout"]
+    stderr_path = result_task["stderr"]
+    assert stdout_path.endswith(".stdout")
+    assert stderr_path.endswith(".stderr")
+    assert open(stdout_path).read() == "hello\n"
+    assert open(stderr_path).read() == "err\n"
+
+
+@pytest.mark.asyncio
+async def test_capture_stdio_false_returns_strings(tmp_path):
+    """Without capture_stdio, stdout/stderr are decoded strings (default behaviour)."""
+    backend = ConcurrentExecutionBackend()
+    backend._work_dir = str(tmp_path)
+
+    task = ComputeTask(executable="/bin/echo", arguments=["world"])
+
+    mock_process = MagicMock()
+    mock_process.communicate = AsyncMock(return_value=(b"world\n", b""))
+    mock_process.returncode = 0
+
+    with patch(
+        "rhapsody.backends.execution.concurrent.asyncio.create_subprocess_exec",
+        new_callable=AsyncMock,
+        return_value=mock_process,
+    ):
+        result_task, state = await backend._execute_command(task)
+
+    assert state == "DONE"
+    assert result_task["stdout"] == "world\n"
+    assert result_task["stderr"] == ""
+
+
+@pytest.mark.asyncio
+async def test_capture_stdio_nonzero_exit_returns_failed(tmp_path):
+    """capture_stdio=True with a failing command returns FAILED state."""
+    backend = ConcurrentExecutionBackend()
+    backend._work_dir = str(tmp_path)
+
+    task = ComputeTask(
+        executable="/bin/bash",
+        arguments=["-c", "exit 1"],
+        capture_stdio=True,
+    )
+
+    result_task, state = await backend._execute_command(task)
+
+    assert state == "FAILED"
+    assert result_task["exit_code"] == 1
