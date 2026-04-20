@@ -29,9 +29,8 @@ class BaseBackend(ABC):
         self._name = name
         # Default output directory for capture_stdio tasks; overridden by Session.add_backend
         self._work_dir: str = os.getcwd()
-        # True once this backend has been registered with a higher entity (session/workflow manager)
-        # via add_backend. A backend must not be added to more than one session.
         self.is_attached: bool = False
+        self.attached_to: list[str] = []
 
     @property
     def name(self) -> str:
