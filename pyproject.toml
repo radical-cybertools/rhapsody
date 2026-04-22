@@ -124,7 +124,9 @@ filterwarnings = [
 markers = [
     "slow: marks tests as slow-running",
     "radical_pilot: marks tests that use RADICAL-Pilot backend",
-    "performance: marks tests as performance benchmarks"
+    "performance: marks tests as performance benchmarks",
+    "integration: marks integration tests",
+    "dragon: marks tests that use Dragon backend"
 ]
 
 [tool.ruff]
