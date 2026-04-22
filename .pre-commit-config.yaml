@@ -77,7 +77,8 @@ repos:
     hooks:
       - id: docs-build
         name: Build docs (strict)
-        language: system
+        language: python
+        additional_dependencies: [tox]
         entry: tox -e docs
         pass_filenames: false
         files: ^(docs/|src/|mkdocs\.yml)
