@@ -3,6 +3,7 @@
 Relies purely on Dask's native scheduler_info() API — no psutil, no extra deps.
 
 Per-worker metrics exposed by Dask:
+
     workers[addr]["metrics"]["cpu"]         → CPU utilization %
     workers[addr]["metrics"]["memory"]      → bytes used
     workers[addr]["memory_limit"]           → bytes total
