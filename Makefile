@@ -56,7 +56,7 @@ test-unit-no-dragon:  ## Run unit tests excluding Dragon (uses regular pytest, f
 
 test-unit-dragon:  ## Run Dragon unit tests (requires 'dragon pytest', may hang other tests)
 	@echo "Running Dragon unit tests with dragon pytest..."
-	@dragon $(PYTHON) -m pytest tests/unit/test_backend_execution_dragon.py -xvs
+	@dragon $(PYTHON) -m pytest tests/unit/test_backend_execution_dragon.py tests/unit/telemetry/test_adapters_dragon.py -xvs
 
 test-integration:  ## Run all integration tests (non-Dragon + Dragon)
 test-integration: test-integration-no-dragon test-integration-dragon

@@ -274,6 +274,7 @@ class DaskExecutionBackend(BaseBackend):
         async def on_done(f):
             task_uid = task["uid"]
             try:
+                self._callback_func(task, "RUNNING")
                 result = await f
                 task["return_value"] = result
                 self._callback_func(task, "DONE")
@@ -370,6 +371,7 @@ class DaskExecutionBackend(BaseBackend):
         async def on_done(f):
             task_uid = task["uid"]
             try:
+                self._callback_func(task, "RUNNING")
                 stdout, stderr, returncode = await f
                 task["stdout"] = stdout
                 task["stderr"] = stderr

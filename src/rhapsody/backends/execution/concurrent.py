@@ -206,6 +206,7 @@ class ConcurrentExecutionBackend(BaseBackend):
     async def _handle_task(self, task: dict) -> None:
         """Handle task execution with callback."""
         try:
+            self._callback_func(task, "RUNNING")
             result_task, state = await self._execute_task(task)
             # Set state on the task object itself before callback
             self._callback_func(result_task, state)
