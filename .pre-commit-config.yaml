@@ -81,5 +81,5 @@ repos:
         additional_dependencies: [tox]
         entry: tox -e docs
         pass_filenames: false
-        files: ^(docs/|src/|mkdocs\.yml)
+        files: ^(docs/|src/|mkdocs\.yml|README\.md|pyproject\.toml)
         types: [file]
