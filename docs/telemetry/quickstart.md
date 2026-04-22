@@ -14,6 +14,10 @@ This pulls in `opentelemetry-sdk`. All other telemetry dependencies (`psutil`, `
 
 ## Minimal example
 
+!!! note
+    **Requires:** `pip install rhapsody-py[telemetry]`
+
+
 ```python
 import asyncio
 from rhapsody import Session, ComputeTask
