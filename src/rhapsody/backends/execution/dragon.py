@@ -1,9 +1,7 @@
 import asyncio
 import logging
 import os
-import queue
 import shlex
-import socket
 import sys
 import threading
 import time
