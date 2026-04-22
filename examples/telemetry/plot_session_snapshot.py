@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""plotv2-no-grant.py — RHAPSODY telemetry JSONL → multi-panel figure."""
+"""plot_session_snapshot.py — RHAPSODY telemetry JSONL → multi-panel figure."""
 
 import collections
 import glob
