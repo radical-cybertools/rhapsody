@@ -315,6 +315,9 @@ class ComputeTask(BaseTask):
             uid: Unique identifier for the task (auto-generated if not provided)
             input_files: List of input file paths
             output_files: List of output file paths
+            capture_stdio: If True, redirect stdout/stderr to files under the session
+                work directory instead of returning decoded strings. Applies to
+                executable tasks only; ignored for function tasks.
             **extra_kwargs: Additional custom fields (e.g. task_backend_specific_kwargs)
 
         Raises:

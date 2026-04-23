@@ -150,9 +150,6 @@ class Session:
 
         Args:
             backend: The execution or inference backend to add.
-
-        Raises:
-            ValueError: If the backend already belongs to another session.
         """
         backend._work_dir = os.path.join(self.work_dir, self.uid)
         os.makedirs(backend._work_dir, exist_ok=True)

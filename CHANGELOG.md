@@ -10,7 +10,7 @@
 - `DragonExecutionBackendV3`: honours `capture_stdio` by wrapping the command in `bash -c "cmd 1>out 2>err"`, bypassing Dragon's internal PIPE infrastructure entirely.
 - `BaseBackend`: added `_work_dir: str` (defaults to `os.getcwd()`) and `is_attached: bool = False`. `Session.add_backend()` is now the single authority that sets `_work_dir = {session.work_dir}/{session.uid}` and flips `is_attached = True`.
 - `Session.add_backend()`: raises `RuntimeError` if the same backend instance is added to more than one session, preventing silent sharing bugs.
-- Unit tests for `capture_stdio` across `ConcurrentExecutionBackend` and `DaskExecutionBackend`.
+- Unit tests for `capture_stdio` across `ConcurrentExecutionBackend`, `DaskExecutionBackend`, and `DragonExecutionBackendV3`.
 - Getting-started guide: new **Capturing stdout/stderr to Files** section in `docs/getting-started/advanced-usage.md`.
 
 ## [0.2.0] - 2026-04-04
