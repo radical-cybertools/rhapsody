@@ -172,20 +172,27 @@ class ConcurrentExecutionBackend(BaseBackend):
         env = backend_kwargs.get("env")  # None inherits the parent process environment
 
         redirect = task.get("capture_stdio")
+        stdout_f = stderr_f = process = None
+        stdout_val = stderr_val = None
+        exit_code = 1
+
         if redirect:
             uid = task["uid"]
             stdout_path = os.path.join(self._work_dir, f"{uid}.stdout")
             stderr_path = os.path.join(self._work_dir, f"{uid}.stderr")
-            stdout_f = open(stdout_path, "wb")
-            stderr_f = open(stderr_path, "wb")
-            stdout_arg = stdout_f
-            stderr_arg = stderr_f
         else:
             stdout_path = stderr_path = None
-            stdout_arg = asyncio.subprocess.PIPE
-            stderr_arg = asyncio.subprocess.PIPE
 
         try:
+            if redirect:
+                stdout_f = open(stdout_path, "wb")
+                stderr_f = open(stderr_path, "wb")
+                stdout_arg = stdout_f
+                stderr_arg = stderr_f
+            else:
+                stdout_arg = asyncio.subprocess.PIPE
+                stderr_arg = asyncio.subprocess.PIPE
+
             if execute_in_shell:
                 # Shell mode: join executable and arguments into single command string
                 cmd = " ".join([executable] + arguments)
@@ -215,16 +222,19 @@ class ConcurrentExecutionBackend(BaseBackend):
                 raw_out, raw_err = await process.communicate()
                 stdout_val = raw_out.decode()
                 stderr_val = raw_err.decode()
+
+            exit_code = process.returncode
         finally:
-            if redirect:
+            if stdout_f is not None:
                 stdout_f.close()
+            if stderr_f is not None:
                 stderr_f.close()
 
         task.update(
             {
                 "stdout": stdout_val,
                 "stderr": stderr_val,
-                "exit_code": process.returncode,
+                "exit_code": exit_code,
             }
         )
 
