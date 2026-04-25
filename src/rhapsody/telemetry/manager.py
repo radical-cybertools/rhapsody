@@ -872,7 +872,7 @@ class TelemetryManager:
         path = Path(self._checkpoint_path)
         path.mkdir(parents=True, exist_ok=True)
         ts = int(self._session_start_time or time.time())
-        filename = f"rhapsody.session.{self._session_id}.{ts}.telemetry.jsonl"
+        filename = f"{self._session_id}.{ts}.telemetry.jsonl"
         filepath = path / filename
         try:
             self._checkpoint_file = open(filepath, "w", buffering=1)  # line-buffered

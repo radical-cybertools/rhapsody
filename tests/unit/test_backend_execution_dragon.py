@@ -684,3 +684,94 @@ def test_v3_fence_delegates_to_batch(backend_v3):
     """backend.fence() calls batch.fence() exactly once."""
     backend_v3.fence()
     backend_v3.batch.fence.assert_called_once()
+
+
+# ============================================================================
+# V3 capture_stdio tests — no Dragon cluster required
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_v3_capture_stdio_build_task_creates_script(backend_v3, tmp_path):
+    """capture_stdio=True writes a shell script and populates registry paths."""
+    backend_v3._work_dir = str(tmp_path)
+
+    task = {
+        "uid": "task.capture-test-001",
+        "executable": "/bin/echo",
+        "arguments": ["hello"],
+        "function": None,
+        "args": [],
+        "kwargs": {},
+        "name": "capture-test",
+        "task_backend_specific_kwargs": {"process_template": {}},
+        "capture_stdio": True,
+    }
+
+    await backend_v3.build_task(task)
+
+    uid = task["uid"]
+    reg = backend_v3._task_registry[uid]
+
+    assert reg["script_path"] is not None
+    assert reg["script_path"].endswith(".sh")
+    assert reg["stdout_path"].endswith(".stdout")
+    assert reg["stderr_path"].endswith(".stderr")
+
+    script = open(reg["script_path"]).read()
+    assert "1>" in script
+    assert "2>" in script
+
+
+@pytest.mark.asyncio
+async def test_v3_capture_stdio_false_no_script(backend_v3, tmp_path):
+    """capture_stdio=False (default) creates no shell script."""
+    backend_v3._work_dir = str(tmp_path)
+
+    task = {
+        "uid": "task.capture-test-002",
+        "executable": "/bin/echo",
+        "arguments": ["hello"],
+        "function": None,
+        "args": [],
+        "kwargs": {},
+        "name": "no-capture-test",
+        "task_backend_specific_kwargs": {"process_template": {}},
+        "capture_stdio": False,
+    }
+
+    await backend_v3.build_task(task)
+
+    uid = task["uid"]
+    reg = backend_v3._task_registry[uid]
+
+    assert reg["script_path"] is None
+    assert reg["stdout_path"] is None
+    assert reg["stderr_path"] is None
+    assert not list(tmp_path.glob("*.sh"))
+
+
+@pytest.mark.asyncio
+async def test_v3_capture_stdio_function_task_no_script(backend_v3, tmp_path):
+    """capture_stdio=True on a function task is ignored — no shell script written."""
+    backend_v3._work_dir = str(tmp_path)
+
+    task = {
+        "uid": "task.capture-test-003",
+        "executable": None,
+        "function": lambda: None,
+        "arguments": [],
+        "args": [],
+        "kwargs": {},
+        "name": "func-capture-test",
+        "task_backend_specific_kwargs": {"process_template": {}},
+        "capture_stdio": True,
+    }
+
+    await backend_v3.build_task(task)
+
+    uid = task["uid"]
+    reg = backend_v3._task_registry[uid]
+
+    assert reg["script_path"] is None
+    assert not list(tmp_path.glob("*.sh"))

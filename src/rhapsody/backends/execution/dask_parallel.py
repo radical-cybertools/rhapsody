@@ -38,6 +38,9 @@ def _run_executable(
     cwd: str | None = None,
     env: dict | None = None,
     shell: bool = False,
+    capture_stdio: bool = False,
+    output_dir: str | None = None,
+    uid: str | None = None,
 ) -> tuple[str, str, int]:
     """Run a subprocess inside a Dask worker.
 
@@ -49,21 +52,32 @@ def _run_executable(
         cwd: Working directory for the subprocess.
         env: Environment variables dict. None inherits the worker environment.
         shell: Whether to execute through the shell.
+        capture_stdio: If True, redirect stdout/stderr to files in output_dir.
+        output_dir: Directory for output files when capture_stdio is True.
+        uid: Task uid used to name output files when capture_stdio is True.
 
     Returns:
-        Tuple of (stdout, stderr, returncode).
+        Tuple of (stdout, stderr, returncode). When capture_stdio is True,
+        stdout and stderr are file paths instead of decoded content.
     """
     import subprocess
 
     cmd = [executable] + list(arguments)
-    result = subprocess.run(
-        cmd if not shell else " ".join(cmd),
-        shell=shell,
-        capture_output=True,
-        cwd=cwd,
-        env=env,
-    )
-    return result.stdout.decode(), result.stderr.decode(), result.returncode
+    shell_cmd = " ".join(cmd) if shell else cmd
+
+    if capture_stdio and output_dir and uid:
+        import os as _os
+
+        stdout_path = _os.path.join(output_dir, f"{uid}.stdout")
+        stderr_path = _os.path.join(output_dir, f"{uid}.stderr")
+        with open(stdout_path, "wb") as out_f, open(stderr_path, "wb") as err_f:
+            result = subprocess.run(
+                shell_cmd, shell=shell, stdout=out_f, stderr=err_f, cwd=cwd, env=env
+            )
+        return stdout_path, stderr_path, result.returncode
+    else:
+        result = subprocess.run(shell_cmd, shell=shell, capture_output=True, cwd=cwd, env=env)
+        return result.stdout.decode(), result.stderr.decode(), result.returncode
 
 
 class DaskExecutionBackend(BaseBackend):
@@ -364,6 +378,9 @@ class DaskExecutionBackend(BaseBackend):
             cwd=bksp.get("cwd"),
             env=bksp.get("env"),
             shell=bksp.get("shell", False),
+            capture_stdio=task.get("capture_stdio", False),
+            output_dir=self._work_dir,
+            uid=task["uid"],
             **backend_kwargs,
         )
         self.tasks[task["uid"]]["future"] = dask_future

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import shlex
 import sys
 import threading
 import time
@@ -3230,18 +3231,23 @@ class DragonExecutionBackendV3(BaseBackend):
                 self._cancelled_tasks.discard(uid)
                 continue
             task_desc = task_info["description"]
+            stdout_path = task_info.get("stdout_path")
+            stderr_path = task_info.get("stderr_path")
             if raised:
                 task_desc["exception"] = result
-                task_desc["stderr"] = tb if tb else str(result)
-                if stdout:
-                    task_desc["stdout"] = stdout
+                task_desc["stderr"] = stderr_path if stderr_path else (tb if tb else str(result))
+                task_desc["stdout"] = (
+                    stdout_path if stdout_path else (stdout or task_desc.get("stdout"))
+                )
                 self._callback_func(task_desc, "FAILED")
             else:
                 task_desc["return_value"] = result
-                if stdout:
-                    task_desc["stdout"] = stdout
-                if stderr:
-                    task_desc["stderr"] = stderr
+                task_desc["stdout"] = (
+                    stdout_path if stdout_path else (stdout or task_desc.get("stdout"))
+                )
+                task_desc["stderr"] = (
+                    stderr_path if stderr_path else (stderr or task_desc.get("stderr"))
+                )
                 self._callback_func(task_desc, "DONE")
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
@@ -3350,6 +3356,29 @@ class DragonExecutionBackendV3(BaseBackend):
         process_templates_config = backend_kwargs.get("process_templates")
         process_template_config = backend_kwargs.get("process_template")
 
+        # Dragon's batch PIPE hangs when stderr is captured for subprocess tasks.
+        # Fix: write a shell script that redirects its own stdout/stderr to files,
+        # then invoke it as `bash script.sh`.  Dragon's forced stdout PIPE sees an
+        # empty stream → immediate EOF → no hang.  Files are written by the script.
+        redirect = task.get("capture_stdio") and not is_function
+        stdout_path = stderr_path = script_path = None
+        if redirect:
+            stdout_path = os.path.join(self._work_dir, f"{uid}.stdout")
+            stderr_path = os.path.join(self._work_dir, f"{uid}.stderr")
+            script_path = os.path.join(self._work_dir, f"{uid}.sh")
+            cmd_line = " ".join(
+                [shlex.quote(str(target))] + [shlex.quote(str(a)) for a in task_args]
+            )
+            with open(script_path, "w") as _f:
+                _f.write(
+                    f"#!/usr/bin/bash\n"
+                    f"{cmd_line}"
+                    f" 1>{shlex.quote(stdout_path)}"
+                    f" 2>{shlex.quote(stderr_path)}\n"
+                )
+            target = "/bin/bash"
+            task_args = (script_path,)
+
         # Single decision tree - no redundant checks
         if process_templates_config is not None:
             # Priority 1: Job with user templates
@@ -3409,6 +3438,9 @@ class DragonExecutionBackendV3(BaseBackend):
             "uid": uid,
             "description": task,
             "batch_task": batch_task,
+            "stdout_path": stdout_path,
+            "stderr_path": stderr_path,
+            "script_path": script_path,
         }
 
         self.logger.debug(f"Created {execution_mode} task: {uid}")

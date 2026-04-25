@@ -171,6 +171,60 @@ After a task completes, results are stored on the task object:
 
 ---
 
+## Capturing stdout/stderr to Files
+
+By default, output from executable tasks is collected in-memory as strings on
+`task.stdout` and `task.stderr`. For long-running tasks or large outputs, use
+`capture_stdio=True` to redirect output directly to files — zero in-memory
+buffering.
+
+```python
+from rhapsody.api import ComputeTask, Session
+from rhapsody.backends import ConcurrentExecutionBackend
+
+async with ConcurrentExecutionBackend() as backend:
+    session = Session(backends=[backend], work_dir="/tmp/my-run")
+
+    tasks = [
+        ComputeTask(
+            executable="/bin/bash",
+            arguments=["-c", "echo hello; echo err >&2"],
+            capture_stdio=True,
+        )
+        for _ in range(10)
+    ]
+
+    async with session:
+        await session.submit_tasks(tasks)
+        await session.wait_tasks(tasks)
+
+    for t in tasks:
+        print(t.stdout)   # path: /tmp/my-run/session.0000/task.000001.stdout
+        print(open(t.stdout).read())
+```
+
+When `capture_stdio=True`, `task.stdout` and `task.stderr` hold **file paths**
+instead of strings. The files are written to `{work_dir}/{session_uid}/` and
+named after the task UID (`task.000001.stdout`, `task.000001.stderr`).
+
+| Behaviour | `capture_stdio=False` (default) | `capture_stdio=True` |
+|---|---|---|
+| `task.stdout` | decoded string | file path (`*.stdout`) |
+| `task.stderr` | decoded string | file path (`*.stderr`) |
+| Memory usage | O(output size) | O(1) |
+| Log persistence | lost after process | file on disk |
+
+!!! note "Supported backends"
+    `capture_stdio` is supported by `ConcurrentExecutionBackend`,
+    `DaskExecutionBackend`, and `DragonExecutionBackendV3`. Function tasks
+    (`function=`) are unaffected regardless of the flag value.
+
+!!! note "Session work_dir"
+    Files are placed in `{session.work_dir}/{session.uid}/`. Pass `work_dir=`
+    when creating the session to control where logs land.
+
+---
+
 ## Multiple Execution Backends
 
 You can register multiple backends in a single session and explicitly route tasks to them using the `backend` keyword.

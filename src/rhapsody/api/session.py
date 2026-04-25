@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from typing import TYPE_CHECKING
 from typing import Callable
 
@@ -131,7 +132,7 @@ class Session:
             uid: Optional unique identifier for the session.
             work_dir: working directory (default: cwd).
         """
-        self.uid = uid or "session.0000"
+        self.uid = uid or f"rhapsody.session.{uuid.uuid4().hex[:8]}"
         self.work_dir = work_dir or os.getcwd()
         self._tasks: dict[str, BaseTask | dict] = {}
         self._state_manager = TaskStateManager()
@@ -150,6 +151,11 @@ class Session:
         Args:
             backend: The execution or inference backend to add.
         """
+        backend._work_dir = os.path.join(self.work_dir, self.uid)
+        os.makedirs(backend._work_dir, exist_ok=True)
+        backend.is_attached = True
+        backend.attached_to.append(self.uid)
+
         self.backends[backend.name] = backend
 
         # Register state manager callback
