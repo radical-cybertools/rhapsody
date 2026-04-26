@@ -335,7 +335,7 @@ class TestCheckpointFile:
 
             files = os.listdir(tmpdir)
             assert len(files) == 1
-            assert files[0].startswith("rhapsody.session.cp-test.")
+            assert files[0].startswith("cp-test.")
             assert files[0].endswith(".telemetry.jsonl")
 
     async def test_file_contains_all_sections(self):

@@ -37,6 +37,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Pushed onto the queue by stop() after queue.join() to unblock the dispatch loop cleanly.
+_STOP_SENTINEL = object()
+
 
 class TelemetryManager:
     """Central telemetry orchestrator for a RHAPSODY session.
@@ -71,7 +74,7 @@ class TelemetryManager:
         checkpoint_path: str | None = None,
     ) -> None:
         self._session_id = session_id
-        self._queue: asyncio.Queue[BaseEvent] = asyncio.Queue()
+        self._queue: asyncio.Queue = asyncio.Queue()
         self._subscribers: list[Callable[[BaseEvent], Any]] = []
         self._adapters: list[TelemetryAdapter] = []
         self._running = False
@@ -188,6 +191,13 @@ class TelemetryManager:
         )
 
         self._running = False
+        # Drain all in-flight events before signalling the dispatch loop to exit.
+        # emit() is now a no-op (guard on _running), so no new events can arrive.
+        try:
+            await asyncio.wait_for(self._queue.join(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("Telemetry queue did not drain cleanly within timeout")
+        self._queue.put_nowait(_STOP_SENTINEL)
 
         for adapter in self._adapters:
             try:
@@ -228,8 +238,10 @@ class TelemetryManager:
     def emit(self, event: BaseEvent) -> None:
         """Enqueue an event for processing.
 
-        Non-blocking, O(1), safe to call from any context.
+        Non-blocking, O(1), safe to call from any context. No-op once stop() has been called.
         """
+        if not self._running:
+            return
         self._queue.put_nowait(event)
 
     def subscribe(self, callback: Callable[[BaseEvent], Any]) -> None:
@@ -691,45 +703,88 @@ class TelemetryManager:
     # ------------------------------------------------------------------
 
     async def _dispatch_loop(self) -> None:
-        """Background task: drain queue, update OTel instruments, notify subscribers."""
+        """Background task: drain queue in batches, update OTel instruments, notify subscribers."""
         from opentelemetry import trace
 
-        while self._running or not self._queue.empty():
-            try:
-                event = await asyncio.wait_for(self._queue.get(), timeout=0.05)
-            except asyncio.TimeoutError:
-                continue
+        _batch_size = 500
 
-            # Keep raw log for convenience methods
+        while True:
+            # Fast path: drain up to _batch_size events without yielding to the event loop.
+            # get_nowait() is a plain deque.popleft() — zero asyncio scheduling overhead.
+            batch: list[BaseEvent] = []
+            try:
+                while len(batch) < _batch_size:
+                    item = self._queue.get_nowait()
+                    if item is _STOP_SENTINEL:
+                        self._queue.task_done()
+                        if batch:
+                            self._flush_batch(batch, trace)
+                            for _ in batch:
+                                self._queue.task_done()
+                        return
+                    batch.append(item)
+            except asyncio.QueueEmpty:
+                pass
+
+            if not batch:
+                # Slow path: queue was empty — wait without a timeout.
+                # Plain queue.get(), no wait_for(), no timer handle, no Task allocation.
+                item = await self._queue.get()
+                if item is _STOP_SENTINEL:
+                    self._queue.task_done()
+                    return
+                batch.append(item)
+
+            self._flush_batch(batch, trace)
+            for _ in batch:
+                self._queue.task_done()  # task_done AFTER processing (Fix 1)
+
+            # Yield only when a full batch was drained — queue likely has more items.
+            # Partial batch means queue is exhausted; await queue.get() yields naturally.
+            if len(batch) == _batch_size:
+                await asyncio.sleep(0)
+
+    def _flush_batch(self, batch: list[BaseEvent], trace_mod: Any) -> None:
+        """Process a collected batch: OTel instruments, JSONL write, subscribers."""
+        for event in batch:
             self._event_log.append(event)
-
             try:
-                self._process_event(event, trace)
+                self._process_event(event, trace_mod)
             except Exception:
                 logger.exception("Error processing telemetry event %s", event.event_type)
 
-            # Write event line to JSONL file — enriched with OTel correlation IDs
-            if self._checkpoint_file is not None:
-                try:
-                    d = dataclasses.asdict(event)
-                    trace_id, span_id = self._span_ids_for_event(event)
-                    d["trace_id"] = trace_id
-                    d["span_id"] = span_id
-                    d["name"] = event.event_type  # OTel-compatible alias
-                    self._write_line("event", d)
-                except Exception:
-                    logger.debug("Failed to write event to checkpoint file", exc_info=True)
+        if self._checkpoint_file is not None:
+            self._write_batch(batch)
 
-            for sub in self._subscribers:
-                try:
-                    if asyncio.iscoroutinefunction(sub):
-                        asyncio.create_task(sub(event))
-                    else:
-                        sub(event)
-                except Exception:
-                    logger.debug("Subscriber raised exception", exc_info=True)
+        if self._subscribers:
+            for event in batch:
+                for sub in self._subscribers:
+                    try:
+                        if asyncio.iscoroutinefunction(sub):
+                            asyncio.create_task(sub(event))
+                        else:
+                            sub(event)
+                    except Exception:
+                        logger.debug("Subscriber raised exception", exc_info=True)
 
-            self._queue.task_done()
+    def _write_batch(self, events: list[BaseEvent]) -> None:
+        """Write a batch of events to JSONL in a single file.write() call."""
+        lines = []
+        for event in events:
+            try:
+                # fields() + getattr: shallow copy that captures init=False class-level
+                # fields (e.g. event_type) which vars()/.__dict__ misses on frozen subclasses.
+                d = {f.name: getattr(event, f.name) for f in dataclasses.fields(event)}
+                trace_id, span_id = self._span_ids_for_event(event)
+                d["trace_id"] = trace_id
+                d["span_id"] = span_id
+                d["name"] = event.event_type
+                d["section"] = "event"
+                lines.append(json.dumps(d, default=str))
+            except Exception:
+                logger.debug("Failed to serialize event for checkpoint", exc_info=True)
+        if lines:
+            self._checkpoint_file.write("\n".join(lines) + "\n")
 
     def _process_event(self, event: BaseEvent, trace_mod: Any) -> None:
         """Translate a RHAPSODY event into OTel instrument calls and span lifecycle."""
@@ -875,7 +930,7 @@ class TelemetryManager:
         filename = f"{self._session_id}.{ts}.telemetry.jsonl"
         filepath = path / filename
         try:
-            self._checkpoint_file = open(filepath, "w", buffering=1)  # line-buffered
+            self._checkpoint_file = open(filepath, "w", buffering=131072)  # 128 KB block buffer
             logger.info("Telemetry checkpoint file: %s", filepath)
         except OSError:
             logger.exception("Could not open telemetry checkpoint file %s", filepath)
