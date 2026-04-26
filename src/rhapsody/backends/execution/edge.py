@@ -18,11 +18,6 @@ from ..base import BaseBackend
 from ..constants import BackendMainStates, StateMapper
 
 try:
-    from radical.edge import BridgeClient
-except ImportError:
-    BridgeClient = None
-
-try:
     import radical.prof as rprof
 except ImportError:
     rprof = None
@@ -80,10 +75,13 @@ class EdgeExecutionBackend(BaseBackend):
     ):
         super().__init__(name=name)
 
-        if BridgeClient is None:
+        try:
+            from radical.edge import BridgeClient
+        except ImportError as exc:
             raise ImportError(
-                "EdgeExecutionBackend requires 'radical.edge'. "
-                "Install it with: pip install radical.edge")
+                f"EdgeExecutionBackend: cannot import radical.edge: "
+                f"{exc}") from exc
+        self._BridgeClient = BridgeClient
 
         self.logger           = _get_logger()
         self._bridge_url      = bridge_url
@@ -134,7 +132,7 @@ class EdgeExecutionBackend(BaseBackend):
 
         # Create BridgeClient → EdgeClient → RhapsodyClient
         # cert=None disables TLS verification (default for self-signed)
-        self._bc = BridgeClient(url=self._bridge_url)
+        self._bc = self._BridgeClient(url=self._bridge_url)
         ec = self._bc.get_edge_client(self._edge_name)
 
         session_kwargs = {'backends': self._remote_backends}
