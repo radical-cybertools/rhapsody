@@ -112,6 +112,7 @@ class TelemetryManager:
         # Active OTel spans keyed by task_id
         self._active_spans: dict[str, Any] = {}
         self._session_span: Any = None
+        self._completed_session_ctx: Any = None  # snapshot after session span ends
 
         # Wall-clock time recorded when RUNNING is first seen for each task.
         self._task_start_times: dict[str, float] = {}
@@ -623,19 +624,27 @@ class TelemetryManager:
         Must be called AFTER _process_event() so that spans have been created/ended.
 
         Correlation rules:
-        - TaskStarted/Completed/Failed  → trace_id + span_id of the task span
-        - SessionStarted/SessionEnded   → trace_id + span_id of the session span
-        - TaskSubmitted/TaskQueued      → session trace_id only (span not yet created),
-                                          span_id = None (OTel-aligned: event belongs to
-                                          the trace but precedes the task span)
-        - ResourceUpdate                → (None, None) — node metric, not task-correlated
+        - TaskCreated/Submitted/Queued/Started/Completed/Failed → task span
+        - SessionStarted/SessionEnded   → session span
+        - ResourceUpdate                → session span
         """
         span_ctx = None
 
-        if event.event_type == "TaskStarted":
+        if event.event_type in ("TaskCreated", "TaskStarted", "TaskSubmitted", "TaskQueued"):
             span = self._active_spans.get(event.task_id)
             if span:
                 span_ctx = span.get_span_context()
+            else:
+                # Same-batch scenario: _process_event(TaskCompleted/Failed/Canceled) already
+                # ran and moved the span_ctx to _completed_span_ctx. Use .get (not .pop) —
+                # the terminal event's own _span_ids_for_event call will pop it.
+                span_ctx = self._completed_span_ctx.get(event.task_id)
+            if span_ctx is None and event.event_type in ("TaskSubmitted", "TaskQueued"):
+                # Fallback: TaskCreated not yet processed — attach to session trace only.
+                if self._session_span:
+                    session_ctx = self._session_span.get_span_context()
+                    if session_ctx.is_valid:
+                        return hex(session_ctx.trace_id), None
 
         elif event.event_type in ("TaskCompleted", "TaskFailed", "TaskCanceled"):
             span_ctx = self._completed_span_ctx.pop(event.task_id, None)
@@ -643,14 +652,9 @@ class TelemetryManager:
         elif event.event_type in ("SessionStarted", "SessionEnded"):
             if self._session_span:
                 span_ctx = self._session_span.get_span_context()
-
-        elif event.event_type in ("TaskSubmitted", "TaskQueued"):
-            # No task span exists yet — attach to the session trace so the event
-            # can be stitched into a full timeline; span_id remains None.
-            if self._session_span:
-                session_ctx = self._session_span.get_span_context()
-                if session_ctx.is_valid:
-                    return hex(session_ctx.trace_id), None
+            elif event.event_type == "SessionEnded":
+                # Same-batch: _process_event already ended _session_span; use snapshot.
+                span_ctx = self._completed_session_ctx
 
         elif event.event_type == "ResourceUpdate":
             # Node/GPU metric belongs to the session scope — attach to the session
@@ -789,9 +793,23 @@ class TelemetryManager:
     def _process_event(self, event: BaseEvent, trace_mod: Any) -> None:
         """Translate a RHAPSODY event into OTel instrument calls and span lifecycle."""
         etype = event.event_type
-        attrs = {"session_id": event.session_id, "backend": event.backend}
+        attrs = {"session_id": event.session_id, "backend": event.backend or ""}
 
-        if etype == "TaskSubmitted":
+        if etype == "TaskCreated":
+            executable = event.attributes.get("executable", "")
+            task_type = event.attributes.get("task_type", "")
+            a = {
+                **attrs,
+                "task_id": event.task_id,
+                "executable": executable,
+                "task_type": task_type,
+            }
+            ctx = trace_mod.set_span_in_context(self._session_span) if self._session_span else None
+            self._active_spans[event.task_id] = self._tracer.start_span(
+                "task", context=ctx, attributes=a
+            )
+
+        elif etype == "TaskSubmitted":
             self._c_submitted.add(1, {**attrs, "task_id": event.task_id})
 
         elif etype == "TaskStarted":
@@ -805,10 +823,16 @@ class TelemetryManager:
             }
             self._c_started.add(1, a)
             self._g_running.add(1, a)
-            ctx = trace_mod.set_span_in_context(self._session_span) if self._session_span else None
-            self._active_spans[event.task_id] = self._tracer.start_span(
-                "task", context=ctx, attributes=a
-            )
+            if event.task_id not in self._active_spans:
+                # Fallback: TaskCreated was never seen (incomplete lifecycle).
+                ctx = (
+                    trace_mod.set_span_in_context(self._session_span)
+                    if self._session_span
+                    else None
+                )
+                self._active_spans[event.task_id] = self._tracer.start_span(
+                    "task", context=ctx, attributes=a
+                )
 
         elif etype == "TaskCompleted":
             executable = event.attributes.get("executable", "")
@@ -904,6 +928,7 @@ class TelemetryManager:
 
         elif etype == "SessionEnded":
             if self._session_span:
+                self._completed_session_ctx = self._session_span.get_span_context()
                 self._session_span.end()
                 self._session_span = None
 

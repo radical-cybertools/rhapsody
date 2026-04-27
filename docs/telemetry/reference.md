@@ -95,7 +95,7 @@ attributes = {
 ```
 
 !!! note "OTel correlation"
-    At submission time no task span exists yet.  The JSONL `trace_id` is the session trace ID (so the event is queryable within the right trace), but `span_id` is `null`.
+    The task span is already open at this point (opened at `TaskCreated`). The JSONL `trace_id` and `span_id` are those of the task span, making this event queryable as a child of the session span in any OTel-compatible tool.
 
 ---
 
@@ -107,7 +107,7 @@ Emitted just before the task is handed to the backend's internal queue. Marks th
 attributes = { "executable": str, "task_type": str }
 ```
 
-Same OTel correlation as `TaskSubmitted` — trace-linked but no task span yet.
+Same OTel correlation as `TaskSubmitted` — the task span is already open; `trace_id` and `span_id` are both set.
 
 ---
 
@@ -120,7 +120,7 @@ attributes = { "executable": str, "task_type": str }
 ```
 
 !!! note "OTel correlation"
-    Opening this event **opens the task OTel span** (named `"task"`) as a child of the session span. The JSONL `trace_id` and `span_id` are those of the freshly opened task span.
+    The task OTel span (named `"task"`) was opened at `TaskCreated`. This event is recorded as an annotation on that already-open span. The JSONL `trace_id` and `span_id` are those of the task span.
 
 ---
 
@@ -424,10 +424,10 @@ task span
 │     task_type  = "compute"
 │     status     = "completed" | "failed"
 │     error_type = "RuntimeError"   (failed tasks only)
-└── duration: TaskStarted.event_time → TaskCompleted.event_time
+└── duration: TaskCreated (span open) → TaskCompleted/Failed/Canceled (span close)
 ```
 
-The span duration is derived from the backend's own task history timestamps — not from event queue latency — so it reflects true execution time.
+The span covers the full task lifecycle from registration to terminal state. To get pure execution time, use the `task_duration_seconds` OTel histogram metric, which is recorded from `TaskStarted` → terminal state.
 
 ### Trace–span correlation in the JSONL file
 
@@ -436,7 +436,7 @@ Every line in the checkpoint file carries two extra keys added at serialization 
 | JSONL key | Source |
 |---|---|
 | `trace_id` | Hex string of the OTel trace ID |
-| `span_id` | Hex string of the correlated span ID (`null` for TaskSubmitted/TaskQueued) |
+| `span_id` | Hex string of the correlated span ID — always non-null for all task lifecycle and session events |
 | `name` | Alias for `event_type` (OTel-compatible) |
 
 This makes the JSONL file directly importable into any OTel-aware tool as a timeline.

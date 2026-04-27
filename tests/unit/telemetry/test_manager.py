@@ -10,7 +10,9 @@ import pytest
 
 pytest.importorskip("opentelemetry", reason="opentelemetry-sdk not installed")
 
+from rhapsody.telemetry.events import TaskCanceled
 from rhapsody.telemetry.events import TaskCompleted
+from rhapsody.telemetry.events import TaskCreated
 from rhapsody.telemetry.events import TaskFailed
 from rhapsody.telemetry.events import TaskQueued
 from rhapsody.telemetry.events import TaskStarted
@@ -175,6 +177,127 @@ class TestSpans:
         assert session_spans[0].end_time is not None
         # prevent double-stop in fixture teardown
         manager._telemetry = None  # type: ignore[attr-defined]
+
+    async def test_session_ended_has_trace_and_span_ids(self):
+        """SessionEnded must carry full trace+span IDs even though the span ends in the same
+        batch."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = TelemetryManager(session_id="se-ids", checkpoint_path=tmpdir)
+            await m.start()
+            await m.stop()
+
+            filepath = os.path.join(tmpdir, os.listdir(tmpdir)[0])
+            events = [json.loads(l) for l in open(filepath) if json.loads(l)["section"] == "event"]
+            ended = next(e for e in events if e["event_type"] == "SessionEnded")
+            assert ended["trace_id"] is not None, "SessionEnded: trace_id must not be null"
+            assert ended["span_id"] is not None, "SessionEnded: span_id must not be null"
+
+    async def test_task_span_created_at_task_created(self, manager):
+        """Span must exist with valid trace/span context immediately after TaskCreated."""
+        manager.emit(
+            make_event(TaskCreated, session_id="test-session", backend="concurrent", task_id="t1")
+        )
+        await asyncio.sleep(0.1)
+        assert "t1" in manager._active_spans
+        ctx = manager._active_spans["t1"].get_span_context()
+        assert ctx.is_valid
+        assert ctx.trace_id != 0
+        assert ctx.span_id != 0
+
+    async def test_full_lifecycle_span_ids_consistent(self, manager):
+        """All lifecycle events for a task must reference the same span_id."""
+        received_ids: dict[str, tuple] = {}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = TelemetryManager(session_id="ids-test", checkpoint_path=tmpdir)
+            await m.start()
+            for etype, kwargs in [
+                (TaskCreated, {}),
+                (TaskSubmitted, {}),
+                (TaskQueued, {}),
+                (TaskStarted, {}),
+                (TaskCompleted, {"duration_seconds": 0.1}),
+            ]:
+                m.emit(
+                    make_event(
+                        etype, session_id="ids-test", backend="concurrent", task_id="t1", **kwargs
+                    )
+                )
+            await asyncio.sleep(0.1)
+            await m.stop()
+
+            filepath = os.path.join(tmpdir, os.listdir(tmpdir)[0])
+            events = [
+                json.loads(line)
+                for line in open(filepath)
+                if json.loads(line)["section"] == "event"
+            ]
+            lifecycle = {
+                e["event_type"]: e
+                for e in events
+                if e["event_type"]
+                in ("TaskCreated", "TaskSubmitted", "TaskQueued", "TaskStarted", "TaskCompleted")
+            }
+
+            for etype, e in lifecycle.items():
+                assert e["trace_id"] is not None, f"{etype}: trace_id must not be null"
+                assert e["span_id"] is not None, f"{etype}: span_id must not be null"
+
+            span_ids = {e["span_id"] for e in lifecycle.values()}
+            assert len(span_ids) == 1, (
+                f"All lifecycle events must share one span_id, got {span_ids}"
+            )
+
+    @pytest.mark.parametrize(
+        "terminal_cls,terminal_kwargs,terminal_etype",
+        [
+            (TaskFailed, {"duration_seconds": 0.1, "error_type": "RuntimeError"}, "TaskFailed"),
+            (TaskCanceled, {"duration_seconds": 0.1}, "TaskCanceled"),
+        ],
+    )
+    async def test_failed_and_canceled_same_batch_span_ids(
+        self, terminal_cls, terminal_kwargs, terminal_etype
+    ):
+        """TaskFailed and TaskCanceled must carry the same span_id as the rest of the lifecycle even
+        when all events land in the same batch (same-batch ordering hazard)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = TelemetryManager(session_id="fc-ids", checkpoint_path=tmpdir)
+            await m.start()
+            for etype, kwargs in [
+                (TaskCreated, {}),
+                (TaskSubmitted, {}),
+                (TaskQueued, {}),
+                (TaskStarted, {}),
+                (terminal_cls, terminal_kwargs),
+            ]:
+                m.emit(
+                    make_event(
+                        etype, session_id="fc-ids", backend="concurrent", task_id="t1", **kwargs
+                    )
+                )
+            await asyncio.sleep(0.1)
+            await m.stop()
+
+            filepath = os.path.join(tmpdir, os.listdir(tmpdir)[0])
+            events = [
+                json.loads(line)
+                for line in open(filepath)
+                if json.loads(line)["section"] == "event"
+            ]
+            lifecycle = {
+                e["event_type"]: e
+                for e in events
+                if e["event_type"]
+                in ("TaskCreated", "TaskSubmitted", "TaskQueued", "TaskStarted", terminal_etype)
+            }
+
+            for etype, e in lifecycle.items():
+                assert e["trace_id"] is not None, f"{etype}: trace_id must not be null"
+                assert e["span_id"] is not None, f"{etype}: span_id must not be null"
+
+            span_ids = {e["span_id"] for e in lifecycle.values()}
+            assert len(span_ids) == 1, (
+                f"All lifecycle events must share one span_id, got {span_ids}"
+            )
 
 
 class TestSubscriber:
