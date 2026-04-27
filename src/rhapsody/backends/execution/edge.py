@@ -17,6 +17,19 @@ from typing import Any, Callable
 from ..base import BaseBackend
 from ..constants import BackendMainStates, StateMapper
 
+# ``radical.edge`` is imported at module level so that tests can patch
+# ``BridgeClient`` here.  When the package isn't installed we keep
+# ``BridgeClient = None`` and remember the original ImportError; the
+# actual chained re-raise happens in ``EdgeExecutionBackend.__init__``
+# so the user sees the real cause (e.g. a downstream import failure
+# inside ``radical.edge`` itself, not just "package missing").
+try:
+    from radical.edge import BridgeClient
+    _radical_edge_import_error = None
+except ImportError as exc:
+    BridgeClient = None
+    _radical_edge_import_error = exc
+
 try:
     import radical.prof as rprof
 except ImportError:
@@ -75,13 +88,10 @@ class EdgeExecutionBackend(BaseBackend):
     ):
         super().__init__(name=name)
 
-        try:
-            from radical.edge import BridgeClient
-        except ImportError as exc:
+        if BridgeClient is None:
             raise ImportError(
                 f"EdgeExecutionBackend: cannot import radical.edge: "
-                f"{exc}") from exc
-        self._BridgeClient = BridgeClient
+                f"{_radical_edge_import_error}") from _radical_edge_import_error
 
         self.logger           = _get_logger()
         self._bridge_url      = bridge_url
@@ -112,6 +122,12 @@ class EdgeExecutionBackend(BaseBackend):
         self._prof = rprof.Profiler('client.task', ns='radical.edge') \
                      if rprof else None
 
+        # -- python-version compat (cloudpickle CodeType is not portable
+        #    across Python minor versions).  Lazily populated on the
+        #    first cloudpickled-task submission.  Tuple (major, minor)
+        #    or None when not yet known.
+        self._edge_python_mm: tuple | None = None
+
     # ------------------------------------------------------------------
     # Async init
     # ------------------------------------------------------------------
@@ -132,7 +148,9 @@ class EdgeExecutionBackend(BaseBackend):
 
         # Create BridgeClient → EdgeClient → RhapsodyClient
         # cert=None disables TLS verification (default for self-signed)
-        self._bc = self._BridgeClient(url=self._bridge_url)
+        # Look up ``BridgeClient`` at call time (not at __init__ time) so
+        # tests that ``patch(...)`` the module-level name take effect.
+        self._bc = BridgeClient(url=self._bridge_url)
         ec = self._bc.get_edge_client(self._edge_name)
 
         session_kwargs = {'backends': self._remote_backends}
@@ -199,6 +217,65 @@ class EdgeExecutionBackend(BaseBackend):
                 self._callback_func, task, state)
 
     # ------------------------------------------------------------------
+    # Python-version compatibility for cloudpickled function tasks
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _task_needs_pickle_compat(t: dict) -> bool:
+        """True iff the task carries a cloudpickled function or fields.
+
+        Cloudpickle serializes function bytecode using ``CodeType``,
+        whose tuple shape changed between Python 3.10 and 3.11.  Any
+        cross-minor-version skew between client and edge will fail
+        deserialization at the receiving end.  Executable tasks and
+        import-path function tasks (``"function": "module:func"``) are
+        unaffected.
+        """
+        fn = t.get('function')
+        if isinstance(fn, str) and fn.startswith('cloudpickle::'):
+            return True
+        return bool(t.get('_pickled_fields'))
+
+    def _ensure_python_compat(self, tasks: list) -> None:
+        """Raise if any cloudpickled task in *tasks* would hit a Python
+        version mismatch on the remote edge.
+
+        Idempotent: caches the edge's (major, minor) on first call.  No
+        check is performed if the batch contains only executable or
+        import-path tasks.
+        """
+        import sys
+
+        if not any(self._task_needs_pickle_compat(t) for t in tasks):
+            return
+
+        if self._edge_python_mm is None:
+            try:
+                info = self._bc.get_edge_client(
+                    self._edge_name).get_plugin('sysinfo').host_role()
+                edge_ver = info.get('python_version') or ''
+                parts    = edge_ver.split('.')
+                if len(parts) >= 2:
+                    self._edge_python_mm = (int(parts[0]), int(parts[1]))
+            except Exception as exc:
+                self.logger.debug(
+                    "could not query edge Python version (%s); skipping "
+                    "cloudpickle compat check", exc)
+                self._edge_python_mm = (0, 0)   # mark as queried
+
+        if self._edge_python_mm and self._edge_python_mm != (0, 0):
+            client_mm = (sys.version_info.major, sys.version_info.minor)
+            if self._edge_python_mm != client_mm:
+                raise RuntimeError(
+                    f"function tasks cannot be submitted to edge "
+                    f"{self._edge_name!r}: client Python "
+                    f"{client_mm[0]}.{client_mm[1]} != edge Python "
+                    f"{self._edge_python_mm[0]}.{self._edge_python_mm[1]}.  "
+                    f"cloudpickle is not portable across Python minor "
+                    f"versions — align the venvs, or use executable / "
+                    f"import-path tasks for this edge.")
+
+    # ------------------------------------------------------------------
     # BaseBackend interface
     # ------------------------------------------------------------------
 
@@ -232,6 +309,7 @@ class EdgeExecutionBackend(BaseBackend):
         # No batching — submit immediately
         if self._batch_window <= 0:
             task_dicts = [dict(t) for t in tasks]
+            self._ensure_python_compat(task_dicts)
             if prof:
                 for t in tasks:
                     prof.prof('task_batch_flush', uid=t['uid'])
@@ -274,6 +352,8 @@ class EdgeExecutionBackend(BaseBackend):
         if self._flush_handle is not None:
             self._flush_handle.cancel()
             self._flush_handle = None
+
+        self._ensure_python_compat(batch)
 
         prof = self._prof
         if prof:
