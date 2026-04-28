@@ -522,6 +522,69 @@ class TestCheckpointFile:
         await m.stop()
         assert m._checkpoint_file is None
 
+    async def test_custom_task_event_has_span_ids(self):
+        """Custom events with task_id must carry the same trace/span as the task span."""
+        from rhapsody.telemetry.events import define_event
+
+        TaskResolved = define_event("asyncflow.TaskResolved")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = TelemetryManager(session_id="custom-task-ev", checkpoint_path=tmpdir)
+            await m.start()
+            m.emit(
+                make_event(
+                    TaskCreated, session_id="custom-task-ev", backend="concurrent", task_id="t1"
+                )
+            )
+            m.emit(
+                make_event(
+                    TaskResolved, session_id="custom-task-ev", backend="concurrent", task_id="t1"
+                )
+            )
+            m.emit(
+                make_event(
+                    TaskCompleted,
+                    session_id="custom-task-ev",
+                    backend="concurrent",
+                    task_id="t1",
+                    duration_seconds=0.1,
+                )
+            )
+            await asyncio.sleep(0.1)
+            await m.stop()
+
+            filepath = os.path.join(tmpdir, os.listdir(tmpdir)[0])
+            rows = [json.loads(l) for l in open(filepath)]
+            evs = {r["event_type"]: r for r in rows if r.get("section") == "event"}
+
+            assert evs["asyncflow.TaskResolved"]["trace_id"] is not None
+            assert evs["asyncflow.TaskResolved"]["span_id"] is not None
+            assert (
+                evs["asyncflow.TaskResolved"]["span_id"]
+                == evs["TaskCreated"]["span_id"]
+                == evs["TaskCompleted"]["span_id"]
+            )
+
+    async def test_custom_session_event_has_trace_id(self):
+        """Custom events without task_id must carry the session trace/span IDs."""
+        from rhapsody.telemetry.events import define_event
+
+        SessionNote = define_event("user.SessionNote")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = TelemetryManager(session_id="custom-sess-ev", checkpoint_path=tmpdir)
+            await m.start()
+            m.emit(make_event(SessionNote, session_id="custom-sess-ev", backend="concurrent"))
+            await asyncio.sleep(0.1)
+            await m.stop()
+
+            filepath = os.path.join(tmpdir, os.listdir(tmpdir)[0])
+            rows = [json.loads(l) for l in open(filepath)]
+            evs = {r["event_type"]: r for r in rows if r.get("section") == "event"}
+
+            assert evs["user.SessionNote"]["trace_id"] is not None
+            assert evs["user.SessionNote"]["span_id"] is not None
+
 
 class TestTaskStateTransitions:
     """Verify _on_task_state_change handles all RUNNING / DONE / FAILED orderings.

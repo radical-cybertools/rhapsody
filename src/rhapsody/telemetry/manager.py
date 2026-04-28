@@ -662,6 +662,24 @@ class TelemetryManager:
             if self._session_span:
                 span_ctx = self._session_span.get_span_context()
 
+        else:
+            # Generic fallback for custom/extension events (e.g.
+            # any user-emitted event via telemetry.emit()).
+            # Correlation by duck typing:
+            #   - has task_id → belongs to the task span (active or recently completed)
+            #   - no task_id  → belongs to the session span
+            # Use .get not .pop — custom events are never terminal; they never own the
+            # span lifecycle.
+            task_id = getattr(event, "task_id", None)
+            if task_id:
+                span = self._active_spans.get(task_id)
+                if span:
+                    span_ctx = span.get_span_context()
+                else:
+                    span_ctx = self._completed_span_ctx.get(task_id)
+            elif self._session_span:
+                span_ctx = self._session_span.get_span_context()
+
         if span_ctx is None or not span_ctx.is_valid:
             return None, None
         return hex(span_ctx.trace_id), hex(span_ctx.span_id)
