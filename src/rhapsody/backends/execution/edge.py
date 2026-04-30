@@ -36,10 +36,6 @@ except ImportError:
     rprof = None
 
 
-def _get_logger() -> logging.Logger:
-    return logging.getLogger(__name__)
-
-
 class EdgeExecutionBackend(BaseBackend):
     """Execution backend that delegates to a remote RADICAL Edge node.
 
@@ -54,10 +50,15 @@ class EdgeExecutionBackend(BaseBackend):
 
     Args:
         bridge_url:    URL of the RADICAL Edge bridge
-                       (e.g. ``"https://localhost:8000"``).
-        edge_name:     Name of the edge to target.
-        plugin_name:   Name of the Rhapsody plugin on the edge
-                       (default ``"rhapsody"``).
+                       (e.g. ``"https://localhost:8000"``).  If omitted,
+                       falls back to the ``RADICAL_BRIDGE_URL`` env var
+                       (resolved by ``BridgeClient`` itself).
+        edge_name:     Name of the edge to target.  If omitted, the
+                       backend auto-selects the first connected edge
+                       that advertises an enabled rhapsody plugin
+                       (the synthetic ``'bridge'`` edge is always
+                       skipped).  Raises ``RuntimeError`` from
+                       ``await backend`` if no candidate is found.
         backends:      Backend names to request on the remote session
                        (default ``["dragon_v3"]``).
         name:          Backend name for Rhapsody registration
@@ -73,12 +74,14 @@ class EdgeExecutionBackend(BaseBackend):
     """
 
     _DEFAULT_BATCH_WINDOW = 0.25
+    _EDGES_TO_SKIP        = ['bridge']
+    _PLUGIN_NAME          = 'rhapsody'
+
 
     def __init__(
         self,
-        bridge_url: str,
-        edge_name: str,
-        plugin_name: str = "rhapsody",
+        bridge_url: str | None = None,
+        edge_name: str | None = None,
         backends: list[str] | None = None,
         name: str = "edge",
         batch_window: float | None = None,
@@ -93,16 +96,16 @@ class EdgeExecutionBackend(BaseBackend):
                 f"EdgeExecutionBackend: cannot import radical.edge: "
                 f"{_radical_edge_import_error}") from _radical_edge_import_error
 
-        self.logger           = _get_logger()
+        self.logger           = logging.getLogger(__name__)
         self._bridge_url      = bridge_url
         self._edge_name       = edge_name
-        self._plugin_name     = plugin_name
         self._remote_backends      = backends or ['dragon_v3']
         self._notify_batch_window  = notify_batch_window
         self._notify_batch_size    = notify_batch_size
+        self._edge_python_mm: tuple | None = None
 
         self._bc   = None   # BridgeClient
-        self._rh   = None   # RhapsodyClient (from get_plugin)
+        self._rh   = None   # RhapsodyClient (from get_rhapsody_handle)
         self._tasks: dict[str, dict] = {}
 
         self._callback_func: Callable = lambda t, s: None
@@ -122,12 +125,6 @@ class EdgeExecutionBackend(BaseBackend):
         self._prof = rprof.Profiler('client.task', ns='radical.edge') \
                      if rprof else None
 
-        # -- python-version compat (cloudpickle CodeType is not portable
-        #    across Python minor versions).  Lazily populated on the
-        #    first cloudpickled-task submission.  Tuple (major, minor)
-        #    or None when not yet known.
-        self._edge_python_mm: tuple | None = None
-
     # ------------------------------------------------------------------
     # Async init
     # ------------------------------------------------------------------
@@ -144,22 +141,8 @@ class EdgeExecutionBackend(BaseBackend):
         # Register states
         StateMapper.register_backend_states_with_defaults(backend=self)
         StateMapper.register_backend_tasks_states_with_defaults(backend=self)
-        self._backend_state = BackendMainStates.INITIALIZED
 
-        # Create BridgeClient → EdgeClient → RhapsodyClient
-        # cert=None disables TLS verification (default for self-signed)
-        # Look up ``BridgeClient`` at call time (not at __init__ time) so
-        # tests that ``patch(...)`` the module-level name take effect.
-        self._bc = BridgeClient(url=self._bridge_url)
-        ec = self._bc.get_edge_client(self._edge_name)
-
-        session_kwargs = {'backends': self._remote_backends}
-        if self._notify_batch_window is not None:
-            session_kwargs['notify_batch_window'] = self._notify_batch_window
-        if self._notify_batch_size is not None:
-            session_kwargs['notify_batch_size'] = self._notify_batch_size
-
-        self._rh = ec.get_plugin(self._plugin_name, **session_kwargs)
+        self._rh = self._get_rhapsody_handle()
 
         # Register persistent notification callback for task completions
         self._rh.register_notification_callback(
@@ -169,7 +152,7 @@ class EdgeExecutionBackend(BaseBackend):
 
         self._initialized = True
         self.logger.info("Edge backend ready: %s/%s (session %s)",
-                         self._edge_name, self._plugin_name,
+                         self._edge_name, self._PLUGIN_NAME,
                          self._rh.sid)
         return self
 
@@ -217,63 +200,102 @@ class EdgeExecutionBackend(BaseBackend):
                 self._callback_func, task, state)
 
     # ------------------------------------------------------------------
+    # Edge auto-selection and Plugin retrieval
+    # ------------------------------------------------------------------
+
+    def _get_rhapsody_handle(self) -> "RhapsodyClient":
+        """Either create an RhapsodyClient for the named edge, or pick the first
+        edge that advertises an enabled rhapsody plugin. Plugins hosted by the
+        Bridge are skipped.
+        Raises ``RuntimeError`` if no candidate is found.
+        """
+
+        self._bc = BridgeClient(url=self._bridge_url)
+        self._bridge_url = self._bc.url
+
+        # find a suitable edge and load rhapsody plugin
+        if not self._edge_name:
+            for eid in self._bc.list_edges():
+                if eid in self._EDGES_TO_SKIP:
+                    continue
+
+                plugins = self._bc.get_edge_client(eid).list_plugins()
+                info    = plugins.get(self._PLUGIN_NAME)
+                if info and info.get('enabled'):
+                    self.logger.info("auto-selected edge %r (plugin %r)",
+                                     eid, self._PLUGIN_NAME)
+                    self._edge_name = eid
+                    break
+
+        if not self._edge_name:
+            raise RuntimeError(
+                f"no edge advertises an enabled {self._PLUGIN_NAME!r} plugin "
+                f"on bridge {self._bridge_url}")
+
+        ec = self._bc.get_edge_client(self._edge_name)
+
+        # get edge's python version to ensure compatible pickling
+        pyver = ''
+        pyexc = ''
+        try:
+            info = ec.get_plugin('sysinfo').host_role()
+            pyver = info.get('python_version') or ''
+            parts = pyver.split('.')
+            if len(parts) >= 2:
+                self._edge_python_mm = (int(parts[0]), int(parts[1]))
+
+        except Exception as exc:
+            pyexc = exc
+
+        if not self._edge_python_mm:
+            self.logger.debug(f"skip pickle compat check {pyver} ({pyexc})")
+
+        kwargs = {'backends': self._remote_backends}
+        if self._notify_batch_window is not None:
+            kwargs['notify_batch_window'] = self._notify_batch_window
+        if self._notify_batch_size is not None:
+            kwargs['notify_batch_size'] = self._notify_batch_size
+
+        return ec.get_plugin(self._PLUGIN_NAME, **kwargs)
+
+
+    # ------------------------------------------------------------------
     # Python-version compatibility for cloudpickled function tasks
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _task_needs_pickle_compat(t: dict) -> bool:
-        """True iff the task carries a cloudpickled function or fields.
+    def _check_python_compat(self, tasks: list) -> None:
+        """Raise if any cloudpickled task in *tasks* would hit a Python
+        version mismatch on the remote edge.  No check is performed
+        if the batch contains only executable or import-path tasks,
+        or if the edge's Python version could not be determined.
 
         Cloudpickle serializes function bytecode using ``CodeType``,
-        whose tuple shape changed between Python 3.10 and 3.11.  Any
-        cross-minor-version skew between client and edge will fail
-        deserialization at the receiving end.  Executable tasks and
-        import-path function tasks (``"function": "module:func"``) are
-        unaffected.
-        """
-        fn = t.get('function')
-        if isinstance(fn, str) and fn.startswith('cloudpickle::'):
-            return True
-        return bool(t.get('_pickled_fields'))
-
-    def _ensure_python_compat(self, tasks: list) -> None:
-        """Raise if any cloudpickled task in *tasks* would hit a Python
-        version mismatch on the remote edge.
-
-        Idempotent: caches the edge's (major, minor) on first call.  No
-        check is performed if the batch contains only executable or
-        import-path tasks.
+        whose tuple shape changed between Python 3.10 and 3.11 — any
+        cross-minor-version skew fails deserialization on the edge.
         """
         import sys
 
-        if not any(self._task_needs_pickle_compat(t) for t in tasks):
+        def needs_compat(t: dict) -> bool:
+            fn = t.get('function')
+            return ((isinstance(fn, str) and fn.startswith('cloudpickle::'))
+                    or bool(t.get('_pickled_fields')))
+
+        if not self._edge_python_mm:
             return
 
-        if self._edge_python_mm is None:
-            try:
-                info = self._bc.get_edge_client(
-                    self._edge_name).get_plugin('sysinfo').host_role()
-                edge_ver = info.get('python_version') or ''
-                parts    = edge_ver.split('.')
-                if len(parts) >= 2:
-                    self._edge_python_mm = (int(parts[0]), int(parts[1]))
-            except Exception as exc:
-                self.logger.debug(
-                    "could not query edge Python version (%s); skipping "
-                    "cloudpickle compat check", exc)
-                self._edge_python_mm = (0, 0)   # mark as queried
+        if not any(needs_compat(t) for t in tasks):
+            return
 
-        if self._edge_python_mm and self._edge_python_mm != (0, 0):
-            client_mm = (sys.version_info.major, sys.version_info.minor)
-            if self._edge_python_mm != client_mm:
-                raise RuntimeError(
-                    f"function tasks cannot be submitted to edge "
-                    f"{self._edge_name!r}: client Python "
-                    f"{client_mm[0]}.{client_mm[1]} != edge Python "
-                    f"{self._edge_python_mm[0]}.{self._edge_python_mm[1]}.  "
-                    f"cloudpickle is not portable across Python minor "
-                    f"versions — align the venvs, or use executable / "
-                    f"import-path tasks for this edge.")
+        client_mm = (sys.version_info.major, sys.version_info.minor)
+        if self._edge_python_mm != client_mm:
+            raise RuntimeError(
+                f"function tasks cannot be submitted to edge "
+                f"{self._edge_name!r}: client Python "
+                f"{client_mm[0]}.{client_mm[1]} != edge Python "
+                f"{self._edge_python_mm[0]}.{self._edge_python_mm[1]}.  "
+                f"cloudpickle is not portable across Python minor "
+                f"versions — align the venvs, or use executable / "
+                f"import-path tasks for this edge.")
 
     # ------------------------------------------------------------------
     # BaseBackend interface
@@ -293,15 +315,11 @@ class EdgeExecutionBackend(BaseBackend):
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
 
-        # Ensure all tasks have UIDs before registration
+        # Assign UIDs, register locally, emit submit prof events — single pass
         import uuid
-        for task in tasks:
-            if 'uid' not in task:
-                task['uid'] = f"task.{uuid.uuid4().hex[:8]}"
-
-        # Register tasks locally for notification tracking
         prof = self._prof
         for task in tasks:
+            task.setdefault('uid', f"task.{uuid.uuid4().hex[:8]}")
             self._tasks[task['uid']] = task
             if prof:
                 prof.prof('task_submit', uid=task['uid'])
@@ -309,10 +327,7 @@ class EdgeExecutionBackend(BaseBackend):
         # No batching — submit immediately
         if self._batch_window <= 0:
             task_dicts = [dict(t) for t in tasks]
-            self._ensure_python_compat(task_dicts)
-            if prof:
-                for t in tasks:
-                    prof.prof('task_batch_flush', uid=t['uid'])
+            self._check_python_compat(task_dicts)
             await asyncio.to_thread(self._rh.submit_tasks, task_dicts)
             return
 
@@ -331,10 +346,10 @@ class EdgeExecutionBackend(BaseBackend):
 
     def _trigger_flush(self):
         """Timer callback — schedule the async flush on the event loop."""
-        asyncio.ensure_future(self._timed_flush())
+        asyncio.ensure_future(self._locked_flush())
 
-    async def _timed_flush(self):
-        """Flush the batch buffer (called from timer)."""
+    async def _locked_flush(self):
+        """Flush the batch buffer under the batch lock."""
         async with self._batch_lock:
             await self._flush_batch()
 
@@ -353,7 +368,7 @@ class EdgeExecutionBackend(BaseBackend):
             self._flush_handle.cancel()
             self._flush_handle = None
 
-        self._ensure_python_compat(batch)
+        self._check_python_compat(batch)
 
         prof = self._prof
         if prof:
@@ -362,11 +377,6 @@ class EdgeExecutionBackend(BaseBackend):
 
         self.logger.debug("Flushing batch of %d tasks", len(batch))
         await asyncio.to_thread(self._rh.submit_tasks, batch)
-
-    async def _force_flush(self):
-        """Force-flush any pending batched tasks."""
-        async with self._batch_lock:
-            await self._flush_batch()
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a single task on the remote edge."""
@@ -387,7 +397,7 @@ class EdgeExecutionBackend(BaseBackend):
 
     async def shutdown(self) -> None:
         """Flush pending tasks, close session and BridgeClient."""
-        await self._force_flush()
+        await self._locked_flush()
         self._backend_state = BackendMainStates.SHUTDOWN
 
         if self._rh:
