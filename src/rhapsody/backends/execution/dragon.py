@@ -3239,12 +3239,32 @@ class DragonExecutionBackendV3(BaseBackend):
             stdout_path = task_info.get("stdout_path")
             stderr_path = task_info.get("stderr_path")
             if raised:
-                task_desc["exception"] = result
+                parts = [p for p in (stderr, tb) if p]
+                diagnostic = "\n".join(parts) if parts else ""
+
+                self.logger.error(
+                    "Task %s failed: result=%r tb_len=%d stdout_len=%d stderr_len=%d",
+                    uid, result, len(tb or ""), len(stdout or ""), len(stderr or ""),
+                )
+                if diagnostic:
+                    self.logger.error("Task %s diagnostic:\n%s", uid, diagnostic)
+
+                if diagnostic:
+                    try:
+                        cls = type(result)
+                        augmented = cls(f"{result}\n--- worker output ---\n{diagnostic}")
+                    except Exception:
+                        augmented = RuntimeError(
+                            f"{result}\n--- worker output ---\n{diagnostic}"
+                        )
+                    task_desc["exception"] = augmented
+                else:
+                    task_desc["exception"] = result
+
                 if stderr_path:
                     task_desc["stderr"] = stderr_path
                 else:
-                    parts = [p for p in (stderr, tb) if p]
-                    task_desc["stderr"] = "\n".join(parts) if parts else str(result)
+                    task_desc["stderr"] = diagnostic or str(result)
                 task_desc["stdout"] = (
                     stdout_path if stdout_path else (stdout or task_desc.get("stdout"))
                 )
