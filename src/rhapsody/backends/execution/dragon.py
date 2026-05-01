@@ -1,4 +1,6 @@
 import asyncio
+import functools
+import glob
 import logging
 import os
 import shlex
@@ -1667,6 +1669,48 @@ class TaskStateMapperV3:
     terminal_states = {DONE, FAILED, CANCELED}
 
 
+def _v3_function_wrapper(user_func, stdout_path, stderr_path, *args, **kwargs):
+    # Per-rank stdout/stderr capture for V3 function tasks.  Dragon batch only
+    # surfaces the dragon-side traceback when a worker rank exits non-zero;
+    # the user's Python exception inside the rank vanishes with the process.
+    # Redirecting sys.stdout/stderr to per-rank files and writing the
+    # traceback before re-raising lets _deliver_batch glob the files and
+    # surface the real cause to the awaiter.
+    import os as _os
+    import sys as _sys
+    import traceback as _tb
+
+    rank = (_os.environ.get("PMI_RANK")
+            or _os.environ.get("OMPI_COMM_WORLD_RANK")
+            or _os.environ.get("PALS_RANKID")
+            or _os.environ.get("SLURM_PROCID")
+            or "0")
+
+    out_file = f"{stdout_path}.{rank}"
+    err_file = f"{stderr_path}.{rank}"
+
+    _out = open(out_file, "w")
+    _err = open(err_file, "w")
+    old_out, old_err = _sys.stdout, _sys.stderr
+    _sys.stdout, _sys.stderr = _out, _err
+    try:
+        return user_func(*args, **kwargs)
+    except BaseException:
+        _tb.print_exc(file=_err)
+        _err.flush()
+        raise
+    finally:
+        _sys.stdout, _sys.stderr = old_out, old_err
+        try:
+            _out.close()
+        except Exception:
+            pass
+        try:
+            _err.close()
+        except Exception:
+            pass
+
+
 # ============================================================================
 # Main Backend Classes
 # V1 Integrates with Dragon HPC Native API
@@ -3238,13 +3282,36 @@ class DragonExecutionBackendV3(BaseBackend):
             task_desc = task_info["description"]
             stdout_path = task_info.get("stdout_path")
             stderr_path = task_info.get("stderr_path")
+            # Executable redirect writes one literal file per path; function
+            # wrap writes per-rank files at `{path}.<rank>`.  Distinguished by
+            # presence of script_path (set only for executable redirect).
+            is_exec_redirect = bool(task_info.get("script_path"))
             if raised:
-                parts = [p for p in (stderr, tb) if p]
+                # Per-rank Python tracebacks captured by _v3_function_wrapper —
+                # only relevant for wrapped function tasks (not executable
+                # redirect, which writes the literal stderr_path file).
+                captured = []
+                if stderr_path and not is_exec_redirect:
+                    for f in sorted(glob.glob(f"{stderr_path}.*")):
+                        try:
+                            with open(f) as _f:
+                                content = _f.read()
+                        except Exception:
+                            continue
+                        if content:
+                            rank = f.rsplit(".", 1)[-1]
+                            captured.append(f"[rank {rank}]\n{content}")
+
+                # Per-rank traces first so the real cause precedes dragon's
+                # internal DragonUserCodeError frames.
+                parts = [*captured, *(p for p in (stderr, tb) if p)]
                 diagnostic = "\n".join(parts) if parts else ""
 
                 self.logger.error(
-                    "Task %s failed: result=%r tb_len=%d stdout_len=%d stderr_len=%d",
-                    uid, result, len(tb or ""), len(stdout or ""), len(stderr or ""),
+                    "Task %s failed: result=%r tb_len=%d stdout_len=%d "
+                    "stderr_len=%d ranks_captured=%d",
+                    uid, result, len(tb or ""), len(stdout or ""),
+                    len(stderr or ""), len(captured),
                 )
                 if diagnostic:
                     self.logger.error("Task %s diagnostic:\n%s", uid, diagnostic)
@@ -3261,21 +3328,28 @@ class DragonExecutionBackendV3(BaseBackend):
                 else:
                     task_desc["exception"] = result
 
-                if stderr_path:
+                if stderr_path and is_exec_redirect:
                     task_desc["stderr"] = stderr_path
                 else:
                     task_desc["stderr"] = diagnostic or str(result)
                 task_desc["stdout"] = (
-                    stdout_path if stdout_path else (stdout or task_desc.get("stdout"))
+                    stdout_path if stdout_path and is_exec_redirect
+                    else (stdout or task_desc.get("stdout"))
                 )
                 self._callback_func(task_desc, "FAILED")
             else:
                 task_desc["return_value"] = result
+                # Only treat stdout/stderr_path as literal files for executable
+                # redirect.  Function-wrap paths are glob prefixes — leave the
+                # raw dragon-captured stdout/stderr (typically empty for
+                # functions) so callers don't follow a path that doesn't exist.
                 task_desc["stdout"] = (
-                    stdout_path if stdout_path else (stdout or task_desc.get("stdout"))
+                    stdout_path if stdout_path and is_exec_redirect
+                    else (stdout or task_desc.get("stdout"))
                 )
                 task_desc["stderr"] = (
-                    stderr_path if stderr_path else (stderr or task_desc.get("stderr"))
+                    stderr_path if stderr_path and is_exec_redirect
+                    else (stderr or task_desc.get("stderr"))
                 )
                 self._callback_func(task_desc, "DONE")
 
@@ -3407,6 +3481,21 @@ class DragonExecutionBackendV3(BaseBackend):
                 )
             target = "/bin/bash"
             task_args = (script_path,)
+
+        # V3 function-task wrapper: dragon batch can't capture per-rank Python
+        # tracebacks (a non-zero rank exit just becomes DragonUserCodeError with
+        # the dragon-side trace).  Wrap function targets we control (Priority 3
+        # mpi auto-build and Priority 4 function native) so each rank writes its
+        # own stderr to a file we can read post-mortem in _deliver_batch.  Skip
+        # Priority 1/2 — caller supplied templates and gets to keep their own
+        # wrapping.
+        if is_function and process_templates_config is None \
+                and process_template_config is None:
+            stdout_path = os.path.join(self._work_dir, f"{uid}.stdout")
+            stderr_path = os.path.join(self._work_dir, f"{uid}.stderr")
+            target = functools.partial(
+                _v3_function_wrapper, target, stdout_path, stderr_path
+            )
 
         # Single decision tree - no redundant checks
         if process_templates_config is not None:
