@@ -1942,6 +1942,26 @@ class DragonExecutionBackendV1(BaseBackend):
                     else:
                         break
 
+                # Recover silent worker deaths.  ``_function_wrapper_v1``
+                # catches Python exceptions and pushes a FunctionTaskCompletionV1
+                # onto the queue, but it cannot catch C-level exits like
+                # ``MPI_Abort()`` (mpi4py's implicit MPI_Init failing
+                # against a missing PMI context) or signal-kills (SIGSEGV
+                # in a native lib).  In those cases the worker process
+                # dies WITHOUT sending a completion, the queue stays
+                # empty, and the only signal upstream is Dragon's
+                # ``DRAGON_USER_CODE_ERROR`` — message-only, no traceback.
+                # This pass walks each running task's ProcessGroup,
+                # detects fully-terminated groups that never reported,
+                # and synthesises FunctionTaskCompletionV1 objects with
+                # whatever stderr / stdout Dragon captured per worker
+                # (via the ``Popen.PIPE`` we set on the ProcessTemplate).
+                # The result flows through the existing aggregation
+                # path and reaches ROSE / asyncflow as a structured
+                # FAILED with diagnostic content, instead of an opaque
+                # ``DragonUserCodeError``.
+                self._recover_silent_failures()
+
                 # Process all completed tasks
                 for uid in completed_tasks:
                     if uid in self._running_tasks:
@@ -1973,6 +1993,135 @@ class DragonExecutionBackendV1(BaseBackend):
             except Exception as e:
                 self.logger.exception(f"Error in task monitoring: {e}")
                 await asyncio.sleep(1)
+
+    def _recover_silent_failures(self) -> None:
+        """Synthesise FunctionTaskCompletionV1 objects for tasks whose
+        dragon ProcessGroup has terminated without any rank pushing a
+        completion to the result queue.
+
+        Triggered by C-level worker exits (MPI_Abort, SIGSEGV, ...) that
+        bypass ``_function_wrapper_v1``'s Python try/except.  Without
+        this recovery path the upstream layers would see Dragon's
+        message-only ``DragonUserCodeError`` and no traceback.
+
+        See ``_monitor_tasks`` for the surrounding context.
+        """
+        for uid, task_info in list(self._running_tasks.items()):
+            group = task_info.group
+            if group is None:
+                continue
+            # Already partially or fully reported via the queue?
+            if self._result_collector.completion_counts.get(uid, 0) > 0:
+                continue
+            # Walk dragon's group state.  We only intervene once the
+            # whole group has terminated AND at least one worker
+            # exited non-zero — otherwise the queue may still be on
+            # its way.
+            try:
+                active = list(group.active_puids or [])
+            except Exception:
+                active = []
+            if active:
+                continue
+            try:
+                inactive = list(group.inactive_puids or [])
+            except Exception:
+                continue
+            non_zero = [(puid, ec) for (puid, ec) in inactive if ec]
+            if not non_zero:
+                # Whole group exited cleanly — wait for queue, don't
+                # synthesise.  The completion is en route.
+                continue
+            self.logger.warning(
+                "Task %s: %d worker(s) exited non-zero without sending a "
+                "completion — recovering captured stderr from Dragon",
+                uid, len(non_zero))
+            for c in self._synthesise_failed_completions(uid, inactive):
+                try:
+                    self.result_queue.put(c, block=False)
+                except Exception as e:
+                    self.logger.warning(
+                        "Failed to enqueue synthesised completion for "
+                        "task %s rank=%s: %s", uid, c.rank, e)
+
+    def _synthesise_failed_completions(
+        self, task_uid: str, inactive_puids: list
+    ) -> list:
+        """Build per-rank FunctionTaskCompletionV1 objects from the
+        post-mortem state of a failed Dragon ProcessGroup.
+
+        Each ``inactive_puids`` entry is a ``(puid, exit_code)`` tuple.
+        We probe the dragon ``Process(ident=puid)`` for its captured
+        stdout / stderr — those buffers persist after the worker dies
+        because the ProcessTemplate was configured with
+        ``stdout=Popen.PIPE``, ``stderr=Popen.PIPE``.  Anything we
+        can read goes into the synthesised completion's ``stderr``
+        and ``traceback`` fields so upstream layers (rhapsody Edge
+        backend → asyncflow → ROSE) see real diagnostic content.
+        """
+        from dragon.native.process import Process as _DragonProcess
+        import traceback as _tb
+        completions = []
+        for rank, entry in enumerate(inactive_puids):
+            try:
+                puid, exit_code = entry
+            except (TypeError, ValueError):
+                puid, exit_code = entry, -1
+            stdout_text = ""
+            stderr_text = ""
+            try:
+                proc = _DragonProcess(ident=puid)
+                # ``proc.stderr`` / ``proc.stdout`` are dragon
+                # connections; their concrete read API varies across
+                # dragon versions, so wrap each access defensively.
+                for attr, sink in (("stderr", "stderr_text"),
+                                    ("stdout", "stdout_text")):
+                    try:
+                        conn = getattr(proc, attr, None)
+                        if conn is None:
+                            continue
+                        if hasattr(conn, "read"):
+                            data = conn.read()
+                        elif hasattr(conn, "recv"):
+                            data = conn.recv()
+                        else:
+                            data = str(conn)
+                        if isinstance(data, bytes):
+                            data = data.decode("utf-8", errors="replace")
+                        if attr == "stderr":
+                            stderr_text = data or ""
+                        else:
+                            stdout_text = data or ""
+                    except Exception:
+                        # Per-stream read failure — keep going so we
+                        # still report whatever the other stream gave
+                        # us, rather than dropping the whole record.
+                        pass
+            except Exception:
+                # Couldn't even construct the Process handle.  We still
+                # emit a completion so the task is reported FAILED;
+                # without it the task would hang indefinitely.
+                stderr_text = (
+                    f"(rhapsody) failed to recover stderr for puid={puid}\n"
+                    + _tb.format_exc())
+            completions.append(FunctionTaskCompletionV1(
+                task_uid=task_uid,
+                rank=rank,
+                process_id=puid if isinstance(puid, int) else 0,
+                stdout=stdout_text,
+                stderr=stderr_text,
+                exit_code=exit_code if isinstance(exit_code, int) else 1,
+                timestamp=time.time(),
+                success=False,
+                exception=(
+                    f"Worker exited with code {exit_code} without sending a "
+                    f"completion (likely MPI_Abort, SIGSEGV, or another "
+                    f"C-level exit that bypassed Python error handling)."),
+                traceback=stderr_text or None,
+                return_value=None,
+                stored_in_ddict=False,
+            ))
+        return completions
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a specific running task with proper cleanup."""
