@@ -1,4 +1,6 @@
 import asyncio
+import functools
+import glob
 import logging
 import os
 import shlex
@@ -1667,6 +1669,39 @@ class TaskStateMapperV3:
     terminal_states = {DONE, FAILED, CANCELED}
 
 
+def _v3_function_wrapper(user_func, stdout_path, stderr_path, *args, **kwargs):
+    """Run *user_func* with sys.stdout/stderr redirected to per-rank files.
+
+    Dragon batch surfaces only a dragon-side ``DragonUserCodeError`` when a
+    ProcessGroup rank exits non-zero — the rank's own Python traceback is
+    dropped.  Persisting it to ``<stderr_path>.<rank>`` before re-raising
+    lets ``_deliver_batch`` read it post-mortem.
+    """
+    import os
+    import sys
+    import traceback
+
+    rank = (os.environ.get("PMI_RANK")
+            or os.environ.get("OMPI_COMM_WORLD_RANK")
+            or os.environ.get("PALS_RANKID")
+            or os.environ.get("SLURM_PROCID")
+            or f"pid{os.getpid()}")
+
+    out = open(f"{stdout_path}.{rank}", "w")
+    err = open(f"{stderr_path}.{rank}", "w")
+    old_out, old_err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = out, err
+    try:
+        return user_func(*args, **kwargs)
+    except BaseException:
+        traceback.print_exc(file=err)
+        raise
+    finally:
+        sys.stdout, sys.stderr = old_out, old_err
+        out.close()
+        err.close()
+
+
 # ============================================================================
 # Main Backend Classes
 # V1 Integrates with Dragon HPC Native API
@@ -3238,20 +3273,54 @@ class DragonExecutionBackendV3(BaseBackend):
             task_desc = task_info["description"]
             stdout_path = task_info.get("stdout_path")
             stderr_path = task_info.get("stderr_path")
+            # Function wrap writes per-rank `<path>.<rank>` files; executable
+            # redirect writes one literal file per path — script_path is set
+            # only for the latter.
+            is_exec_redirect = bool(task_info.get("script_path"))
             if raised:
-                task_desc["exception"] = result
-                task_desc["stderr"] = stderr_path if stderr_path else (tb if tb else str(result))
+                captured = []
+                if stderr_path and not is_exec_redirect:
+                    for f in sorted(glob.glob(f"{stderr_path}.*")):
+                        try:
+                            with open(f) as fh:
+                                content = fh.read()
+                        except Exception:
+                            continue
+                        if content:
+                            rank = f.rsplit(".", 1)[-1]
+                            captured.append(f"[rank {rank}]\n{content}")
+                diagnostic = "\n".join(captured) if captured else ""
+                if diagnostic:
+                    try:
+                        cls = type(result)
+                        augmented = cls(f"{result}\n--- worker output ---\n{diagnostic}")
+                    except Exception:
+                        augmented = RuntimeError(
+                            f"{result}\n--- worker output ---\n{diagnostic}"
+                        )
+                    task_desc["exception"] = augmented
+                else:
+                    task_desc["exception"] = result
+                if stderr_path and is_exec_redirect:
+                    task_desc["stderr"] = stderr_path
+                else:
+                    task_desc["stderr"] = diagnostic or str(result)
                 task_desc["stdout"] = (
-                    stdout_path if stdout_path else (stdout or task_desc.get("stdout"))
+                    stdout_path if stdout_path and is_exec_redirect
+                    else (stdout or task_desc.get("stdout"))
                 )
                 self._callback_func(task_desc, "FAILED")
             else:
                 task_desc["return_value"] = result
+                # Function-wrap paths are glob prefixes, not literal files —
+                # only point stdout/stderr at the path for exec redirect.
                 task_desc["stdout"] = (
-                    stdout_path if stdout_path else (stdout or task_desc.get("stdout"))
+                    stdout_path if stdout_path and is_exec_redirect
+                    else (stdout or task_desc.get("stdout"))
                 )
                 task_desc["stderr"] = (
-                    stderr_path if stderr_path else (stderr or task_desc.get("stderr"))
+                    stderr_path if stderr_path and is_exec_redirect
+                    else (stderr or task_desc.get("stderr"))
                 )
                 self._callback_func(task_desc, "DONE")
 
@@ -3383,6 +3452,15 @@ class DragonExecutionBackendV3(BaseBackend):
                 )
             target = "/bin/bash"
             task_args = (script_path,)
+
+        # Wrap every function target so each rank persists its own
+        # stdout/stderr; see _v3_function_wrapper for why.
+        if is_function:
+            stdout_path = os.path.join(self._work_dir, f"{uid}.stdout")
+            stderr_path = os.path.join(self._work_dir, f"{uid}.stderr")
+            target = functools.partial(
+                _v3_function_wrapper, target, stdout_path, stderr_path
+            )
 
         # Single decision tree - no redundant checks
         if process_templates_config is not None:
