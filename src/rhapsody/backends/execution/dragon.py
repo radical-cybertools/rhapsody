@@ -1680,11 +1680,14 @@ def _v3_function_wrapper(user_func, stdout_path, stderr_path, *args, **kwargs):
     import sys as _sys
     import traceback as _tb
 
+    # Rank label: prefer MPI runtime env vars (human-readable rank index);
+    # fall back to PID so non-MPI ProcessGroup ranks land in distinct files
+    # rather than racing on `.0`.
     rank = (_os.environ.get("PMI_RANK")
             or _os.environ.get("OMPI_COMM_WORLD_RANK")
             or _os.environ.get("PALS_RANKID")
             or _os.environ.get("SLURM_PROCID")
-            or "0")
+            or f"pid{_os.getpid()}")
 
     out_file = f"{stdout_path}.{rank}"
     err_file = f"{stderr_path}.{rank}"
@@ -3482,15 +3485,14 @@ class DragonExecutionBackendV3(BaseBackend):
             target = "/bin/bash"
             task_args = (script_path,)
 
-        # V3 function-task wrapper: dragon batch can't capture per-rank Python
-        # tracebacks (a non-zero rank exit just becomes DragonUserCodeError with
-        # the dragon-side trace).  Wrap function targets we control (Priority 3
-        # mpi auto-build and Priority 4 function native) so each rank writes its
-        # own stderr to a file we can read post-mortem in _deliver_batch.  Skip
-        # Priority 1/2 — caller supplied templates and gets to keep their own
-        # wrapping.
-        if is_function and process_templates_config is None \
-                and process_template_config is None:
+        # V3 function-task wrapper: dragon batch can't surface per-rank Python
+        # tracebacks (a non-zero rank exit just becomes DragonUserCodeError —
+        # dragon prints the trace to the rank's own stderr stream but doesn't
+        # write it into results_ddict).  Wrap every function target so each
+        # rank captures its own stderr to a file we can read post-mortem in
+        # _deliver_batch.  Applies to all function priorities (1 process_-
+        # templates, 2 process_template, 3 mpi auto-build, 4 function native).
+        if is_function:
             stdout_path = os.path.join(self._work_dir, f"{uid}.stdout")
             stderr_path = os.path.join(self._work_dir, f"{uid}.stderr")
             target = functools.partial(
