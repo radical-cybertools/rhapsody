@@ -146,10 +146,13 @@ class TestSpans:
             )
         )
         await asyncio.sleep(0.1)
+        from opentelemetry.trace import StatusCode
+
         spans = [s for s in manager.read_traces() if s.name == "task"]
         assert len(spans) == 1
         assert spans[0].end_time is not None
         assert spans[0].attributes.get("status") == "completed"
+        assert spans[0].status.status_code == StatusCode.OK
 
     async def test_failed_span_status(self, manager):
         manager.emit(
@@ -166,9 +169,13 @@ class TestSpans:
             )
         )
         await asyncio.sleep(0.1)
+        from opentelemetry.trace import StatusCode
+
         spans = [s for s in manager.read_traces() if s.name == "task"]
         assert spans[0].attributes.get("status") == "failed"
         assert spans[0].attributes.get("error_type") == "ValueError"
+        assert spans[0].status.status_code == StatusCode.ERROR
+        assert spans[0].status.description == "ValueError"
 
     async def test_session_span(self, manager):
         await manager.stop()
@@ -584,6 +591,51 @@ class TestCheckpointFile:
 
             assert evs["user.SessionNote"]["trace_id"] is not None
             assert evs["user.SessionNote"]["span_id"] is not None
+
+    async def test_span_records_have_status_code(self):
+        """Span JSONL records must include status_code field for OTel tool compatibility."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = TelemetryManager(session_id="sc-test", checkpoint_path=tmpdir)
+            await m.start()
+            m.emit(
+                make_event(TaskCreated, session_id="sc-test", backend="concurrent", task_id="t1")
+            )
+            m.emit(
+                make_event(
+                    TaskCompleted,
+                    session_id="sc-test",
+                    backend="concurrent",
+                    task_id="t1",
+                    duration_seconds=0.1,
+                )
+            )
+            m.emit(
+                make_event(TaskCreated, session_id="sc-test", backend="concurrent", task_id="t2")
+            )
+            m.emit(
+                make_event(
+                    TaskFailed,
+                    session_id="sc-test",
+                    backend="concurrent",
+                    task_id="t2",
+                    duration_seconds=0.1,
+                    error_type="RuntimeError",
+                )
+            )
+            await asyncio.sleep(0.1)
+            await m.stop()
+
+            filepath = os.path.join(tmpdir, os.listdir(tmpdir)[0])
+            rows = [json.loads(l) for l in open(filepath)]
+            spans = {
+                r["attributes"]["task_id"]: r
+                for r in rows
+                if r.get("section") == "span" and r.get("name") == "task"
+            }
+
+            assert spans["t1"]["status_code"] == "OK"
+            assert spans["t2"]["status_code"] == "ERROR"
+            assert spans["t2"]["status_description"] == "RuntimeError"
 
 
 class TestTaskStateTransitions:

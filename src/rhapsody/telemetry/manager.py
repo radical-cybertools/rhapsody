@@ -878,6 +878,7 @@ class TelemetryManager:
             span.set_attribute("task_type", task_type)
             if event.attributes.get("incomplete_lifecycle"):
                 span.set_attribute("incomplete_lifecycle", True)
+            span.set_status(trace_mod.StatusCode.OK)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
 
@@ -909,6 +910,7 @@ class TelemetryManager:
             span.set_attribute("task_type", task_type)
             if event.attributes.get("incomplete_lifecycle"):
                 span.set_attribute("incomplete_lifecycle", True)
+            span.set_status(trace_mod.StatusCode.ERROR, error_type)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
 
@@ -938,6 +940,7 @@ class TelemetryManager:
             span.set_attribute("task_type", task_type)
             if event.attributes.get("incomplete_lifecycle"):
                 span.set_attribute("incomplete_lifecycle", True)
+            span.set_status(trace_mod.StatusCode.ERROR)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
 
@@ -1023,6 +1026,8 @@ class TelemetryManager:
                 "start_time_s": s.start_time / 1e9 if s.start_time else None,
                 "end_time_s": s.end_time / 1e9 if s.end_time else None,
                 "duration_ms": round(dur, 3) if dur is not None else None,
+                "status_code": s.status.status_code.name,
+                "status_description": s.status.description or None,
                 "attributes": dict(s.attributes or {}),
             }
             try:
