@@ -3381,32 +3381,80 @@ class DragonExecutionBackendV3(BaseBackend):
             )
             self._batch_monitor_thread.start()
 
-        # Build tasks
-        batch_tasks_data = []
-        for task in tasks:
-            try:
-                batch_task = await self.build_task(task)
-                batch_tasks_data.append((task["uid"], batch_task))
-                # This is the moment Dragon takes ownership was called
-                # inside build_task) and start executing it.
+        # Dragon's batch keeps an internal work-queue (``self.batch.work_q``,
+        # a stdlib ``queue.Queue`` with ``maxsize=manager_work_queue_max_batch_size``,
+        # 256 by default).  Each ``self.batch.process/.job/.function`` call
+        # ends in a blocking ``self.work_q.put(task)``: when the queue is
+        # full, ``put`` blocks the *calling thread* until dragon's
+        # dispatcher drains a slot.  Doing that on the asyncio event loop
+        # — which is what the previous serial ``for ... await build_task``
+        # loop did — freezes WS keepalives and every other coroutine for
+        # the duration of the drain.  At scale (1000+ tasks per batch on a
+        # multi-node alloc) that easily exceeds bridge / client timeouts.
+        #
+        # Fix: chunk submissions to the queue's maxsize and run each
+        # chunk's blocking puts in a worker thread via ``asyncio.to_thread``.
+        # The event loop is free while the worker fills (and waits on)
+        # the dragon queue; chunk-by-chunk registration into
+        # ``_monitored_batches`` lets the monitor thread observe early
+        # completions instead of stalling them until the whole batch is
+        # built.  ``maxsize == 0`` (unbounded) falls back to a sane chunk
+        # size so we still yield periodically.
+        chunk = self.batch.work_q.maxsize or 4096
+
+        def _build_chunk(chunk_tasks):
+            """Synchronous per-chunk builder; runs in a worker thread.
+
+            Returns a list of ``(task, batch_task | None, exception | None)``
+            so the event-loop side can register monitored tasks and emit
+            RUNNING/FAILED callbacks without doing those calls itself in
+            a worker thread.
+            """
+            out = []
+            for task in chunk_tasks:
+                try:
+                    batch_task = self._build_task_sync(task)
+                    out.append((task, batch_task, None))
+                except Exception as e:
+                    out.append((task, None, e))
+            return out
+
+        n_built = 0
+        for start in range(0, len(tasks), chunk):
+            chunk_results = await asyncio.to_thread(
+                _build_chunk, tasks[start:start + chunk])
+            for task, batch_task, exc in chunk_results:
+                if exc is not None:
+                    self.logger.error(
+                        f"Failed to create task {task.get('uid')}: {exc}",
+                        exc_info=exc)
+                    task["exception"] = exc
+                    self._callback_func(task, "FAILED")
+                    continue
+                # Tasks are already in-flight — the Batch background thread
+                # auto-dispatches them the moment they were created via
+                # batch.function()/process()/job() inside _build_task_sync.
+                self._monitored_batches[batch_task.uid] = (batch_task, task["uid"])
                 self._callback_func(task, "RUNNING")
-            except Exception as e:
-                self.logger.error(f"Failed to create task {task.get('uid')}: {e}", exc_info=True)
-                task["exception"] = e
-                self._callback_func(task, "FAILED")
+                n_built += 1
 
-        if not batch_tasks_data:
-            return
-
-        # Tasks are already in-flight — the Batch background thread auto-dispatches them
-        # the moment they are created via batch.function()/process()/job().
-        # Register each task individually for result monitoring.
-        for uid, batch_task in batch_tasks_data:
-            self._monitored_batches[batch_task.uid] = (batch_task, uid)
-        self.logger.info(f"Submitted {len(batch_tasks_data)} tasks (streaming, auto-dispatched)")
+        if n_built:
+            self.logger.info(
+                f"Submitted {n_built} tasks (streaming, auto-dispatched)")
 
     async def build_task(self, task: dict):
         """Translate AsyncFlow task to Dragon Batch task.
+
+        Async wrapper retained for backward compatibility with existing
+        callers (tests, V1/V2-style code paths).  The body is fully
+        synchronous and lives in :meth:`_build_task_sync`; ``submit_tasks``
+        offloads chunks of those sync calls to a worker thread so dragon's
+        blocking ``work_q.put`` does not freeze the event loop.
+        """
+        return self._build_task_sync(task)
+
+    def _build_task_sync(self, task: dict):
+        """Translate AsyncFlow task to Dragon Batch task (synchronous).
 
         Translation Priority (in order):
         1. If process_templates (list) provided → Job mode (ignore type='mpi', ignore ranks) [function/executable]
