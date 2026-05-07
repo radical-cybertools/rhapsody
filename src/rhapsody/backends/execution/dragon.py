@@ -3195,7 +3195,11 @@ class DragonExecutionBackendV3(BaseBackend):
                 for tuid in batch_tuids:
                     if tuid not in self._monitored_batches:
                         continue
-                    # Single DDict read: KeyError means not ready yet (avoids redundant __contains__)
+                    # ``__contains__`` first: a bare subscript on Dragon's
+                    # distributed DDict blocks on remote-peer keys at
+                    # multi-node scale instead of raising KeyError.
+                    if tuid not in self.batch.results_ddict:
+                        continue
                     try:
                         result, tb, raised, stdout, stderr = self.batch.results_ddict[tuid]
                     except KeyError:
