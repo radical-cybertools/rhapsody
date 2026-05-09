@@ -3599,14 +3599,17 @@ class DragonExecutionBackendV3(BaseBackend):
                 # redirect.  Function-wrap paths are glob prefixes — leave the
                 # raw dragon-captured stdout/stderr (typically empty for
                 # functions) so callers don't follow a path that doesn't exist.
-                task_desc["stdout"] = (
-                    stdout_path if stdout_path and is_exec_redirect
-                    else (stdout or task_desc.get("stdout"))
-                )
-                task_desc["stderr"] = (
-                    stderr_path if stderr_path and is_exec_redirect
-                    else (stderr or task_desc.get("stderr"))
-                )
+                out = (stdout_path if stdout_path and is_exec_redirect
+                       else (stdout or task_desc.get("stdout")))
+                err = (stderr_path if stderr_path and is_exec_redirect
+                       else (stderr or task_desc.get("stderr")))
+                # Dev semantics: don't fabricate `stdout=None` /
+                # `stderr=None` keys on success when there is genuinely
+                # nothing to surface.
+                if out is not None:
+                    task_desc["stdout"] = out
+                if err is not None:
+                    task_desc["stderr"] = err
                 self._callback_func(task_desc, "DONE")
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
