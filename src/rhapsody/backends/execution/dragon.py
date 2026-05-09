@@ -3474,10 +3474,18 @@ class DragonExecutionBackendV3(BaseBackend):
 
     def _submit_pinned_process(self, uid: str, template) -> None:
         """Cheap path: single dragon Process with explicit Policy."""
+        # ProcessTemplate folds kwargs into argdata for python targets and
+        # exposes no .kwargs attribute; recover via the unpickle accessor.
+        if template.is_python:
+            target, args, kwargs = template.get_original_python_parameters()
+        else:
+            target = template.target
+            args   = template.args
+            kwargs = {}
         proc = Process(
-            target = template.target,
-            args   = template.args,
-            kwargs = template.kwargs,
+            target = target,
+            args   = args,
+            kwargs = kwargs,
             cwd    = template.cwd,
             env    = template.env,
             stdin  = template.stdin,
@@ -3687,9 +3695,9 @@ class DragonExecutionBackendV3(BaseBackend):
                     task["exception"] = exc
                     self._callback_func(task, "FAILED")
                     continue
-                # Pinned tasks return None from _build_task_sync — they
-                # are tracked in _pinned_tasks (driven by _sweep_pinned),
-                # not in _monitored_batches.
+                # Pinned tasks return None — tracked in _pinned_tasks, and
+                # already fired RUNNING inside _build_task_sync (before
+                # proc.start()) so an early DONE from _sweep_pinned wins.
                 if batch_task is not None:
                     # Batch tasks are already in-flight — the Batch background
                     # thread auto-dispatches them the moment they were created
@@ -3697,7 +3705,7 @@ class DragonExecutionBackendV3(BaseBackend):
                     # _build_task_sync.
                     self._monitored_batches[batch_task.uid] = (
                         batch_task, task["uid"])
-                self._callback_func(task, "RUNNING")
+                    self._callback_func(task, "RUNNING")
                 n_built += 1
 
         if n_built:
@@ -3840,6 +3848,10 @@ class DragonExecutionBackendV3(BaseBackend):
         # Single decision tree - no redundant checks
         if pinned_templates is not None:
             # Priority 0: pinned task — bypass Batch's worker pool.
+            # Fire RUNNING before proc.start() so a fast DONE delivered by
+            # _sweep_pinned can't overtake it on the loop (FIFO via
+            # call_soon_threadsafe).  Dispatch loop must skip RUNNING here.
+            self._callback_func(task, "RUNNING")
             batch_task = self._submit_pinned(uid, pinned_templates,
                                              name, timeout)
             execution_mode = "pinned"
