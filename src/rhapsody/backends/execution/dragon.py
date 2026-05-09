@@ -3,6 +3,7 @@ import functools
 import glob
 import logging
 import os
+import queue
 import shlex
 import sys
 import threading
@@ -1714,6 +1715,22 @@ def _v3_function_wrapper(user_func, stdout_path, stderr_path, *args, **kwargs):
             pass
 
 
+def _is_pinned_policy(policy) -> bool:
+    """True iff the Policy carries an explicit per-host placement.
+
+    Tasks with a pinned policy bypass dragon.workflows.batch's worker pool:
+    that pool is sized at Manager startup and silently ignores per-task
+    placement (Manager.__setstate__ in dragon/workflows/batch/batch.py
+    builds policy_list once and never consults ProcessTemplate.policy).
+    Pinned tasks therefore route to a per-task ProcessGroup whose member
+    template carries the user's Policy, which the GS path honours.
+    """
+    if policy is None or Policy is None:
+        return False
+    return policy.placement in (
+        Policy.Placement.HOST_NAME, Policy.Placement.HOST_ID)
+
+
 # ============================================================================
 # Main Backend Classes
 # V1 Integrates with Dragon HPC Native API
@@ -3184,6 +3201,20 @@ class DragonExecutionBackendV3(BaseBackend):
         self._batch_monitor_thread = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
+        # Host-pinned tasks bypass the batch worker pool and run as one
+        # ProcessGroup per task; tracked separately from _monitored_batches
+        # because they have no batch_task.uid.  _pinned_reap_q hands closed
+        # PGs to a background reaper so the monitor loop never blocks on
+        # ProcessGroup.close()'s GS round-trip.
+        self._pinned_tasks: dict[str, dict] = {}
+        self._pinned_lock = threading.Lock()
+        self._pinned_reap_q: queue.Queue = queue.Queue()
+        self._pinned_reaper_thread: Optional[threading.Thread] = None
+        # Polling interval for pinned-task state sweeps.  Each sweep IPCs
+        # once per in-flight PG, so we throttle to bound GS pressure at
+        # large fan-out; trades up to this much DONE-callback latency.
+        self._pinned_poll_interval = 0.05
+
         self._shutdown_event = threading.Event()
 
         self.logger.info(
@@ -3232,15 +3263,14 @@ class DragonExecutionBackendV3(BaseBackend):
         """
         self.logger.debug("Starting Dragon batch monitor loop (polling mode)")
 
-        while not self._shutdown_event.is_set() or self._monitored_batches:
+        last_pinned_sweep = 0.0
+
+        while (not self._shutdown_event.is_set()
+               or self._monitored_batches
+               or self._pinned_tasks):
             try:
                 # Iterate over a copy of keys to allow modification during iteration
                 batch_tuids = list(self._monitored_batches.keys())
-
-                if not batch_tuids:
-                    # No active tasks, sleep briefly to avoid high CPU
-                    time.sleep(0.01)
-                    continue
 
                 # Collect all completed tasks in this sweep, then deliver in one batch
                 completed = []
@@ -3259,18 +3289,245 @@ class DragonExecutionBackendV3(BaseBackend):
                     batch_task, uid = self._monitored_batches.pop(tuid)
                     completed.append((uid, result, tb, raised, stdout, stderr))
 
+                # Pinned-task sweep (throttled): each PG._state is a GS IPC,
+                # so at large fan-out tight polling overwhelms GS.
+                now = time.time()
+                if (self._pinned_tasks
+                        and (now - last_pinned_sweep) >= self._pinned_poll_interval):
+                    last_pinned_sweep = now
+                    completed.extend(self._sweep_pinned())
+
                 # One cross-thread wakeup for the entire sweep batch
                 if completed:
                     self._loop.call_soon_threadsafe(self._deliver_batch, completed)
 
-                # Small sleep after each full sweep to prevent tight loop
-                time.sleep(0.005)
+                if not batch_tuids and not self._pinned_tasks:
+                    # No active tasks, sleep briefly to avoid high CPU
+                    time.sleep(0.01)
+                else:
+                    # Small sleep after each full sweep to prevent tight loop
+                    time.sleep(0.005)
 
             except Exception as e:
                 self.logger.exception(f"Critical error in monitor loop: {e}")
                 time.sleep(0.1)
 
         self.logger.debug("Dragon batch monitor loop stopped")
+
+    def _sweep_pinned(self) -> list:
+        """Poll each in-flight pinned task; return completion tuples.
+
+        Returns list of ``(uid, result, tb, raised, stdout, stderr)`` shaped
+        identically to the batch path so _deliver_batch handles them
+        uniformly.  stdout/stderr are left empty here — _deliver_batch
+        already reads file paths from _task_registry[uid] for tasks that
+        used the redirect/function-wrap mechanism.
+
+        Each slot is one of two kinds: ``"process"`` (Process.returncode
+        is None while running, int when done) or ``"pg"`` (ProcessGroup
+        reaches IDLE/ERROR).
+        """
+        completions = []
+        with self._pinned_lock:
+            uids = list(self._pinned_tasks.keys())
+        sweep_start = time.time()
+        for uid in uids:
+            with self._pinned_lock:
+                slot = self._pinned_tasks.get(uid)
+            if slot is None:
+                continue
+            kind = slot.get("kind", "pg")
+
+            if kind == "process":
+                proc = slot["process"]
+                try:
+                    rc = proc.returncode
+                except Exception as e:
+                    self.logger.debug("pinned %s rc query failed: %s",
+                                      uid, e)
+                    continue
+                if rc is None:
+                    continue
+                failed = rc != 0
+                if failed:
+                    result = RuntimeError(
+                        f"pinned task {uid} failed: exit={rc}")
+                else:
+                    result = None
+                completions.append((uid, result, "", failed, "", ""))
+                with self._pinned_lock:
+                    self._pinned_tasks.pop(uid, None)
+                # Process needs no reap — descriptor is freed by GS once
+                # the process exits and we've harvested returncode.
+                continue
+
+            # kind == "pg"
+            pg = slot["pg"]
+            try:
+                state = pg._state
+            except Exception as e:
+                self.logger.debug("pinned %s state query failed: %s",
+                                  uid, e)
+                continue
+            if state.name not in ("IDLE", "ERROR"):
+                continue
+            try:
+                inactive = pg.inactive_puids
+            except Exception:
+                inactive = []
+            exit_codes = [ec for _, ec in inactive]
+            failed = (state.name == "ERROR"
+                      or any(ec != 0 for ec in exit_codes)
+                      or len(inactive) < slot.get("nproc", 1))
+            if failed:
+                result = RuntimeError(
+                    f"pinned task {uid} failed: state={state.name} "
+                    f"exit_codes={exit_codes}")
+            else:
+                result = None
+            completions.append((uid, result, "", failed, "", ""))
+            with self._pinned_lock:
+                done = self._pinned_tasks.pop(uid, None)
+            if done is not None:
+                try:
+                    self._pinned_reap_q.put_nowait(done["pg"])
+                except Exception:
+                    pass
+        # Trace each sweep so a stalled run phase (nothing ever
+        # terminating) is visible.  Throttled to once per second so we
+        # don't flood when the sweep cadence is 50ms.
+        sweep_dt = time.time() - sweep_start
+        last_log = getattr(self, "_pinned_sweep_last_log", 0.0)
+        if uids and (sweep_start - last_log) >= 1.0:
+            self._pinned_sweep_last_log = sweep_start
+            self.logger.info(
+                "pinned sweep: queried=%d done=%d reap_q=%d  in=%.3fs",
+                len(uids), len(completions),
+                self._pinned_reap_q.qsize(), sweep_dt)
+        return completions
+
+    def _pinned_reaper_loop(self):
+        """Background thread that closes finished/cancelled ProcessGroups.
+
+        ProcessGroup.close() is a blocking GS round-trip with a per-call
+        patience window; doing it inline in _monitor_loop would stall the
+        batch sweep.  This thread drains _pinned_reap_q.  A None sentinel
+        triggers exit; otherwise we run until shutdown_event is set and
+        the queue is empty.
+        """
+        while True:
+            try:
+                pg = self._pinned_reap_q.get(timeout=0.1)
+            except queue.Empty:
+                if (self._shutdown_event.is_set()
+                        and self._pinned_reap_q.empty()):
+                    return
+                continue
+            if pg is None:
+                return
+            try:
+                pg.close(patience=2.0)
+            except Exception as e:
+                self.logger.debug("pinned PG close error: %s", e)
+
+    def _ensure_pinned_reaper(self):
+        if (self._pinned_reaper_thread is not None
+                and self._pinned_reaper_thread.is_alive()):
+            return
+        self._pinned_reaper_thread = threading.Thread(
+            target=self._pinned_reaper_loop,
+            name="dragon_pinned_reaper",
+            daemon=True,
+        )
+        self._pinned_reaper_thread.start()
+
+    def _submit_pinned(self, uid: str, pinned_templates: list,
+                       name: str, timeout: float) -> None:
+        """Submit a pinned task.
+
+        Single-template, single-process tasks (the common case for
+        host+gpu pinning) are spawned via ``dragon.native.process.Process``:
+        one GS round-trip with the policy attached, no Manager process,
+        no PGSetProperties / PGAddProcessTemplates handshake — roughly
+        two orders of magnitude cheaper than ``ProcessGroup.init()``.
+
+        Multi-process or multi-template tasks fall back to a one-shot
+        ``ProcessGroup`` (slower but supports per-rank Policy).
+
+        Returns None either way — pinned tasks are tracked in
+        ``self._pinned_tasks`` rather than ``self._monitored_batches``.
+        """
+        # Single template + nproc == 1 is the cheap path (Process API).
+        if len(pinned_templates) == 1 and pinned_templates[0][0] == 1:
+            self._submit_pinned_process(uid, pinned_templates[0][1])
+        else:
+            self._submit_pinned_pg(uid, pinned_templates, name, timeout)
+        n_total = self._pinned_submitted_total = (
+            getattr(self, "_pinned_submitted_total", 0) + 1)
+        if n_total == 1 or n_total % 256 == 0:
+            with self._pinned_lock:
+                in_flight = len(self._pinned_tasks)
+            self.logger.info(
+                "pinned submit %d  in-flight=%d  uid=%s",
+                n_total, in_flight, uid)
+        return None
+
+    def _submit_pinned_process(self, uid: str, template) -> None:
+        """Cheap path: single dragon Process with explicit Policy."""
+        # ProcessTemplate folds kwargs into argdata for python targets and
+        # exposes no .kwargs attribute; recover via the unpickle accessor.
+        if template.is_python:
+            target, args, kwargs = template.get_original_python_parameters()
+        else:
+            target = template.target
+            args   = template.args
+            kwargs = {}
+        proc = Process(
+            target = target,
+            args   = args,
+            kwargs = kwargs,
+            cwd    = template.cwd,
+            env    = template.env,
+            stdin  = template.stdin,
+            stdout = template.stdout,
+            stderr = template.stderr,
+            policy = template.policy,
+            options= template.options,
+        )
+        proc.start()
+        with self._pinned_lock:
+            self._pinned_tasks[uid] = {
+                "kind"        : "process",
+                "process"     : proc,
+                "submitted_at": time.time(),
+            }
+
+    def _submit_pinned_pg(self, uid: str, pinned_templates: list,
+                          name: str, timeout: float) -> None:
+        """Fallback path: one-shot ProcessGroup for nproc>1 / multi-template."""
+        # Walltime: dragon kills the group when this elapses; the same
+        # 1e9 sentinel _build_task_sync uses for "no real timeout".
+        wt = timeout if (timeout and timeout < 1e9) else None
+        pg = ProcessGroup(
+            restart              = False,
+            ignore_error_on_exit = True,
+            walltime             = wt,
+            name                 = name,
+        )
+        nproc_total = 0
+        for nproc, template in pinned_templates:
+            pg.add_process(nproc=nproc, template=template)
+            nproc_total += nproc
+        pg.init()
+        pg.start()
+        with self._pinned_lock:
+            self._pinned_tasks[uid] = {
+                "kind"        : "pg",
+                "pg"          : pg,
+                "nproc"       : nproc_total,
+                "submitted_at": time.time(),
+            }
+        self._ensure_pinned_reaper()
 
     def _deliver_batch(self, completions: list) -> None:
         """Deliver a batch of completed tasks. Runs on the asyncio event loop (via
@@ -3350,14 +3607,17 @@ class DragonExecutionBackendV3(BaseBackend):
                 # redirect.  Function-wrap paths are glob prefixes — leave the
                 # raw dragon-captured stdout/stderr (typically empty for
                 # functions) so callers don't follow a path that doesn't exist.
-                task_desc["stdout"] = (
-                    stdout_path if stdout_path and is_exec_redirect
-                    else (stdout or task_desc.get("stdout"))
-                )
-                task_desc["stderr"] = (
-                    stderr_path if stderr_path and is_exec_redirect
-                    else (stderr or task_desc.get("stderr"))
-                )
+                out = (stdout_path if stdout_path and is_exec_redirect
+                       else (stdout or task_desc.get("stdout")))
+                err = (stderr_path if stderr_path and is_exec_redirect
+                       else (stderr or task_desc.get("stderr")))
+                # Dev semantics: don't fabricate `stdout=None` /
+                # `stderr=None` keys on success when there is genuinely
+                # nothing to surface.
+                if out is not None:
+                    task_desc["stdout"] = out
+                if err is not None:
+                    task_desc["stderr"] = err
                 self._callback_func(task_desc, "DONE")
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
@@ -3435,11 +3695,17 @@ class DragonExecutionBackendV3(BaseBackend):
                     task["exception"] = exc
                     self._callback_func(task, "FAILED")
                     continue
-                # Tasks are already in-flight — the Batch background thread
-                # auto-dispatches them the moment they were created via
-                # batch.function()/process()/job() inside _build_task_sync.
-                self._monitored_batches[batch_task.uid] = (batch_task, task["uid"])
-                self._callback_func(task, "RUNNING")
+                # Pinned tasks return None — tracked in _pinned_tasks, and
+                # already fired RUNNING inside _build_task_sync (before
+                # proc.start()) so an early DONE from _sweep_pinned wins.
+                if batch_task is not None:
+                    # Batch tasks are already in-flight — the Batch background
+                    # thread auto-dispatches them the moment they were created
+                    # via batch.function()/process()/job() inside
+                    # _build_task_sync.
+                    self._monitored_batches[batch_task.uid] = (
+                        batch_task, task["uid"])
+                    self._callback_func(task, "RUNNING")
                 n_built += 1
 
         if n_built:
@@ -3551,8 +3817,46 @@ class DragonExecutionBackendV3(BaseBackend):
                 _v3_function_wrapper, target, stdout_path, stderr_path
             )
 
-        # Single decision tree - no redundant checks
+        # Detect host-pinned templates upfront.  dragon.workflows.batch's
+        # worker pool ignores per-task ProcessTemplate.policy (see
+        # _is_pinned_policy), so any task that asks for a specific host
+        # bypasses Batch and runs as its own ProcessGroup whose member
+        # template carries the user's Policy.
+        pinned_templates = None  # list[(nproc, ProcessTemplate)] or None
         if process_templates_config is not None:
+            if any(_is_pinned_policy(tc.get("policy"))
+                   for _, tc in process_templates_config):
+                pinned_templates = [
+                    (nranks,
+                     ProcessTemplate(
+                         target, **{**tc, "args": task_args,
+                                    "kwargs": task_kwargs}))
+                    for nranks, tc in process_templates_config
+                ]
+        elif process_template_config is not None:
+            if _is_pinned_policy(process_template_config.get("policy")):
+                pinned_templates = [(
+                    1,
+                    ProcessTemplate(
+                        target, **{**process_template_config,
+                                   "args": task_args,
+                                   "kwargs": task_kwargs}),
+                )]
+        # Auto-build (mpi/function/executable) paths attach no policy and
+        # are therefore never pinned.
+
+        # Single decision tree - no redundant checks
+        if pinned_templates is not None:
+            # Priority 0: pinned task — bypass Batch's worker pool.
+            # Fire RUNNING before proc.start() so a fast DONE delivered by
+            # _sweep_pinned can't overtake it on the loop (FIFO via
+            # call_soon_threadsafe).  Dispatch loop must skip RUNNING here.
+            self._callback_func(task, "RUNNING")
+            batch_task = self._submit_pinned(uid, pinned_templates,
+                                             name, timeout)
+            execution_mode = "pinned"
+
+        elif process_templates_config is not None:
             # Priority 1: Job with user templates
             process_templates = [
                 (
@@ -3643,10 +3947,32 @@ class DragonExecutionBackendV3(BaseBackend):
         if uid not in self._task_registry:
             raise ValueError(f"Task {uid} not found")
 
-        # NOTE: dragon.batch does not expose nor support
-        # process/function/job cancellation, we just notify
-        # the asyncflow that the task is cancelled so not to block the flow
         task = self._task_registry[uid]["description"]
+
+        # Pinned tasks own their own dragon resource (Process or
+        # ProcessGroup) and can be cancelled at the dragon level; batch
+        # tasks have no per-task cancel hook in dragon.workflows.batch,
+        # so the asyncflow is just notified.
+        with self._pinned_lock:
+            slot = self._pinned_tasks.pop(uid, None)
+        if slot is not None:
+            kind = slot.get("kind", "pg")
+            if kind == "process":
+                try:
+                    slot["process"].terminate()
+                except Exception as e:
+                    self.logger.debug("pinned cancel terminate %s: %s",
+                                      uid, e)
+            else:
+                try:
+                    slot["pg"].stop(patience=2.0)
+                except Exception as e:
+                    self.logger.debug("pinned cancel stop %s: %s", uid, e)
+                try:
+                    self._pinned_reap_q.put_nowait(slot["pg"])
+                except Exception:
+                    pass
+
         self._callback_func(task, "CANCELED")
         self._cancelled_tasks.add(uid)
 
@@ -3663,6 +3989,28 @@ class DragonExecutionBackendV3(BaseBackend):
         self.logger.info("Shutting down V3 backend")
         self._shutdown_event.set()
 
+        # Stop any in-flight pinned tasks (Process or ProcessGroup);
+        # the reaper closes the remaining PGs.
+        with self._pinned_lock:
+            remaining = list(self._pinned_tasks.values())
+            self._pinned_tasks.clear()
+        for slot in remaining:
+            kind = slot.get("kind", "pg")
+            if kind == "process":
+                try:
+                    slot["process"].terminate()
+                except Exception as e:
+                    self.logger.debug("pinned shutdown terminate: %s", e)
+            else:
+                try:
+                    slot["pg"].stop(patience=1.0)
+                except Exception as e:
+                    self.logger.debug("pinned shutdown stop: %s", e)
+                try:
+                    self._pinned_reap_q.put_nowait(slot["pg"])
+                except Exception:
+                    pass
+
         # Wait for monitor thread to finish if it exists
         if self._batch_monitor_thread and self._batch_monitor_thread.is_alive():
             try:
@@ -3672,6 +4020,15 @@ class DragonExecutionBackendV3(BaseBackend):
                     self.logger.warning("Batch monitor thread did not stop within timeout")
             except Exception as e:
                 self.logger.exception(f"Error stopping monitor thread: {e}")
+
+        # Drain the pinned reaper after the monitor stops so any
+        # last-second reaps queued by _sweep_pinned are processed.
+        if (self._pinned_reaper_thread
+                and self._pinned_reaper_thread.is_alive()):
+            try:
+                self._pinned_reaper_thread.join(timeout=10.0)
+            except Exception as e:
+                self.logger.debug("pinned reaper join: %s", e)
 
         # Close Batch
         if self.batch:
