@@ -34,6 +34,10 @@ from rhapsody.telemetry.events import TaskSubmitted
 from rhapsody.telemetry.events import make_event
 
 if TYPE_CHECKING:
+    from opentelemetry.sdk.metrics.export import MetricReader
+    from opentelemetry.sdk.resources import Resource as OtelResource
+    from opentelemetry.sdk.trace import SpanProcessor
+
     from rhapsody.telemetry.adapters.base import TelemetryAdapter
 
 logger = logging.getLogger(__name__)
@@ -108,6 +112,9 @@ class TelemetryManager:
         session_id: str,
         checkpoint_interval: float | None = None,
         checkpoint_path: str | None = None,
+        span_processors: list[SpanProcessor] | None = None,
+        metric_readers: list[MetricReader] | None = None,
+        resource: OtelResource | None = None,
     ) -> None:
         self._session_id = session_id
         self._queue: asyncio.Queue = asyncio.Queue()
@@ -173,6 +180,15 @@ class TelemetryManager:
         # Stored so it can be properly detached in stop().
         self._session_ctx_token: Any = None
 
+        # Caller-supplied OTel extension points wired into RHAPSODY's internal providers
+        # at start() time alongside SpanBuffer / InMemoryMetricReader.
+        # Callers own exporter construction; RHAPSODY never imports specific exporters.
+        self._extra_span_processors: list = list(span_processors or [])
+        self._extra_metric_readers: list = list(metric_readers or [])
+        # Optional Resource override. None → Resource.create() in start(), which reads
+        # OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES from the environment automatically.
+        self._resource: Any = resource
+
     # ------------------------------------------------------------------
     # Public properties
     # ------------------------------------------------------------------
@@ -190,14 +206,28 @@ class TelemetryManager:
         """Start the telemetry manager: set up OTel SDK, open checkpoint file, start loops."""
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+        from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 
+        # Resource.create() reads OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES from the
+        # environment automatically; the passed dict provides fallback defaults only.
+        _resource = self._resource or Resource.create(
+            {"service.name": "rhapsody", "session_id": self._session_id}
+        )
+
         self._metric_reader = InMemoryMetricReader()
         self._span_exporter = SpanBuffer()
-        self._meter_provider = MeterProvider(metric_readers=[self._metric_reader])
-        self._tracer_provider = TracerProvider()
+
+        self._meter_provider = MeterProvider(
+            metric_readers=[self._metric_reader] + self._extra_metric_readers,
+            resource=_resource,
+        )
+        self._tracer_provider = TracerProvider(resource=_resource)
         self._tracer_provider.add_span_processor(SimpleSpanProcessor(self._span_exporter))
+        for proc in self._extra_span_processors:
+            self._tracer_provider.add_span_processor(proc)
+
         self._meter = self._meter_provider.get_meter("rhapsody")
         self._tracer = self._tracer_provider.get_tracer("rhapsody")
 

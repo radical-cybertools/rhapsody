@@ -443,6 +443,75 @@ This makes the JSONL file directly importable into any OTel-aware tool as a time
 
 ---
 
+## Span annotation and enrichment API
+
+These methods let application code interact with the active OTel span without importing OTel directly.
+
+### `span_scope(name, attributes=None)`
+
+Context manager that opens a child span under the currently active span (or under the session span when called outside a task context).
+
+```python
+with telemetry.span_scope("preprocessing", {"dataset": "train_2024"}):
+    # Any spans opened here will be children of "preprocessing"
+    process_data()
+```
+
+Useful for grouping a sequence of operations into a named sub-trace. If telemetry is not started, `span_scope()` is a no-op.
+
+---
+
+### `annotate_current_span(event)`
+
+Records a `BaseEvent` as an **annotation** (OTel span event) on the currently active span. Does nothing if there is no active span.
+
+```python
+def on_event(event):
+    if event.event_type == "TaskCompleted":
+        telemetry.annotate_current_span(event)
+
+telemetry.subscribe(on_event)
+```
+
+Attributes are serialized to strings. Useful for linking RHAPSODY lifecycle events to custom spans opened with `span_scope()`.
+
+---
+
+### `register_span_enricher(func)`
+
+Registers a callback that is called for every `TaskCreated` event and returns extra attributes to add to that task's OTel span.
+
+```python
+telemetry.register_span_enricher(
+    lambda event: {"my.workflow_id": event.attributes.get("my.workflow_id", "")}
+)
+```
+
+`func` receives a `BaseEvent` and must return a `dict[str, str | int | float | bool]`. Multiple enrichers are applied in registration order. Enrichers are the correct place to stamp custom grouping keys (workflow IDs, pipeline names, etc.) onto task spans without modifying RHAPSODY source.
+
+---
+
+### `export_as_otlp(path=None)`
+
+Serializes all finished spans to a standards-compliant OTLP JSON payload (the `POST /v1/traces` wire format). Call after `stop()` when all spans are finalized.
+
+```python
+await session.close()
+
+# Write to file
+telemetry.export_as_otlp("./traces.json")
+
+# Or get the JSON string directly
+payload = telemetry.export_as_otlp()
+```
+
+The returned string is valid OTLP JSON and can be:
+- Uploaded to any visualizer that accepts OTLP format (Jaeger, Grafana Tempo, Zipkin with conversion)
+- POSTed directly to an OTLP HTTP endpoint
+- Stored for offline analysis
+
+---
+
 ## JSONL checkpoint format
 
 Each line in the `.telemetry.jsonl` file is a JSON object with a `"section"` discriminator:
