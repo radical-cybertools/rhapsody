@@ -7,8 +7,9 @@ environments.
 from __future__ import annotations
 
 from .concurrent import ConcurrentExecutionBackend  # noqa: F401
+from .noop       import NoopExecutionBackend         # noqa: F401
 
-__all__ = ["ConcurrentExecutionBackend"]
+__all__ = ["ConcurrentExecutionBackend", "NoopExecutionBackend"]
 
 # Try to import optional backends
 try:
@@ -22,6 +23,13 @@ try:
     from .radical_pilot import RadicalExecutionBackend  # noqa: F401
 
     __all__.append("RadicalExecutionBackend")
+except ImportError:
+    pass
+
+try:
+    from .edge import EdgeExecutionBackend  # noqa: F401
+
+    __all__.append("EdgeExecutionBackend")
 except ImportError:
     pass
 
