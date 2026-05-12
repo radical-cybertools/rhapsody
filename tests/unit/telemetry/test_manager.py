@@ -752,6 +752,162 @@ class TestTaskStateTransitions:
 # ------------------------------------------------------------------
 
 
+class TestOtelInjection:
+    async def test_extra_span_processor_receives_spans(self):
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+        exporter = InMemorySpanExporter()
+        m = TelemetryManager(
+            session_id="inj-spans",
+            span_processors=[SimpleSpanProcessor(exporter)],
+        )
+        await m.start()
+        m.emit(make_event(TaskStarted, session_id="inj-spans", backend="concurrent", task_id="t1"))
+        m.emit(
+            make_event(
+                TaskCompleted,
+                session_id="inj-spans",
+                backend="concurrent",
+                task_id="t1",
+                duration_seconds=0.1,
+            )
+        )
+        await asyncio.sleep(0.1)
+        await m.stop()
+
+        assert any(s.name == "task" for s in exporter.get_finished_spans()), (
+            "injected exporter did not receive the task span"
+        )
+        assert any(s.name == "task" for s in m.read_traces()), (
+            "internal SpanBuffer must still be populated"
+        )
+
+    async def test_extra_metric_reader_receives_metrics(self):
+        from opentelemetry.sdk.metrics.export import InMemoryMetricReader as OtelReader
+
+        reader = OtelReader()
+        m = TelemetryManager(session_id="inj-metrics", metric_readers=[reader])
+        await m.start()
+        m.emit(
+            make_event(TaskSubmitted, session_id="inj-metrics", backend="concurrent", task_id="t1")
+        )
+        await asyncio.sleep(0.1)
+
+        metrics = reader.get_metrics_data()
+        all_names = {
+            metric.name
+            for rm in (metrics.resource_metrics if metrics else [])
+            for sm in rm.scope_metrics
+            for metric in sm.metrics
+        }
+        assert "tasks_submitted" in all_names, (
+            f"tasks_submitted not in injected reader metrics: {all_names}"
+        )
+
+        await m.stop()
+
+
+class TestExportAsOtlp:
+    async def test_custom_resource_attributes_in_otlp(self):
+        from opentelemetry.sdk.resources import Resource
+
+        resource = Resource.create({"service.name": "my-app"})
+        m = TelemetryManager(session_id="otlp-res", resource=resource)
+        await m.start()
+        m.emit(
+            make_event(
+                TaskCompleted,
+                session_id="otlp-res",
+                backend="concurrent",
+                task_id="t1",
+                duration_seconds=0.1,
+            )
+        )
+        await asyncio.sleep(0.1)
+        await m.stop()
+
+        data = json.loads(m.export_as_otlp())
+        res_attrs = {
+            a["key"]: a["value"] for a in data["resourceSpans"][0]["resource"]["attributes"]
+        }
+        assert res_attrs.get("service.name") == {"stringValue": "my-app"}, (
+            f"Expected 'my-app', got {res_attrs.get('service.name')}"
+        )
+
+    async def test_array_attribute_serialized_as_array_value(self):
+        """Tuple span attribute must produce arrayValue in OTLP JSON."""
+        m = TelemetryManager(session_id="otlp-arr")
+        await m.start()
+        m.register_span_enricher(lambda e: {"tags": ("alpha", "beta", "gamma")})
+        m.emit(make_event(TaskCreated, session_id="otlp-arr", backend="concurrent", task_id="t1"))
+        m.emit(
+            make_event(
+                TaskCompleted,
+                session_id="otlp-arr",
+                backend="concurrent",
+                task_id="t1",
+                duration_seconds=0.1,
+            )
+        )
+        await asyncio.sleep(0.1)
+        await m.stop()
+
+        data = json.loads(m.export_as_otlp())
+        spans = data["resourceSpans"][0]["scopeSpans"][0]["spans"]
+        task_span = next(s for s in spans if s["name"] == "task")
+        attrs = {a["key"]: a["value"] for a in task_span["attributes"]}
+
+        assert "arrayValue" in attrs.get("tags", {}), (
+            f"Expected arrayValue for 'tags', got {attrs.get('tags')}"
+        )
+        values = attrs["tags"]["arrayValue"]["values"]
+        assert [v["stringValue"] for v in values] == ["alpha", "beta", "gamma"]
+
+
+class TestTaskQueuedSpanEvent:
+    async def test_task_queued_adds_span_event(self, manager):
+        manager.emit(
+            make_event(TaskCreated, session_id="test-session", backend="concurrent", task_id="t1")
+        )
+        manager.emit(
+            make_event(TaskQueued, session_id="test-session", backend="concurrent", task_id="t1")
+        )
+        manager.emit(
+            make_event(
+                TaskCompleted,
+                session_id="test-session",
+                backend="concurrent",
+                task_id="t1",
+                duration_seconds=0.1,
+            )
+        )
+        await asyncio.sleep(0.1)
+
+        spans = [s for s in manager.read_traces() if s.name == "task"]
+        assert len(spans) == 1
+        span_event_names = [e.name for e in spans[0].events]
+        assert "TaskQueued" in span_event_names
+
+        queued_ev = next(e for e in spans[0].events if e.name == "TaskQueued")
+        assert queued_ev.attributes.get("task_id") == "t1"
+
+    async def test_task_queued_without_prior_created_is_ignored(self, manager):
+        """TaskQueued for an unknown task_id must not crash — span not in _active_spans."""
+        manager.emit(
+            make_event(
+                TaskQueued, session_id="test-session", backend="concurrent", task_id="unknown-t"
+            )
+        )
+        await asyncio.sleep(0.1)
+        assert manager._dispatch_task and not manager._dispatch_task.done()
+
+
+# ------------------------------------------------------------------
+# Helpers to navigate OTel MetricsData
+# ------------------------------------------------------------------
+
+
 def _sum_counter(metrics_data, name: str) -> float:
     total = 0.0
     if metrics_data is None:
