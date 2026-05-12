@@ -54,9 +54,9 @@ asyncio.run(main())
     "duration_seconds": 3.42,
     "tasks": {
         "submitted": 20,
-        "started":   20,
         "completed": 20,
         "failed":     0,
+        "canceled":   0,
         "running":    0,
     },
     "duration": {
@@ -67,6 +67,8 @@ asyncio.run(main())
     },
     "resources": {
         "concurrent/myhost": {
+            "backend":           "concurrent",
+            "node_id":           "myhost",
             "cpu_percent":       41.2,
             "memory_percent":    28.7,
             "gpu_percent":       None,
