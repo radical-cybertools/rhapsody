@@ -32,18 +32,31 @@ backend = ConcurrentExecutionBackend(name="local", executor=executor)
 ```
 
 ### Dask Backend
-Distributed execution using Dask clusters.
+Distributed execution using any Dask-compatible cluster.
 
 ```python
 DaskExecutionBackend(
-    resources={"n_workers": 4, "memory_limit": "2GB"},
-    cluster=pre_existing_cluster_obj, # Optional
-    client=pre_existing_client_obj    # Optional
+    resources={"n_workers": 4, "memory_limit": "2GB"},  # passed to LocalCluster when no cluster/client given
+    cluster=pre_existing_cluster_obj,  # SLURMCluster, KubeCluster, LocalCluster, …
+    client=pre_existing_client_obj     # pre-existing dask.distributed.Client
+)
+```
+
+Supports **sync functions**, **async functions**, and **executable tasks**. Pass Dask-specific scheduling hints via `task_backend_specific_kwargs`:
+
+```python
+ComputeTask(
+    function=my_fn, args=(x,),
+    task_backend_specific_kwargs={"resources": {"GPU": 1}},  # GPU worker only
+)
+ComputeTask(
+    executable="/bin/sim", arguments=["--n", "4"],
+    task_backend_specific_kwargs={"resources": {"CPU": 4}, "shell": True},
 )
 ```
 
 !!! tip "Preconfigured Clusters"
-    If both `cluster` and `client` are omitted, Rhapsody will create a new `LocalCluster` using the provided `resources`.
+    If both `cluster` and `client` are omitted, Rhapsody creates a new `LocalCluster` using the provided `resources`. Pass `cluster=` to use SLURM, Kubernetes, or any other Dask cluster type.
 
 ### Dragon Backend
 High-performance execution using the Dragon runtime.
@@ -53,29 +66,23 @@ from rhapsody.backends import DragonExecutionBackendV3
 
 backend = DragonExecutionBackendV3(
     name="dragon",
-    num_workers=16,               # Total worker processes
-    disable_telemetry=False,       # Enable/disable Dragon telemetry
-    disable_background_batching=False, # Enable/disable background monitoring
-    disable_batch_submission=False # Toggle batch vs individual submission
+    num_nodes=4,            # Total nodes for the worker pool (optional)
+    pool_nodes=2,           # Nodes per worker pool (optional)
+    disable_telemetry=False,  # Enable/disable Dragon telemetry
 )
 ```
 
-!!! note "Batch vs. Stream Submission"
-    The `disable_batch_submission` parameter controls how tasks are sent to the Dragon runtime:
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | `str` | `"dragon"` | Backend identifier used for task routing |
+| `num_nodes` | `int` | `None` | Total number of nodes; forwarded to `Batch(num_nodes=...)` |
+| `pool_nodes` | `int` | `None` | Nodes per worker pool; forwarded to `Batch(pool_nodes=...)` |
+| `disable_telemetry` | `bool` | `False` | Disable Dragon internal telemetry |
 
-    - **Batch Mode** (`False`): High throughput. Groups tasks into a single multi-task batch.
-    - **Stream Mode** (`True`): Individual monitoring. Each task is submitted and tracked as a separate Dragon batch.
-
-    ```python
-    # Batch Mode (Recommended for many small tasks)
-    backend = await DragonExecutionBackendV3(disable_batch_submission=False)
-    await session.submit_tasks([t1, t2]) # Single submission
-
-    # Stream Mode (Better for isolated task tracking)
-    backend = await DragonExecutionBackendV3(disable_batch_submission=True)
-    await session.submit_tasks([t1, t2]) # Two separate submissions
-    ```
-
+!!! note "Streaming pipeline"
+    `DragonExecutionBackendV3` uses Dragon's streaming batch pipeline — tasks submitted via
+    `session.submit_tasks()` are dispatched individually by a continuously running background
+    thread. There is no compile or start step; tasks begin executing as soon as they are submitted.
 
 !!! note "Dragon Versions"
     While `DragonExecutionBackendV3` is recommended for most users and will be always maintained, V1 and V2 are also available for legacy compatibility.

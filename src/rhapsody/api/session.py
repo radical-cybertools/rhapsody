@@ -3,15 +3,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import time
-from collections import Counter
-from collections import defaultdict
+import uuid
 from typing import TYPE_CHECKING
-from typing import Any
+from typing import Callable
+
+from rhapsody.api.errors import TaskExecutionError
 
 if TYPE_CHECKING:
     from rhapsody.api.task import BaseTask
     from rhapsody.backends.base import BaseBackend
+    from rhapsody.telemetry.manager import TelemetryManager
 
 
 logger = logging.getLogger(__name__)
@@ -26,16 +27,17 @@ class TaskStateManager:
 
     def __init__(self):
         self._task_futures: dict[str, asyncio.Future] = {}
-        self._task_states: dict[str, str] = {}
         self._terminal_states = set()  # Will be populated by backends
         self._lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Telemetry observer — set by Session.enable_telemetry(), None = zero cost
+        self._telemetry_observer: Callable[[dict, str], None] | None = None
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         """Bind an event loop to the manager for thread-safe updates."""
         self._loop = loop
 
-    def update_task(self, task: dict | BaseTask, state: str, **kwargs: Any) -> None:
+    def update_task(self, task: dict | BaseTask, state: str, **kwargs: object) -> None:
         """Update task state and notify waiters (thread-safe)."""
         if self._loop and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._update_task_impl, task, state)
@@ -51,24 +53,29 @@ class TaskStateManager:
     def _update_task_impl(self, task: dict | BaseTask, state: str) -> None:
         """Actual update logic, expected to run on the event loop."""
         uid = task["uid"]
-        now = time.time()
 
-        # Update the task object in-place (Single Source of Truth update)
+        # Update the task object in-place (Single Source of Truth)
         task["state"] = state
 
-        # Telemetry: Record transition history
-        if "history" not in task:
-            task["history"] = {}
-        task["history"][state] = now
-
-        self._task_states[uid] = state
+        # Telemetry hook — O(1) None check, zero cost when not enabled
+        if self._telemetry_observer is not None:
+            self._telemetry_observer(task, state)
 
         # If terminal, notify waiters
         if state in self._terminal_states:
             if uid in self._task_futures:
-                fut = self._task_futures[uid]
+                fut = self._task_futures.pop(uid)
                 if not fut.done():
-                    fut.set_result(task)
+                    exc = task.get("exception")
+                    exit_code = task.get("exit_code")
+                    if isinstance(exc, BaseException):
+                        fut.set_exception(exc)
+                    elif exit_code is not None and exit_code != 0:
+                        fut.set_exception(
+                            TaskExecutionError(uid, task.get("stderr") or "", exit_code)
+                        )
+                    else:
+                        fut.set_result(task)
 
     def get_wait_future(self, uid: str, task: dict | BaseTask) -> asyncio.Future:
         """Get or create a future to wait for a specific task."""
@@ -85,9 +92,18 @@ class TaskStateManager:
             else:
                 self._task_futures[uid] = asyncio.Future()
 
-            # If already done before we started waiting, set result immediately
-            if self._task_states.get(uid) in self._terminal_states:
-                self._task_futures[uid].set_result(task)
+            # If already done before we started waiting, resolve immediately
+            if task.get("state") in self._terminal_states:
+                exc = task.get("exception")
+                exit_code = task.get("exit_code")
+                if isinstance(exc, BaseException):
+                    self._task_futures[uid].set_exception(exc)
+                elif exit_code is not None and exit_code != 0:
+                    self._task_futures[uid].set_exception(
+                        TaskExecutionError(uid, task.get("stderr") or "", exit_code)
+                    )
+                else:
+                    self._task_futures[uid].set_result(task)
 
         return self._task_futures[uid]
 
@@ -116,10 +132,12 @@ class Session:
             uid: Optional unique identifier for the session.
             work_dir: working directory (default: cwd).
         """
-        self.uid = uid or "session.0000"
+        self.uid = uid or f"rhapsody.session.{uuid.uuid4().hex[:8]}"
         self.work_dir = work_dir or os.getcwd()
         self._tasks: dict[str, BaseTask | dict] = {}
         self._state_manager = TaskStateManager()
+        self._telemetry: TelemetryManager | None = None
+        self._resource_poll_interval: float = 5.0
 
         # Register callbacks with all provided backends
         backends_list = backends or []
@@ -133,6 +151,11 @@ class Session:
         Args:
             backend: The execution or inference backend to add.
         """
+        backend._work_dir = os.path.join(self.work_dir, self.uid)
+        os.makedirs(backend._work_dir, exist_ok=True)
+        backend.is_attached = True
+        backend.attached_to.append(self.uid)
+
         self.backends[backend.name] = backend
 
         # Register state manager callback
@@ -146,6 +169,10 @@ class Session:
             self._state_manager._terminal_states.update(state_mapper.terminal_states)
 
         logger.debug(f"Registered backend '{backend.name}' with Session '{self.uid}'")
+
+        # Register a telemetry adapter if telemetry is already enabled
+        if self._telemetry is not None:
+            self._attach_telemetry_adapter(backend)
 
     async def submit_tasks(self, tasks: list[dict | BaseTask]) -> list[asyncio.Future]:
         """Submit tasks to execution backends and return futures.
@@ -165,10 +192,8 @@ class Session:
         if not self.backends:
             raise RuntimeError("No backends configured in Session")
 
-        # Map backends by name for fast lookup
-        tasks_by_backend = defaultdict(list)
-
         # Group tasks by their explicit backend target
+        tasks_by_backend: dict[str, list] = {}
         futures = []
         for task in tasks:
             uid = task["uid"]
@@ -180,11 +205,12 @@ class Session:
                 task.bind_future(fut)
             futures.append(fut)
 
-            # Mark submission time
-            if "history" not in task:
-                task["history"] = {}
-            if "submitted" not in task["history"]:
-                task["history"]["submitted"] = time.time()
+            # Stamp task_type for telemetry event classification
+            task["task_type"] = type(task).__name__
+
+            # TaskCreated: task is registered and future is bound; backend not yet assigned.
+            if self._telemetry is not None:
+                self._telemetry._on_task_created(task)
 
             # Routing decision
             target_name = task.get("backend")
@@ -193,6 +219,10 @@ class Session:
                 target_name = next(iter(self.backends))
                 task["backend"] = target_name  # Ensure it's recorded
 
+            # Emit TaskSubmitted AFTER routing so task["backend"] is always set.
+            if self._telemetry is not None:
+                self._telemetry._on_task_submitted(task)
+
             if target_name not in self.backends:
                 available = list(self.backends.keys())
                 raise ValueError(
@@ -200,18 +230,22 @@ class Session:
                     f"Available backends: {available}"
                 )
 
-            tasks_by_backend[target_name].append(task)
+            tasks_by_backend.setdefault(target_name, []).append(task)
 
         # Submit each group to its respective backend concurrently
         submission_tasks = []
         for name, backend_tasks in tasks_by_backend.items():
             backend = self.backends[name]
+            # Emit TaskQueued at the backend boundary (after routing, before execution)
+            if self._telemetry is not None:
+                for task in backend_tasks:
+                    self._telemetry._on_task_queued(task)
             submission_tasks.append(backend.submit_tasks(backend_tasks))
 
         if submission_tasks:
             await asyncio.gather(*submission_tasks)
 
-        logger.info(f"Successfully submitted {len(tasks)} tasks")
+        logger.debug(f"Successfully submitted {len(tasks)} tasks")
 
         return futures
 
@@ -240,9 +274,12 @@ class Session:
             uid = task["uid"]
             futures.append(self._state_manager.get_wait_future(uid, task))
 
-        # Wait for all futures
+        # Wait for all futures; return_exceptions=True prevents task failures from
+        # propagating — callers inspect task.state / task.exception directly.
         try:
-            await asyncio.wait_for(asyncio.gather(*futures), timeout=timeout)
+            await asyncio.wait_for(
+                asyncio.gather(*futures, return_exceptions=True), timeout=timeout
+            )
         except asyncio.TimeoutError:
             # Check how many finished
             finished = sum(
@@ -254,52 +291,74 @@ class Session:
 
         return tasks
 
-    def get_statistics(self) -> dict[str, Any]:
-        """Get session-wide delivery and performance statistics.
+    async def start_telemetry(
+        self,
+        resource_poll_interval: float = 5.0,
+        checkpoint_interval: float | None = None,
+        checkpoint_path: str | None = None,
+    ) -> TelemetryManager:
+        """Enable and start telemetry collection for this session in one call.
+
+        Creates a :class:`~rhapsody.telemetry.manager.TelemetryManager`, wires it
+        into the task state manager, registers backend-specific adapters, and starts
+        the async dispatch loop — all in a single ``await``.
+
+        Telemetry stops automatically when :meth:`close` is called. There is no need
+        to call ``stop()`` on the returned manager separately.
+
+        Must be called **before** ``await session.submit_tasks()``.
+
+        Args:
+            resource_poll_interval: Seconds between resource metric polls (default: 5.0).
+            checkpoint_interval:    Seconds between metric+span flushes to disk.
+                                    None = no periodic flush (file still written at stop).
+            checkpoint_path:        Directory for the JSONL checkpoint file.
+                                    None = no file output.
 
         Returns:
-            Dictionary containing task counts, success rates, and latencies.
+            The active :class:`~rhapsody.telemetry.manager.TelemetryManager`.
+            Use it for optional advanced operations: ``subscribe()``, ``summary()``,
+            ``task_spans()``, ``read_metrics()``, ``read_traces()``.
+            Or retrieve it later via :meth:`get_telemetry`.
         """
-        stats: dict[str, Any] = {
-            "counts": Counter(),
-            "latencies": {
-                "total": [],
-                "queue": [],
-                "execution": [],
-            },
-            "summary": {},
-        }
+        from rhapsody.telemetry.manager import TelemetryManager  # deferred import
 
-        for task in self._tasks.values():
-            state = task.get("state", "UNKNOWN")
-            stats["counts"][state] += 1
+        self._resource_poll_interval = resource_poll_interval
+        self._telemetry = TelemetryManager(
+            session_id=self.uid,
+            checkpoint_interval=checkpoint_interval,
+            checkpoint_path=checkpoint_path,
+        )
+        self._state_manager._telemetry_observer = self._telemetry._on_task_state_change
 
-            history = task.get("history", {})
-            submitted = history.get("submitted")
-            running = history.get("RUNNING")
-            done = history.get("DONE") or history.get("FAILED") or history.get("CANCELED")
+        for backend in self.backends.values():
+            self._telemetry.attach_backend(
+                backend,
+                session_id=self.uid,
+                backend_name=backend.name,
+                interval=resource_poll_interval,
+            )
 
-            if submitted and done:
-                stats["latencies"]["total"].append(done - submitted)
+        await self._telemetry.start()
+        return self._telemetry
 
-            if submitted and running:
-                stats["latencies"]["queue"].append(running - submitted)
+    def get_telemetry(self) -> TelemetryManager:
+        """Return the active TelemetryManager.
 
-            if running and done:
-                stats["latencies"]["execution"].append(done - running)
-
-        # Calculate averages for summary
-        for key, values in stats["latencies"].items():
-            if values:
-                stats["summary"][f"avg_{key}"] = sum(values) / len(values)
-            else:
-                stats["summary"][f"avg_{key}"] = 0.0
-
-        stats["summary"]["total_tasks"] = len(self._tasks)
-        return stats
+        Raises:
+            RuntimeError: If telemetry has not been started via :meth:`start_telemetry`.
+        """
+        if self._telemetry is None:
+            raise RuntimeError(
+                "Telemetry not started. Call `await session.start_telemetry()` first."
+            )
+        return self._telemetry
 
     async def close(self) -> None:
-        """Shutdown all backends."""
+        """Shutdown telemetry (if enabled) then all backends."""
+        if self._telemetry is not None:
+            await self._telemetry.stop()
+            self._telemetry = None
         for backend in self.backends.values():
             await backend.shutdown()
 

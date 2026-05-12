@@ -5,6 +5,7 @@ This module provides a backend that executes tasks on local or single node HPC r
 
 import asyncio
 import logging
+import os
 from concurrent.futures import Executor
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import ThreadPoolExecutor
@@ -126,14 +127,18 @@ class ConcurrentExecutionBackend(BaseBackend):
 
     @staticmethod
     def _run_in_process(func, args, kwargs):
-        """Execute async function in isolated executor process."""
+        """Execute function (sync or async) in isolated executor process."""
         func = cloudpickle.loads(func)
-        return asyncio.run(func(*args, **kwargs))
+        if asyncio.iscoroutinefunction(func):
+            return asyncio.run(func(*args, **kwargs))
+        return func(*args, **kwargs)
 
     @staticmethod
     def _run_in_thread(func, args, kwargs):
-        """Execute async function in isolated executor process."""
-        return asyncio.run(func(*args, **kwargs))
+        """Execute function (sync or async) in isolated executor thread."""
+        if asyncio.iscoroutinefunction(func):
+            return asyncio.run(func(*args, **kwargs))
+        return func(*args, **kwargs)
 
     async def _execute_function(self, task: dict) -> tuple[dict, str]:
         """Execute async function task in Process/Thread PoolExecutor."""
@@ -168,30 +173,73 @@ class ConcurrentExecutionBackend(BaseBackend):
         arguments = task.get("arguments", [])
         backend_kwargs = task.get("task_backend_specific_kwargs", {})
         execute_in_shell = backend_kwargs.get("shell", False)
+        cwd = backend_kwargs.get("cwd")
+        env = backend_kwargs.get("env")  # None inherits the parent process environment
 
-        if execute_in_shell:
-            # Shell mode: join executable and arguments into single command string
-            cmd = " ".join([executable] + arguments)
-            process = await asyncio.create_subprocess_shell(
-                cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+        redirect = task.get("capture_stdio")
+        stdout_f = stderr_f = process = None
+        stdout_val = stderr_val = None
+        exit_code = 1
+
+        if redirect:
+            uid = task["uid"]
+            stdout_path = os.path.join(self._work_dir, f"{uid}.stdout")
+            stderr_path = os.path.join(self._work_dir, f"{uid}.stderr")
         else:
-            # Exec mode: pass executable and arguments separately (no shell)
-            process = await asyncio.create_subprocess_exec(
-                executable,
-                *arguments,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        stdout, stderr = await process.communicate()
+            stdout_path = stderr_path = None
+
+        try:
+            if redirect:
+                stdout_f = open(stdout_path, "wb")
+                stderr_f = open(stderr_path, "wb")
+                stdout_arg = stdout_f
+                stderr_arg = stderr_f
+            else:
+                stdout_arg = asyncio.subprocess.PIPE
+                stderr_arg = asyncio.subprocess.PIPE
+
+            if execute_in_shell:
+                # Shell mode: join executable and arguments into single command string
+                cmd = " ".join([executable] + arguments)
+                process = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdout=stdout_arg,
+                    stderr=stderr_arg,
+                    cwd=cwd,
+                    env=env,
+                )
+            else:
+                # Exec mode: pass executable and arguments separately (no shell)
+                process = await asyncio.create_subprocess_exec(
+                    executable,
+                    *arguments,
+                    stdout=stdout_arg,
+                    stderr=stderr_arg,
+                    cwd=cwd,
+                    env=env,
+                )
+
+            if redirect:
+                await process.wait()
+                stdout_val = stdout_path
+                stderr_val = stderr_path
+            else:
+                raw_out, raw_err = await process.communicate()
+                stdout_val = raw_out.decode()
+                stderr_val = raw_err.decode()
+
+            exit_code = process.returncode
+        finally:
+            if stdout_f is not None:
+                stdout_f.close()
+            if stderr_f is not None:
+                stderr_f.close()
 
         task.update(
             {
-                "stdout": stdout.decode(),
-                "stderr": stderr.decode(),
-                "exit_code": process.returncode,
+                "stdout": stdout_val,
+                "stderr": stderr_val,
+                "exit_code": exit_code,
             }
         )
 
@@ -201,6 +249,7 @@ class ConcurrentExecutionBackend(BaseBackend):
     async def _handle_task(self, task: dict) -> None:
         """Handle task execution with callback."""
         try:
+            self._callback_func(task, "RUNNING")
             result_task, state = await self._execute_task(task)
             # Set state on the task object itself before callback
             self._callback_func(result_task, state)

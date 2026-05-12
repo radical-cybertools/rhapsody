@@ -101,6 +101,9 @@ markdown_extensions:
       alternate_style: true
   - pymdownx.tasklist:
       custom_checkbox: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
 
 nav:
   - Home:
@@ -109,10 +112,21 @@ nav:
       - Installation: getting-started/installation.md
       - Quick Start: getting-started/quick-start.md
       - Advanced Usage: getting-started/advanced-usage.md
+      - Resource Specification: getting-started/resource-specification.md
       - Configuration: getting-started/configuration.md
       - Integrations: integrations.md
       - Contributing: contributing.md
       - Issues (GitHub): https://github.com/radical-cybertools/rhapsody/issues
+  - Telemetry:
+      - Overview: telemetry/index.md
+      - Events & Metrics Reference: telemetry/reference.md
+      - Quick Start: telemetry/quickstart.md
+      - Integrations & Extensions: telemetry/integrations.md
+      - FAQ: telemetry/faq.md
+  - HPC Machines:
+      - Overview: hpc-machines/index.md
+      - NCSA Delta: hpc-machines/ncsa-delta.md
+      - NERSC Perlmutter: hpc-machines/perlmutter.md
   - Project:
       - project/index.md
       - Roadmap: project/roadmap.md

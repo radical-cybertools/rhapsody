@@ -143,9 +143,9 @@ async def test_function_task_submission():
 async def test_task_with_resources():
     """Test submitting tasks with resource requirements."""
     tasks = [
-        ComputeTask(executable="/bin/echo", arguments=["Task 1"], memory=1024, cpu_threads=2),
-        ComputeTask(executable="/bin/echo", arguments=["Task 2"], memory=2048, cpu_threads=4),
-        ComputeTask(executable="/bin/echo", arguments=["Task 3"], memory=512, cpu_threads=1),
+        ComputeTask(executable="/bin/echo", arguments=["Task 1"]),
+        ComputeTask(executable="/bin/echo", arguments=["Task 2"]),
+        ComputeTask(executable="/bin/echo", arguments=["Task 3"]),
     ]
 
     backend = await rhapsody.get_backend("concurrent")

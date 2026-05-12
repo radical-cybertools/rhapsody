@@ -13,6 +13,7 @@ extend-ignore-identifiers-re = [
 [default.extend-words]
 # Add specific words that should not be corrected
 # rhapsody = "rhapsody"
+# HPE = "HPE"
 
 [files]
 extend-exclude = [

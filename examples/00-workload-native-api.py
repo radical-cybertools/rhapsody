@@ -19,13 +19,13 @@ async def main():
     tasks = [
         ComputeTask(
             executable="/bin/bash",
+            capture_stdio=True,
             arguments=["-c", "echo Hello from task 1 on $HOSTNAME"],
-            shell=True,
         ),
         ComputeTask(
             executable="/bin/bash",
+            capture_stdio=True,
             arguments=["-c", "echo Hello from task 2 on $HOSTNAME"],
-            shell=True,
         ),
     ]
 

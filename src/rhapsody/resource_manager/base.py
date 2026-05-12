@@ -418,7 +418,7 @@ class ResourceManager:
         results = [fut.result() for fut in as_completed(futs)]
         node_ok = [node for node, ret, _, _ in results if ret == 0]
         retval  = [node for node in rm_info.node_list if node.name in node_ok]
-        
+
         # Log failed nodes
         for node, ret, stdout, stderr in results:
             if ret != 0:
@@ -426,7 +426,7 @@ class ResourceManager:
                     "node %s check failed (retval=%d): stdout=%s, stderr=%s",
                     node, ret, stdout.strip(), stderr.strip()
                 )
-        
+
 
         return retval
 
