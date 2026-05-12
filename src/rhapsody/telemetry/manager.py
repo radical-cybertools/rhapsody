@@ -528,6 +528,11 @@ class TelemetryManager:
                 return {"key": k, "value": {"intValue": str(v)}}
             if isinstance(v, float):
                 return {"key": k, "value": {"doubleValue": v}}
+            if isinstance(v, (list, tuple)):
+                return {
+                    "key": k,
+                    "value": {"arrayValue": {"values": [_typed_kv("", e)["value"] for e in v]}},
+                }
             return {"key": k, "value": {"stringValue": str(v)}}
 
         otlp_spans = []
@@ -568,15 +573,12 @@ class TelemetryManager:
                 ]
             otlp_spans.append(span_dict)
 
+        res_attrs = dict(self._tracer_provider.resource.attributes)
+        res_attrs.setdefault("session_id", self._session_id)
         payload = {
             "resourceSpans": [
                 {
-                    "resource": {
-                        "attributes": [
-                            _typed_kv("service.name", "rhapsody"),
-                            _typed_kv("session_id", self._session_id),
-                        ]
-                    },
+                    "resource": {"attributes": [_typed_kv(k, v) for k, v in res_attrs.items()]},
                     "scopeSpans": [
                         {
                             "scope": {"name": "rhapsody"},
@@ -1059,7 +1061,13 @@ class TelemetryManager:
             except Exception:
                 logger.debug("Failed to serialize event for checkpoint", exc_info=True)
         if lines:
-            self._checkpoint_file.write("\n".join(lines) + "\n")
+            try:
+                self._checkpoint_file.write("\n".join(lines) + "\n")
+            except OSError:
+                logger.warning(
+                    "Telemetry checkpoint write failed; events lost for this batch",
+                    exc_info=True,
+                )
 
     def _process_event(self, event: BaseEvent, trace_mod: Any, otel_context: Any) -> None:
         """Translate a RHAPSODY event into OTel instrument calls and span lifecycle."""
@@ -1206,6 +1214,11 @@ class TelemetryManager:
             span.set_status(trace_mod.StatusCode.ERROR)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
+
+        elif etype == "TaskQueued":
+            span = self._active_spans.get(event.task_id)
+            if span is not None and span.is_recording():
+                span.add_event("TaskQueued", attributes={"task_id": event.task_id})
 
         elif etype == "SessionStarted":
             pass  # session span created synchronously in start() for immediate availability
