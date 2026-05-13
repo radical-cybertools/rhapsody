@@ -4,6 +4,184 @@
 
 ### Added
 
+- **`SpanBuffer`** — new public, thread-safe span collector that replaces
+  `InMemorySpanExporter` as RHAPSODY's internal span store. Uses `list.extend()`
+  for O(1) appends (vs. the exporter's O(n²) `tuple +=` per flush). `shutdown()`
+  is a no-op so spans remain accessible after `tracer_provider.shutdown()`.
+  `get_finished_spans()`, `clear()`, and `force_flush()` match the
+  `InMemorySpanExporter` API.
+
+- **Provider-agnostic OTel injection** — `TelemetryManager.__init__()` and
+  `Session.start_telemetry()` accept three new optional parameters:
+  - `span_processors: list | None` — OTel `SpanProcessor` instances
+    (e.g. `BatchSpanProcessor(OTLPSpanExporter())`) added to RHAPSODY's private
+    `TracerProvider` alongside the internal `SpanBuffer`. Callers own exporter
+    construction; RHAPSODY never imports specific exporter classes.
+  - `metric_readers: list | None` — OTel `MetricReader` instances
+    (e.g. `PeriodicExportingMetricReader(OTLPMetricExporter())`) added to
+    RHAPSODY's private `MeterProvider` alongside `InMemoryMetricReader`.
+  - `resource: Resource | None` — optional OTel `Resource` override.
+    `None` (default) calls `Resource.create()` which reads `OTEL_SERVICE_NAME`
+    and `OTEL_RESOURCE_ATTRIBUTES` from the environment automatically.
+
+- **`TelemetryManager.annotate_current_span(event)`** — records a `BaseEvent`
+  as an OTel span event (with serialized attributes) on the currently active
+  span. No-op when no valid span is active or telemetry is stopped.
+
+- **`TelemetryManager.register_span_enricher(func)`** — registers a callback
+  invoked at `TaskCreated` time that returns extra `dict` attributes to stamp
+  onto the task's OTel span. Multiple enrichers are applied in registration
+  order. Used by orchestration layers (e.g. AsyncFlow) to inject workflow-level
+  grouping keys.
+
+- **`TelemetryManager.export_as_otlp(path=None)`** — serializes all finished
+  spans to a standards-compliant OTLP JSON payload (the POST `/v1/traces` wire
+  format: 32/16-char hex IDs, nanosecond timestamps as strings, typed KV
+  attributes). Returns the JSON string and optionally writes to `path`.
+
+- **`TelemetryManager._task_contexts`** — internal dict that captures the OTel
+  context (`context.get_current()`) at `TaskCreated` emit time and restores it
+  via `attach/detach` in `_process_event()`. This is the standard in-process OTel
+  propagation pattern across asyncio task boundaries.
+
+- **`TelemetryManager._session_ctx_token`** — stores the attach token for the
+  session span context, detached cleanly in `stop()`.
+
+### Performance
+
+- **Batch-drain dispatch loop** — replaced the per-event
+  `asyncio.wait_for(queue.get(), timeout=0.05)` pattern in `_dispatch_loop`
+  with a batch-drain approach that reduces asyncio event-loop interactions from
+  O(N) to O(N/500) under burst load.
+
+  Key changes:
+  - Fast path: drain up to 500 events per iteration with `queue.get_nowait()`
+    (plain `deque.popleft()` — zero asyncio scheduling overhead, no timer handle,
+    no `Task` allocation per event). Fall back to a blocking `await queue.get()`
+    only when the queue is empty.
+  - `asyncio.sleep(0)` yielded once per *full* batch, not once per event.
+    Partial batches block naturally on the next `await queue.get()`.
+  - `_flush_batch()` — new helper that processes OTel instruments, writes the
+    JSONL checkpoint, and dispatches to subscribers for an entire batch at once.
+    Subscriber dispatch is guarded by `if self._subscribers` to skip the inner
+    loop when no subscribers are registered.
+  - `_write_batch()` — new helper that serializes a batch of events and issues a
+    **single `file.write()` call** per batch. Uses
+    `dataclasses.fields() + getattr` instead of `dataclasses.asdict()`: avoids
+    the deep-recursive copy, and correctly captures `init=False` class-level
+    fields (e.g. `event_type`) that `vars()` / `__dict__` miss on frozen
+    dataclass subclasses.
+  - Checkpoint file opened with `buffering=131072` (128 KB block buffer) instead
+    of `buffering=1` (line-buffered). The previous setting issued one `write()`
+    syscall per event — up to 80 000 syscalls for a 40 K-task session.
+  - **Sentinel-based shutdown** — `stop()` sets `_running=False`, awaits
+    `queue.join()` with a 5 s timeout to guarantee full drain, then pushes
+    `_STOP_SENTINEL` to unblock the dispatch loop cleanly. `emit()` is now a
+    no-op after `stop()` to prevent late emissions racing with the sentinel.
+
+  Measured at 40 000 tasks (`DragonExecutionBackend`):
+
+  | | Telemetry overhead |
+  |---|---|
+  | Before (per-event `wait_for`) | +7 s (3.66× slower than no-telemetry) |
+  | After (batch-drain) | +2 s (1.73× slower than no-telemetry) |
+
+  **71% reduction in telemetry overhead** at 40 K tasks.
+
+### Fixed
+
+- **`TaskCreated` as task span head** — task spans were previously opened at
+  `TaskSubmitted`, leaving `TaskCreated` (the earliest lifecycle event) with
+  only a `trace_id` and no `span_id` in the JSONL. The span is now opened at
+  `TaskCreated` so all lifecycle events carry both `trace_id` and `span_id`,
+  making the JSONL 100% OTel-aligned from the first event.
+
+- **Same-batch span ordering hazard** — when `TaskCreated` and
+  `TaskCompleted` / `TaskFailed` land in the same 500-event batch,
+  `_process_event` closes the span before `_span_ids_for_event` can look it up
+  for intermediate events in the batch. Fixed by:
+  - `_completed_span_ctx` dict: stores the `SpanContext` snapshot when a span
+    is ended so intermediate events in the same batch can still retrieve it
+    via `.get()` (not `.pop()`).
+  - Terminal events (Completed/Failed/Canceled) `.pop()` the entry, ensuring
+    no unbounded growth.
+  - Same fix applied to the session span: `_completed_session_ctx` snapshot is
+    taken at `SessionEnded` so JSONL serialization for same-batch session events
+    still finds a valid context.
+
+- **`ResourceUpdate` JSONL correlation** — `ResourceUpdate` events now carry
+  the session span's `trace_id` and `span_id` (previously `(None, None)`),
+  making node and GPU metrics queryable within the session trace in Jaeger /
+  Tempo.
+
+- **`TaskSubmitted` / `TaskQueued` fallback** — if `TaskCreated` was never
+  seen (incomplete lifecycle, e.g. task registered before telemetry started),
+  `TaskSubmitted` opens the task span instead, preserving best-effort
+  correlation.
+
+- **External trace/span injection** — components outside RHAPSODY (e.g. an
+  orchestration layer or application code) can now emit events that carry an
+  explicit `trace_id` / `span_id` and have them written to the JSONL with the
+  correct OTel correlation IDs, enabling cross-component trace stitching.
+
+- **Memory leak in `ConcurrentExecutionBackend._run_executable`** — file
+  handles (`stdout_f`, `stderr_f`) opened for `capture_stdio=True` tasks were
+  not closed on exception paths (subprocess launch failure, timeout, etc.).
+  Refactored to initialize both handles and `exit_code` before the `try` block
+  and close them in `finally`, eliminating the leak.
+
+- **OTel span parent hierarchy** — task spans previously had no parent span and
+  scattered across multiple unrelated traces. Root cause: `_dispatch_loop` runs
+  in a separate asyncio `Task` and does not inherit the calling coroutine's OTel
+  context. Fix: capture `context.get_current()` at `TaskCreated` emit time,
+  store in `_task_contexts`, restore via `attach/detach` in `_process_event()`.
+  All task spans now correctly nest under the session root span in the trace
+  hierarchy.
+
+- **`span_scope()` session span fallback** — when called from a context with no
+  valid active span (e.g. inside a block body spawned before `start_telemetry()`),
+  `span_scope()` now explicitly uses `self._session_span` as the parent context
+  instead of creating a root span. Replaces custom `_null_context()` with stdlib
+  `nullcontext`.
+
+
+### Changed
+
+- **`TelemetryManager.export_as_otlp()`** — renamed from
+  `export_traces_otlp_json()` for consistency with the OTel ecosystem naming
+  convention.
+
+- **`TelemetryManager.start()` OTel provider setup** — always uses
+  `Resource.create({"service.name": "rhapsody", "session_id": ...})` as the
+  default resource (reads `OTEL_SERVICE_NAME` from env automatically as
+  fallback). Caller-supplied `span_processors` are added via
+  `tracer_provider.add_span_processor()` after the internal `SpanBuffer` processor.
+  Caller-supplied `metric_readers` are appended to the `MeterProvider` reader
+  list alongside the internal `InMemoryMetricReader`.
+
+### Docs
+
+- **`docs/telemetry/integrations.md`**:
+  - Fixed "Connecting an OTLP exporter" section: removed the broken
+    `set_tracer_provider()` pattern (RHAPSODY creates private providers and
+    ignores globals) and replaced with the correct `span_processors=` injection.
+    Added tip block showing env-var configuration for Honeycomb/Grafana Cloud.
+  - Fixed "Grafana + Prometheus Step 3": removed `set_meter_provider()` pattern;
+    replaced with `metric_readers=[PrometheusMetricReader()]`.
+  - Updated "What RHAPSODY produces" table: `InMemorySpanExporter` → `SpanBuffer`.
+
+- **`docs/telemetry/quickstart.md`**: added three missing rows to the
+  `start_telemetry` parameters table (`span_processors`, `metric_readers`,
+  `resource`).
+
+- **`docs/telemetry/reference.md`**: added "Span annotation and enrichment API"
+  section documenting `span_scope()`, `annotate_current_span()`,
+  `register_span_enricher()`, and `export_as_otlp()`.
+
+- **`docs/telemetry/index.md`**: updated "OpenTelemetry compatibility" paragraph
+  to accurately describe the private-provider model and direct users to the
+  `span_processors`/`metric_readers` injection API.
+
 - `ComputeTask`: new `capture_stdio: bool = False` parameter. When `True`, stdout and stderr from executable tasks are redirected directly to files (`{work_dir}/{session_uid}/{task_uid}.stdout` / `.stderr`) with zero in-memory buffering. `task.stdout` and `task.stderr` then hold file paths instead of decoded strings. Function tasks are unaffected regardless of the flag value.
 - `ConcurrentExecutionBackend`: honours `capture_stdio` by passing open file handles to `asyncio.create_subprocess_exec` / `asyncio.create_subprocess_shell`; the kernel writes directly, no Python-level buffering.
 - `DaskExecutionBackend`: honours `capture_stdio` in the module-level `_run_executable` function; file handles are passed to `subprocess.run` inside the worker process.

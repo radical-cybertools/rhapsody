@@ -12,35 +12,46 @@ RHAPSODY uses `opentelemetry-sdk` internally with **in-memory providers** (no ex
 
 | Signal | OTel type | Provider |
 |---|---|---|
-| Task / session traces | Spans (`ReadableSpan`) | `TracerProvider` → `InMemorySpanExporter` |
+| Task / session traces | Spans (`ReadableSpan`) | `TracerProvider` → `SpanBuffer` (in-memory) |
 | Counters, gauges, histograms | Metrics (`MetricsData`) | `MeterProvider` → `InMemoryMetricReader` |
 | Raw events | JSONL file lines | RHAPSODY checkpoint writer |
 
 ### Connecting an OTLP exporter (Jaeger, Tempo, Dynatrace…)
 
-Because RHAPSODY uses the standard OTel SDK, you can add any exporter **before** calling `start_telemetry()`:
+RHAPSODY creates its own private `TracerProvider` and `MeterProvider` at `start_telemetry()` time. To forward data to an external backend, pass your pre-built `SpanProcessor` and/or `MetricReader` instances — the standard OTel extension points. RHAPSODY wires them into its providers alongside the internal `SpanBuffer` / `InMemoryMetricReader`:
 
 ```python
-from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
-# Build a custom TracerProvider with an OTLP exporter
-provider = TracerProvider()
-provider.add_span_processor(
-    BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317"))
+telemetry = await session.start_telemetry(
+    checkpoint_path="./tel/",
+    span_processors=[BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317"))],
 )
-
-# Inject it before start_telemetry()
-from opentelemetry import trace
-trace.set_tracer_provider(provider)
-
-telemetry = await session.start_telemetry(checkpoint_path="./tel/")
 # … run session …
 await session.close()   # stops telemetry automatically
 ```
 
-All task spans will now appear in Jaeger / Grafana Tempo alongside the in-memory copy.
+All task spans now flow to both Jaeger / Grafana Tempo **and** the in-memory `SpanBuffer` (powering `read_traces()` / `task_spans()`). RHAPSODY never imports specific exporter classes — you own exporter construction and configuration entirely.
+
+!!! tip "Environment-based configuration"
+    OTel exporters read `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, and
+    `OTEL_SERVICE_NAME` from the environment automatically. Pair this with `Resource.create()`
+    via the `resource` parameter:
+
+    ```python
+    import os
+    os.environ["OTEL_SERVICE_NAME"] = "my-app"
+    os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "https://api.honeycomb.io"
+    os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = "x-honeycomb-team=YOUR_API_KEY"
+
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+    telemetry = await session.start_telemetry(
+        span_processors=[BatchSpanProcessor(OTLPSpanExporter())],
+    )
+    ```
 
 ---
 
@@ -82,21 +93,16 @@ pip install opentelemetry-exporter-prometheus
 ### Step 3 — wire RHAPSODY metrics to the exporter
 
 ```python
-from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.exporter.prometheus import PrometheusMetricReader
 from prometheus_client import start_http_server
 
 # Serve Prometheus metrics on port 9464
 start_http_server(port=9464)
-reader = PrometheusMetricReader()
-provider = MeterProvider(metric_readers=[reader])
-
-from opentelemetry import metrics
-metrics.set_meter_provider(provider)
 
 telemetry = await session.start_telemetry(
     resource_poll_interval=5.0,
     checkpoint_path="./tel/",
+    metric_readers=[PrometheusMetricReader()],
 )
 ```
 

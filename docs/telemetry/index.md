@@ -85,7 +85,7 @@ This means:
 
 ## OpenTelemetry compatibility
 
-All RHAPSODY telemetry data is produced through the **OpenTelemetry Python SDK**. The in-memory providers can be swapped for any OTLP-compatible exporter (Jaeger, Tempo, Prometheus, Dynatrace) by pointing the SDK at your collector — no RHAPSODY code changes required.
+All RHAPSODY telemetry data is produced through the **OpenTelemetry Python SDK**. RHAPSODY creates its own private `TracerProvider` and `MeterProvider` with in-memory storage. To forward data to any OTel-compatible backend (Jaeger, Tempo, Prometheus, Dynatrace, Honeycomb), pass pre-built `SpanProcessor` and/or `MetricReader` instances to `start_telemetry()` — no other RHAPSODY code changes required. See [Integrations & Extensions](integrations.md#connecting-an-otlp-exporter-jaeger-tempo-dynatrace) for examples.
 
 The JSONL checkpoint file is a portable, OTel-aligned export that can be replayed, plotted, or ingested into any time-series tool.
 
