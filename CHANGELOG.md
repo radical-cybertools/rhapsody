@@ -90,6 +90,8 @@
 
 ### Fixed
 
+- **Task callback contract (`stdout`/`stderr`)** — `task["stdout"]` and `task["stderr"]` are now guaranteed to be `str` (never absent, never `None`) after any DONE or FAILED callback across all backends. `DragonExecutionBackendV3`, `ConcurrentExecutionBackend`, and `DaskExecutionBackend` each had paths that left the key missing or set it to `None`, causing `KeyError: 'stdout'` in consumers using bracket notation. A new `pytest.mark.result_contract` marker groups seven cross-backend regression tests that enforce this invariant.
+
 - **`TaskCreated` as task span head** — task spans were previously opened at
   `TaskSubmitted`, leaving `TaskCreated` (the earliest lifecycle event) with
   only a `trace_id` and no `span_id` in the JSONL. The span is now opened at
