@@ -293,7 +293,7 @@ class DaskExecutionBackend(BaseBackend):
                 self._callback_func(task, "RUNNING")
                 result = await f
                 task["return_value"] = result
-                task["stdout"] = str(result)
+                task["stdout"] = ""
                 task["stderr"] = ""
                 self._callback_func(task, "DONE")
             except dask.client.FutureCancelledError:
@@ -318,6 +318,7 @@ class DaskExecutionBackend(BaseBackend):
             )
             task["stdout"] = ""
             task["stderr"] = str(task["exception"])
+            task["exit_code"] = 1
             self._callback_func(task, "FAILED")
             return
 

@@ -514,7 +514,8 @@ async def test_dask_function_done_stdout_is_string():
 
     done = [(t, s) for t, s in captured if s == "DONE"]
     assert done, "DONE callback never fired"
-    assert isinstance(done[0][0].get("stdout"), str)
+    assert done[0][0].get("stdout") == ""
+    assert done[0][0].get("stderr") == ""
 
 
 @pytest.mark.result_contract
