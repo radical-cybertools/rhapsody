@@ -3236,18 +3236,12 @@ class DragonExecutionBackendV3(BaseBackend):
             if raised:
                 task_desc["exception"] = result
                 task_desc["stderr"] = stderr_path if stderr_path else (tb if tb else str(result))
-                task_desc["stdout"] = (
-                    stdout_path if stdout_path else (stdout or task_desc.get("stdout"))
-                )
+                task_desc["stdout"] = stdout_path or stdout or ""
                 self._callback_func(task_desc, "FAILED")
             else:
                 task_desc["return_value"] = result
-                task_desc["stdout"] = (
-                    stdout_path if stdout_path else (stdout or task_desc.get("stdout"))
-                )
-                task_desc["stderr"] = (
-                    stderr_path if stderr_path else (stderr or task_desc.get("stderr"))
-                )
+                task_desc["stdout"] = stdout_path or stdout or ""
+                task_desc["stderr"] = stderr_path or stderr or ""
                 self._callback_func(task_desc, "DONE")
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
