@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-15
+
 ### Added
 
 - **`SpanBuffer`** — new public, thread-safe span collector that replaces
