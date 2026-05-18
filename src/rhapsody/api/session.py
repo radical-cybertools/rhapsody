@@ -296,6 +296,9 @@ class Session:
         resource_poll_interval: float = 5.0,
         checkpoint_interval: float | None = None,
         checkpoint_path: str | None = None,
+        span_processors: list | None = None,
+        metric_readers: list | None = None,
+        resource: object | None = None,
     ) -> TelemetryManager:
         """Enable and start telemetry collection for this session in one call.
 
@@ -314,6 +317,22 @@ class Session:
                                     None = no periodic flush (file still written at stop).
             checkpoint_path:        Directory for the JSONL checkpoint file.
                                     None = no file output.
+            span_processors:        Optional list of
+                                    ``opentelemetry.sdk.trace.SpanProcessor`` instances
+                                    (e.g. ``BatchSpanProcessor(OTLPSpanExporter())``)
+                                    added to RHAPSODY's TracerProvider alongside the
+                                    internal SpanBuffer. Callers own exporter construction
+                                    and configuration.
+            metric_readers:         Optional list of
+                                    ``opentelemetry.sdk.metrics.export.MetricReader``
+                                    instances (e.g.
+                                    ``PeriodicExportingMetricReader(OTLPMetricExporter())``)
+                                    added to RHAPSODY's MeterProvider alongside the
+                                    internal InMemoryMetricReader.
+            resource:               Optional ``opentelemetry.sdk.resources.Resource``.
+                                    When None (default), ``Resource.create()`` is called
+                                    automatically and reads ``OTEL_SERVICE_NAME`` /
+                                    ``OTEL_RESOURCE_ATTRIBUTES`` from the environment.
 
         Returns:
             The active :class:`~rhapsody.telemetry.manager.TelemetryManager`.
@@ -328,6 +347,9 @@ class Session:
             session_id=self.uid,
             checkpoint_interval=checkpoint_interval,
             checkpoint_path=checkpoint_path,
+            span_processors=span_processors,
+            metric_readers=metric_readers,
+            resource=resource,
         )
         self._state_manager._telemetry_observer = self._telemetry._on_task_state_change
 

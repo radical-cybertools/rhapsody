@@ -117,7 +117,7 @@ class ConcurrentExecutionBackend(BaseBackend):
             task.update(
                 {
                     "stderr": str(e),
-                    "stdout": None,
+                    "stdout": "",
                     "exit_code": 1,
                     "exception": e,
                     "return_value": None,

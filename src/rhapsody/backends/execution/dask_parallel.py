@@ -275,6 +275,8 @@ class DaskExecutionBackend(BaseBackend):
                     raise ValueError("Task must specify either 'function' or 'executable'")
             except Exception as e:
                 task["exception"] = e
+                task["stdout"] = ""
+                task["stderr"] = str(e)
                 self._callback_func(task, "FAILED")
 
     async def _submit_to_dask(self, task: dict[str, Any], fn: Callable, *args) -> None:
@@ -295,11 +297,15 @@ class DaskExecutionBackend(BaseBackend):
                 self._callback_func(task, "RUNNING")
                 result = await f
                 task["return_value"] = result
+                task["stdout"] = ""
+                task["stderr"] = ""
                 self._callback_func(task, "DONE")
             except dask.client.FutureCancelledError:
                 self._callback_func(task, "CANCELED")
             except Exception as e:
                 task["exception"] = e
+                task["stdout"] = ""
+                task["stderr"] = str(e)
                 self._callback_func(task, "FAILED")
             finally:
                 # Clean up the future reference once task is complete
@@ -314,6 +320,9 @@ class DaskExecutionBackend(BaseBackend):
                 f"Workers must be started with matching --resources flags "
                 f'(e.g. dask worker <scheduler> --resources "GPU=1").'
             )
+            task["stdout"] = ""
+            task["stderr"] = str(task["exception"])
+            task["exit_code"] = 1
             self._callback_func(task, "FAILED")
             return
 
@@ -371,6 +380,7 @@ class DaskExecutionBackend(BaseBackend):
                 f'(e.g. dask worker <scheduler> --resources "GPU=1").'
             )
             task["stderr"] = msg
+            task["stdout"] = ""
             task["exit_code"] = 1
             self._callback_func(task, "FAILED")
             return
@@ -403,6 +413,8 @@ class DaskExecutionBackend(BaseBackend):
                 self._callback_func(task, "CANCELED")
             except Exception as e:
                 task["exception"] = e
+                task["stdout"] = ""
+                task["stderr"] = str(e)
                 self._callback_func(task, "FAILED")
             finally:
                 if task_uid in self.tasks:
