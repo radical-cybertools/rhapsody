@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rhapsody-py"
-version = "0.3.0"
+version = "0.3.1"
 description = "Runtime system for executing heterogeneous HPC-AI workflows with dynamic task graphs on high-performance computing infrastructures."
 license = { text = "MIT" }
 authors = [
@@ -48,7 +48,7 @@ telemetry = ["opentelemetry-sdk>=1.20.0", "nvidia-ml-py"]
 # Backend-specific dependencies
 dask = ["dask[distributed]>=2023.0.0"]
 radical_pilot = ["radical.pilot>=1.30.0"]
-dragon = ["dragonhpc"]  # Requires Python >= 3.10
+dragon = ["dragonhpc==0.13.2"]  # Requires Python >= 3.10
 vllm-dragon = [
     "aiohttp>=3.8.0",
     "pyyaml>=6.0",

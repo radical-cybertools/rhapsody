@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-19
+
+### Fixed
+
+- Pinned `dragonhpc==0.13.2` in the `dragon` optional dependency. Dragon 0.14.0
+  changed DDict write routing in `Batch` such that `DragonExecutionBackendV3`'s
+  monitor loop blocks indefinitely on every task result. Users on Dragon 0.14.0
+  should upgrade to the forthcoming release that includes the full migration fix.
+
 ## [0.3.0] - 2026-05-15
 
 ### Added
