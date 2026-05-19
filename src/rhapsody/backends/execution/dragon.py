@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import shlex
 import sys
 import threading
 import time
@@ -3346,32 +3345,39 @@ class DragonExecutionBackendV3(BaseBackend):
             def target(*a, **kw):
                 return asyncio.run(original_target(*a, **kw))
 
+        capture_stdio = bool(task.get("capture_stdio")) and not is_function
+
         # Get template configs once
         process_templates_config = backend_kwargs.get("process_templates")
         process_template_config = backend_kwargs.get("process_template")
 
-        # Dragon's batch PIPE hangs when stderr is captured for subprocess tasks.
-        # Fix: write a shell script that redirects its own stdout/stderr to files,
-        # then invoke it as `bash script.sh`.  Dragon's forced stdout PIPE sees an
-        # empty stream → immediate EOF → no hang.  Files are written by the script.
-        redirect = task.get("capture_stdio") and not is_function
-        stdout_path = stderr_path = script_path = None
-        if redirect:
-            stdout_path = os.path.join(self._work_dir, f"{uid}.stdout")
-            stderr_path = os.path.join(self._work_dir, f"{uid}.stderr")
-            script_path = os.path.join(self._work_dir, f"{uid}.sh")
-            cmd_line = " ".join(
-                [shlex.quote(str(target))] + [shlex.quote(str(a)) for a in task_args]
-            )
-            with open(script_path, "w") as _f:
-                _f.write(
-                    f"#!/usr/bin/bash\n"
-                    f"{cmd_line}"
-                    f" 1>{shlex.quote(stdout_path)}"
-                    f" 2>{shlex.quote(stderr_path)}\n"
-                )
-            target = "/bin/bash"
-            task_args = (script_path,)
+        _format_process_template_kwargs = lambda template_cfg: {**template_cfg, "args": task_args, "kwargs": task_kwargs}
+        def _process_capture_stdio(template_kwargs: dict[str, Any], capture_stdio: bool) -> dict[str, Any]:
+            """
+            Define default arguments for stdout and stderr capture
+
+            By default, bind the process STDOUT and STDERR to the streams on the
+            main RHAPSODY process
+            """
+            if capture_stdio:
+                template_kwargs.setdefault("stdout", Popen.PIPE)
+                template_kwargs.setdefault("stderr", Popen.PIPE)
+            return template_kwargs
+
+        def _build_process_template_kwargs(template_cfg: dict[str, Any], capture_stdio: bool) -> dict[str, Any]:
+            """
+            Build the kwargs for the process template
+
+            1) reformats the user-defined args and kwargs for the task template
+            2) defines the STDOUT/STDERR streams if RHAPSODY should capture output
+            """
+            template_kwargs = _format_process_template_kwargs(template_cfg)
+            template_kwargs = _process_capture_stdio(template_kwargs, capture_stdio)
+            return template_kwargs
+
+        # stdout_path = None # @AymenFJA, Confirm that these can be removed?
+        # stderr_path = None # @AymenFJA, Confirm that these can be removed?
+        # script_path = None # @AymenFJA, Confirm that these can be removed?
 
         # Single decision tree - no redundant checks
         if process_templates_config is not None:
@@ -3379,7 +3385,7 @@ class DragonExecutionBackendV3(BaseBackend):
             process_templates = [
                 (
                     nranks,
-                    ProcessTemplate(target, **{**tc, "args": task_args, "kwargs": task_kwargs}),
+                    ProcessTemplate(target, **_build_process_template_kwargs(tc, capture_stdio)),
                 )
                 for nranks, tc in process_templates_config
             ]
@@ -3390,7 +3396,7 @@ class DragonExecutionBackendV3(BaseBackend):
             # Priority 2: Process with user template
             batch_task = self.batch.process(
                 ProcessTemplate(
-                    target, **{**process_template_config, "args": task_args, "kwargs": task_kwargs}
+                    target, **_build_process_template_kwargs(process_template_config, capture_stdio)
                 ),
                 name=name,
                 timeout=timeout,
@@ -3399,11 +3405,15 @@ class DragonExecutionBackendV3(BaseBackend):
 
         elif backend_kwargs.get("type") == "mpi":
             # Priority 3: Job auto-build
+            auto_template_kwargs = _build_process_template_kwargs(
+                {"args": task_args, "kwargs": task_kwargs},
+                capture_stdio
+            )
             batch_task = self.batch.job(
                 [
                     (
                         backend_kwargs.get("ranks", 1),
-                        ProcessTemplate(target, args=task_args, kwargs=task_kwargs),
+                        ProcessTemplate(target, **auto_template_kwargs),
                     )
                 ],
                 name=name,
@@ -3420,8 +3430,12 @@ class DragonExecutionBackendV3(BaseBackend):
 
         else:
             # Priority 5: Executable process auto-build
+            auto_template_kwargs = _build_process_template_kwargs(
+                {"args": task_args, "kwargs": task_kwargs},
+                capture_stdio
+            )
             batch_task = self.batch.process(
-                ProcessTemplate(target, args=task_args, kwargs=task_kwargs),
+                ProcessTemplate(target, **auto_template_kwargs),
                 name=name,
                 timeout=timeout,
             )
@@ -3432,9 +3446,9 @@ class DragonExecutionBackendV3(BaseBackend):
             "uid": uid,
             "description": task,
             "batch_task": batch_task,
-            "stdout_path": stdout_path,
-            "stderr_path": stderr_path,
-            "script_path": script_path,
+#            "stdout_path": stdout_path, # @AymenFJA: Confirm that these can be removed?
+#            "stderr_path": stderr_path, # @AymenFJA: Confirm that these can be removed?
+#            "script_path": script_path, # @AymenFJA: Confirm that these can be removed?
         }
 
         self.logger.debug(f"Created {execution_mode} task: {uid}")
