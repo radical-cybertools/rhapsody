@@ -2794,6 +2794,18 @@ class DragonExecutionBackendV2(BaseBackend):
                 start_time=time.time(),
             )
 
+            # Stamp placement so the telemetry layer can forward it on TaskStarted.
+            # Future placement-API work will likely replace this with a structured
+            # field on the task object; the consumer side already reads from a dict.
+            gpu_ids: list[int] = []
+            for rank_gpus in gpu_allocations.values():
+                gpu_ids.extend(rank_gpus)
+            task["placement"] = {
+                "node_id": worker_name,
+                "cores": ranks,
+                "gpu_ids": sorted(set(gpu_ids)),
+            }
+
             self._callback_func(task, "RUNNING")
 
         except Exception:
@@ -3144,6 +3156,38 @@ class DragonExecutionBackendV3(BaseBackend):
             f"DragonExecutionBackendV3: {self.batch.num_workers} workers, "
             f"{self.batch.num_managers} managers"
         )
+
+    def topology(self) -> list[dict[str, Any]]:
+        """Best-effort topology for Dragon V3.
+
+        Dragon's Batch API does not surface per-task placement, so this is
+        derived from the constructor's ``num_nodes`` plus a probe of the
+        first worker. When the real placement API lands, this should switch
+        to the explicit resource-manager data source.
+        """
+        num_nodes = getattr(self.batch, "num_nodes", None) or 1
+        # Per-node defaults — Dragon doesn't expose this directly via Batch.
+        # Use psutil locally; multi-node will report the same shape per node
+        # which is the best we can do without an RM topology call.
+        cores = 0
+        gpus = 0
+        try:
+            import psutil  # type: ignore[import-not-found]
+
+            cores = psutil.cpu_count(logical=True) or 0
+        except Exception:
+            pass
+        try:
+            import pynvml  # type: ignore[import-not-found]
+
+            pynvml.nvmlInit()
+            gpus = int(pynvml.nvmlDeviceGetCount())
+        except Exception:
+            pass
+        return [
+            {"id": f"node-{i:04d}", "cores": cores, "gpus": gpus}
+            for i in range(int(num_nodes))
+        ]
 
     def __await__(self):
         return self._async_init().__await__()

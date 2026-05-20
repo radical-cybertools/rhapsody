@@ -865,6 +865,92 @@ class TestExportAsOtlp:
         assert [v["stringValue"] for v in values] == ["alpha", "beta", "gamma"]
 
 
+class TestResourceLayout:
+    async def test_resource_layout_event_round_trips(self, manager):
+        """ResourceLayout emitted via the public API survives the dispatch loop."""
+        from rhapsody.telemetry.events import ResourceLayout
+
+        received = []
+        manager.subscribe(received.append)
+        manager.emit(
+            make_event(
+                ResourceLayout,
+                session_id="test-session",
+                backend="concurrent",
+                attributes={
+                    "nodes": [
+                        {"id": "n0", "cores": 64, "gpus": 4},
+                        {"id": "n1", "cores": 64, "gpus": 4},
+                    ]
+                },
+            )
+        )
+        await asyncio.sleep(0.1)
+
+        layouts = [e for e in received if e.event_type == "ResourceLayout"]
+        assert len(layouts) == 1
+        assert layouts[0].attributes["nodes"][0]["cores"] == 64
+        assert layouts[0].attributes["nodes"][1]["gpus"] == 4
+
+    async def test_resource_layout_written_to_checkpoint(self):
+        """ResourceLayout shows up in the JSONL checkpoint as a normal event."""
+        from rhapsody.telemetry.events import ResourceLayout
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = TelemetryManager(session_id="rl-cp", checkpoint_path=tmpdir)
+            await m.start()
+            m.emit(
+                make_event(
+                    ResourceLayout,
+                    session_id="rl-cp",
+                    backend="concurrent",
+                    attributes={"nodes": [{"id": "host-a", "cores": 8, "gpus": 0}]},
+                )
+            )
+            await asyncio.sleep(0.1)
+            await m.stop()
+
+            filepath = os.path.join(tmpdir, os.listdir(tmpdir)[0])
+            rows = [json.loads(l) for l in open(filepath)]
+            layouts = [r for r in rows if r.get("event_type") == "ResourceLayout"]
+            assert len(layouts) == 1
+            assert layouts[0]["attributes"]["nodes"][0]["id"] == "host-a"
+
+
+class TestTaskPlacementPropagation:
+    async def test_placement_in_task_dict_forwarded_to_started_event(self, manager):
+        """task['placement'] (set by a backend) must surface on TaskStarted.attributes."""
+        received = []
+        manager.subscribe(received.append)
+        task = {
+            "uid": "t-place",
+            "backend": "dragon",
+            "task_type": "ComputeTask",
+            "placement": {"node_id": "worker-3", "cores": 4, "gpu_ids": [0, 1]},
+        }
+        manager._on_task_state_change(task, "RUNNING")
+        await asyncio.sleep(0.1)
+
+        started = [e for e in received if e.event_type == "TaskStarted"]
+        assert len(started) == 1
+        assert started[0].node_id == "worker-3"
+        placement = started[0].attributes.get("placement")
+        assert placement == {"node_id": "worker-3", "cores": 4, "gpu_ids": [0, 1]}
+
+    async def test_missing_placement_does_not_break(self, manager):
+        """Backends that don't populate placement still produce a valid TaskStarted."""
+        received = []
+        manager.subscribe(received.append)
+        task = {"uid": "t-no-place", "backend": "dragon", "task_type": "ComputeTask"}
+        manager._on_task_state_change(task, "RUNNING")
+        await asyncio.sleep(0.1)
+
+        started = [e for e in received if e.event_type == "TaskStarted"]
+        assert len(started) == 1
+        assert started[0].node_id is None
+        assert "placement" not in started[0].attributes
+
+
 class TestTaskQueuedSpanEvent:
     async def test_task_queued_adds_span_event(self, manager):
         manager.emit(

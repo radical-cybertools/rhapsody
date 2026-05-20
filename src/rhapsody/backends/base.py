@@ -164,3 +164,22 @@ class BaseBackend(ABC):
             NotImplementedError: If the backend doesn't support cancellation
         """
         raise NotImplementedError("Not implemented in the base backend")
+
+    def topology(self) -> list[dict[str, Any]]:
+        """Best-effort description of the resources this backend has access to.
+
+        Consumed by the telemetry layer to emit a one-shot ResourceLayout event
+        at session start, so external viewers can size their node-grid to the
+        actual cluster shape instead of hardcoding it.
+
+        Returns:
+            A list of node descriptors. Each entry is a dict with keys:
+              - ``id``    (str): node identifier
+              - ``cores`` (int): CPU cores on this node
+              - ``gpus``  (int): GPUs on this node
+
+        Default implementation returns an empty list. Backends that know their
+        layout should override; the telemetry layer treats ``[]`` as "topology
+        unknown" and the viewer falls back to a generic default.
+        """
+        return []

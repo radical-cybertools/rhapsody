@@ -106,6 +106,27 @@ class ConcurrentExecutionBackend(BaseBackend):
     def get_task_states_map(self):
         return StateMapper(backend=self)
 
+    def topology(self):
+        """Single-node best-effort: probe local CPU/GPU counts."""
+        import socket
+
+        cores = 0
+        gpus = 0
+        try:
+            import psutil  # type: ignore[import-not-found]
+
+            cores = psutil.cpu_count(logical=True) or 0
+        except Exception:
+            pass
+        try:
+            import pynvml  # type: ignore[import-not-found]
+
+            pynvml.nvmlInit()
+            gpus = int(pynvml.nvmlDeviceGetCount())
+        except Exception:
+            pass
+        return [{"id": socket.gethostname(), "cores": cores, "gpus": gpus}]
+
     async def _execute_task(self, task: dict) -> tuple[dict, str]:
         """Execute a single task."""
         try:

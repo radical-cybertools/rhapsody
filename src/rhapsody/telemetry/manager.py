@@ -765,6 +765,15 @@ class TelemetryManager:
             # Record the wall-clock time we first see RUNNING so we can compute
             # duration in DONE/FAILED.
             self._task_start_times[task_id] = now_wall
+            attrs: dict = {"executable": executable, "task_type": task_type}
+            # Optional placement info — populated by backends that know it.
+            # Schema: {node_id: str, cores: int, gpu_ids: list[int]}.
+            # When future placement APIs land they should write the same key.
+            placement = task.get("placement") if isinstance(task, dict) else None
+            node_id_for_event = None
+            if isinstance(placement, dict):
+                attrs["placement"] = placement
+                node_id_for_event = placement.get("node_id")
             self.emit(
                 make_event(
                     TaskStarted,
@@ -772,10 +781,8 @@ class TelemetryManager:
                     backend=backend,
                     task_id=task_id,
                     event_time=now_wall,
-                    attributes={
-                        "executable": executable,
-                        "task_type": task_type,
-                    },
+                    node_id=node_id_for_event,
+                    attributes=attrs,
                 )
             )
 

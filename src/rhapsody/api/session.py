@@ -362,6 +362,28 @@ class Session:
             )
 
         await self._telemetry.start()
+
+        # Emit one ResourceLayout per backend so viewers can size their grid
+        # to the actual topology. Backends that don't report a layout return
+        # [] and the event still goes out — viewers fall back to a default.
+        from rhapsody.telemetry.events import ResourceLayout
+        from rhapsody.telemetry.events import make_event
+
+        for backend in self.backends.values():
+            try:
+                nodes = backend.topology()
+            except Exception:
+                logger.debug("backend.topology() failed for %s", backend.name, exc_info=True)
+                nodes = []
+            self._telemetry.emit(
+                make_event(
+                    ResourceLayout,
+                    session_id=self.uid,
+                    backend=backend.name,
+                    attributes={"nodes": nodes},
+                )
+            )
+
         return self._telemetry
 
     def get_telemetry(self) -> TelemetryManager:
