@@ -3351,8 +3351,18 @@ class DragonExecutionBackendV3(BaseBackend):
         process_templates_config = backend_kwargs.get("process_templates")
         process_template_config = backend_kwargs.get("process_template")
 
-        _format_process_template_kwargs = lambda template_cfg: {**template_cfg, "args": task_args, "kwargs": task_kwargs}
-        def _process_capture_stdio(template_kwargs: dict[str, Any], capture_stdio: bool) -> dict[str, Any]:
+        def _format_process_template_kwargs(
+                template_cfg: dict[str, Any]
+            ) -> dict[str, Any]:
+            """
+            Repack task configuration into one dictionary
+            """
+            return {**template_cfg, "args": task_args, "kwargs": task_kwargs}
+
+        def _process_capture_stdio(
+                template_kwargs: dict[str, Any],
+                capture_stdio: bool
+            ) -> dict[str, Any]:
             """
             Define default arguments for stdout and stderr capture
 
@@ -3364,7 +3374,10 @@ class DragonExecutionBackendV3(BaseBackend):
                 template_kwargs.setdefault("stderr", Popen.PIPE)
             return template_kwargs
 
-        def _build_process_template_kwargs(template_cfg: dict[str, Any], capture_stdio: bool) -> dict[str, Any]:
+        def _build_process_template_kwargs(
+                template_cfg: dict[str, Any],
+                capture_stdio: bool
+            ) -> dict[str, Any]:
             """
             Build the kwargs for the process template
 
@@ -3385,7 +3398,9 @@ class DragonExecutionBackendV3(BaseBackend):
             process_templates = [
                 (
                     nranks,
-                    ProcessTemplate(target, **_build_process_template_kwargs(tc, capture_stdio)),
+                    ProcessTemplate(
+                        target,
+                        **_build_process_template_kwargs(tc, capture_stdio)),
                 )
                 for nranks, tc in process_templates_config
             ]
@@ -3396,7 +3411,10 @@ class DragonExecutionBackendV3(BaseBackend):
             # Priority 2: Process with user template
             batch_task = self.batch.process(
                 ProcessTemplate(
-                    target, **_build_process_template_kwargs(process_template_config, capture_stdio)
+                    target,
+                    **_build_process_template_kwargs(
+                        process_template_config, capture_stdio
+                    )
                 ),
                 name=name,
                 timeout=timeout,
