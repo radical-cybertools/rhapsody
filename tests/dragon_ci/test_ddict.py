@@ -9,9 +9,7 @@ from __future__ import annotations
 import inspect
 
 import pytest
-
 from dragon.data.ddict.ddict import DDict
-
 
 _DDICT_KWARGS = (
     "managers_per_node", "n_nodes", "total_mem",

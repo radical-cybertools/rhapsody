@@ -9,14 +9,12 @@ from __future__ import annotations
 import inspect
 
 import pytest
-
-from dragon.infrastructure.gpu_desc import AccVendor, find_accelerators
-from dragon.telemetry.collector import (
-    get_amd_metrics,
-    get_intel_metrics,
-    get_nvidia_metrics,
-    identify_gpu,
-)
+from dragon.infrastructure.gpu_desc import AccVendor
+from dragon.infrastructure.gpu_desc import find_accelerators
+from dragon.telemetry.collector import get_amd_metrics
+from dragon.telemetry.collector import get_intel_metrics
+from dragon.telemetry.collector import get_nvidia_metrics
+from dragon.telemetry.collector import identify_gpu
 
 # All tests here need dragon.telemetry.collector — auto-skip if unavailable.
 pytestmark = pytest.mark.requires_telemetry_collector

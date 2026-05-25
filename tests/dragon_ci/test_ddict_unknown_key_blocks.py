@@ -20,7 +20,6 @@ invocation.
 """
 
 import pytest
-
 from dragon.data.ddict.ddict import DDict
 
 

@@ -11,13 +11,11 @@ import inspect
 import time
 
 import pytest
-
+from _dragon_ci_helpers import pg_worker  # noqa: E402
 from dragon.native.event import Event
 from dragon.native.process import ProcessTemplate
 from dragon.native.process_group import ProcessGroup
 from dragon.native.queue import Queue
-
-from _dragon_ci_helpers import pg_worker  # noqa: E402
 
 
 def test_queue_ctor_accepts_maxsize():

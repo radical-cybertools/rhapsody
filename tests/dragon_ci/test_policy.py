@@ -9,9 +9,7 @@ from __future__ import annotations
 import inspect
 
 import pytest
-
 from dragon.infrastructure.policy import Policy
-
 
 _POLICY_KWARGS = (
     "placement", "host_name", "host_id", "distribution",

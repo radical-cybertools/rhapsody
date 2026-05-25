@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import asyncio
 
+from _dragon_ci_helpers import async_double  # noqa: E402
+from _dragon_ci_helpers import async_run_shim  # noqa: E402
 from dragon.workflows.batch import Batch
-
-from _dragon_ci_helpers import async_double, async_run_shim  # noqa: E402
 
 
 def test_iscoroutinefunction_detects_async_def():

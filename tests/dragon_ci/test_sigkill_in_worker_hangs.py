@@ -16,10 +16,8 @@ resources that break any subsequent test in the same pytest invocation.
 """
 
 import pytest
-
-from dragon.workflows.batch import Batch
-
 from _dragon_ci_helpers import fn_kill_self  # noqa: E402
+from dragon.workflows.batch import Batch
 
 
 @pytest.mark.timeout(5, method="thread")

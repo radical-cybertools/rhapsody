@@ -7,7 +7,6 @@ one ``Policy`` per node, then pins one worker per Policy.
 from __future__ import annotations
 
 import pytest
-
 from dragon.infrastructure.policy import Policy
 from dragon.native.machine import System
 

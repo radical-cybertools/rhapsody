@@ -11,9 +11,7 @@ from __future__ import annotations
 import inspect
 
 import pytest
-
 from dragon.workflows.batch import Batch
-
 
 _BATCH_CTOR_KWARGS = ("num_nodes", "pool_nodes", "disable_telem",
                       "scheduler_workers", "results_ddict_mem")

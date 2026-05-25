@@ -11,7 +11,6 @@ from __future__ import annotations
 import inspect
 
 import pytest
-
 from dragon.infrastructure.facts import PMIBackend
 from dragon.native.process import ProcessTemplate
 from dragon.workflows.batch import Batch

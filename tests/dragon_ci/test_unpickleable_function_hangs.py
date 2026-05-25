@@ -21,7 +21,6 @@ import os
 import sys
 
 import pytest
-
 from dragon.workflows.batch import Batch
 
 

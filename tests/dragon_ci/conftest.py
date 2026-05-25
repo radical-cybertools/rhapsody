@@ -32,7 +32,6 @@ import sys
 import pytest
 import pytest_asyncio
 
-
 # --- Make _dragon_ci_helpers importable from workers ----------------------
 
 _HERE = os.path.dirname(os.path.abspath(__file__))

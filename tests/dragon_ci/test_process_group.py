@@ -15,13 +15,12 @@ from __future__ import annotations
 import inspect
 
 import pytest
-
+from _dragon_ci_helpers import pg_worker  # noqa: E402
 from dragon.native.event import Event
 from dragon.native.process import ProcessTemplate
-from dragon.native.process_group import DragonUserCodeError, ProcessGroup
+from dragon.native.process_group import DragonUserCodeError
+from dragon.native.process_group import ProcessGroup
 from dragon.native.queue import Queue
-
-from _dragon_ci_helpers import pg_worker  # noqa: E402
 
 
 @pytest.mark.parametrize("kwarg", ["restart", "pmi", "policy"])

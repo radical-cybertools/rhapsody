@@ -17,10 +17,9 @@ import inspect
 
 import cloudpickle
 import pytest
-
 from dragon.infrastructure.policy import Policy
-from dragon.native.process import Popen, ProcessTemplate
-
+from dragon.native.process import Popen
+from dragon.native.process import ProcessTemplate
 
 _TEMPLATE_KWARGS = (
     "target", "args", "kwargs", "cwd", "env", "stdin", "stdout", "stderr", "policy",

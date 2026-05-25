@@ -11,7 +11,6 @@ import signal
 import sys
 import time
 
-
 # --- Batch.function targets ----------------------------------------------
 
 

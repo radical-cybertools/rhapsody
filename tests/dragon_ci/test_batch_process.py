@@ -14,7 +14,6 @@ redirects to files (see the V3 ``capture_stdio`` code path).
 from __future__ import annotations
 
 import pytest
-
 from dragon.native.process import ProcessTemplate
 from dragon.workflows.batch import Batch
 

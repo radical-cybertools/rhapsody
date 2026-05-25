@@ -21,10 +21,9 @@ subsequent tests in the same pytest invocation:
 from __future__ import annotations
 
 import pytest
-
+from _dragon_ci_helpers import fn_assert_false  # noqa: E402
+from _dragon_ci_helpers import fn_sys_exit_one  # noqa: E402
 from dragon.workflows.batch import Batch
-
-from _dragon_ci_helpers import fn_assert_false, fn_sys_exit_one  # noqa: E402
 
 
 def test_caught_exception_is_reraised_and_tuple_recorded(batch: Batch):

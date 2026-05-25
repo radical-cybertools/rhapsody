@@ -15,13 +15,14 @@ for why callables passed to Batch tasks cannot be defined in this file.
 from __future__ import annotations
 
 import pytest
-
+from _dragon_ci_helpers import add  # noqa: E402  (must be importable from workers)
+from _dragon_ci_helpers import kwfn  # noqa: E402  (must be importable from workers)
+from _dragon_ci_helpers import print_and_return  # noqa: E402  (must be importable from workers)
+from _dragon_ci_helpers import raise_value_error  # noqa: E402  (must be importable from workers)
+from _dragon_ci_helpers import slow_double  # noqa: E402  (must be importable from workers)
 from dragon.workflows.batch import Batch
-from dragon.workflows.batch.batch import Function, TaskNotReadyError
-
-from _dragon_ci_helpers import (  # noqa: E402  (must be importable from workers)
-    add, kwfn, print_and_return, raise_value_error, slow_double,
-)
+from dragon.workflows.batch.batch import Function
+from dragon.workflows.batch.batch import TaskNotReadyError
 
 
 def test_function_returns_function_handle(batch: Batch):
