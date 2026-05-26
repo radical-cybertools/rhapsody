@@ -12,10 +12,12 @@ wait, batch notifications) are inherited automatically.
 
 import asyncio
 import logging
-from typing import Any, Callable
+from typing import Any
+from typing import Callable
 
 from ..base import BaseBackend
-from ..constants import BackendMainStates, StateMapper
+from ..constants import BackendMainStates
+from ..constants import StateMapper
 
 # ``radical.edge`` is imported at module level so that tests can patch
 # ``BridgeClient`` here.  When the package isn't installed we keep
@@ -84,6 +86,7 @@ class EdgeExecutionBackend(BaseBackend):
         edge_name: str | None = None,
         backends: list[str] | None = None,
         name: str = "edge",
+        plugin_name: str = _PLUGIN_NAME,
         batch_window: float | None = None,
         batch_limit: int = 1024,
         notify_batch_window: float | None = None,
@@ -99,10 +102,12 @@ class EdgeExecutionBackend(BaseBackend):
         self.logger           = logging.getLogger(__name__)
         self._bridge_url      = bridge_url
         self._edge_name       = edge_name
+        self._plugin_name          = plugin_name
         self._remote_backends      = backends or ['dragon_v3']
         self._notify_batch_window  = notify_batch_window
         self._notify_batch_size    = notify_batch_size
         self._edge_python_mm: tuple | None = None
+        self._edge_python_lookup_done = False
 
         self._bc   = None   # BridgeClient
         self._rh   = None   # RhapsodyClient (from get_rhapsody_handle)
@@ -152,7 +157,7 @@ class EdgeExecutionBackend(BaseBackend):
 
         self._initialized = True
         self.logger.info("Edge backend ready: %s/%s (session %s)",
-                         self._edge_name, self._PLUGIN_NAME,
+                         self._edge_name, self._plugin_name,
                          self._rh.sid)
         return self
 
@@ -220,35 +225,19 @@ class EdgeExecutionBackend(BaseBackend):
                     continue
 
                 plugins = self._bc.get_edge_client(eid).list_plugins()
-                info    = plugins.get(self._PLUGIN_NAME)
+                info    = plugins.get(self._plugin_name)
                 if info and info.get('enabled'):
                     self.logger.info("auto-selected edge %r (plugin %r)",
-                                     eid, self._PLUGIN_NAME)
+                                     eid, self._plugin_name)
                     self._edge_name = eid
                     break
 
         if not self._edge_name:
             raise RuntimeError(
-                f"no edge advertises an enabled {self._PLUGIN_NAME!r} plugin "
+                f"no edge advertises an enabled {self._plugin_name!r} plugin "
                 f"on bridge {self._bridge_url}")
 
         ec = self._bc.get_edge_client(self._edge_name)
-
-        # get edge's python version to ensure compatible pickling
-        pyver = ''
-        pyexc = ''
-        try:
-            info = ec.get_plugin('sysinfo').host_role()
-            pyver = info.get('python_version') or ''
-            parts = pyver.split('.')
-            if len(parts) >= 2:
-                self._edge_python_mm = (int(parts[0]), int(parts[1]))
-
-        except Exception as exc:
-            pyexc = exc
-
-        if not self._edge_python_mm:
-            self.logger.debug(f"skip pickle compat check {pyver} ({pyexc})")
 
         kwargs = {'backends': self._remote_backends}
         if self._notify_batch_window is not None:
@@ -256,7 +245,7 @@ class EdgeExecutionBackend(BaseBackend):
         if self._notify_batch_size is not None:
             kwargs['notify_batch_size'] = self._notify_batch_size
 
-        return ec.get_plugin(self._PLUGIN_NAME, **kwargs)
+        return ec.get_plugin(self._plugin_name, **kwargs)
 
 
     # ------------------------------------------------------------------
@@ -280,10 +269,27 @@ class EdgeExecutionBackend(BaseBackend):
             return ((isinstance(fn, str) and fn.startswith('cloudpickle::'))
                     or bool(t.get('_pickled_fields')))
 
-        if not self._edge_python_mm:
+        if not any(needs_compat(t) for t in tasks):
             return
 
-        if not any(needs_compat(t) for t in tasks):
+        if not self._edge_python_lookup_done:
+            self._edge_python_lookup_done = True
+            pyver = ''
+            pyexc = ''
+            try:
+                ec = self._bc.get_edge_client(self._edge_name)
+                info = ec.get_plugin('sysinfo').host_role()
+                pyver = info.get('python_version') or ''
+                parts = pyver.split('.')
+                if len(parts) >= 2:
+                    self._edge_python_mm = (int(parts[0]), int(parts[1]))
+            except Exception as exc:
+                pyexc = exc
+
+            if not self._edge_python_mm:
+                self.logger.debug(f"skip pickle compat check {pyver} ({pyexc})")
+
+        if not self._edge_python_mm:
             return
 
         client_mm = (sys.version_info.major, sys.version_info.minor)

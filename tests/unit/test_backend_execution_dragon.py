@@ -619,8 +619,8 @@ def test_v3_deliver_batch_success_stores_value_and_fires_done(backend_v3):
     backend_v3._deliver_batch([(uid, 42, None, False, None, None)])
 
     assert task_desc["return_value"] == 42
-    assert "stdout" not in task_desc
-    assert "stderr" not in task_desc
+    assert task_desc["stdout"] == ""
+    assert task_desc["stderr"] == ""
     backend_v3._callback_func.assert_called_once_with(task_desc, "DONE")
     assert uid not in backend_v3._task_registry
 
@@ -775,3 +775,52 @@ async def test_v3_capture_stdio_function_task_no_script(backend_v3, tmp_path):
 
     assert reg["script_path"] is None
     assert not list(tmp_path.glob("*.sh"))
+
+
+# ============================================================================
+# result_contract tests — stdout/stderr must be str after any DONE/FAILED
+# ============================================================================
+
+
+@pytest.mark.result_contract
+def test_v3_deliver_batch_empty_dragon_stdout_written_as_empty_string(backend_v3):
+    """Regression: stdout='' from Dragon must land as '' not None or absent key."""
+    uid = "task.contract-empty-stdout"
+    task_desc = {"uid": uid}
+    backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
+
+    backend_v3._deliver_batch([(uid, 0, None, False, "", "")])
+
+    assert isinstance(task_desc["stdout"], str)
+    assert isinstance(task_desc["stderr"], str)
+    backend_v3._callback_func.assert_called_once_with(task_desc, "DONE")
+
+
+@pytest.mark.result_contract
+def test_v3_deliver_batch_stdout_path_takes_priority_over_empty_stdout(backend_v3):
+    """stdout_path wins when capture_stdio redirect is active."""
+    uid = "task.contract-redirect"
+    task_desc = {"uid": uid}
+    backend_v3._task_registry[uid] = {
+        "uid": uid,
+        "description": task_desc,
+        "stdout_path": "/work/uid.stdout",
+        "stderr_path": "/work/uid.stderr",
+    }
+
+    backend_v3._deliver_batch([(uid, 0, None, False, "", "")])
+
+    assert task_desc["stdout"] == "/work/uid.stdout"
+    assert task_desc["stderr"] == "/work/uid.stderr"
+
+
+@pytest.mark.result_contract
+def test_v3_deliver_batch_failed_stdout_is_string(backend_v3):
+    """Stdout must be a str in the FAILED path."""
+    uid = "task.contract-failed-stdout"
+    task_desc = {"uid": uid}
+    backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
+
+    backend_v3._deliver_batch([(uid, RuntimeError("boom"), None, True, "", "")])
+
+    assert isinstance(task_desc["stdout"], str)

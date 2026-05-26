@@ -5,10 +5,12 @@ Tasks are immediately marked as DONE without executing anything.
 
 import asyncio
 import logging
-from typing import Any, Callable
+from typing import Any
+from typing import Callable
 
 from ..base import BaseBackend
-from ..constants import BackendMainStates, StateMapper
+from ..constants import BackendMainStates
+from ..constants import StateMapper
 
 
 def _get_logger() -> logging.Logger:

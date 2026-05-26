@@ -127,7 +127,7 @@ async def test_async_init_idempotent():
 
 @pytest.mark.asyncio
 async def test_submit_tasks_delegates_to_rhapsody_client():
-    backend = await _init_backend()
+    backend = await _init_backend(batch_window=0)
 
     tasks = [{"uid": "t.001", "executable": "/bin/echo",
               "arguments": ["hi"]}]

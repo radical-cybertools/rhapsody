@@ -7,7 +7,7 @@ environments.
 from __future__ import annotations
 
 from .concurrent import ConcurrentExecutionBackend  # noqa: F401
-from .noop       import NoopExecutionBackend         # noqa: F401
+from .noop import NoopExecutionBackend  # noqa: F401
 
 __all__ = ["ConcurrentExecutionBackend", "NoopExecutionBackend"]
 
