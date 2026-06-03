@@ -83,6 +83,41 @@ _HAS_TELEM = _safe(_has_telemetry_collector, False)
 _HAS_PMI = os.environ.get("DRAGON_CI_HAS_PMI", "").lower() not in ("", "0", "false")
 
 
+# --- Early-abort gate: must run under `dragon python` --------------------
+
+
+def pytest_configure(config):
+    """Abort early if not running under the Dragon launcher.
+
+    Without the gate, ``pytest tests/dragon_ci`` collects fine (dragon is
+    importable from the venv) but each test fails individually with cryptic
+    ``DRAGON_MEMORY_ERRNO`` channel-attach errors. The gate gives a single
+    actionable message instead.
+
+    Fast path: scan for any ``DRAGON_*`` env var — the launcher exports
+    several of them. Slow path: if env vars are present but the runtime
+    is unreachable (e.g. a stale dragon session), the behavioural probe
+    catches that.
+    """
+    dragon_envs = [k for k in os.environ if k.startswith("DRAGON_")]
+    if not dragon_envs:
+        pytest.exit(
+            "Dragon CI suite must run under the Dragon launcher:\n"
+            "    dragon python -m pytest -c tests/dragon_ci/pytest.ini "
+            "--rootdir=tests/dragon_ci tests/dragon_ci/",
+            returncode=2,
+        )
+    try:
+        _detect_nnodes()
+    except Exception as exc:
+        pytest.exit(
+            f"DRAGON_* env vars present ({len(dragon_envs)} found) but the "
+            f"Dragon runtime is unreachable — likely a stale dragon session. "
+            f"Re-launch with `dragon python -m pytest ...`.\nProbe error: {exc!r}",
+            returncode=2,
+        )
+
+
 # --- Auto-skip markers ----------------------------------------------------
 
 # (marker_name, predicate-that-must-be-true-to-run, reason)

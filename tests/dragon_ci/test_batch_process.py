@@ -19,8 +19,8 @@ from dragon.workflows.batch import Batch
 
 
 def test_process_returns_five_tuple(batch: Batch):
-    """A trivial ``/bin/echo`` task completes and yields the 5-tuple shape."""
-    task = batch.process(ProcessTemplate("/bin/echo", args=("hello-process",)))
+    """A trivial subprocess task completes and yields the 5-tuple shape."""
+    task = batch.process(ProcessTemplate("/bin/true", args=()))
     entry = batch.results_ddict[task.uid]
     assert isinstance(entry, tuple) and len(entry) == 5, (
         f"results_ddict shape changed for batch.process: {entry!r}"
