@@ -3351,6 +3351,29 @@ class DragonExecutionBackendV3(BaseBackend):
         process_templates_config = backend_kwargs.get("process_templates")
         process_template_config = backend_kwargs.get("process_template")
 
+        # Dragon's batch PIPE hangs when stderr is captured for subprocess tasks.
+        # Fix: write a shell script that redirects its own stdout/stderr to files,
+        # then invoke it as `bash script.sh`.  Dragon's forced stdout PIPE sees an
+        # empty stream → immediate EOF → no hang.  Files are written by the script.
+        redirect = task.get("capture_stdio") and not is_function
+        stdout_path = stderr_path = script_path = None
+        if redirect:
+            stdout_path = os.path.join(self._work_dir, f"{uid}.stdout")
+            stderr_path = os.path.join(self._work_dir, f"{uid}.stderr")
+            script_path = os.path.join(self._work_dir, f"{uid}.sh")
+            cmd_line = " ".join(
+                [shlex.quote(str(target))] + [shlex.quote(str(a)) for a in task_args]
+            )
+            with open(script_path, "w") as _f:
+                _f.write(
+                    f"#!/usr/bin/bash\n"
+                    f"{cmd_line}"
+                    f" 1>{shlex.quote(stdout_path)}"
+                    f" 2>{shlex.quote(stderr_path)}\n"
+                )
+            target = "/bin/bash"
+            task_args = (script_path,)
+
         def _format_process_template_kwargs(
                 template_cfg: dict[str, Any]
             ) -> dict[str, Any]:
@@ -3387,10 +3410,6 @@ class DragonExecutionBackendV3(BaseBackend):
             template_kwargs = _format_process_template_kwargs(template_cfg)
             template_kwargs = _process_capture_stdio(template_kwargs, capture_stdio)
             return template_kwargs
-
-        # stdout_path = None # @AymenFJA, Confirm that these can be removed?
-        # stderr_path = None # @AymenFJA, Confirm that these can be removed?
-        # script_path = None # @AymenFJA, Confirm that these can be removed?
 
         # Single decision tree - no redundant checks
         if process_templates_config is not None:
@@ -3461,12 +3480,13 @@ class DragonExecutionBackendV3(BaseBackend):
 
         # Register and return
         self._task_registry[uid] = {
+
             "uid": uid,
             "description": task,
             "batch_task": batch_task,
-#            "stdout_path": stdout_path, # @AymenFJA: Confirm that these can be removed?
-#            "stderr_path": stderr_path, # @AymenFJA: Confirm that these can be removed?
-#            "script_path": script_path, # @AymenFJA: Confirm that these can be removed?
+            "stdout_path": stdout_path,
+            "stderr_path": stderr_path,
+            "script_path": script_path,
         }
 
         self.logger.debug(f"Created {execution_mode} task: {uid}")
