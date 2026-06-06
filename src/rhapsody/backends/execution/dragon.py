@@ -3117,11 +3117,25 @@ class DragonExecutionBackendV3(BaseBackend):
         super().__init__(name=name)
 
         self.logger = _get_logger()
-        self._resources = resources or {}
+        # Accept the documented ``partition`` key (consumed at the Dragon
+        # launcher level via ``--hostlist``; informational here).  Reject any
+        # other resources keys we don't yet support so silent failures are
+        # impossible.
+        self._resources = dict(resources or {})
+        partition = self._resources.pop("partition", None)
         if self._resources:
             raise NotImplementedError(
-                "DragonExecutionBackendV3 does not yet support resources"
+                f"DragonExecutionBackendV3: unsupported resources keys: "
+                f"{list(self._resources)}"
             )
+        self._partition: dict = partition or {}
+
+        # If num_nodes wasn't specified explicitly, derive it from the
+        # partition spec.  Dragon's runtime is already constrained at the
+        # launcher level (--hostlist), so this just keeps Batch() in sync.
+        if num_nodes is None and self._partition.get("nodelist"):
+            num_nodes = len(self._partition["nodelist"])
+
         self.batch = Batch(
             num_nodes=num_nodes,
             pool_nodes=pool_nodes,
@@ -3144,6 +3158,51 @@ class DragonExecutionBackendV3(BaseBackend):
             f"DragonExecutionBackendV3: {self.batch.num_workers} workers, "
             f"{self.batch.num_managers} managers"
         )
+
+    # ------------------------------------------------------------------
+    # Launcher prefix construction (rhapsody-partitions hook).
+    #
+    # Multiple Dragon front-ends co-resident on the head node would clash
+    # on the default ports (7575 / 6565 / 6566).  A class-level counter,
+    # bumped per build, hands each child a disjoint port triplet.
+    # ------------------------------------------------------------------
+    _port_offset_lock: threading.Lock = threading.Lock()
+    _next_port_offset: int = 0
+    _port_offset_step: int = 100
+
+    @classmethod
+    def _allocate_port_offset(cls) -> int:
+        with cls._port_offset_lock:
+            offset = cls._next_port_offset
+            cls._next_port_offset += cls._port_offset_step
+        return offset
+
+    @classmethod
+    def build_launch_prefix(cls, partition: Optional[dict]) -> list:
+        """Construct the ``dragon ...`` argv prefix for a child host.
+
+        Honours :func:`rhapsody_rm.partition_spec` output: if ``partition``
+        carries a ``nodelist``, the Dragon launcher is constrained via
+        ``-N`` and ``--hostlist`` (and ``--wlm slurm``).  All three Dragon
+        ports are offset per-instance so two front-ends on the same head
+        node don't collide.
+        """
+        offset = cls._allocate_port_offset()
+        cmd: list = [
+            "dragon",
+            "--port",          str(7575 + offset),
+            "--overlay-port",  str(6565 + offset),
+            "--frontend-port", str(6566 + offset),
+        ]
+        if partition and partition.get("nodelist"):
+            nodes = partition["nodelist"]
+            hosts = ",".join(n.name for n in nodes)
+            cmd += [
+                "-N", str(len(nodes)),
+                "--wlm", "slurm",
+                "--hostlist", hosts,
+            ]
+        return cmd
 
     def __await__(self):
         return self._async_init().__await__()

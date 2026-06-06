@@ -39,9 +39,27 @@ edge's HTTP+SSE+TLS is WAN-grade and too heavy for same-allocation local IPC.
    allocation. No edge/bridge machinery.
 2. **Process-per-partition** for proxied partitions; **in-process for the single
    partition default** (§7).
-3. **KISS / purely additive.** v1 adds new modules only — **zero edits to existing
-   `Session`, task, or backend code** (justified in §5). When in doubt, choose the
-   smaller, more localized change.
+3. **KISS / purely additive — with two narrow exceptions noted below.** v1 adds
+   new modules only — **zero edits to existing `Session`, task, or backend code**
+   (justified in §5). When in doubt, choose the smaller, more localized change.
+
+   **Exceptions** (deliberate, small, and in service of *avoiding* a leaking
+   abstraction — putting launcher-specific knowledge where it belongs):
+   (a) `BaseBackend.build_launch_prefix(cls, partition) -> list[str]` is added
+       as a classmethod with a no-op default; the seam by which a backend with
+       its own runtime (Dragon, Flux) constructs its own argv prefix without
+       leaking CLI knowledge into the proxy or the call site.
+   (b) `DragonExecutionBackendV3.__init__` is taught to accept
+       `resources={"partition": …}` (previously a blanket
+       `NotImplementedError`); partition info is informational at the runtime
+       level (the constraint is enforced by `--hostlist` at the launcher
+       level) and supplies a `num_nodes` default. The class also overrides
+       `build_launch_prefix` and owns the per-instance port-offset counter
+       that keeps two co-resident Dragon front-ends from clashing on the
+       default ports.
+
+   Both edits are the start of the §12 migration (partition contract consumer
+   moving from RP to Dragon/Flux as RP retires) — done on the right seam.
 4. **Cross-partition data dependencies are required** — and turn out to be free
    (§5).
 5. **Node pickup / pinning / env correctness for Dragon & Flux is OUT OF SCOPE** —
