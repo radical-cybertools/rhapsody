@@ -28,30 +28,19 @@ class TaskStateManager:
     def __init__(self):
         self._task_futures: dict[str, asyncio.Future] = {}
         self._terminal_states = set()  # Will be populated by backends
-        self._lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         # Telemetry observer — set by Session.enable_telemetry(), None = zero cost
         self._telemetry_observer: Callable[[dict, str], None] | None = None
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Bind an event loop to the manager for thread-safe updates."""
         self._loop = loop
 
     def update_task(self, task: dict | BaseTask, state: str, **kwargs: object) -> None:
-        """Update task state and notify waiters (thread-safe)."""
-        if self._loop and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(self._update_task_impl, task, state)
-        else:
-            # Fallback if no loop bound (e.g. synch tests) or loop closed
-            # Warning: This is not thread-safe if called from another thread
-            logger.error(
-                "update_task called without a valid event loop "
-                f"(loop={self._loop}, closed={getattr(self._loop, 'is_closed', lambda: None)()})"
-            )
-            self._update_task_impl(task, state)
+        """Update task state and notify waiters. Must be called from the event loop.
 
-    def _update_task_impl(self, task: dict | BaseTask, state: str) -> None:
-        """Actual update logic, expected to run on the event loop."""
+        Backends delivering results from a background thread must cross the thread boundary first
+        via loop.call_soon_threadsafe(self.update_task, task, state).
+        """
         uid = task["uid"]
 
         # Update the task object in-place (Single Source of Truth)

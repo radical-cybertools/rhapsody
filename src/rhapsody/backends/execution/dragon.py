@@ -24,8 +24,6 @@ try:
 
     import dragon
     from dragon.data.ddict.ddict import DDict
-    from dragon.infrastructure.gpu_desc import AccVendor
-    from dragon.infrastructure.gpu_desc import find_accelerators
     from dragon.infrastructure.policy import Policy
 
     # Node Telemetry only
@@ -37,7 +35,6 @@ try:
     from dragon.native.process_group import DragonUserCodeError
     from dragon.native.process_group import ProcessGroup
     from dragon.native.queue import Queue
-    from dragon.telemetry import Telemetry
     from dragon.workflows.batch import Batch
 
 except ImportError:  # pragma: no cover - environment without Dragon
@@ -52,9 +49,6 @@ except ImportError:  # pragma: no cover - environment without Dragon
     Policy = None
     Batch = None
     Event = None
-    Telemetry = None
-    AccVendor = None
-    find_accelerators = None
 
 
 def _get_logger() -> logging.Logger:
@@ -3079,8 +3073,8 @@ class DragonExecutionBackendV3(BaseBackend):
     """Dragon Batch backend using the streaming pipeline model.
 
     Tasks submitted via batch.function()/process()/job() are auto-dispatched by the Batch
-    background thread. A single monitor thread polls each task with Task.get(block=False)
-    and fires callbacks when results become available in the DDict.
+    background thread. A single monitor thread polls each task's manager-specific DDict shard
+    and fires callbacks when results become available.
 
     Note on working directory:
         DragonExecutionBackendV3 does not support a backend-level working directory.
@@ -3105,9 +3099,7 @@ class DragonExecutionBackendV3(BaseBackend):
 
     def __init__(
         self,
-        num_nodes: Optional[int] = None,
-        pool_nodes: Optional[int] = None,
-        disable_telemetry: bool = False,
+        batch_kwargs: Optional[dict] = None,
         name: Optional[str] = "dragon",
     ):
         if not Batch:
@@ -3116,11 +3108,7 @@ class DragonExecutionBackendV3(BaseBackend):
         super().__init__(name=name)
 
         self.logger = _get_logger()
-        self.batch = Batch(
-            num_nodes=num_nodes,
-            pool_nodes=pool_nodes,
-            disable_telem=disable_telemetry,
-        )
+        self.batch = Batch(**(batch_kwargs or {}))
 
         self._backend_state = BackendMainStates.INITIALIZED
         self._callback_func: Callable = lambda t, s: None
@@ -3195,12 +3183,25 @@ class DragonExecutionBackendV3(BaseBackend):
                 for tuid in batch_tuids:
                     if tuid not in self._monitored_batches:
                         continue
-                    # Single DDict read: KeyError means not ready yet (avoids redundant __contains__)
+                    batch_task, uid = self._monitored_batches[tuid]
+
+                    # Wait until the Batch client compiler has placed this task on a manager.
+                    # manager_idx is None in the window between submission and compile.
+                    manager_idx = batch_task.core.manager_idx
+                    if manager_idx is None:
+                        continue
+
+                    # SCHEDULER_MANAGER_IDX == -1 maps to shard 0; subnode managers map 1-to-1.
+                    ddict_shard_idx = 0 if manager_idx == -1 else manager_idx
+
                     try:
-                        result, tb, raised, stdout, stderr = self.batch.results_ddict[tuid]
+                        result, tb, raised, stdout, stderr = self.batch.results_ddict.manager(
+                            ddict_shard_idx
+                        )[tuid]
                     except KeyError:
                         continue
-                    batch_task, uid = self._monitored_batches.pop(tuid)
+
+                    self._monitored_batches.pop(tuid, None)
                     completed.append((uid, result, tb, raised, stdout, stderr))
 
                 # One cross-thread wakeup for the entire sweep batch
@@ -3350,11 +3351,20 @@ class DragonExecutionBackendV3(BaseBackend):
         process_templates_config = backend_kwargs.get("process_templates")
         process_template_config = backend_kwargs.get("process_template")
 
-        # Dragon's batch PIPE hangs when stderr is captured for subprocess tasks.
-        # Fix: write a shell script that redirects its own stdout/stderr to files,
-        # then invoke it as `bash script.sh`.  Dragon's forced stdout PIPE sees an
-        # empty stream → immediate EOF → no hang.  Files are written by the script.
+        # When capture_stdio is requested for subprocess tasks, write a shell script that
+        # redirects both stdout and stderr to files, then invoke it as `bash script.sh`.
+        # Dragon's PIPE for the bash wrapper sees an empty stream → immediate EOF → no hang.
         redirect = task.get("capture_stdio") and not is_function
+
+        # Dragon 0.13.2 unconditionally set template.stdout = Popen.PIPE for every
+        # process task, so stdout was always captured.  Dragon 0.14.0 removed that —
+        # needs_output is only True when the template explicitly carries stdout=Popen.PIPE.
+        # Restore that behavior for subprocess tasks:
+        #   • no capture_stdio redirect → stdout=Popen.PIPE (direct capture via DDict)
+        #   • capture_stdio redirect     → stdout=None      (bash script writes to file;
+        #                                                     PIPE would just see EOF)
+        # Functions capture stdout via io.StringIO internally; no PIPE needed.
+        stdout_pipe = None if (redirect or is_function) else Popen.PIPE
         stdout_path = stderr_path = script_path = None
         if redirect:
             stdout_path = os.path.join(self._work_dir, f"{uid}.stdout")
@@ -3376,10 +3386,14 @@ class DragonExecutionBackendV3(BaseBackend):
         # Single decision tree - no redundant checks
         if process_templates_config is not None:
             # Priority 1: Job with user templates
+            # stdout_pipe is the default; user's tc dict can override it.
             process_templates = [
                 (
                     nranks,
-                    ProcessTemplate(target, **{**tc, "args": task_args, "kwargs": task_kwargs}),
+                    ProcessTemplate(
+                        target,
+                        **{"stdout": stdout_pipe, **tc, "args": task_args, "kwargs": task_kwargs},
+                    ),
                 )
                 for nranks, tc in process_templates_config
             ]
@@ -3388,9 +3402,16 @@ class DragonExecutionBackendV3(BaseBackend):
 
         elif process_template_config is not None:
             # Priority 2: Process with user template
+            # stdout_pipe is the default; user's process_template_config can override it.
             batch_task = self.batch.process(
                 ProcessTemplate(
-                    target, **{**process_template_config, "args": task_args, "kwargs": task_kwargs}
+                    target,
+                    **{
+                        "stdout": stdout_pipe,
+                        **process_template_config,
+                        "args": task_args,
+                        "kwargs": task_kwargs,
+                    },
                 ),
                 name=name,
                 timeout=timeout,
@@ -3403,7 +3424,9 @@ class DragonExecutionBackendV3(BaseBackend):
                 [
                     (
                         backend_kwargs.get("ranks", 1),
-                        ProcessTemplate(target, args=task_args, kwargs=task_kwargs),
+                        ProcessTemplate(
+                            target, args=task_args, kwargs=task_kwargs, stdout=stdout_pipe
+                        ),
                     )
                 ],
                 name=name,
@@ -3421,7 +3444,7 @@ class DragonExecutionBackendV3(BaseBackend):
         else:
             # Priority 5: Executable process auto-build
             batch_task = self.batch.process(
-                ProcessTemplate(target, args=task_args, kwargs=task_kwargs),
+                ProcessTemplate(target, args=task_args, kwargs=task_kwargs, stdout=stdout_pipe),
                 name=name,
                 timeout=timeout,
             )
@@ -3465,14 +3488,28 @@ class DragonExecutionBackendV3(BaseBackend):
         if uid not in self._task_registry:
             raise ValueError(f"Task {uid} not found")
 
-        # NOTE: dragon.batch does not expose nor support
-        # process/function/job cancellation, we just notify
-        # the asyncflow that the task is cancelled so not to block the flow
-        task = self._task_registry[uid]["description"]
-        self._callback_func(task, "CANCELED")
-        self._cancelled_tasks.add(uid)
+        batch_task = self._task_registry[uid]["batch_task"]
+        loop = asyncio.get_running_loop()
 
-        return True
+        try:
+            cancelled = await loop.run_in_executor(None, batch_task.cancel)
+        except Exception as e:
+            self.logger.warning(f"Dragon cancel failed for {uid}: {e}; falling back to soft-cancel")
+            cancelled = True
+
+        if cancelled:
+            registry_entry = self._task_registry.pop(uid, None)
+            if registry_entry is None:
+                # Task completed naturally between the executor call and here — not cancelled.
+                return False
+            task_desc = registry_entry["description"]
+            # Stop the monitor loop from polling this task's DDict entry. Without this,
+            # the blocking DDict IPC for a cancelled task can stall the monitor thread
+            # and delay result delivery for subsequently submitted tasks.
+            self._monitored_batches.pop(batch_task.uid, None)
+            self._callback_func(task_desc, "CANCELED")
+
+        return cancelled
 
     async def shutdown(self) -> None:
         """Shutdown the backend and clean up resources."""
@@ -3498,10 +3535,11 @@ class DragonExecutionBackendV3(BaseBackend):
         # Close Batch
         if self.batch:
             try:
-                self.logger.debug("Closing batch...")
-                self.batch.close()
+                self.logger.debug("Joining batch...")
                 self.batch.join(timeout=10.0)
-                self.logger.debug("Batch closed successfully")
+                self.logger.debug("Destroying batch...")
+                self.batch.destroy(timeout=15.0)
+                self.logger.debug("Batch destroyed successfully")
             except Exception as e:
                 self.logger.warning(f"Error closing batch gracefully: {e}")
                 try:
@@ -3526,14 +3564,8 @@ class DragonExecutionBackendV3(BaseBackend):
     @classmethod
     async def create(
         cls,
-        num_nodes: Optional[int] = None,
-        pool_nodes: Optional[int] = None,
-        disable_telemetry: bool = False,
+        batch_kwargs: Optional[dict] = None,
     ):
         """Create and initialize a DragonExecutionBackendV3."""
-        backend = cls(
-            num_nodes=num_nodes,
-            pool_nodes=pool_nodes,
-            disable_telemetry=disable_telemetry,
-        )
+        backend = cls(batch_kwargs=batch_kwargs)
         return await backend
