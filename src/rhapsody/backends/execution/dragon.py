@@ -3383,6 +3383,10 @@ class DragonExecutionBackendV3(BaseBackend):
             target = "/bin/bash"
             task_args = (script_path,)
 
+        def _build_process_template_kwargs(template_cfg: dict[str, Any]) -> dict[str, Any]:
+            """Build ProcessTemplate kwargs: stdout_pipe as default; user config overrides."""
+            return {"stdout": stdout_pipe, **template_cfg, "args": task_args, "kwargs": task_kwargs}
+
         # Single decision tree - no redundant checks
         if process_templates_config is not None:
             # Priority 1: Job with user templates
@@ -3390,10 +3394,7 @@ class DragonExecutionBackendV3(BaseBackend):
             process_templates = [
                 (
                     nranks,
-                    ProcessTemplate(
-                        target,
-                        **{"stdout": stdout_pipe, **tc, "args": task_args, "kwargs": task_kwargs},
-                    ),
+                    ProcessTemplate(target, **_build_process_template_kwargs(tc)),
                 )
                 for nranks, tc in process_templates_config
             ]
@@ -3404,15 +3405,7 @@ class DragonExecutionBackendV3(BaseBackend):
             # Priority 2: Process with user template
             # stdout_pipe is the default; user's process_template_config can override it.
             batch_task = self.batch.process(
-                ProcessTemplate(
-                    target,
-                    **{
-                        "stdout": stdout_pipe,
-                        **process_template_config,
-                        "args": task_args,
-                        "kwargs": task_kwargs,
-                    },
-                ),
+                ProcessTemplate(target, **_build_process_template_kwargs(process_template_config)),
                 name=name,
                 timeout=timeout,
             )
@@ -3424,9 +3417,7 @@ class DragonExecutionBackendV3(BaseBackend):
                 [
                     (
                         backend_kwargs.get("ranks", 1),
-                        ProcessTemplate(
-                            target, args=task_args, kwargs=task_kwargs, stdout=stdout_pipe
-                        ),
+                        ProcessTemplate(target, **_build_process_template_kwargs({})),
                     )
                 ],
                 name=name,
@@ -3444,7 +3435,7 @@ class DragonExecutionBackendV3(BaseBackend):
         else:
             # Priority 5: Executable process auto-build
             batch_task = self.batch.process(
-                ProcessTemplate(target, args=task_args, kwargs=task_kwargs, stdout=stdout_pipe),
+                ProcessTemplate(target, **_build_process_template_kwargs({})),
                 name=name,
                 timeout=timeout,
             )
