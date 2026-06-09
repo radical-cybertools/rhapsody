@@ -146,6 +146,26 @@ and placement settings flow through Dragon's [ProcessTemplate](https://dragonhpc
 There is **no backend-level `working_directory`** in V3. Every process
 configuration must be set per-task via `task_backend_specific_kwargs`.
 
+### Backend-level configuration (`batch_kwargs`)
+
+Pass a `batch_kwargs` dict when constructing the backend to tune the underlying
+`dragon.workflows.batch.Batch` instance:
+
+```python
+backend = await DragonExecutionBackendV3(batch_kwargs={
+    "num_nodes": 8,
+    "results_ddict_mem": 4 * 1024**3,  # 4 GiB results DDict
+    "scheduler_workers": 16,
+})
+```
+
+All accepted keys and their defaults are documented in the
+[Dragon Batch API](https://dragonhpc.github.io/dragon/doc/_build/html/ref/workflows/dragon.workflows.batch.Batch.html#dragon.workflows.batch.Batch).
+
+!!! note "Dragon 0.14.0"
+    `pool_nodes` is accepted for backwards compatibility but has no effect in
+    Dragon 0.14.0 — it is silently forced to `1` internally.
+
 **Supported `task_backend_specific_kwargs`:**
 
 | Key | Type | Description |
@@ -164,10 +184,15 @@ configuration must be set per-task via `task_backend_specific_kwargs`.
 | `policy` | `Policy` | Placement and GPU/NUMA affinity |
 | `options` | `ProcessOptions` | Dragon process options |
 
-!!! warning "Excluded parameters"
+!!! warning "Managed parameters"
     `target`, `args`, and `kwargs` are managed by RHAPSODY internally via
     `ComputeTask.executable`, `ComputeTask.arguments`, and `ComputeTask.function`.
     Do not set them inside `process_template`.
+
+    `stdout` defaults to `Popen.PIPE` for all process tasks (Dragon 0.14.0
+    requires this to be set explicitly for output capture). You can override
+    it by passing `stdout=None` in your template if you want to suppress
+    capture, or `stdout=Popen.STDOUT` to merge with stderr.
 
 ### Single-process task
 

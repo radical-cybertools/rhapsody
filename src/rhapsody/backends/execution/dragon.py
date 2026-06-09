@@ -3076,10 +3076,27 @@ class DragonExecutionBackendV3(BaseBackend):
     background thread. A single monitor thread polls each task's manager-specific DDict shard
     and fires callbacks when results become available.
 
+    Args:
+        batch_kwargs: Forwarded verbatim to ``dragon.workflows.batch.Batch()``.
+
+            Supported keys (Dragon 0.14.0):
+
+            - ``num_nodes`` *(int, optional)* — nodes to use; defaults to the full
+              allocation.
+            - ``disable_telem`` *(bool)* — disable Dragon's internal telemetry
+              (default ``False``).
+            - ``scheduler_workers`` *(int, optional)* — size of the scheduler's local
+              worker pool; defaults to ``num_nodes``. Increase this when running many
+              concurrent multi-node (MPI) jobs.
+            - ``results_ddict_mem`` *(int, optional)* — bytes to allocate for the
+              results DDict (default: 1 GiB × num_nodes). Increase for workloads that
+              return large arrays or submit millions of tasks.
+            - ``pool_nodes`` — **no-op in Dragon 0.14.0**, kept for API compatibility.
+
     Note on working directory:
         DragonExecutionBackendV3 does not support a backend-level working directory.
-        To set the working directory per task, use ``task_backend_specific_kwargs``
-        with ``process_template`` (single process) or ``process_templates`` (MPI job)::
+        Set it per task via ``task_backend_specific_kwargs`` with ``process_template``
+        (single process) or ``process_templates`` (MPI job)::
 
             ComputeTask(
                 function=my_func,
