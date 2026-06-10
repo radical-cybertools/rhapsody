@@ -3198,9 +3198,10 @@ class DragonExecutionBackendV3(BaseBackend):
                 # Collect all completed tasks in this sweep, then deliver in one batch
                 completed = []
                 for tuid in batch_tuids:
-                    if tuid not in self._monitored_batches:
+                    entry = self._monitored_batches.get(tuid)
+                    if entry is None:
                         continue
-                    batch_task, uid = self._monitored_batches[tuid]
+                    batch_task, uid = entry
 
                     # Wait until the Batch client compiler has placed this task on a manager.
                     # manager_idx is None in the window between submission and compile.
