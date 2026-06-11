@@ -106,7 +106,12 @@ RHAPSODY is licensed under the [MIT License](LICENSE.md).
 
 ## Acknowledgments
 
-RHAPSODY is developed by the [RADICAL Research Group](http://radical.rutgers.edu/) at Rutgers University.
+RHAPSODY is a collaborative project between two teams:
+
+- **[RADICAL Research Group](https://radical.rutgers.edu/)** — Rutgers University, New Jersey: core architecture, API design, session management, telemetry, and backend abstraction.
+- **[Hewlett Packard Enterprise (HPE)](https://www.hpe.com/)** — USA / Canada: DragonHPC runtime integration and Dragon backend development.
+
+See the full [Team](https://radical-cybertools.github.io/rhapsody/project/team/) page for details.
 
 ### Related Projects
 
@@ -123,7 +128,7 @@ If you use RHAPSODY in your research, please cite:
 ```bibtex
 @software{rhapsody2024,
   title={RHAPSODY: Runtime for Heterogeneous Applications, Service Orchestration and Dynamism},
-  author={RADICAL Research Team},
+  author={RADICAL Research Group, Rutgers University and Hewlett Packard Enterprise},
   year={2024},
   url={https://github.com/radical-cybertools/rhapsody},
   version={0.1.0}

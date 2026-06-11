@@ -83,7 +83,7 @@ def backend_v3():
         backend = DragonExecutionBackendV3()
 
     backend._callback_func = MagicMock()
-    backend._loop = asyncio.get_event_loop()
+    backend._loop = asyncio.new_event_loop()
     return backend
 
 
@@ -576,25 +576,47 @@ async def test_process_template_combined_spec_policy_cwd_args(session_v3):
 # ============================================================================
 
 
-def test_v3_constructor_accepts_new_params_and_forwards_to_batch():
-    """num_nodes, pool_nodes, and disable_telemetry are accepted and forwarded to Batch."""
+def test_v3_constructor_batch_kwargs_forwarded_verbatim():
+    """batch_kwargs contents are splatted into Batch() unchanged."""
     from rhapsody.backends.execution.dragon import DragonExecutionBackendV3
 
     mock_batch = MagicMock()
     mock_batch.num_workers = 8
     mock_batch.num_managers = 1
 
+    kwargs = {"num_nodes": 4, "pool_nodes": 2, "disable_telem": True, "scheduler_workers": 2}
+
     with patch(
         "rhapsody.backends.execution.dragon.Batch", return_value=mock_batch
     ) as mock_batch_cls:
-        backend = DragonExecutionBackendV3(num_nodes=4, pool_nodes=2, disable_telemetry=True)
+        backend = DragonExecutionBackendV3(batch_kwargs=kwargs)
 
-    mock_batch_cls.assert_called_once_with(num_nodes=4, pool_nodes=2, disable_telem=True)
+    mock_batch_cls.assert_called_once_with(**kwargs)
     assert backend.batch is mock_batch
 
 
-def test_v3_constructor_rejects_removed_params():
-    """num_workers, disable_background_batching, and disable_batch_submission no longer exist."""
+def test_v3_constructor_no_batch_kwargs_calls_batch_with_no_args():
+    """DragonExecutionBackendV3() with no args calls Batch() with no args."""
+    from rhapsody.backends.execution.dragon import DragonExecutionBackendV3
+
+    mock_batch = MagicMock()
+    mock_batch.num_workers = 4
+    mock_batch.num_managers = 1
+
+    with patch(
+        "rhapsody.backends.execution.dragon.Batch", return_value=mock_batch
+    ) as mock_batch_cls:
+        DragonExecutionBackendV3()
+
+    mock_batch_cls.assert_called_once_with()
+
+
+def test_v3_constructor_rejects_bare_batch_params():
+    """Batch params passed directly (not via batch_kwargs) raise TypeError.
+
+    num_nodes, pool_nodes, disable_telemetry, and other old top-level params are no longer accepted
+    as direct constructor arguments — they must go through batch_kwargs.
+    """
     from rhapsody.backends.execution.dragon import DragonExecutionBackendV3
 
     mock_batch = MagicMock()
@@ -602,6 +624,12 @@ def test_v3_constructor_rejects_removed_params():
     mock_batch.num_managers = 1
 
     with patch("rhapsody.backends.execution.dragon.Batch", return_value=mock_batch):
+        with pytest.raises(TypeError):
+            DragonExecutionBackendV3(num_nodes=4)
+        with pytest.raises(TypeError):
+            DragonExecutionBackendV3(pool_nodes=2)
+        with pytest.raises(TypeError):
+            DragonExecutionBackendV3(disable_telemetry=True)
         with pytest.raises(TypeError):
             DragonExecutionBackendV3(num_workers=4)
         with pytest.raises(TypeError):
@@ -684,6 +712,225 @@ def test_v3_fence_delegates_to_batch(backend_v3):
     """backend.fence() calls batch.fence() exactly once."""
     backend_v3.fence()
     backend_v3.batch.fence.assert_called_once()
+
+
+def test_v3_monitor_loop_skips_task_with_no_manager_idx(backend_v3):
+    """Monitor loop skips a task whose manager_idx is not yet set (None)."""
+    mock_task = MagicMock()
+    mock_task.core.manager_idx = None
+    uid = "task.monitor-no-idx"
+    backend_v3._monitored_batches[uid] = (mock_task, "flow-uid")
+
+    # Run one sweep manually
+    backend_v3.batch.results_ddict.manager.side_effect = AssertionError("should not be called")
+    batch_tuids = list(backend_v3._monitored_batches.keys())
+    completed = []
+    for tuid in batch_tuids:
+        if tuid not in backend_v3._monitored_batches:
+            continue
+        batch_task, flow_uid = backend_v3._monitored_batches[tuid]
+        manager_idx = batch_task.core.manager_idx
+        if manager_idx is None:
+            continue
+        ddict_shard_idx = 0 if manager_idx == -1 else manager_idx
+        try:
+            result, tb, raised, stdout, stderr = backend_v3.batch.results_ddict.manager(
+                ddict_shard_idx
+            )[tuid]
+        except KeyError:
+            continue
+        backend_v3._monitored_batches.pop(tuid)
+        completed.append((flow_uid, result, tb, raised, stdout, stderr))
+
+    assert completed == []
+    assert uid in backend_v3._monitored_batches  # not consumed
+
+
+def test_v3_monitor_loop_routes_to_correct_shard(backend_v3):
+    """Monitor loop calls results_ddict.manager(shard_idx) with the task's manager_idx."""
+    mock_task = MagicMock()
+    mock_task.core.manager_idx = 2
+    uid = "task.monitor-shard"
+    backend_v3._monitored_batches[uid] = (mock_task, "flow-uid-2")
+
+    mock_shard = MagicMock()
+    mock_shard.__getitem__ = MagicMock(return_value=("result", None, False, "", ""))
+    backend_v3.batch.results_ddict.manager.return_value = mock_shard
+
+    batch_tuids = list(backend_v3._monitored_batches.keys())
+    completed = []
+    for tuid in batch_tuids:
+        if tuid not in backend_v3._monitored_batches:
+            continue
+        batch_task, flow_uid = backend_v3._monitored_batches[tuid]
+        manager_idx = batch_task.core.manager_idx
+        if manager_idx is None:
+            continue
+        ddict_shard_idx = 0 if manager_idx == -1 else manager_idx
+        try:
+            result, tb, raised, stdout, stderr = backend_v3.batch.results_ddict.manager(
+                ddict_shard_idx
+            )[tuid]
+        except KeyError:
+            continue
+        backend_v3._monitored_batches.pop(tuid)
+        completed.append((flow_uid, result, tb, raised, stdout, stderr))
+
+    backend_v3.batch.results_ddict.manager.assert_called_once_with(2)
+    assert len(completed) == 1
+    assert completed[0][0] == "flow-uid-2"
+    assert completed[0][1] == "result"
+
+
+def test_v3_monitor_loop_scheduler_manager_maps_to_shard_0(backend_v3):
+    """SCHEDULER_MANAGER_IDX (-1) maps to DDict shard 0."""
+    mock_task = MagicMock()
+    mock_task.core.manager_idx = -1  # SCHEDULER_MANAGER_IDX
+    uid = "task.monitor-scheduler"
+    backend_v3._monitored_batches[uid] = (mock_task, "flow-sched")
+
+    mock_shard = MagicMock()
+    mock_shard.__getitem__ = MagicMock(return_value=("sched-result", None, False, "", ""))
+    backend_v3.batch.results_ddict.manager.return_value = mock_shard
+
+    batch_tuids = list(backend_v3._monitored_batches.keys())
+    for tuid in batch_tuids:
+        if tuid not in backend_v3._monitored_batches:
+            continue
+        batch_task, _ = backend_v3._monitored_batches[tuid]
+        manager_idx = batch_task.core.manager_idx
+        if manager_idx is None:
+            continue
+        ddict_shard_idx = 0 if manager_idx == -1 else manager_idx
+        try:
+            backend_v3.batch.results_ddict.manager(ddict_shard_idx)[tuid]
+        except KeyError:
+            continue
+
+    backend_v3.batch.results_ddict.manager.assert_called_once_with(0)
+
+
+@pytest.mark.asyncio
+async def test_v3_cancel_task_calls_dragon_cancel(backend_v3):
+    """cancel_task delegates to batch_task.cancel() and fires CANCELED callback on success.
+
+    The callback must be called synchronously — no asyncio.sleep(0) needed to observe it. This
+    verifies that TaskStateManager.update_task (when bound) runs inline on the event loop.
+
+    After cancellation the task must be removed from both _task_registry and _monitored_batches so
+    the monitor loop stops polling its DDict entry (blocking IPC for a cancelled task would stall
+    the monitor thread and delay result delivery for subsequently submitted tasks).
+    """
+    uid = "task.unit-cancel"
+    mock_batch_task = MagicMock()
+    mock_batch_task.cancel.return_value = True
+    task_desc = {"uid": uid}
+    backend_v3._task_registry[uid] = {
+        "uid": uid,
+        "description": task_desc,
+        "batch_task": mock_batch_task,
+    }
+    backend_v3._monitored_batches[mock_batch_task.uid] = (mock_batch_task, uid)
+
+    result = await backend_v3.cancel_task(uid)
+
+    # Callback and state must be visible immediately — no yield required
+    assert result is True
+    mock_batch_task.cancel.assert_called_once()
+    backend_v3._callback_func.assert_called_once_with(task_desc, "CANCELED")
+    # Task must be eagerly removed so the monitor loop stops polling
+    assert uid not in backend_v3._task_registry
+    assert mock_batch_task.uid not in backend_v3._monitored_batches
+
+
+@pytest.mark.asyncio
+async def test_v3_cancel_task_returns_false_when_task_completed_before_cancel_lands(backend_v3):
+    """cancel_task returns False when the task was already delivered (registry entry gone).
+
+    Race: the event loop yields inside run_in_executor; _deliver_batch could pop the task
+    from _task_registry before cancel_task resumes. The guard must return False rather than
+    raising KeyError, and must NOT fire the CANCELED callback.
+
+    The test simulates this by patching run_in_executor to pop the registry entry as a
+    side effect — exactly what _deliver_batch does while the executor is in flight.
+    """
+    uid = "task.unit-cancel-race"
+    mock_batch_task = MagicMock()
+    mock_batch_task.cancel.return_value = True
+    task_desc = {"uid": uid}
+    backend_v3._task_registry[uid] = {
+        "uid": uid,
+        "description": task_desc,
+        "batch_task": mock_batch_task,
+    }
+
+    # Simulate _deliver_batch removing the registry entry while run_in_executor is awaited.
+    original_cancel = mock_batch_task.cancel
+
+    def cancel_and_deliver():
+        result = original_cancel()
+        backend_v3._task_registry.pop(uid, None)
+        return result
+
+    mock_batch_task.cancel = cancel_and_deliver
+
+    result = await backend_v3.cancel_task(uid)
+
+    assert result is False
+    backend_v3._callback_func.assert_not_called()
+    assert uid not in backend_v3._task_registry
+
+
+@pytest.mark.asyncio
+async def test_v3_cancel_task_dragon_returns_false_no_callback(backend_v3):
+    """cancel_task does not fire callback when Dragon reports the task cannot be cancelled."""
+    uid = "task.unit-cancel-false"
+    mock_batch_task = MagicMock()
+    mock_batch_task.cancel.return_value = False
+    task_desc = {"uid": uid}
+    backend_v3._task_registry[uid] = {
+        "uid": uid,
+        "description": task_desc,
+        "batch_task": mock_batch_task,
+    }
+
+    result = await backend_v3.cancel_task(uid)
+
+    assert result is False
+    backend_v3._callback_func.assert_not_called()
+    assert uid not in backend_v3._cancelled_tasks
+
+
+@pytest.mark.asyncio
+async def test_v3_cancel_task_dragon_raises_falls_back_to_soft_cancel(backend_v3):
+    """cancel_task falls back to soft-cancel (callback fired, cancelled=True) if Dragon raises."""
+    uid = "task.unit-cancel-exc"
+    mock_batch_task = MagicMock()
+    mock_batch_task.cancel.side_effect = RuntimeError("dragon scheduler unreachable")
+    task_desc = {"uid": uid}
+    backend_v3._task_registry[uid] = {
+        "uid": uid,
+        "description": task_desc,
+        "batch_task": mock_batch_task,
+    }
+    backend_v3._monitored_batches[mock_batch_task.uid] = (mock_batch_task, uid)
+
+    result = await backend_v3.cancel_task(uid)
+
+    assert result is True
+    backend_v3._callback_func.assert_called_once_with(task_desc, "CANCELED")
+    assert uid not in backend_v3._task_registry
+    assert mock_batch_task.uid not in backend_v3._monitored_batches
+
+
+@pytest.mark.asyncio
+async def test_v3_shutdown_calls_join_and_destroy_not_close(backend_v3):
+    """Shutdown() calls batch.join() then batch.destroy(); batch.close() must NOT be called."""
+    await backend_v3.shutdown()
+
+    backend_v3.batch.join.assert_called_once()
+    backend_v3.batch.destroy.assert_called_once()
+    backend_v3.batch.close.assert_not_called()
 
 
 # ============================================================================

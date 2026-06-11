@@ -2,6 +2,75 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Dragon 0.14.0 full migration** — `DragonExecutionBackendV3` is fully ported
+  to the DragonHPC 0.14.0 API. Key changes:
+  - **Sharded DDict** — task results are now read from the correct DDict shard
+    using `results_ddict.manager(shard_idx)[tuid]`, matching how Dragon 0.14.0
+    writes results per `manager_idx`. The previous unsharded access caused the
+    monitor loop to block indefinitely.
+  - **Real task cancellation** — `cancel_task()` now calls Dragon's
+    `batch_task.cancel()` instead of a soft/fake cancel. Cancelled tasks are
+    eagerly removed from both `_task_registry` and `_monitored_batches`,
+    preventing the monitor thread from stalling on DDict polls for tasks that
+    will never deliver results.
+  - **Stdout capture restored** — Dragon 0.14.0 removed the unconditional
+    `stdout=Popen.PIPE` that Dragon 0.13.2 applied automatically. RHAPSODY now
+    explicitly injects it across all five `ProcessTemplate` construction paths so
+    stdout is captured for every process and executable task by default. Users can
+    override it via `process_template`.
+  - **Python 3.13 support** — Dragon 0.14.0 extends support to Python 3.13; the
+    CI matrix and `pyproject.toml` extras comment are updated accordingly.
+
+- **HPC integration test suite** (`tests/integration/test-hpc/dragon/`) — 25
+  end-to-end tests across five categories: multi-node GPU execution, single-node
+  GPU, task pinning and affinity, scale/stress (10 K+ tasks), and MPI
+  (mpi4py gather/allreduce/broadcast). Topology is detected dynamically from
+  `dragon.native.machine.System`; tests auto-skip when the required resources
+  are absent. The entire suite is excluded from CI via a `pytest_ignore_collect`
+  hook and only runs on a live cluster with `RHAPSODY_HPC=1`.
+
+- **HPC machine guides** — new setup guides for PSC Bridges-2 (SSH-based Dragon
+  launcher with TCP transport) and Purdue Anvil (Cray PE stack, identical to
+  Delta). The HPC machines index now clarifies that `ConcurrentExecutionBackend`
+  works out of the box on every machine, while `DragonExecutionBackendV3`
+  requires machine-specific configuration documented per page.
+
+- **Team and contributor documentation** — `docs/project/team.md` and
+  `README.md` updated to credit both the RADICAL Research Group (Rutgers) and
+  the HPE team.
+
+### Changed
+
+- **`TaskStateManager.update_task`** — removed per-call `asyncio.get_running_loop()`
+  / `try-except RuntimeError` on-loop detection. All backends already call this
+  from the event loop; the check was firing 128 K+ times per 64 K-task workload
+  and always taking the inline branch. The method now calls the implementation
+  directly. Unused `asyncio.Lock` also removed.
+
+- **`_build_process_template_kwargs` helper** — ProcessTemplate construction
+  across all five task priorities is consolidated into a single helper, adopted
+  from the `ashao/dragon-executor-hanging-bugfix` branch and adapted for
+  RHAPSODY's `stdout_pipe` semantics. Co-Authored-By: Andrew Shao (HPE).
+
+### Fixed
+
+- **Monitor loop race condition** — the two-step `if tuid not in dict` / `dict[tuid]`
+  access in `_monitor_loop` was a TOCTOU race with `cancel_task` running on the
+  event loop. Replaced with a single atomic `dict.get(tuid)` call.
+
+- **Python 3.13 `asyncio.get_event_loop()` error** — the `backend_v3` test
+  fixture called `asyncio.get_event_loop()` in a sync context. Python 3.13
+  tightened this from a `DeprecationWarning` to a hard `RuntimeError`. Fixed
+  by using `asyncio.new_event_loop()` instead.
+
+- **`long_running` task fixture unresponsive to cancellation** — the integration
+  test helper used `time.sleep(60)`, which ignores Dragon's `kill_by_exception`
+  mechanism until the sleep finishes (up to 60 seconds). Changed to a
+  `while True: time.sleep(0.1)` loop so the Dragon worker is freed within
+  ~100 ms of cancellation.
+
 ## [0.3.1] - 2026-05-19
 
 ### Fixed
