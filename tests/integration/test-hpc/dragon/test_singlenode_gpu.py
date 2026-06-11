@@ -1,5 +1,4 @@
-"""
-Category 2 — Single-node, single-GPU tests.
+"""Category 2 — Single-node, single-GPU tests.
 
 Purpose:
     Validate correctness on the minimal execution configuration: one node,
@@ -28,19 +27,20 @@ Expected outcomes:
 Run:
     dragon python3 -m pytest test-hpc/test_singlenode_gpu.py -v
 """
+
 import pytest
-
 from hpc_workers import add as _add
-
 
 # ---------------------------------------------------------------------------
 # Pinned executable tests — verify node placement via stdout
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_executable_pinned_to_first_node(rhapsody_session, topology):
     """/bin/hostname pinned to the first node; stdout contains its hostname."""
     from dragon.infrastructure.policy import Policy
+
     from rhapsody.api import ComputeTask
 
     node = topology[0]
@@ -61,15 +61,14 @@ async def test_executable_pinned_to_first_node(rhapsody_session, topology):
 
     assert results[0]["state"] == "DONE"
     stdout = (results[0].get("stdout") or "").strip()
-    assert node["hostname"] in stdout, (
-        f"Expected {node['hostname']!r} in stdout, got {stdout!r}"
-    )
+    assert node["hostname"] in stdout, f"Expected {node['hostname']!r} in stdout, got {stdout!r}"
 
 
 @pytest.mark.asyncio
 async def test_executable_echo_on_first_node(rhapsody_session, topology):
     """/bin/echo with arguments runs on first node and stdout is captured."""
     from dragon.infrastructure.policy import Policy
+
     from rhapsody.api import ComputeTask
 
     node = topology[0]
@@ -96,6 +95,7 @@ async def test_executable_echo_on_first_node(rhapsody_session, topology):
 # ---------------------------------------------------------------------------
 # Unpinned function tests — verify return value capture via batch.function()
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_function_return_value(rhapsody_session):
@@ -133,11 +133,13 @@ async def test_multiple_function_tasks_return_correct_values(rhapsody_session):
 # GPU affinity tests — verify via stdout
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.gpu
 @pytest.mark.asyncio
 async def test_single_gpu_affinity_on_first_node(rhapsody_session, gpu_nodes):
     """Task pinned to the first GPU of the first GPU node; stdout shows CUDA_VISIBLE_DEVICES."""
     from dragon.infrastructure.policy import Policy
+
     from rhapsody.api import ComputeTask
 
     node = gpu_nodes[0]
@@ -172,6 +174,7 @@ async def test_single_gpu_affinity_on_first_node(rhapsody_session, gpu_nodes):
 async def test_all_gpus_on_first_node(rhapsody_session, gpu_nodes):
     """One task per GPU on the first GPU node; each stdout shows its assigned GPU."""
     from dragon.infrastructure.policy import Policy
+
     from rhapsody.api import ComputeTask
 
     node = gpu_nodes[0]

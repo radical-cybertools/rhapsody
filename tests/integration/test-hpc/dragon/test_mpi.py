@@ -1,5 +1,4 @@
-"""
-Category 5 — MPI integration tests (mpi4py).
+"""Category 5 — MPI integration tests (mpi4py).
 
 Purpose:
     Validate that RHAPSODY can launch MPI jobs through Dragon's batch.job()
@@ -26,26 +25,25 @@ Expected outcomes:
 Run:
     dragon python3 -m pytest test-hpc/test_mpi.py -v
 """
+
 import pytest
-
-from hpc_workers import (
-    mpi_gather_hostnames as _mpi_gather_hostnames,
-    mpi_allreduce_sum as _mpi_allreduce_sum,
-    mpi_broadcast_check as _mpi_broadcast_check,
-    mpi_scatter_and_gather as _mpi_scatter_and_gather,
-)
-
+from hpc_workers import mpi_allreduce_sum as _mpi_allreduce_sum
+from hpc_workers import mpi_broadcast_check as _mpi_broadcast_check
+from hpc_workers import mpi_gather_hostnames as _mpi_gather_hostnames
+from hpc_workers import mpi_scatter_and_gather as _mpi_scatter_and_gather
 
 # ---------------------------------------------------------------------------
 # Single-node MPI tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.mpi
 @pytest.mark.asyncio
 async def test_mpi_gather_single_node(rhapsody_session, topology):
     """2-rank MPI job on one node: gather hostnames to rank 0."""
-    from rhapsody.api import ComputeTask
     from dragon.infrastructure.policy import Policy
+
+    from rhapsody.api import ComputeTask
 
     node = topology[0]
     ranks = 2
@@ -54,10 +52,15 @@ async def test_mpi_gather_single_node(rhapsody_session, topology):
         function=_mpi_gather_hostnames,
         task_backend_specific_kwargs={
             "process_templates": [
-                (ranks, {"policy": Policy(
-                    placement=Policy.Placement.HOST_NAME,
-                    host_name=node["hostname"],
-                )})
+                (
+                    ranks,
+                    {
+                        "policy": Policy(
+                            placement=Policy.Placement.HOST_NAME,
+                            host_name=node["hostname"],
+                        )
+                    },
+                )
             ]
         },
     )
@@ -71,8 +74,7 @@ async def test_mpi_gather_single_node(rhapsody_session, topology):
     assert result["size"] == ranks
     assert len(result["hostnames"]) == ranks
     assert all(h == node["hostname"] for h in result["hostnames"]), (
-        f"Expected all ranks on {node['hostname']!r}, "
-        f"got: {result['hostnames']}"
+        f"Expected all ranks on {node['hostname']!r}, got: {result['hostnames']}"
     )
 
 
@@ -80,8 +82,9 @@ async def test_mpi_gather_single_node(rhapsody_session, topology):
 @pytest.mark.asyncio
 async def test_mpi_allreduce_single_node(rhapsody_session, topology):
     """4-rank MPI allreduce on one node: sum must equal ranks * input value."""
-    from rhapsody.api import ComputeTask
     from dragon.infrastructure.policy import Policy
+
+    from rhapsody.api import ComputeTask
 
     node = topology[0]
     ranks = 4
@@ -92,10 +95,15 @@ async def test_mpi_allreduce_single_node(rhapsody_session, topology):
         args=(input_val,),
         task_backend_specific_kwargs={
             "process_templates": [
-                (ranks, {"policy": Policy(
-                    placement=Policy.Placement.HOST_NAME,
-                    host_name=node["hostname"],
-                )})
+                (
+                    ranks,
+                    {
+                        "policy": Policy(
+                            placement=Policy.Placement.HOST_NAME,
+                            host_name=node["hostname"],
+                        )
+                    },
+                )
             ]
         },
     )
@@ -114,8 +122,9 @@ async def test_mpi_allreduce_single_node(rhapsody_session, topology):
 @pytest.mark.asyncio
 async def test_mpi_broadcast_single_node(rhapsody_session, topology):
     """Broadcast from rank 0 to all ranks on one node; verify all received."""
-    from rhapsody.api import ComputeTask
     from dragon.infrastructure.policy import Policy
+
+    from rhapsody.api import ComputeTask
 
     node = topology[0]
     ranks = 4
@@ -125,10 +134,15 @@ async def test_mpi_broadcast_single_node(rhapsody_session, topology):
         args=(42,),
         task_backend_specific_kwargs={
             "process_templates": [
-                (ranks, {"policy": Policy(
-                    placement=Policy.Placement.HOST_NAME,
-                    host_name=node["hostname"],
-                )})
+                (
+                    ranks,
+                    {
+                        "policy": Policy(
+                            placement=Policy.Placement.HOST_NAME,
+                            host_name=node["hostname"],
+                        )
+                    },
+                )
             ]
         },
     )
@@ -144,13 +158,15 @@ async def test_mpi_broadcast_single_node(rhapsody_session, topology):
 # Multi-node MPI tests
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.mpi
 @pytest.mark.multi_node
 @pytest.mark.asyncio
 async def test_mpi_gather_across_nodes(rhapsody_session, topology):
     """1 rank per node, gather hostnames to rank 0; confirm each node is represented."""
-    from rhapsody.api import ComputeTask
     from dragon.infrastructure.policy import Policy
+
+    from rhapsody.api import ComputeTask
 
     ranks_per_node = 1
     expected_hosts = {node["hostname"] for node in topology}
@@ -159,10 +175,15 @@ async def test_mpi_gather_across_nodes(rhapsody_session, topology):
         function=_mpi_gather_hostnames,
         task_backend_specific_kwargs={
             "process_templates": [
-                (ranks_per_node, {"policy": Policy(
-                    placement=Policy.Placement.HOST_NAME,
-                    host_name=node["hostname"],
-                )})
+                (
+                    ranks_per_node,
+                    {
+                        "policy": Policy(
+                            placement=Policy.Placement.HOST_NAME,
+                            host_name=node["hostname"],
+                        )
+                    },
+                )
                 for node in topology
             ]
         },
@@ -176,8 +197,7 @@ async def test_mpi_gather_across_nodes(rhapsody_session, topology):
     assert result["size"] == len(topology) * ranks_per_node
     observed_hosts = set(result["hostnames"])
     assert observed_hosts == expected_hosts, (
-        f"Missing nodes in MPI gather. "
-        f"Expected: {expected_hosts}, got: {observed_hosts}"
+        f"Missing nodes in MPI gather. Expected: {expected_hosts}, got: {observed_hosts}"
     )
 
 
@@ -186,8 +206,9 @@ async def test_mpi_gather_across_nodes(rhapsody_session, topology):
 @pytest.mark.asyncio
 async def test_mpi_allreduce_across_nodes(rhapsody_session, topology):
     """Multi-node allreduce: 2 ranks per node, verify global sum."""
-    from rhapsody.api import ComputeTask
     from dragon.infrastructure.policy import Policy
+
+    from rhapsody.api import ComputeTask
 
     ranks_per_node = 2
     input_val = 3
@@ -198,10 +219,15 @@ async def test_mpi_allreduce_across_nodes(rhapsody_session, topology):
         args=(input_val,),
         task_backend_specific_kwargs={
             "process_templates": [
-                (ranks_per_node, {"policy": Policy(
-                    placement=Policy.Placement.HOST_NAME,
-                    host_name=node["hostname"],
-                )})
+                (
+                    ranks_per_node,
+                    {
+                        "policy": Policy(
+                            placement=Policy.Placement.HOST_NAME,
+                            host_name=node["hostname"],
+                        )
+                    },
+                )
                 for node in topology
             ]
         },
@@ -222,21 +248,27 @@ async def test_mpi_allreduce_across_nodes(rhapsody_session, topology):
 @pytest.mark.asyncio
 async def test_multiple_independent_mpi_jobs(rhapsody_session, topology):
     """Submit multiple independent MPI jobs concurrently; all must complete."""
-    from rhapsody.api import ComputeTask
     from dragon.infrastructure.policy import Policy
+
+    from rhapsody.api import ComputeTask
 
     n_jobs = 4
     tasks = []
 
-    for job_id in range(n_jobs):
+    for _ in range(n_jobs):
         task = ComputeTask(
             function=_mpi_gather_hostnames,
             task_backend_specific_kwargs={
                 "process_templates": [
-                    (1, {"policy": Policy(
-                        placement=Policy.Placement.HOST_NAME,
-                        host_name=node["hostname"],
-                    )})
+                    (
+                        1,
+                        {
+                            "policy": Policy(
+                                placement=Policy.Placement.HOST_NAME,
+                                host_name=node["hostname"],
+                            )
+                        },
+                    )
                     for node in topology
                 ]
             },

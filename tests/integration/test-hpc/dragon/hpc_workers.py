@@ -1,5 +1,4 @@
-"""
-Worker functions that execute inside Dragon's remote worker processes.
+"""Worker functions that execute inside Dragon's remote worker processes.
 
 All functions used as the `function=` argument in ComputeTask must live here
 (not in test files) because Dragon serialises them by module reference.
@@ -12,6 +11,7 @@ Rules:
   - Functions must be picklable by cloudpickle (all closures captured, no
     references to pytest fixtures or test-file globals).
 """
+
 
 def add(a, b):
     """Return a + b."""
@@ -27,8 +27,11 @@ def identity(n: int) -> int:
 # MPI worker functions
 # ---------------------------------------------------------------------------
 
+
 def mpi_gather_hostnames() -> dict:
     """Gather all rank hostnames to rank 0 and return them."""
+    import socket
+
     from mpi4py import MPI
 
     comm = MPI.COMM_WORLD

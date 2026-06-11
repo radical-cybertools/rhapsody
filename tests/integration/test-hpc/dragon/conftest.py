@@ -1,5 +1,4 @@
-"""
-Shared fixtures and markers for the RHAPSODY + Dragon HPC test suite.
+"""Shared fixtures and markers for the RHAPSODY + Dragon HPC test suite.
 
 Run with:
     dragon python3 -m pytest test-hpc/ -v
@@ -8,6 +7,7 @@ All topology detection happens here.  Tests never hardcode node counts,
 GPU counts, or hostnames — they skip automatically when the required
 resources are not present in the current allocation.
 """
+
 import os
 
 import pytest
@@ -33,6 +33,7 @@ def pytest_configure(config):
 # Topology detection  (session-scoped — runs once per pytest session)
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="session")
 def topology():
     """Detect nodes and GPUs from the live Dragon allocation.
@@ -42,7 +43,8 @@ def topology():
 
     Raises RuntimeError if Dragon is not initialised.
     """
-    from dragon.native.machine import Node, System
+    from dragon.native.machine import Node
+    from dragon.native.machine import System
 
     nodes = []
     for huid in System().nodes:
@@ -80,6 +82,7 @@ def total_gpus(gpu_nodes):
 # Automatic skip logic — applied via autouse fixture
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(autouse=True)
 def _apply_topology_skips(request, topology, gpu_nodes):
     """Skip tests whose resource marks cannot be satisfied by the allocation."""
@@ -100,24 +103,23 @@ def _apply_topology_skips(request, topology, gpu_nodes):
 # Backend and session fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="module")
 async def dragon_backend(request):
     """Initialise a DragonExecutionBackendV3 for the test module.
 
-    Scale tests can override batch_kwargs via indirect parametrisation or
-    by setting the RHAPSODY_DDICT_MEM_GB env var (default: 2 GiB/node).
+    Scale tests can override batch_kwargs via indirect parametrisation or by setting the
+    RHAPSODY_DDICT_MEM_GB env var (default: 2 GiB/node).
     """
-    from rhapsody.backends import DragonExecutionBackendV3
-
     from dragon.native.machine import System
+
+    from rhapsody.backends import DragonExecutionBackendV3
 
     num_nodes = len(list(System().nodes))
     ddict_mem_gb = int(os.environ.get("RHAPSODY_DDICT_MEM_GB", 2))
-    ddict_mem = ddict_mem_gb * num_nodes * (1024 ** 3)
+    ddict_mem = ddict_mem_gb * num_nodes * (1024**3)
 
-    backend = await DragonExecutionBackendV3(
-        batch_kwargs={"results_ddict_mem": ddict_mem}
-    )
+    backend = await DragonExecutionBackendV3(batch_kwargs={"results_ddict_mem": ddict_mem})
     yield backend
     await backend.shutdown()
 

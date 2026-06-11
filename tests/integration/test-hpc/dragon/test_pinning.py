@@ -1,5 +1,4 @@
-"""
-Category 3 — Task pinning and affinity tests.
+"""Category 3 — Task pinning and affinity tests.
 
 Purpose:
     Verify that placement constraints are strictly enforced by Dragon and
@@ -26,17 +25,19 @@ Expected outcomes:
 Run:
     dragon python3 -m pytest test-hpc/test_pinning.py -v
 """
-import pytest
 
+import pytest
 
 # ---------------------------------------------------------------------------
 # Node pinning
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_pin_to_each_node_sequentially(rhapsody_session, topology):
     """One /bin/hostname task per node; stdout must match the pinned hostname."""
     from dragon.infrastructure.policy import Policy
+
     from rhapsody.api import ComputeTask
 
     tasks = [
@@ -70,6 +71,7 @@ async def test_pin_to_each_node_sequentially(rhapsody_session, topology):
 async def test_exclusive_node_pinning(rhapsody_session, topology):
     """Tasks pinned to node[0] and node[1] must land on different nodes."""
     from dragon.infrastructure.policy import Policy
+
     from rhapsody.api import ComputeTask
 
     node_a = topology[0]
@@ -113,11 +115,13 @@ async def test_exclusive_node_pinning(rhapsody_session, topology):
 # GPU affinity
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.gpu
 @pytest.mark.asyncio
 async def test_pin_to_specific_gpu(rhapsody_session, gpu_nodes):
     """One task per GPU on the first GPU node; each stdout shows its GPU assignment."""
     from dragon.infrastructure.policy import Policy
+
     from rhapsody.api import ComputeTask
 
     node = gpu_nodes[0]
@@ -155,6 +159,7 @@ async def test_pin_to_specific_gpu(rhapsody_session, gpu_nodes):
 async def test_round_robin_gpu_across_nodes(rhapsody_session, gpu_nodes):
     """One task per (node, GPU) pair; stdout contains 'hostname:CUDA_VISIBLE_DEVICES'."""
     from dragon.infrastructure.policy import Policy
+
     from rhapsody.api import ComputeTask
 
     tasks = []
@@ -187,9 +192,7 @@ async def test_round_robin_gpu_across_nodes(rhapsody_session, gpu_nodes):
         # stdout format: "hostname:CUDA_VISIBLE_DEVICES"
         assert ":" in stdout, f"Unexpected stdout format: {stdout!r}"
         ret_host, ret_gpu = stdout.split(":", 1)
-        assert exp_host in ret_host, (
-            f"Hostname mismatch: expected {exp_host!r}, got {ret_host!r}"
-        )
+        assert exp_host in ret_host, f"Hostname mismatch: expected {exp_host!r}, got {ret_host!r}"
         assert ret_gpu not in ("", "NOT_SET"), (
             f"GPU affinity missing on node {exp_host!r}: CUDA_VISIBLE_DEVICES={ret_gpu!r}"
         )
@@ -199,10 +202,12 @@ async def test_round_robin_gpu_across_nodes(rhapsody_session, gpu_nodes):
 # Executable pinning (baseline)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_executable_pinned_to_each_node(rhapsody_session, topology):
     """/bin/hostname pinned to each node; stdout contains the expected hostname."""
     from dragon.infrastructure.policy import Policy
+
     from rhapsody.api import ComputeTask
 
     tasks = [

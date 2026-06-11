@@ -1,5 +1,4 @@
-"""
-Category 1 — Multi-node, multi-GPU execution tests.
+"""Category 1 — Multi-node, multi-GPU execution tests.
 
 Purpose:
     Validate that RHAPSODY can distribute tasks across every node in the
@@ -23,18 +22,20 @@ Expected outcomes:
 Run:
     dragon python3 -m pytest test-hpc/test_multinode_gpu.py -v
 """
-import pytest
 
+import pytest
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.multi_node
 @pytest.mark.asyncio
 async def test_one_task_per_node(rhapsody_session, topology):
     """Each node receives one pinned executable task; stdout contains the hostname."""
     from dragon.infrastructure.policy import Policy
+
     from rhapsody.api import ComputeTask
 
     tasks = [
@@ -70,6 +71,7 @@ async def test_one_task_per_node(rhapsody_session, topology):
 async def test_one_task_per_gpu_across_nodes(rhapsody_session, gpu_nodes):
     """One task per GPU node; stdout shows non-empty CUDA_VISIBLE_DEVICES."""
     from dragon.infrastructure.policy import Policy
+
     from rhapsody.api import ComputeTask
 
     tasks = []
@@ -110,6 +112,7 @@ async def test_one_task_per_gpu_across_nodes(rhapsody_session, gpu_nodes):
 async def test_concurrent_submission_all_nodes(rhapsody_session, topology):
     """Submit tasks to all nodes in one call; all complete and each returns its hostname."""
     from dragon.infrastructure.policy import Policy
+
     from rhapsody.api import ComputeTask
 
     tasks = [
