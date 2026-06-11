@@ -83,7 +83,7 @@ def backend_v3():
         backend = DragonExecutionBackendV3()
 
     backend._callback_func = MagicMock()
-    backend._loop = asyncio.get_event_loop()
+    backend._loop = asyncio.new_event_loop()
     return backend
 
 
