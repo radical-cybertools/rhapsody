@@ -61,7 +61,6 @@ source /path/to/your/venv/bin/activate
 ```bash
 # Example: SLURM allocation with 4 nodes, 4 GPUs each
 salloc -N 4 --gpus-per-node=4 -t 01:00:00
-dragon start   # starts Dragon's global services across the allocation
 ```
 
 ### Step 3 — run the tests
