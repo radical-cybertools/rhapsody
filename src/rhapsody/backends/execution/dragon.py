@@ -3312,10 +3312,9 @@ class DragonExecutionBackendV3(BaseBackend):
         def _build_chunk(chunk_tasks):
             """Synchronous per-chunk builder; runs in a worker thread.
 
-            Returns a list of ``(task, batch_task | None, exception | None)``
-            so the event-loop side can register monitored tasks and emit
-            RUNNING/FAILED callbacks without doing those calls itself in
-            a worker thread.
+            Returns a list of ``(task, batch_task | None, exception | None)`` so the event-loop side
+            can register monitored tasks and emit RUNNING/FAILED callbacks without doing those calls
+            itself in a worker thread.
             """
             out = []
             for task in chunk_tasks:
@@ -3328,13 +3327,12 @@ class DragonExecutionBackendV3(BaseBackend):
 
         n_built = 0
         for start in range(0, len(tasks), chunk):
-            chunk_results = await asyncio.to_thread(
-                _build_chunk, tasks[start:start + chunk])
+            chunk_results = await asyncio.to_thread(_build_chunk, tasks[start : start + chunk])
             for task, batch_task, exc in chunk_results:
                 if exc is not None:
                     self.logger.error(
-                        f"Failed to create task {task.get('uid')}: {exc}",
-                        exc_info=exc)
+                        f"Failed to create task {task.get('uid')}: {exc}", exc_info=exc
+                    )
                     task["exception"] = exc
                     self._callback_func(task, "FAILED")
                     continue
@@ -3346,8 +3344,7 @@ class DragonExecutionBackendV3(BaseBackend):
                 n_built += 1
 
         if n_built:
-            self.logger.info(
-                f"Submitted {n_built} tasks (streaming, auto-dispatched)")
+            self.logger.info(f"Submitted {n_built} tasks (streaming, auto-dispatched)")
 
     async def build_task(self, task: dict):
         """Translate AsyncFlow task to Dragon Batch task.
