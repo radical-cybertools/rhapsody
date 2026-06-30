@@ -306,3 +306,47 @@ async def test_capture_stdio_nonzero_exit_returns_failed(tmp_path):
 
     assert state == "FAILED"
     assert result_task["exit_code"] == 1
+
+
+# ---------------------------------------------------------------------------
+# result_contract tests — stdout/stderr must be str after any DONE/FAILED
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.result_contract
+@pytest.mark.asyncio
+async def test_concurrent_exception_path_stdout_is_empty_string():
+    """When _execute_task catches an exception, stdout must be '' not None."""
+    backend = ConcurrentExecutionBackend()
+
+    async def boom():
+        raise RuntimeError("intentional")
+
+    task = ComputeTask(function=boom, args=[])
+    result_task, state = await backend._execute_task(task)
+
+    assert state == "FAILED"
+    assert isinstance(result_task["stdout"], str)
+
+
+@pytest.mark.result_contract
+@pytest.mark.asyncio
+async def test_concurrent_command_empty_output_stdout_is_string():
+    """_execute_command with empty stdout/stderr must write '' not None."""
+    backend = ConcurrentExecutionBackend()
+    task = ComputeTask(executable="/bin/true")
+
+    mock_process = MagicMock()
+    mock_process.communicate = AsyncMock(return_value=(b"", b""))
+    mock_process.returncode = 0
+
+    with patch(
+        "rhapsody.backends.execution.concurrent.asyncio.create_subprocess_exec",
+        new_callable=AsyncMock,
+        return_value=mock_process,
+    ):
+        result_task, state = await backend._execute_command(task)
+
+    assert state == "DONE"
+    assert isinstance(result_task["stdout"], str)
+    assert isinstance(result_task["stderr"], str)

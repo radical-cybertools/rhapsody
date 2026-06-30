@@ -15,6 +15,7 @@ import dataclasses
 import json
 import logging
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Any
@@ -33,9 +34,51 @@ from rhapsody.telemetry.events import TaskSubmitted
 from rhapsody.telemetry.events import make_event
 
 if TYPE_CHECKING:
+    from opentelemetry.sdk.metrics.export import MetricReader
+    from opentelemetry.sdk.resources import Resource as OtelResource
+    from opentelemetry.sdk.trace import SpanProcessor
+
     from rhapsody.telemetry.adapters.base import TelemetryAdapter
 
 logger = logging.getLogger(__name__)
+
+# Pushed onto the queue by stop() after queue.join() to unblock the dispatch loop cleanly.
+_STOP_SENTINEL = object()
+
+
+class SpanBuffer:
+    """O(1)-append in-process span store.
+
+    InMemorySpanExporter (an OTel test utility) does `_finished_spans += tuple(spans)` on every
+    export call — O(n) per call, O(n²) total for n spans. For 40K spans that costs ~4 seconds inside
+    the dispatch loop. list.extend() keeps append at O(1) amortized.
+
+    Implements the SpanExporter interface so it can be passed to any SpanProcessor.
+    """
+
+    def __init__(self) -> None:
+        import threading
+
+        self._spans: list = []
+        self._lock = threading.Lock()
+
+    def export(self, spans) -> None:
+        with self._lock:
+            self._spans.extend(spans)
+
+    def get_finished_spans(self) -> tuple:
+        with self._lock:
+            return tuple(self._spans)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._spans.clear()
+
+    def shutdown(self) -> None:
+        pass  # keep spans accessible via get_finished_spans() after tracer_provider.shutdown()
+
+    def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        return True
 
 
 class TelemetryManager:
@@ -69,9 +112,12 @@ class TelemetryManager:
         session_id: str,
         checkpoint_interval: float | None = None,
         checkpoint_path: str | None = None,
+        span_processors: list[SpanProcessor] | None = None,
+        metric_readers: list[MetricReader] | None = None,
+        resource: OtelResource | None = None,
     ) -> None:
         self._session_id = session_id
-        self._queue: asyncio.Queue[BaseEvent] = asyncio.Queue()
+        self._queue: asyncio.Queue = asyncio.Queue()
         self._subscribers: list[Callable[[BaseEvent], Any]] = []
         self._adapters: list[TelemetryAdapter] = []
         self._running = False
@@ -109,6 +155,7 @@ class TelemetryManager:
         # Active OTel spans keyed by task_id
         self._active_spans: dict[str, Any] = {}
         self._session_span: Any = None
+        self._completed_session_ctx: Any = None  # snapshot after session span ends
 
         # Wall-clock time recorded when RUNNING is first seen for each task.
         self._task_start_times: dict[str, float] = {}
@@ -119,6 +166,28 @@ class TelemetryManager:
 
         # Last-seen resource values for UpDownCounter delta tracking
         self._last: dict[str, dict[str, float]] = {"cpu": {}, "mem": {}, "gpu": {}}
+
+        # Registered by higher-layer runtimes to inject custom OTel span attributes.
+        # Each callable receives the event and returns a dict of extra attributes.
+        self._span_attribute_extractors: list[Callable[[BaseEvent], dict]] = []
+
+        # OTel context snapshot captured at emit() time for each TaskCreated event.
+        # Keyed by task_id. Consumed (popped) in _process_event() to restore the
+        # correct parent span context in the dispatch loop.
+        self._task_contexts: dict[str, Any] = {}
+
+        # Token returned by context.attach() when the session span is activated in start().
+        # Stored so it can be properly detached in stop().
+        self._session_ctx_token: Any = None
+
+        # Caller-supplied OTel extension points wired into RHAPSODY's internal providers
+        # at start() time alongside SpanBuffer / InMemoryMetricReader.
+        # Callers own exporter construction; RHAPSODY never imports specific exporters.
+        self._extra_span_processors: list = list(span_processors or [])
+        self._extra_metric_readers: list = list(metric_readers or [])
+        # Optional Resource override. None → Resource.create() in start(), which reads
+        # OTEL_SERVICE_NAME and OTEL_RESOURCE_ATTRIBUTES from the environment automatically.
+        self._resource: Any = resource
 
     # ------------------------------------------------------------------
     # Public properties
@@ -137,15 +206,28 @@ class TelemetryManager:
         """Start the telemetry manager: set up OTel SDK, open checkpoint file, start loops."""
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+        from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+        # Resource.create() reads OTEL_SERVICE_NAME / OTEL_RESOURCE_ATTRIBUTES from the
+        # environment automatically; the passed dict provides fallback defaults only.
+        _resource = self._resource or Resource.create(
+            {"service.name": "rhapsody", "session_id": self._session_id}
+        )
 
         self._metric_reader = InMemoryMetricReader()
-        self._span_exporter = InMemorySpanExporter()
-        self._meter_provider = MeterProvider(metric_readers=[self._metric_reader])
-        self._tracer_provider = TracerProvider()
+        self._span_exporter = SpanBuffer()
+
+        self._meter_provider = MeterProvider(
+            metric_readers=[self._metric_reader] + self._extra_metric_readers,
+            resource=_resource,
+        )
+        self._tracer_provider = TracerProvider(resource=_resource)
         self._tracer_provider.add_span_processor(SimpleSpanProcessor(self._span_exporter))
+        for proc in self._extra_span_processors:
+            self._tracer_provider.add_span_processor(proc)
+
         self._meter = self._meter_provider.get_meter("rhapsody")
         self._tracer = self._tracer_provider.get_tracer("rhapsody")
 
@@ -156,6 +238,20 @@ class TelemetryManager:
             self._open_checkpoint_file()
 
         self._session_start_time = time.time()
+
+        # Create the session span synchronously so it is available before any
+        # workflow_scope() / span_scope() call — _dispatch_loop runs in a separate
+        # asyncio task and would otherwise process SessionStarted too late.
+        self._session_span = self._tracer.start_span(
+            "session", attributes={"session_id": self._session_id, "backend": "rhapsody"}
+        )
+        from opentelemetry import context as otel_context
+        from opentelemetry import trace as trace_mod
+
+        self._session_ctx_token = otel_context.attach(
+            trace_mod.set_span_in_context(self._session_span)
+        )
+
         self._running = True
         self._dispatch_task = asyncio.create_task(self._dispatch_loop(), name="telemetry-dispatch")
 
@@ -188,6 +284,13 @@ class TelemetryManager:
         )
 
         self._running = False
+        # Drain all in-flight events before signalling the dispatch loop to exit.
+        # emit() is now a no-op (guard on _running), so no new events can arrive.
+        try:
+            await asyncio.wait_for(self._queue.join(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("Telemetry queue did not drain cleanly within timeout")
+        self._queue.put_nowait(_STOP_SENTINEL)
 
         for adapter in self._adapters:
             try:
@@ -216,6 +319,12 @@ class TelemetryManager:
             self._checkpoint_file.close()
             self._checkpoint_file = None
 
+        from opentelemetry import context as otel_context
+
+        if self._session_ctx_token is not None:
+            otel_context.detach(self._session_ctx_token)
+            self._session_ctx_token = None
+
         if self._meter_provider:
             self._meter_provider.shutdown()
         if self._tracer_provider:
@@ -226,11 +335,19 @@ class TelemetryManager:
     # ------------------------------------------------------------------
 
     def emit(self, event: BaseEvent) -> None:
-        """Enqueue an event for processing.
+        """Enqueue an event for async processing (JSONL, metrics, spans).
 
-        Non-blocking, O(1), safe to call from any context.
+        Non-blocking, O(1) for all event types. For TaskCreated events, captures the caller's OTel
+        context so _process_event() can restore it in the dispatch loop and create the task span
+        with the correct structural parent.
         """
+        if not self._running:
+            return
         self._queue.put_nowait(event)
+        if self._tracer is not None and event.event_type == "TaskCreated":
+            from opentelemetry import context as _ctx
+
+            self._task_contexts[event.task_id] = _ctx.get_current()
 
     def subscribe(self, callback: Callable[[BaseEvent], Any]) -> None:
         """Register a callback to receive every event.
@@ -239,6 +356,63 @@ class TelemetryManager:
         callbacks never crash the dispatch loop.
         """
         self._subscribers.append(callback)
+
+    def annotate_current_span(self, event: BaseEvent) -> None:
+        """Add this event as a timestamped annotation on the currently active OTel span.
+
+        Must be called from a context where a span is active (e.g. inside span_scope()). No-op if no
+        valid span is active or telemetry has not been started.
+        """
+        if self._tracer is None:
+            return
+        from opentelemetry import trace as _trace
+
+        active = _trace.get_current_span()
+        if active is None or not active.get_span_context().is_valid:
+            return
+        attrs = event.attributes
+        active.add_event(
+            event.event_type,
+            attributes={k: str(v) for k, v in attrs.items()} if attrs else {},
+        )
+
+    def register_span_enricher(self, func: Callable[[BaseEvent], dict]) -> None:
+        """Register a callable that enriches OTel span attributes at span creation time.
+
+        Called for every TaskCreated event (and TaskStarted fallback). The callable receives the
+        event and must return a dict of additional OTel attributes to merge. Exceptions are logged
+        at DEBUG level so faulty extractors cannot crash the dispatch loop.
+        """
+        self._span_attribute_extractors.append(func)
+
+    @contextmanager
+    def span_scope(self, name: str, attributes: dict | None = None):
+        """Create a named span, make it the active OTel context for the duration.
+
+        Any emit(TaskCreated) calls made while this scope is active will capture this span as the
+        parent, so task spans become structural children.
+
+        No-op when telemetry has not been started (self._tracer is None).
+        """
+        if self._tracer is None:
+            yield
+            return
+        from opentelemetry import context as otel_context
+        from opentelemetry import trace as trace_mod
+
+        _active = trace_mod.get_current_span()
+        _ctx = (
+            None
+            if _active.get_span_context().is_valid
+            else (trace_mod.set_span_in_context(self._session_span) if self._session_span else None)
+        )
+        span = self._tracer.start_span(name, context=_ctx, attributes=attributes or {})
+        token = otel_context.attach(trace_mod.set_span_in_context(span))
+        try:
+            yield
+        finally:
+            otel_context.detach(token)
+            span.end()
 
     def register_adapter(self, adapter: TelemetryAdapter) -> None:
         """Register a backend telemetry adapter.
@@ -330,6 +504,99 @@ class TelemetryManager:
         if self._span_exporter is None:
             return ()
         return self._span_exporter.get_finished_spans()
+
+    def export_as_otlp(self, path: str | None = None) -> str:
+        """Export finished spans as a valid OTLP JSON string.
+
+        Produces output compatible with Jaeger, Tempo, Grafana, and any standard
+        OTel visualizer. The JSONL checkpoint is RHAPSODY's internal analysis format
+        and is intentionally not OTLP-compliant; this method provides the standard
+        export path alongside it.
+
+        Args:
+            path: If given, write the JSON to this file (parent dirs created as needed).
+
+        Returns:
+            OTLP JSON string (``{"resourceSpans": [...]}``)
+        """
+        spans = self.read_traces()
+
+        def _typed_kv(k: str, v) -> dict:
+            if isinstance(v, bool):
+                return {"key": k, "value": {"boolValue": v}}
+            if isinstance(v, int):
+                return {"key": k, "value": {"intValue": str(v)}}
+            if isinstance(v, float):
+                return {"key": k, "value": {"doubleValue": v}}
+            if isinstance(v, (list, tuple)):
+                return {
+                    "key": k,
+                    "value": {"arrayValue": {"values": [_typed_kv("", e)["value"] for e in v]}},
+                }
+            return {"key": k, "value": {"stringValue": str(v)}}
+
+        otlp_spans = []
+        for s in spans:
+            try:
+                status_code = s.status.status_code.value
+            except AttributeError:
+                status_code = 0
+            status_obj: dict = {"code": status_code}
+            if s.status.description:
+                status_obj["message"] = s.status.description
+
+            try:
+                kind = s.kind.value
+            except AttributeError:
+                kind = 0
+
+            span_dict: dict = {
+                "traceId": format(s.context.trace_id, "032x"),
+                "spanId": format(s.context.span_id, "016x"),
+                "name": s.name,
+                "kind": kind,
+                "startTimeUnixNano": str(s.start_time) if s.start_time else "0",
+                "endTimeUnixNano": str(s.end_time) if s.end_time else "0",
+                "attributes": [_typed_kv(k, v) for k, v in (s.attributes or {}).items()],
+                "status": status_obj,
+            }
+            if s.parent:
+                span_dict["parentSpanId"] = format(s.parent.span_id, "016x")
+            if s.events:
+                span_dict["events"] = [
+                    {
+                        "timeUnixNano": str(e.timestamp),
+                        "name": e.name,
+                        "attributes": [_typed_kv(k, v) for k, v in (e.attributes or {}).items()],
+                    }
+                    for e in s.events
+                ]
+            otlp_spans.append(span_dict)
+
+        res_attrs = dict(self._tracer_provider.resource.attributes)
+        res_attrs.setdefault("session_id", self._session_id)
+        payload = {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": [_typed_kv(k, v) for k, v in res_attrs.items()]},
+                    "scopeSpans": [
+                        {
+                            "scope": {"name": "rhapsody"},
+                            "spans": otlp_spans,
+                        }
+                    ],
+                }
+            ]
+        }
+
+        result = json.dumps(payload)
+
+        if path is not None:
+            p = Path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(result)
+
+        return result
 
     # ------------------------------------------------------------------
     # Convenience methods
@@ -611,19 +878,27 @@ class TelemetryManager:
         Must be called AFTER _process_event() so that spans have been created/ended.
 
         Correlation rules:
-        - TaskStarted/Completed/Failed  → trace_id + span_id of the task span
-        - SessionStarted/SessionEnded   → trace_id + span_id of the session span
-        - TaskSubmitted/TaskQueued      → session trace_id only (span not yet created),
-                                          span_id = None (OTel-aligned: event belongs to
-                                          the trace but precedes the task span)
-        - ResourceUpdate                → (None, None) — node metric, not task-correlated
+        - TaskCreated/Submitted/Queued/Started/Completed/Failed → task span
+        - SessionStarted/SessionEnded   → session span
+        - ResourceUpdate                → session span
         """
         span_ctx = None
 
-        if event.event_type == "TaskStarted":
+        if event.event_type in ("TaskCreated", "TaskStarted", "TaskSubmitted", "TaskQueued"):
             span = self._active_spans.get(event.task_id)
             if span:
                 span_ctx = span.get_span_context()
+            else:
+                # Same-batch scenario: _process_event(TaskCompleted/Failed/Canceled) already
+                # ran and moved the span_ctx to _completed_span_ctx. Use .get (not .pop) —
+                # the terminal event's own _span_ids_for_event call will pop it.
+                span_ctx = self._completed_span_ctx.get(event.task_id)
+            if span_ctx is None and event.event_type in ("TaskSubmitted", "TaskQueued"):
+                # Fallback: TaskCreated not yet processed — attach to session trace only.
+                if self._session_span:
+                    session_ctx = self._session_span.get_span_context()
+                    if session_ctx.is_valid:
+                        return hex(session_ctx.trace_id), None
 
         elif event.event_type in ("TaskCompleted", "TaskFailed", "TaskCanceled"):
             span_ctx = self._completed_span_ctx.pop(event.task_id, None)
@@ -631,19 +906,32 @@ class TelemetryManager:
         elif event.event_type in ("SessionStarted", "SessionEnded"):
             if self._session_span:
                 span_ctx = self._session_span.get_span_context()
-
-        elif event.event_type in ("TaskSubmitted", "TaskQueued"):
-            # No task span exists yet — attach to the session trace so the event
-            # can be stitched into a full timeline; span_id remains None.
-            if self._session_span:
-                session_ctx = self._session_span.get_span_context()
-                if session_ctx.is_valid:
-                    return hex(session_ctx.trace_id), None
+            elif event.event_type == "SessionEnded":
+                # Same-batch: _process_event already ended _session_span; use snapshot.
+                span_ctx = self._completed_session_ctx
 
         elif event.event_type == "ResourceUpdate":
             # Node/GPU metric belongs to the session scope — attach to the session
             # span so it is queryable as a child of the root in OTel tools.
             if self._session_span:
+                span_ctx = self._session_span.get_span_context()
+
+        else:
+            # Generic fallback for custom/extension events (e.g.
+            # any user-emitted event via telemetry.emit()).
+            # Correlation by duck typing:
+            #   - has task_id → belongs to the task span (active or recently completed)
+            #   - no task_id  → belongs to the session span
+            # Use .get not .pop — custom events are never terminal; they never own the
+            # span lifecycle.
+            task_id = getattr(event, "task_id", None)
+            if task_id:
+                span = self._active_spans.get(task_id)
+                if span:
+                    span_ctx = span.get_span_context()
+                else:
+                    span_ctx = self._completed_span_ctx.get(task_id)
+            elif self._session_span:
                 span_ctx = self._session_span.get_span_context()
 
         if span_ctx is None or not span_ctx.is_valid:
@@ -691,52 +979,128 @@ class TelemetryManager:
     # ------------------------------------------------------------------
 
     async def _dispatch_loop(self) -> None:
-        """Background task: drain queue, update OTel instruments, notify subscribers."""
+        """Background task: drain queue in batches, update OTel instruments, notify subscribers."""
+        from opentelemetry import context as otel_context
         from opentelemetry import trace
 
-        while self._running or not self._queue.empty():
-            try:
-                event = await asyncio.wait_for(self._queue.get(), timeout=0.05)
-            except asyncio.TimeoutError:
-                continue
+        _batch_size = 500
 
-            # Keep raw log for convenience methods
+        while True:
+            # Fast path: drain up to _batch_size events without yielding to the event loop.
+            # get_nowait() is a plain deque.popleft() — zero asyncio scheduling overhead.
+            batch: list[BaseEvent] = []
+            try:
+                while len(batch) < _batch_size:
+                    item = self._queue.get_nowait()
+                    if item is _STOP_SENTINEL:
+                        self._queue.task_done()
+                        if batch:
+                            self._flush_batch(batch, trace, otel_context)
+                            for _ in batch:
+                                self._queue.task_done()
+                        return
+                    batch.append(item)
+            except asyncio.QueueEmpty:
+                pass
+
+            if not batch:
+                # Slow path: queue was empty — wait without a timeout.
+                # Plain queue.get(), no wait_for(), no timer handle, no Task allocation.
+                item = await self._queue.get()
+                if item is _STOP_SENTINEL:
+                    self._queue.task_done()
+                    return
+                batch.append(item)
+
+            self._flush_batch(batch, trace, otel_context)
+            for _ in batch:
+                self._queue.task_done()  # task_done AFTER processing (Fix 1)
+
+            # Yield only when a full batch was drained — queue likely has more items.
+            # Partial batch means queue is exhausted; await queue.get() yields naturally.
+            if len(batch) == _batch_size:
+                await asyncio.sleep(0)
+
+    def _flush_batch(self, batch: list[BaseEvent], trace_mod: Any, otel_context: Any) -> None:
+        """Process a collected batch: OTel instruments, JSONL write, subscribers."""
+        for event in batch:
             self._event_log.append(event)
-
             try:
-                self._process_event(event, trace)
+                self._process_event(event, trace_mod, otel_context)
             except Exception:
                 logger.exception("Error processing telemetry event %s", event.event_type)
 
-            # Write event line to JSONL file — enriched with OTel correlation IDs
-            if self._checkpoint_file is not None:
-                try:
-                    d = dataclasses.asdict(event)
-                    trace_id, span_id = self._span_ids_for_event(event)
-                    d["trace_id"] = trace_id
-                    d["span_id"] = span_id
-                    d["name"] = event.event_type  # OTel-compatible alias
-                    self._write_line("event", d)
-                except Exception:
-                    logger.debug("Failed to write event to checkpoint file", exc_info=True)
+        if self._checkpoint_file is not None:
+            self._write_batch(batch)
 
-            for sub in self._subscribers:
-                try:
-                    if asyncio.iscoroutinefunction(sub):
-                        asyncio.create_task(sub(event))
-                    else:
-                        sub(event)
-                except Exception:
-                    logger.debug("Subscriber raised exception", exc_info=True)
+        if self._subscribers:
+            for event in batch:
+                for sub in self._subscribers:
+                    try:
+                        if asyncio.iscoroutinefunction(sub):
+                            asyncio.create_task(sub(event))
+                        else:
+                            sub(event)
+                    except Exception:
+                        logger.debug("Subscriber raised exception", exc_info=True)
 
-            self._queue.task_done()
+    def _write_batch(self, events: list[BaseEvent]) -> None:
+        """Write a batch of events to JSONL in a single file.write() call."""
+        lines = []
+        for event in events:
+            try:
+                # fields() + getattr: shallow copy that captures init=False class-level
+                # fields (e.g. event_type) which vars()/.__dict__ misses on frozen subclasses.
+                d = {f.name: getattr(event, f.name) for f in dataclasses.fields(event)}
+                trace_id, span_id = self._span_ids_for_event(event)
+                d["trace_id"] = trace_id
+                d["span_id"] = span_id
+                d["name"] = event.event_type
+                d["section"] = "event"
+                lines.append(json.dumps(d, default=str))
+            except Exception:
+                logger.debug("Failed to serialize event for checkpoint", exc_info=True)
+        if lines:
+            try:
+                self._checkpoint_file.write("\n".join(lines) + "\n")
+            except OSError:
+                logger.warning(
+                    "Telemetry checkpoint write failed; events lost for this batch",
+                    exc_info=True,
+                )
 
-    def _process_event(self, event: BaseEvent, trace_mod: Any) -> None:
+    def _process_event(self, event: BaseEvent, trace_mod: Any, otel_context: Any) -> None:
         """Translate a RHAPSODY event into OTel instrument calls and span lifecycle."""
         etype = event.event_type
-        attrs = {"session_id": event.session_id, "backend": event.backend}
+        attrs = {"session_id": event.session_id, "backend": event.backend or ""}
 
-        if etype == "TaskSubmitted":
+        if etype == "TaskCreated":
+            executable = event.attributes.get("executable", "")
+            task_type = event.attributes.get("task_type", "")
+            a = {
+                **attrs,
+                "task_id": event.task_id,
+                "executable": executable,
+                "task_type": task_type,
+            }
+            for extractor in self._span_attribute_extractors:
+                try:
+                    a.update(extractor(event))
+                except Exception:
+                    logger.debug("span attribute extractor failed", exc_info=True)
+            _ctx = self._task_contexts.pop(event.task_id, None)
+            if _ctx is not None:
+                _token = otel_context.attach(_ctx)
+                try:
+                    self._active_spans[event.task_id] = self._tracer.start_span(
+                        "task", attributes=a
+                    )
+                finally:
+                    otel_context.detach(_token)
+            else:
+                self._active_spans[event.task_id] = self._tracer.start_span("task", attributes=a)
+
+        elif etype == "TaskSubmitted":
             self._c_submitted.add(1, {**attrs, "task_id": event.task_id})
 
         elif etype == "TaskStarted":
@@ -750,10 +1114,29 @@ class TelemetryManager:
             }
             self._c_started.add(1, a)
             self._g_running.add(1, a)
-            ctx = trace_mod.set_span_in_context(self._session_span) if self._session_span else None
-            self._active_spans[event.task_id] = self._tracer.start_span(
-                "task", context=ctx, attributes=a
-            )
+            if event.task_id not in self._active_spans:
+                # Fallback: TaskCreated was never seen (incomplete lifecycle).
+                # Use a_span copy so metric attributes (a) are not polluted with
+                # workflow_id or other span-only extractor fields.
+                a_span = dict(a)
+                for extractor in self._span_attribute_extractors:
+                    try:
+                        a_span.update(extractor(event))
+                    except Exception:
+                        logger.debug("span attribute extractor failed", exc_info=True)
+                _ctx = self._task_contexts.pop(event.task_id, None)
+                if _ctx is not None:
+                    _token = otel_context.attach(_ctx)
+                    try:
+                        self._active_spans[event.task_id] = self._tracer.start_span(
+                            "task", attributes=a_span
+                        )
+                    finally:
+                        otel_context.detach(_token)
+                else:
+                    self._active_spans[event.task_id] = self._tracer.start_span(
+                        "task", attributes=a_span
+                    )
 
         elif etype == "TaskCompleted":
             executable = event.attributes.get("executable", "")
@@ -770,17 +1153,13 @@ class TelemetryManager:
             if span is not None:
                 self._g_running.add(-1, a)
             else:
-                ctx = (
-                    trace_mod.set_span_in_context(self._session_span)
-                    if self._session_span
-                    else None
-                )
-                span = self._tracer.start_span("task", context=ctx, attributes=a)
+                span = self._tracer.start_span("task", attributes=a)
             span.set_attribute("status", "completed")
             span.set_attribute("executable", executable)
             span.set_attribute("task_type", task_type)
             if event.attributes.get("incomplete_lifecycle"):
                 span.set_attribute("incomplete_lifecycle", True)
+            span.set_status(trace_mod.StatusCode.OK)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
 
@@ -800,18 +1179,14 @@ class TelemetryManager:
             if span is not None:
                 self._g_running.add(-1, a)
             else:
-                ctx = (
-                    trace_mod.set_span_in_context(self._session_span)
-                    if self._session_span
-                    else None
-                )
-                span = self._tracer.start_span("task", context=ctx, attributes=a)
+                span = self._tracer.start_span("task", attributes=a)
             span.set_attribute("status", "failed")
             span.set_attribute("error_type", error_type)
             span.set_attribute("executable", executable)
             span.set_attribute("task_type", task_type)
             if event.attributes.get("incomplete_lifecycle"):
                 span.set_attribute("incomplete_lifecycle", True)
+            span.set_status(trace_mod.StatusCode.ERROR, error_type)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
 
@@ -830,25 +1205,27 @@ class TelemetryManager:
             if span is not None:
                 self._g_running.add(-1, a)
             else:
-                ctx = (
-                    trace_mod.set_span_in_context(self._session_span)
-                    if self._session_span
-                    else None
-                )
-                span = self._tracer.start_span("task", context=ctx, attributes=a)
+                span = self._tracer.start_span("task", attributes=a)
             span.set_attribute("status", "canceled")
             span.set_attribute("executable", executable)
             span.set_attribute("task_type", task_type)
             if event.attributes.get("incomplete_lifecycle"):
                 span.set_attribute("incomplete_lifecycle", True)
+            span.set_status(trace_mod.StatusCode.ERROR)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
 
+        elif etype == "TaskQueued":
+            span = self._active_spans.get(event.task_id)
+            if span is not None and span.is_recording():
+                span.add_event("TaskQueued", attributes={"task_id": event.task_id})
+
         elif etype == "SessionStarted":
-            self._session_span = self._tracer.start_span("session", attributes=attrs)
+            pass  # session span created synchronously in start() for immediate availability
 
         elif etype == "SessionEnded":
             if self._session_span:
+                self._completed_session_ctx = self._session_span.get_span_context()
                 self._session_span.end()
                 self._session_span = None
 
@@ -875,7 +1252,7 @@ class TelemetryManager:
         filename = f"{self._session_id}.{ts}.telemetry.jsonl"
         filepath = path / filename
         try:
-            self._checkpoint_file = open(filepath, "w", buffering=1)  # line-buffered
+            self._checkpoint_file = open(filepath, "w", buffering=131072)  # 128 KB block buffer
             logger.info("Telemetry checkpoint file: %s", filepath)
         except OSError:
             logger.exception("Could not open telemetry checkpoint file %s", filepath)
@@ -925,6 +1302,8 @@ class TelemetryManager:
                 "start_time_s": s.start_time / 1e9 if s.start_time else None,
                 "end_time_s": s.end_time / 1e9 if s.end_time else None,
                 "duration_ms": round(dur, 3) if dur is not None else None,
+                "status_code": s.status.status_code.name,
+                "status_description": s.status.description or None,
                 "attributes": dict(s.attributes or {}),
             }
             try:

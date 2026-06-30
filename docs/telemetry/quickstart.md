@@ -54,9 +54,9 @@ asyncio.run(main())
     "duration_seconds": 3.42,
     "tasks": {
         "submitted": 20,
-        "started":   20,
         "completed": 20,
         "failed":     0,
+        "canceled":   0,
         "running":    0,
     },
     "duration": {
@@ -67,6 +67,8 @@ asyncio.run(main())
     },
     "resources": {
         "concurrent/myhost": {
+            "backend":           "concurrent",
+            "node_id":           "myhost",
             "cpu_percent":       41.2,
             "memory_percent":    28.7,
             "gpu_percent":       None,
@@ -209,6 +211,9 @@ This produces a multi-panel PNG (shown in [Integrations — Real Run Visualizati
 | `resource_poll_interval` | `float` | `5.0` | Seconds between resource metric polls |
 | `checkpoint_interval` | `float \| None` | `None` | Seconds between periodic metric+span flushes. `None` = flush only at session end |
 | `checkpoint_path` | `str \| None` | `None` | Directory for the JSONL file. `None` = no file output |
+| `span_processors` | `list \| None` | `None` | OTel `SpanProcessor` instances (e.g. `BatchSpanProcessor(OTLPSpanExporter())`) added alongside RHAPSODY's internal `SpanBuffer`. Callers own exporter construction. |
+| `metric_readers` | `list \| None` | `None` | OTel `MetricReader` instances (e.g. `PeriodicExportingMetricReader(OTLPMetricExporter())`) added alongside RHAPSODY's internal `InMemoryMetricReader`. |
+| `resource` | `Resource \| None` | `None` | OTel `Resource` override. `None` = `Resource.create()` reads `OTEL_SERVICE_NAME` / `OTEL_RESOURCE_ATTRIBUTES` from the environment automatically. |
 
 To access the manager after the initial call use `session.get_telemetry()`.
 

@@ -478,3 +478,73 @@ async def test_dask_submit_executable_no_cwd():
 
     except ImportError:
         pytest.skip("Dask dependencies not available")
+
+
+# ---------------------------------------------------------------------------
+# result_contract tests — stdout/stderr must be str after any DONE/FAILED
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.result_contract
+@pytest.mark.asyncio
+async def test_dask_function_done_stdout_is_string():
+    """Function DONE callback must include stdout as a str."""
+    try:
+        from unittest.mock import patch
+
+        from rhapsody.backends import DaskExecutionBackend
+    except ImportError:
+        pytest.skip("Dask not available")
+
+    backend = DaskExecutionBackend()
+    backend._initialized = True
+    captured = []
+    backend.register_callback(lambda t, s: captured.append((dict(t), s)))
+
+    task = ComputeTask(function=lambda: 99, args=[])
+    backend.tasks[task["uid"]] = {}
+
+    fut = asyncio.get_event_loop().create_future()
+    with patch.object(backend, "_client") as mc:
+        mc.submit.return_value = fut
+        asyncio.create_task(backend._submit_async_function(task))
+        await asyncio.sleep(0)
+        fut.set_result(99)
+        await asyncio.sleep(0)
+
+    done = [(t, s) for t, s in captured if s == "DONE"]
+    assert done, "DONE callback never fired"
+    assert done[0][0].get("stdout") == ""
+    assert done[0][0].get("stderr") == ""
+
+
+@pytest.mark.result_contract
+@pytest.mark.asyncio
+async def test_dask_function_failed_stdout_is_string():
+    """Function FAILED callback must include stdout as a str."""
+    try:
+        from unittest.mock import patch
+
+        from rhapsody.backends import DaskExecutionBackend
+    except ImportError:
+        pytest.skip("Dask not available")
+
+    backend = DaskExecutionBackend()
+    backend._initialized = True
+    captured = []
+    backend.register_callback(lambda t, s: captured.append((dict(t), s)))
+
+    task = ComputeTask(function=lambda: 1 / 0, args=[])
+    backend.tasks[task["uid"]] = {}
+
+    fut = asyncio.get_event_loop().create_future()
+    with patch.object(backend, "_client") as mc:
+        mc.submit.return_value = fut
+        asyncio.create_task(backend._submit_async_function(task))
+        await asyncio.sleep(0)
+        fut.set_exception(ZeroDivisionError("div by zero"))
+        await asyncio.sleep(0)
+
+    failed = [(t, s) for t, s in captured if s == "FAILED"]
+    assert failed, "FAILED callback never fired"
+    assert isinstance(failed[0][0].get("stdout"), str)
