@@ -48,10 +48,10 @@ def test_event_wait_returns_truthy_when_set():
 
 def test_event_wait_returns_falsy_on_timeout():
     e = Event()
-    t0 = time.time()
+    t0 = time.monotonic()
     rv = e.wait(timeout=0.2)
     assert not rv, f"Event.wait should be falsy on timeout, got {rv!r}"
-    assert time.time() - t0 >= 0.15, "Event.wait returned before its timeout"
+    assert time.monotonic() - t0 >= 0.15, "Event.wait returned before its timeout"
 
 
 def test_queue_event_cross_process_roundtrip():

@@ -58,9 +58,12 @@ def test_process_group_lifecycle_smoke():
     grp.init()
     grp.start()
 
-    msg = q.get(timeout=30.0)
-    assert msg.get("pid") and msg.get("host")
-
-    shutdown.set()
-    grp.join(timeout=30.0)
-    grp.close()
+    try:
+        msg = q.get(timeout=30.0)
+        assert msg.get("pid") and msg.get("host")
+    finally:
+        # Guarantee the worker is told to stop and the group is reaped even if
+        # q.get() times out or the assertion fails, else pg_worker loops forever.
+        shutdown.set()
+        grp.join(timeout=30.0)
+        grp.close()

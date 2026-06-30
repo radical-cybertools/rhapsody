@@ -37,7 +37,10 @@ import pytest_asyncio
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
-os.environ["PYTHONPATH"] = _HERE + os.pathsep + os.environ.get("PYTHONPATH", "")
+# Only append a separator when PYTHONPATH is already populated; a trailing
+# separator (empty entry) is implicitly treated as the cwd, which we don't want.
+_existing_pp = os.environ.get("PYTHONPATH")
+os.environ["PYTHONPATH"] = f"{_HERE}{os.pathsep}{_existing_pp}" if _existing_pp else _HERE
 
 
 # --- Dragon must be importable -------------------------------------------

@@ -62,6 +62,9 @@ def test_batch_close_join_terminate_lifecycle():
     is deprecated as of Dragon 0.14 (no-op); only ``join()`` is real teardown.
     """
     b = Batch(disable_telem=True)
-    b.close()
-    b.join(timeout=30.0)
-    b.terminate()
+    try:
+        b.close()
+        b.join(timeout=30.0)
+    finally:
+        # Always terminate so a raising/timed-out join() can't leak the Batch.
+        b.terminate()

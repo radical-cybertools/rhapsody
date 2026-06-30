@@ -45,8 +45,12 @@ def test_batch_job_launch(batch: Batch, nranks):
             pmi=PMIBackend.PMIX,
         )
         job.get(timeout=120.0)
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"PMIX launch unavailable on this host: {exc!r}")
+    except RuntimeError as exc:
+        # Only skip for a genuine PMIx-unavailable host; let other RuntimeErrors
+        # (and any TypeError/AttributeError/etc.) surface as real failures.
+        if "pmi" in str(exc).lower():
+            pytest.skip(f"PMIX launch unavailable on this host: {exc!r}")
+        raise
 
     assert isinstance(job, Job)
     result, tb, raised, _stdout, _stderr = batch.results_ddict[job.uid]
