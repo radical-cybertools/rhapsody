@@ -37,7 +37,7 @@ warnings.warn(
 
 @pytest.mark.skip(
     reason="DISABLED — Dragon bug: SIGKILL'd worker is undetected, task.get() "
-           "blocks forever, timeout= is ignored. Re-enable to check if fixed."
+    "blocks forever, timeout= is ignored. Re-enable to check if fixed."
 )
 @pytest.mark.timeout(5, method="thread")
 def test_sigkill_in_worker_hangs(fresh_batch: Batch):

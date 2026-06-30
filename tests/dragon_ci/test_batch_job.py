@@ -41,7 +41,8 @@ def test_batch_job_launch(batch: Batch, nranks):
     try:
         job = batch.job(
             [(nranks, ProcessTemplate("/bin/true", args=()))],
-            name=f"dragon-ci-{nranks}rank", pmi=PMIBackend.PMIX,
+            name=f"dragon-ci-{nranks}rank",
+            pmi=PMIBackend.PMIX,
         )
         job.get(timeout=120.0)
     except Exception as exc:  # noqa: BLE001

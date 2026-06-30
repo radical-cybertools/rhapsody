@@ -12,8 +12,13 @@ import pytest
 from dragon.infrastructure.policy import Policy
 
 _POLICY_KWARGS = (
-    "placement", "host_name", "host_id", "distribution",
-    "cpu_affinity", "gpu_affinity", "wait_mode",
+    "placement",
+    "host_name",
+    "host_id",
+    "distribution",
+    "cpu_affinity",
+    "gpu_affinity",
+    "wait_mode",
 )
 
 

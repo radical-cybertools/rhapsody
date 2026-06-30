@@ -64,7 +64,9 @@ def pg_worker(queue, shutdown_event):
 
 
 def fn_assert_false(_x):
-    assert False, "intentional dragon_ci probe"
+    # Raise explicitly rather than `assert False` so the probe still fires under
+    # `python -O` (which strips asserts); the test expects this AssertionError.
+    raise AssertionError("intentional dragon_ci probe")
 
 
 def fn_sys_exit_one(_x):

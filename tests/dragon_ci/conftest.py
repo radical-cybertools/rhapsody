@@ -176,8 +176,8 @@ async def batch():
 
 @pytest_asyncio.fixture(loop_scope="session")
 async def fresh_batch():
-    """A throwaway Batch for tests that intentionally kill workers — the
-    session ``batch`` cannot recover once a worker is SIGKILL'd.
+    """A throwaway Batch for tests that intentionally kill workers — the session ``batch`` cannot
+    recover once a worker is SIGKILL'd.
 
     Skips the graceful ``join()`` because dead workers make it block for
     the full timeout; ``terminate()`` can also raise ``DragonUserCodeError``

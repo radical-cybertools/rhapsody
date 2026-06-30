@@ -13,8 +13,13 @@ import inspect
 import pytest
 from dragon.workflows.batch import Batch
 
-_BATCH_CTOR_KWARGS = ("num_nodes", "pool_nodes", "disable_telem",
-                      "scheduler_workers", "results_ddict_mem")
+_BATCH_CTOR_KWARGS = (
+    "num_nodes",
+    "pool_nodes",
+    "disable_telem",
+    "scheduler_workers",
+    "results_ddict_mem",
+)
 _BATCH_METHODS = ("function", "process", "job", "fence", "close", "join", "terminate")
 
 
@@ -43,8 +48,10 @@ def test_batch_results_ddict_supports_lookup(batch):
 
 
 def test_batch_fence_callable_on_idle_batch(batch):
-    """Rhapsody exposes ``Batch.fence()`` to user code as a barrier. On an
-    idle Batch it must complete without raising."""
+    """Rhapsody exposes ``Batch.fence()`` to user code as a barrier.
+
+    On an idle Batch it must complete without raising.
+    """
     batch.fence()
 
 

@@ -13,8 +13,8 @@ from dragon.native.machine import System
 
 @pytest.mark.parametrize("attr", ["nnodes", "hostname_policies"])
 def test_system_attribute_present(attr):
-    """Rhapsody reads ``System().nnodes`` (V1 DDict sizing) and calls
-    ``hostname_policies()`` (telemetry adapter, one worker per node)."""
+    """Rhapsody reads ``System().nnodes`` (V1 DDict sizing) and calls ``hostname_policies()``
+    (telemetry adapter, one worker per node)."""
     assert hasattr(System(), attr), f"System.{attr} removed"
 
 

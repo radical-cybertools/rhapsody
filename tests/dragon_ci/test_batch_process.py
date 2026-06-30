@@ -43,9 +43,11 @@ def test_process_default_stdio_is_empty(batch: Batch):
 
 
 def test_process_template_args_none_raises_typeerror(batch: Batch):
-    """``ProcessTemplate(...).args`` defaults to None, which makes
-    ``Batch.process`` raise ``TypeError: 'NoneType' object is not iterable``.
-    Pass ``args=()`` to avoid it."""
+    """``ProcessTemplate(...).args`` defaults to None, which makes ``Batch.process`` raise
+    ``TypeError: 'NoneType' object is not iterable``.
+
+    Pass ``args=()`` to avoid it.
+    """
     with pytest.raises(TypeError, match="NoneType"):
         batch.process(ProcessTemplate("/bin/true"))
 
@@ -64,16 +66,13 @@ def test_process_non_zero_exit_is_visible(batch: Batch):
 def test_process_capture_stdio_via_shell_redirect(batch: Batch, tmp_path):
     """Pins Rhapsody's ``capture_stdio`` workaround.
 
-    A wrapper bash script redirects its own stdout/stderr to files, then
-    runs the real command. Dragon launches the bash; the files end up with
-    the captured output regardless of Dragon's PIPE behaviour.
+    A wrapper bash script redirects its own stdout/stderr to files, then runs the real command.
+    Dragon launches the bash; the files end up with the captured output regardless of Dragon's PIPE
+    behaviour.
     """
     stdout_path = tmp_path / "task.stdout"
     script_path = tmp_path / "task.sh"
-    script_path.write_text(
-        f"#!/usr/bin/bash\n"
-        f"/bin/echo 'stdout-from-wrapped' 1>{stdout_path}\n"
-    )
+    script_path.write_text(f"#!/usr/bin/bash\n/bin/echo 'stdout-from-wrapped' 1>{stdout_path}\n")
     script_path.chmod(0o755)
 
     task = batch.process(ProcessTemplate("/bin/bash", args=(str(script_path),)))

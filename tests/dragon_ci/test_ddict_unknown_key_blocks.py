@@ -34,13 +34,18 @@ warnings.warn(
 
 @pytest.mark.skip(
     reason="DISABLED — Dragon bug: DDict[unknown_key] blocks instead of raising "
-           "KeyError when wait_for_keys=True. Re-enable to check if fixed."
+    "KeyError when wait_for_keys=True. Re-enable to check if fixed."
 )
 @pytest.mark.timeout(10, method="thread")
 def test_ddict_get_unknown_key_blocks_forever():
     # wait_for_keys=True requires working_set_size > 1 (Dragon enforces it).
-    d = DDict(n_nodes=1, managers_per_node=1, total_mem=4 * 1024 * 1024,
-              wait_for_keys=True, working_set_size=2)
+    d = DDict(
+        n_nodes=1,
+        managers_per_node=1,
+        total_mem=4 * 1024 * 1024,
+        wait_for_keys=True,
+        working_set_size=2,
+    )
     try:
         with pytest.raises(KeyError):
             _ = d["never-written"]

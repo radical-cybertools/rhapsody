@@ -53,7 +53,10 @@ def test_function_get_non_blocking_raises_when_not_ready(batch: Batch):
 
 
 def test_results_ddict_five_tuple_on_success(batch: Batch):
-    """Rhapsody unpacks exactly five fields. Order and shape are the contract."""
+    """Rhapsody unpacks exactly five fields.
+
+    Order and shape are the contract.
+    """
     task = batch.function(add, 1, 1)
     task.get(timeout=60.0)
     entry = batch.results_ddict[task.uid]

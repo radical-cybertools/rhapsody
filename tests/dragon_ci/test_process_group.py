@@ -32,9 +32,7 @@ def test_process_group_ctor_kwarg(kwarg):
 
 @pytest.mark.parametrize("method", ["add_process", "init", "start", "join", "stop", "close"])
 def test_process_group_method_present(method):
-    assert callable(getattr(ProcessGroup, method, None)), (
-        f"ProcessGroup.{method}() removed"
-    )
+    assert callable(getattr(ProcessGroup, method, None)), f"ProcessGroup.{method}() removed"
 
 
 @pytest.mark.parametrize("kwarg", ["nproc", "template"])

@@ -22,7 +22,15 @@ from dragon.native.process import Popen
 from dragon.native.process import ProcessTemplate
 
 _TEMPLATE_KWARGS = (
-    "target", "args", "kwargs", "cwd", "env", "stdin", "stdout", "stderr", "policy",
+    "target",
+    "args",
+    "kwargs",
+    "cwd",
+    "env",
+    "stdin",
+    "stdout",
+    "stderr",
+    "policy",
 )
 
 
@@ -60,13 +68,17 @@ def test_template_env_dict_preserved():
 def test_template_stdio_sentinels_accepted():
     """PIPE/DEVNULL must be acceptable to the stdin/stdout/stderr kwargs."""
     ProcessTemplate(
-        "/bin/echo", args=("x",),
-        stdin=Popen.DEVNULL, stdout=Popen.PIPE, stderr=Popen.PIPE,
+        "/bin/echo",
+        args=("x",),
+        stdin=Popen.DEVNULL,
+        stdout=Popen.PIPE,
+        stderr=Popen.PIPE,
     )
 
 
 def test_template_argdata_round_trips_via_cloudpickle():
     """Rhapsody round-trips ``(target, args, kwargs)`` out of ``pt.argdata``."""
+
     def _target(x, y):
         return x + y
 

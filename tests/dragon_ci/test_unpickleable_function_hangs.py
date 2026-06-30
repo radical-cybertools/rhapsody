@@ -43,7 +43,7 @@ warnings.warn(
 
 @pytest.mark.skip(
     reason="DISABLED — Dragon bug: worker silently dies during cloudpickle "
-           "unpickling; task.get() blocks forever. Re-enable to check if fixed."
+    "unpickling; task.get() blocks forever. Re-enable to check if fixed."
 )
 @pytest.mark.timeout(5, method="thread")
 def test_unpickleable_function_hangs(fresh_batch: Batch):
