@@ -20,8 +20,7 @@ def _get_logger() -> logging.Logger:
 class NoopExecutionBackend(BaseBackend):
     """Backend that completes every task instantly.
 
-    Useful for measuring Edge/bridge/client overhead without any actual
-    task execution cost.
+    Useful for measuring Orbit/bridge/client overhead without any actual task execution cost.
     """
 
     def __init__(self, name: str = "noop"):
@@ -53,12 +52,14 @@ class NoopExecutionBackend(BaseBackend):
 
         submitted = []
         for task in tasks:
-            task.update({
-                "return_value": True,
-                "stdout":       "",
-                "stderr":       "",
-                "exit_code":    0,
-            })
+            task.update(
+                {
+                    "return_value": True,
+                    "stdout": "",
+                    "stderr": "",
+                    "exit_code": 0,
+                }
+            )
             self.tasks[task["uid"]] = task
             future = asyncio.create_task(self._complete(task))
             submitted.append(future)
@@ -83,8 +84,7 @@ class NoopExecutionBackend(BaseBackend):
     def build_task(self, uid, task_desc, task_specific_kwargs):
         pass
 
-    def link_explicit_data_deps(self, src_task=None, dst_task=None,
-                                file_name=None, file_path=None):
+    def link_explicit_data_deps(self, src_task=None, dst_task=None, file_name=None, file_path=None):
         pass
 
     def link_implicit_data_deps(self, src_task, dst_task):
