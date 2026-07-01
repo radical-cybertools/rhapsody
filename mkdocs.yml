@@ -127,6 +127,8 @@ nav:
       - Overview: hpc-machines/index.md
       - NCSA Delta: hpc-machines/ncsa-delta.md
       - NERSC Perlmutter: hpc-machines/perlmutter.md
+      - PSC Bridges-2: hpc-machines/bridges2.md
+      - Purdue Anvil: hpc-machines/anvil.md
   - Project:
       - project/index.md
       - Roadmap: project/roadmap.md
