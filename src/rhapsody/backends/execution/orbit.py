@@ -182,6 +182,9 @@ class OrbitExecutionBackend(BaseBackend):
 
     def _apply_task_update(self, body: dict):
         """Apply a single task status update from SSE."""
+        if not body:
+            return
+
         uid = body.get("uid")
         state = body.get("state", "")
 
@@ -268,14 +271,19 @@ class OrbitExecutionBackend(BaseBackend):
                 if eid in self._ENDPOINTS_TO_SKIP:
                     continue
 
-                plugins = self._bc.get_endpoint_client(eid).list_plugins()
-                info = plugins.get(self._plugin_name)
-                if info and info.get("enabled"):
-                    self.logger.info(
-                        "auto-selected endpoint %r (plugin %r)", eid, self._plugin_name
-                    )
-                    self._endpoint_name = eid
-                    break
+                # An offline or misbehaving endpoint must not abort the whole
+                # auto-selection scan — skip it and keep probing the rest.
+                try:
+                    plugins = self._bc.get_endpoint_client(eid).list_plugins()
+                    info = plugins.get(self._plugin_name)
+                    if info and info.get("enabled"):
+                        self.logger.info(
+                            "auto-selected endpoint %r (plugin %r)", eid, self._plugin_name
+                        )
+                        self._endpoint_name = eid
+                        break
+                except Exception as exc:
+                    self.logger.debug("failed to query plugins on endpoint %r: %s", eid, exc)
 
         if not self._endpoint_name:
             raise RuntimeError(
@@ -372,6 +380,9 @@ class OrbitExecutionBackend(BaseBackend):
         When batching is disabled (batch_window == 0), delegates directly
         to ``RhapsodyClient.submit_tasks()``.
         """
+        if not self._initialized:
+            await self._async_init()
+
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
 
@@ -459,6 +470,9 @@ class OrbitExecutionBackend(BaseBackend):
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a single task on the remote endpoint."""
+        if not self._initialized:
+            await self._async_init()
+
         if uid not in self._tasks:
             return False
 
@@ -477,6 +491,9 @@ class OrbitExecutionBackend(BaseBackend):
         callbacks don't hang.  ``_fire_callback`` dedups against the matching
         CANCELED SSE notification, so each task's terminal callback fires once.
         """
+        if not self._initialized:
+            await self._async_init()
+
         result = await asyncio.to_thread(self._rh.cancel_all_tasks)
 
         for task in list(self._tasks.values()):
