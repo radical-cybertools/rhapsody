@@ -197,7 +197,18 @@ class OrbitExecutionBackend(BaseBackend):
     # ------------------------------------------------------------------
 
     def _on_task_notification(self, endpoint, plugin, topic, data):
-        """SSE callback: update local tasks and fire Rhapsody callback."""
+        """SSE callback — runs on the client's background (SSE) thread.
+
+        Marshal the whole update onto the event loop so that every read/write of
+        ``self._tasks`` and the task dicts happens single-threaded there, never
+        racing loop-side writers (submit / cancel / flush-error).
+        """
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(self._handle_notification, topic, data)
+
+    def _handle_notification(self, topic, data):
+        """Dispatch a notification on the event-loop thread."""
         if topic == "task_status_batch":
             for t in data.get("tasks", []):
                 self._apply_task_update(t)
@@ -254,9 +265,9 @@ class OrbitExecutionBackend(BaseBackend):
         if self._prof:
             self._prof.prof("task_complete", uid=uid, state=state)
 
-        # Fire Rhapsody state callback (thread-safe)
-        if self._loop and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(self._fire_callback, task, state)
+        # Already on the event-loop thread (dispatched from
+        # _on_task_notification via call_soon_threadsafe), so fire directly.
+        self._fire_callback(task, state)
 
     def _fire_callback(self, task: dict, state: str) -> None:
         """Invoke the Rhapsody state callback, at most once per terminal state.

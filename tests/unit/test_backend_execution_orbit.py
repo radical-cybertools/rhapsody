@@ -212,8 +212,11 @@ async def test_shutdown_closes_clients():
 # ---------------------------------------------------------------------------
 
 
-def test_on_task_notification_single():
-    backend = _make_backend()
+@pytest.mark.asyncio
+async def test_on_task_notification_single():
+    # _on_task_notification marshals to the event loop; drive one tick to let
+    # the scheduled handler run before asserting.
+    backend = await _init_backend()
     backend._tasks["t.001"] = {"uid": "t.001", "state": "SUBMITTED"}
 
     backend._on_task_notification(
@@ -222,13 +225,15 @@ def test_on_task_notification_single():
         topic="task_status",
         data={"uid": "t.001", "state": "DONE", "stdout": "hello\n", "exit_code": 0},
     )
+    await asyncio.sleep(0)
 
     assert backend._tasks["t.001"]["state"] == "DONE"
     assert backend._tasks["t.001"]["stdout"] == "hello\n"
 
 
-def test_on_task_notification_batch():
-    backend = _make_backend()
+@pytest.mark.asyncio
+async def test_on_task_notification_batch():
+    backend = await _init_backend()
     backend._tasks["t.001"] = {"uid": "t.001", "state": "SUBMITTED"}
     backend._tasks["t.002"] = {"uid": "t.002", "state": "SUBMITTED"}
 
@@ -243,14 +248,16 @@ def test_on_task_notification_batch():
             ]
         },
     )
+    await asyncio.sleep(0)
 
     assert backend._tasks["t.001"]["state"] == "DONE"
     assert backend._tasks["t.002"]["state"] == "FAILED"
     assert backend._tasks["t.002"]["error"] == "boom"
 
 
-def test_on_task_notification_ignores_unknown_task():
-    backend = _make_backend()
+@pytest.mark.asyncio
+async def test_on_task_notification_ignores_unknown_task():
+    backend = await _init_backend()
     # No tasks registered — should not crash
     backend._on_task_notification(
         endpoint="hpc1",
@@ -258,12 +265,14 @@ def test_on_task_notification_ignores_unknown_task():
         topic="task_status",
         data={"uid": "unknown", "state": "DONE"},
     )
+    await asyncio.sleep(0)
 
 
-def test_on_task_notification_coerces_string_exception():
+@pytest.mark.asyncio
+async def test_on_task_notification_coerces_string_exception():
     """A string exception serialized over the wire must become a real BaseException so session.py
     raises it instead of silently treating the failed task as successful."""
-    backend = _make_backend()
+    backend = await _init_backend()
     backend._tasks["t.001"] = {"uid": "t.001", "state": "SUBMITTED"}
 
     backend._on_task_notification(
@@ -272,6 +281,7 @@ def test_on_task_notification_coerces_string_exception():
         topic="task_status",
         data={"uid": "t.001", "state": "FAILED", "exception": "remote boom"},
     )
+    await asyncio.sleep(0)
 
     exc = backend._tasks["t.001"]["exception"]
     assert isinstance(exc, BaseException)
@@ -622,3 +632,46 @@ async def test_shutdown_flushes_buffered_tasks():
     backend._mock_rh.submit_tasks.assert_called_once()
     sent = backend._mock_rh.submit_tasks.call_args[0][0]
     assert [t["uid"] for t in sent] == ["t.1"]
+
+
+@pytest.mark.asyncio
+async def test_sse_notification_applied_on_loop_thread():
+    """A notification delivered from a non-loop (SSE) thread must be applied on the event-loop
+    thread — never on the caller's thread — so it can't race loop-side writers of self._tasks."""
+    backend = await _init_backend()
+    backend._tasks["t.1"] = {"uid": "t.1", "state": "SUBMITTED"}
+
+    applied = {}
+    orig_apply = backend._apply_task_update
+
+    def spy(body):
+        applied["thread"] = threading.get_ident()
+        return orig_apply(body)
+
+    backend._apply_task_update = spy
+
+    sse = {}
+
+    def deliver():
+        sse["thread"] = threading.get_ident()
+        backend._on_task_notification(
+            endpoint="e",
+            plugin="rhapsody",
+            topic="task_status",
+            data={"uid": "t.1", "state": "DONE"},
+        )
+
+    t = threading.Thread(target=deliver)
+    t.start()
+    t.join()
+
+    # Scheduled on the loop, but not run yet (we haven't yielded).
+    assert "thread" not in applied
+    assert backend._tasks["t.1"]["state"] == "SUBMITTED"
+
+    await asyncio.sleep(0)
+
+    loop_thread = threading.get_ident()
+    assert applied["thread"] == loop_thread  # applied on the loop thread
+    assert applied["thread"] != sse["thread"]  # not the SSE (caller) thread
+    assert backend._tasks["t.1"]["state"] == "DONE"
