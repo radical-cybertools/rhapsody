@@ -20,7 +20,7 @@ def _get_logger() -> logging.Logger:
 class NoopExecutionBackend(BaseBackend):
     """Backend that completes every task instantly.
 
-    Useful for measuring Endpoint/bridge/client overhead without any actual task execution cost.
+    Useful for measuring Orbit/bridge/client overhead without any actual task execution cost.
     """
 
     def __init__(self, name: str = "noop"):
