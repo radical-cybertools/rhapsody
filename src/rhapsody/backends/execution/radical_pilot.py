@@ -245,10 +245,12 @@ class RadicalExecutionBackend(BaseBackend):
             self.tasks = {}
             self.raptor_mode = False
 
-            # Extract and remove partition info from resources.  Copy first so
-            # we don't mutate the caller-provided dict in place.
-            self.resources = dict(self.resources)
-            partition = self.resources.pop("partition", {})
+            # Work on a local copy and strip "partition" from it, so the pilot
+            # description doesn't receive partition config while self.resources
+            # stays intact (caller's dict is not mutated, and a retry of
+            # _initialize still sees the partition entry).
+            resources = dict(self.resources)
+            partition = resources.pop("partition", {})
             partition_nodelist = partition.get("nodelist", [])
             partition_env = partition.get("env", {})
 
@@ -257,7 +259,7 @@ class RadicalExecutionBackend(BaseBackend):
             self.pilot_manager = rp.PilotManager(self.session)
 
             # Create pilot description
-            pd = rp.PilotDescription(self.resources)
+            pd = rp.PilotDescription(resources)
 
             # Configure partition if specified
             if partition_nodelist:

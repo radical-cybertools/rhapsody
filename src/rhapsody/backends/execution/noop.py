@@ -27,6 +27,7 @@ class NoopExecutionBackend(BaseBackend):
         super().__init__(name=name)
         self.logger = _get_logger()
         self.tasks: dict[str, dict] = {}
+        self._futures: dict[str, asyncio.Task] = {}
         self._callback_func: Callable = lambda t, s: None
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
@@ -46,11 +47,10 @@ class NoopExecutionBackend(BaseBackend):
     def get_task_states_map(self):
         return StateMapper(backend=self)
 
-    async def submit_tasks(self, tasks: list[dict[str, Any]]) -> list[asyncio.Task]:
+    async def submit_tasks(self, tasks: list[dict[str, Any]]) -> None:
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
 
-        submitted = []
         for task in tasks:
             task.update(
                 {
@@ -60,25 +60,44 @@ class NoopExecutionBackend(BaseBackend):
                     "exit_code": 0,
                 }
             )
-            self.tasks[task["uid"]] = task
-            future = asyncio.create_task(self._complete(task))
-            submitted.append(future)
-        return submitted
+            uid = task["uid"]
+            self.tasks[uid] = task
+            # Track the completion future so it can be cancelled via
+            # cancel_task / cancel_all_tasks / shutdown.
+            self._futures[uid] = asyncio.create_task(self._complete(task))
 
     async def _complete(self, task: dict) -> None:
-        self._callback_func(task, "DONE")
+        try:
+            task["state"] = "DONE"
+            self._callback_func(task, "DONE")
+        finally:
+            self._futures.pop(task["uid"], None)
 
     async def cancel_task(self, uid: str) -> bool:
-        return uid in self.tasks
+        if uid not in self.tasks:
+            return False
+
+        future = self._futures.pop(uid, None)
+        if future is not None and not future.done():
+            future.cancel()
+
+        task = self.tasks[uid]
+        if task.get("state") not in ("DONE", "FAILED", "CANCELED"):
+            task["state"] = "CANCELED"
+            self._callback_func(task, "CANCELED")
+        return True
 
     async def cancel_all_tasks(self) -> int:
-        n = len(self.tasks)
-        self.tasks.clear()
-        return n
+        uids = list(self.tasks)
+        for uid in uids:
+            await self.cancel_task(uid)
+        return len(uids)
 
     async def shutdown(self) -> None:
+        await self.cancel_all_tasks()
         self._backend_state = BackendMainStates.SHUTDOWN
         self.tasks.clear()
+        self._futures.clear()
         self.logger.info("Noop execution backend shutdown")
 
     def build_task(self, uid, task_desc, task_specific_kwargs):
