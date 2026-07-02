@@ -250,7 +250,9 @@ class RadicalExecutionBackend(BaseBackend):
             # stays intact (caller's dict is not mutated, and a retry of
             # _initialize still sees the partition entry).
             resources = dict(self.resources)
-            partition = resources.pop("partition", {})
+            # ``or {}`` also covers an explicit ``"partition": None`` in the
+            # resources (pop's default only applies when the key is absent).
+            partition = resources.pop("partition", None) or {}
             partition_nodelist = partition.get("nodelist", [])
             partition_env = partition.get("env", {})
 

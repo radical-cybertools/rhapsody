@@ -5,6 +5,7 @@ Tasks are immediately marked as DONE without executing anything.
 
 import asyncio
 import logging
+import uuid
 from typing import Any
 from typing import Callable
 
@@ -60,18 +61,22 @@ class NoopExecutionBackend(BaseBackend):
                     "exit_code": 0,
                 }
             )
-            uid = task["uid"]
+            uid = task.setdefault("uid", f"noop.{uuid.uuid4().hex[:8]}")
             self.tasks[uid] = task
             # Track the completion future so it can be cancelled via
             # cancel_task / cancel_all_tasks / shutdown.
             self._futures[uid] = asyncio.create_task(self._complete(task))
 
     async def _complete(self, task: dict) -> None:
+        uid = task["uid"]
         try:
             task["state"] = "DONE"
             self._callback_func(task, "DONE")
         finally:
-            self._futures.pop(task["uid"], None)
+            # Drop terminal tasks so the backend does not retain every task it
+            # ever ran (this backend is used to benchmark millions of them).
+            self._futures.pop(uid, None)
+            self.tasks.pop(uid, None)
 
     async def cancel_task(self, uid: str) -> bool:
         if uid not in self.tasks:
@@ -81,7 +86,8 @@ class NoopExecutionBackend(BaseBackend):
         if future is not None and not future.done():
             future.cancel()
 
-        task = self.tasks[uid]
+        # Remove the task (terminal); don't retain it.
+        task = self.tasks.pop(uid)
         if task.get("state") not in ("DONE", "FAILED", "CANCELED"):
             task["state"] = "CANCELED"
             self._callback_func(task, "CANCELED")
