@@ -151,7 +151,9 @@ class OrbitExecutionBackend(BaseBackend):
         StateMapper.register_backend_states_with_defaults(backend=self)
         StateMapper.register_backend_tasks_states_with_defaults(backend=self)
 
-        self._rh = self._get_rhapsody_handle()
+        # Runs blocking network I/O (BridgeClient, endpoint/plugin queries),
+        # so keep it off the event loop.
+        self._rh = await asyncio.to_thread(self._get_rhapsody_handle)
 
         # Register persistent notification callback for task completions
         self._rh.register_notification_callback(self._on_task_notification, topic="task_status")
@@ -305,7 +307,7 @@ class OrbitExecutionBackend(BaseBackend):
     # Python-version compatibility for cloudpickled function tasks
     # ------------------------------------------------------------------
 
-    def _check_python_compat(self, tasks: list) -> None:
+    async def _check_python_compat(self, tasks: list) -> None:
         """Raise if any cloudpickled task in *tasks* would hit a Python version mismatch on the
         remote endpoint.  No check is performed if the batch contains only executable or import-path
         tasks, or if the endpoint's Python version could not be determined.
@@ -332,9 +334,14 @@ class OrbitExecutionBackend(BaseBackend):
             # good, even if the reported version can't be parsed (that's
             # deterministic and retrying wouldn't help).
             info = None
-            try:
+
+            def _lookup():
                 ec = self._bc.get_endpoint_client(self._endpoint_name)
-                info = ec.get_plugin("sysinfo").host_role()
+                return ec.get_plugin("sysinfo").host_role()
+
+            try:
+                # Blocking network I/O — run off the event loop.
+                info = await asyncio.to_thread(_lookup)
             except Exception as exc:
                 self.logger.debug(f"pickle compat lookup failed, will retry: {exc}")
 
@@ -390,7 +397,7 @@ class OrbitExecutionBackend(BaseBackend):
         # buffering, so the error always propagates to this caller.  When
         # batching defers the flush, the check would otherwise run inside an
         # orphaned ``ensure_future`` task and never reach the awaiter.
-        self._check_python_compat(tasks)
+        await self._check_python_compat(tasks)
 
         # Assign UIDs, register locally, emit submit prof events — single pass
         import uuid
@@ -512,16 +519,17 @@ class OrbitExecutionBackend(BaseBackend):
             self.logger.warning("Failed to flush pending tasks during shutdown: %s", e)
         self._backend_state = BackendMainStates.SHUTDOWN
 
+        # close() calls perform blocking network I/O — run them off the loop.
         if self._rh:
             try:
-                self._rh.close()
+                await asyncio.to_thread(self._rh.close)
             except Exception as e:
                 self.logger.warning("Failed to close session: %s", e)
             self._rh = None
 
         if self._bc:
             try:
-                self._bc.close()
+                await asyncio.to_thread(self._bc.close)
             except Exception as e:
                 self.logger.warning("Failed to close bridge client: %s", e)
             self._bc = None
