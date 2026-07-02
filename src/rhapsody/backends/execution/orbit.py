@@ -119,6 +119,9 @@ class OrbitExecutionBackend(BaseBackend):
 
         self._callback_func: Callable = lambda t, s: None
         self._initialized = False
+        # Serializes _async_init so concurrent first submissions (which now
+        # await inside init) don't run the initialization logic twice.
+        self._init_lock = asyncio.Lock()
         self._backend_state = BackendMainStates.INITIALIZED
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -155,6 +158,15 @@ class OrbitExecutionBackend(BaseBackend):
         if self._initialized:
             return self
 
+        async with self._init_lock:
+            # Re-check under the lock: a concurrent caller may have finished
+            # initialization while we waited to acquire it.
+            if self._initialized:
+                return self
+
+            return await self._do_async_init()
+
+    async def _do_async_init(self):
         self._loop = asyncio.get_running_loop()
 
         # Register states
@@ -215,7 +227,12 @@ class OrbitExecutionBackend(BaseBackend):
         # A remote failure may serialize its exception as a string or dict;
         # coerce it to a real exception so session.py raises it instead of
         # silently treating the failed task as successful.
-        exc = body.get("exception", body.get("error"))
+        # ``.get(k, default)`` only falls back when the key is *absent*; a
+        # present-but-null "exception" (common in JSON) must still fall back to
+        # "error".
+        exc = body.get("exception")
+        if exc is None:
+            exc = body.get("error")
         if exc is not None and not isinstance(exc, BaseException):
             body["exception"] = RuntimeError(str(exc))
 
@@ -330,8 +347,13 @@ class OrbitExecutionBackend(BaseBackend):
 
         def needs_compat(t: dict) -> bool:
             fn = t.get("function")
-            return (isinstance(fn, str) and fn.startswith("cloudpickle::")) or bool(
-                t.get("_pickled_fields")
+            # A raw Python callable (a ComputeTask function not yet serialized)
+            # takes the same cloudpickle path once submitted, so it must be
+            # checked too — not just already-``cloudpickle::``-encoded strings.
+            return (
+                callable(fn)
+                or (isinstance(fn, str) and fn.startswith("cloudpickle::"))
+                or bool(t.get("_pickled_fields"))
             )
 
         if not any(needs_compat(t) for t in tasks):
@@ -451,7 +473,20 @@ class OrbitExecutionBackend(BaseBackend):
         """
         task = asyncio.ensure_future(self._locked_flush())
         self._inflight_flushes.add(task)
-        task.add_done_callback(self._inflight_flushes.discard)
+        task.add_done_callback(self._on_flush_done)
+
+    def _on_flush_done(self, task: asyncio.Task) -> None:
+        """Untrack a finished background flush and retrieve its exception.
+
+        ``_send_batch`` already logs the failure and marks tasks FAILED; we
+        retrieve the exception here only so asyncio does not emit a spurious
+        "Task exception was never retrieved" warning.
+        """
+        self._inflight_flushes.discard(task)
+        if not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                self.logger.debug("background batch flush failed: %s", exc)
 
     async def _locked_flush(self):
         """Detach the buffered batch under the batch lock, then send it unlocked."""
