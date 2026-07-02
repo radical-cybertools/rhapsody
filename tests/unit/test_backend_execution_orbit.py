@@ -2,6 +2,8 @@
 
 import asyncio
 import sys
+import threading
+import time
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -523,3 +525,100 @@ async def test_terminal_callback_fires_once_across_cancel_and_sse():
     backend._fire_callback(backend._tasks["t.1"], "CANCELED")  # SSE path: dedup
 
     assert cb.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Batch flushing: lock is released during the network send, sends stay
+# serialized/ordered, and buffered tasks survive shutdown
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_batch_send_releases_lock_during_send():
+    """A slow batch send must not hold the batch lock — other submitters can keep buffering while
+    the network flush is in flight.
+
+    With the send performed under the batch lock this would dead-time out.
+    """
+    backend = await _init_backend(batch_window=10, batch_limit=2)
+
+    send_started = threading.Event()
+    release_send = threading.Event()
+
+    def slow_submit(batch):
+        send_started.set()
+        release_send.wait(timeout=5)
+        return [{"uid": batch[0]["uid"], "state": "SUBMITTED"}]
+
+    backend._mock_rh.submit_tasks = MagicMock(side_effect=slow_submit)
+
+    # Fill the buffer (limit=2) → inline flush that blocks inside the send.
+    first = asyncio.create_task(
+        backend.submit_tasks(
+            [
+                {"uid": "t.1", "executable": "/bin/true"},
+                {"uid": "t.2", "executable": "/bin/true"},
+            ]
+        )
+    )
+
+    # Wait until the send is actually in flight in the worker thread.
+    assert await asyncio.to_thread(send_started.wait, 5)
+
+    # While the send is blocked, another submit must still complete (buffer)
+    # rather than hang on the batch lock.
+    await asyncio.wait_for(
+        backend.submit_tasks([{"uid": "t.3", "executable": "/bin/true"}]),
+        timeout=1.0,
+    )
+    assert "t.3" in backend._tasks
+
+    release_send.set()
+    await asyncio.wait_for(first, timeout=5)
+    await backend.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_batch_sends_are_serialized():
+    """Concurrent flushes must not call the client concurrently — the send lock serializes them, so
+    at most one send runs at a time."""
+    backend = await _init_backend(batch_window=10, batch_limit=1)
+
+    counter_lock = threading.Lock()
+    state = {"cur": 0, "max": 0}
+    order = []
+
+    def rec(batch):
+        with counter_lock:
+            state["cur"] += 1
+            state["max"] = max(state["max"], state["cur"])
+        time.sleep(0.02)
+        with counter_lock:
+            state["cur"] -= 1
+        order.append(batch[0]["uid"])
+        return [{"uid": batch[0]["uid"], "state": "SUBMITTED"}]
+
+    backend._mock_rh.submit_tasks = MagicMock(side_effect=rec)
+
+    # limit=1 → each submit flushes immediately; fire several concurrently.
+    await asyncio.gather(
+        *[backend.submit_tasks([{"uid": f"t.{i}", "executable": "/bin/true"}]) for i in range(5)]
+    )
+
+    assert len(order) == 5
+    assert state["max"] == 1
+
+
+@pytest.mark.asyncio
+async def test_shutdown_flushes_buffered_tasks():
+    """Tasks still buffered when shutdown is called are flushed, not dropped."""
+    backend = await _init_backend(batch_window=10, batch_limit=100)
+
+    await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/true"}])
+    backend._mock_rh.submit_tasks.assert_not_called()  # buffered, not sent yet
+
+    await backend.shutdown()
+
+    backend._mock_rh.submit_tasks.assert_called_once()
+    sent = backend._mock_rh.submit_tasks.call_args[0][0]
+    assert [t["uid"] for t in sent] == ["t.1"]

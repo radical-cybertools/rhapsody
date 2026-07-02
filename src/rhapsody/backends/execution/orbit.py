@@ -128,8 +128,18 @@ class OrbitExecutionBackend(BaseBackend):
         )
         self._batch_limit = batch_limit
         self._batch_buffer: list[dict] = []
+        # ``_batch_lock`` guards ``_batch_buffer`` / ``_flush_handle`` and is
+        # held only briefly (append, or detach-the-batch).  ``_send_lock``
+        # serializes the actual remote sends, so concurrent flushes neither
+        # overlap on the (not necessarily thread-safe) client nor reorder
+        # batches — while leaving the batch lock free for other submitters to
+        # keep buffering during a slow network flush.
         self._batch_lock = asyncio.Lock()
+        self._send_lock = asyncio.Lock()
         self._flush_handle: asyncio.TimerHandle | None = None
+        # Background (timer-triggered) flush tasks, awaited on shutdown so a
+        # batch that is mid-send is never dropped.
+        self._inflight_flushes: set[asyncio.Task] = set()
 
         # -- profiling --
         self._prof = rprof.Profiler("client.task", ns="radical.orbit") if rprof else None
@@ -415,41 +425,65 @@ class OrbitExecutionBackend(BaseBackend):
             await asyncio.to_thread(self._rh.submit_tasks, task_dicts)
             return
 
-        # Batching — collect and schedule flush
+        # Batching — collect and, if the buffer is now full, flush inline.
+        # The batch is detached *under* the lock but sent *outside* it, so a
+        # slow network send never blocks other submitters from buffering.
+        batch = None
         async with self._batch_lock:
             self._batch_buffer.extend(dict(t) for t in tasks)
 
             if len(self._batch_buffer) >= self._batch_limit:
-                # Buffer full — flush now
-                await self._flush_batch()
+                # Buffer full — take the batch now, send it below.
+                batch = self._detach_batch()
             elif self._flush_handle is None:
                 # Start the timer for the first task in this window
                 loop = asyncio.get_running_loop()
                 self._flush_handle = loop.call_later(self._batch_window, self._trigger_flush)
 
+        if batch is not None:
+            await self._send_batch(batch)
+
     def _trigger_flush(self):
-        """Timer callback — schedule the async flush on the event loop."""
-        asyncio.ensure_future(self._locked_flush())
+        """Timer callback — schedule a background flush on the event loop.
+
+        The task is tracked in ``_inflight_flushes`` so ``shutdown`` can await
+        an in-progress send instead of dropping the batch.
+        """
+        task = asyncio.ensure_future(self._locked_flush())
+        self._inflight_flushes.add(task)
+        task.add_done_callback(self._inflight_flushes.discard)
 
     async def _locked_flush(self):
-        """Flush the batch buffer under the batch lock."""
+        """Detach the buffered batch under the batch lock, then send it unlocked."""
         async with self._batch_lock:
-            await self._flush_batch()
+            batch = self._detach_batch()
+        await self._send_batch(batch)
 
-    async def _flush_batch(self):
-        """Send all buffered tasks in one bulk request.
+    def _detach_batch(self) -> list[dict]:
+        """Swap out the current buffer and cancel the pending flush timer.
 
-        Must be called while holding ``_batch_lock``.
+        Must be called while holding ``_batch_lock``.  Returns the detached
+        batch (possibly empty).
         """
-        if not self._batch_buffer:
-            return
-
         batch = self._batch_buffer
         self._batch_buffer = []
 
         if self._flush_handle is not None:
             self._flush_handle.cancel()
             self._flush_handle = None
+
+        return batch
+
+    async def _send_batch(self, batch: list[dict]) -> None:
+        """Send an already-detached batch to the remote endpoint in one request.
+
+        Runs *outside* ``_batch_lock`` (so other submitters can keep buffering
+        during the network I/O) but *under* ``_send_lock`` (so concurrent
+        flushes stay serialized and ordered, and never call the client
+        concurrently).
+        """
+        if not batch:
+            return
 
         # NOTE: compat is validated up front in submit_tasks(); buffered tasks
         # are already known-good by the time they reach the flush.
@@ -460,20 +494,22 @@ class OrbitExecutionBackend(BaseBackend):
                 prof.prof("task_batch_flush", uid=t.get("uid", "?"))
 
         self.logger.debug("Flushing batch of %d tasks", len(batch))
-        try:
-            await asyncio.to_thread(self._rh.submit_tasks, batch)
-        except Exception as exc:
-            # The flush runs as a detached background task; an unhandled error
-            # here would leave the batch's tasks hung forever.  Fail them
-            # explicitly so the failure reaches the client.
-            self.logger.error("Failed to submit batch of %d tasks: %s", len(batch), exc)
-            for t in batch:
-                task = self._tasks.get(t.get("uid"))
-                if task is not None:
-                    task["exception"] = exc
-                    task["state"] = "FAILED"
-                    self._fire_callback(task, "FAILED")
-            raise
+        async with self._send_lock:
+            try:
+                await asyncio.to_thread(self._rh.submit_tasks, batch)
+            except Exception as exc:
+                # A timer-triggered flush runs as a detached background task; an
+                # unhandled error here would leave the batch's tasks hung
+                # forever.  Fail them explicitly so the failure reaches the
+                # client (and re-raise for the inline buffer-full caller).
+                self.logger.error("Failed to submit batch of %d tasks: %s", len(batch), exc)
+                for t in batch:
+                    task = self._tasks.get(t.get("uid"))
+                    if task is not None:
+                        task["exception"] = exc
+                        task["state"] = "FAILED"
+                        self._fire_callback(task, "FAILED")
+                raise
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a single task on the remote endpoint."""
@@ -517,6 +553,12 @@ class OrbitExecutionBackend(BaseBackend):
         except Exception as e:
             # Never let a flush failure skip client cleanup below.
             self.logger.warning("Failed to flush pending tasks during shutdown: %s", e)
+
+        # Wait for any timer-triggered flush already in flight so its batch is
+        # sent before we tear down the clients.
+        if self._inflight_flushes:
+            await asyncio.gather(*list(self._inflight_flushes), return_exceptions=True)
+
         self._backend_state = BackendMainStates.SHUTDOWN
 
         # close() calls perform blocking network I/O — run them off the loop.
