@@ -27,7 +27,6 @@ class BackendMainStates(Enum):
     SHUTDOWN = "SHUTDOWN"
 
 
-
 class TasksMainStates(Enum):
     """Enumeration of standard task states used across all backends.
 

@@ -34,7 +34,9 @@ def _get_logger() -> logging.Logger:
 class ConcurrentExecutionBackend(BaseBackend):
     """Simple async-only concurrent execution backend."""
 
-    def __init__(self, executor: Executor = None, name: str = "concurrent", resources: dict | None = None):
+    def __init__(
+        self, executor: Executor = None, name: str = "concurrent", resources: dict | None = None
+    ):
         super().__init__(name=name)
 
         self.logger = _get_logger()
