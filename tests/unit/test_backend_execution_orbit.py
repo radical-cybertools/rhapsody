@@ -10,7 +10,26 @@ from unittest.mock import patch
 
 import pytest
 
+import rhapsody.backends.execution.orbit as orbit_mod
 from rhapsody.backends.execution.orbit import OrbitExecutionBackend
+
+
+@pytest.fixture(autouse=True)
+def _stub_bridge_client():
+    """Allow the suite to run without ``radical.orbit`` installed (e.g. in CI).
+
+    ``OrbitExecutionBackend.__init__`` raises ``ImportError`` when the optional
+    ``radical.orbit`` package is missing (module-level ``BridgeClient`` is
+    ``None``).  Every test mocks the bridge/rhapsody chain anyway, so when the
+    real package is absent stub the symbol to a non-``None`` mock so the
+    backend can be constructed.  When it is installed this is a no-op.
+    """
+    if orbit_mod.BridgeClient is not None:
+        yield
+        return
+    with patch.object(orbit_mod, "BridgeClient", MagicMock()):
+        yield
+
 
 # ---------------------------------------------------------------------------
 # Helpers
