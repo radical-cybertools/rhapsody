@@ -219,7 +219,7 @@ class OrbitExecutionBackend(BaseBackend):
 
     def _apply_task_update(self, body: dict):
         """Apply a single task status update from SSE."""
-        if not body:
+        if not isinstance(body, dict):
             return
 
         uid = body.get("uid")
@@ -280,16 +280,25 @@ class OrbitExecutionBackend(BaseBackend):
         This guard ensures consumers that resolve a future on the terminal
         callback see it exactly once.
 
+        Once a terminal state has fired, the task is dropped from ``_tasks``
+        (and its uid from ``_terminal_fired``) to bound memory over a
+        long-running session.  A later duplicate notification is then ignored
+        by ``_apply_task_update`` because the uid is no longer tracked.
+
         Must run on the event loop thread — ``_terminal_fired`` is accessed
         without a lock, and every caller (SSE via ``call_soon_threadsafe``,
         cancel paths from coroutine bodies) already runs there.
         """
         uid = task.get("uid")
-        if uid and str(state).upper() in self._TERMINAL_STATES:
+        terminal = bool(uid) and str(state).upper() in self._TERMINAL_STATES
+        if terminal:
             if uid in self._terminal_fired:
                 return
             self._terminal_fired.add(uid)
         self._callback_func(task, state)
+        if terminal:
+            self._tasks.pop(uid, None)
+            self._terminal_fired.discard(uid)
 
     # ------------------------------------------------------------------
     # Endpoint auto-selection and Plugin retrieval
@@ -567,7 +576,16 @@ class OrbitExecutionBackend(BaseBackend):
         if uid not in self._tasks:
             return False
 
-        await asyncio.to_thread(self._rh.cancel_task, uid)
+        # If the task is still buffered locally (not yet flushed), the endpoint
+        # never received it — drop it from the buffer and skip the remote
+        # cancel (which would target an unknown uid).
+        async with self._batch_lock:
+            buffered = any(t.get("uid") == uid for t in self._batch_buffer)
+            if buffered:
+                self._batch_buffer = [t for t in self._batch_buffer if t.get("uid") != uid]
+
+        if not buffered:
+            await asyncio.to_thread(self._rh.cancel_task, uid)
 
         task = self._tasks[uid]
         task["state"] = "CANCELED"
@@ -584,6 +602,14 @@ class OrbitExecutionBackend(BaseBackend):
         """
         if not self._initialized:
             await self._async_init()
+
+        # Drop anything still buffered locally so it is not flushed and executed
+        # after cancellation; the remote cancel_all only covers submitted tasks.
+        async with self._batch_lock:
+            self._batch_buffer = []
+            if self._flush_handle is not None:
+                self._flush_handle.cancel()
+                self._flush_handle = None
 
         result = await asyncio.to_thread(self._rh.cancel_all_tasks)
 

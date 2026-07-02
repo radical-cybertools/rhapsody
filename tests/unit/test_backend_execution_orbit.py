@@ -182,10 +182,17 @@ async def test_submit_tasks_sets_running_state():
 async def test_cancel_task():
     backend = await _init_backend()
     backend._tasks["t.001"] = {"uid": "t.001", "state": "RUNNING"}
+    cb = MagicMock()
+    backend.register_callback(cb)
 
     result = await backend.cancel_task("t.001")
     assert result is True
-    assert backend._tasks["t.001"]["state"] == "CANCELED"
+    # terminal task is delivered via callback, then pruned from the registry
+    task, state = cb.call_args[0]
+    assert task["uid"] == "t.001"
+    assert state == "CANCELED"
+    assert task["state"] == "CANCELED"
+    assert "t.001" not in backend._tasks
     backend._mock_rh.cancel_task.assert_called_once_with("t.001")
 
 
@@ -237,6 +244,8 @@ async def test_on_task_notification_single():
     # the scheduled handler run before asserting.
     backend = await _init_backend()
     backend._tasks["t.001"] = {"uid": "t.001", "state": "SUBMITTED"}
+    cb = MagicMock()
+    backend.register_callback(cb)
 
     backend._on_task_notification(
         endpoint="hpc1",
@@ -246,8 +255,11 @@ async def test_on_task_notification_single():
     )
     await asyncio.sleep(0)
 
-    assert backend._tasks["t.001"]["state"] == "DONE"
-    assert backend._tasks["t.001"]["stdout"] == "hello\n"
+    task, state = cb.call_args[0]
+    assert state == "DONE"
+    assert task["state"] == "DONE"
+    assert task["stdout"] == "hello\n"
+    assert "t.001" not in backend._tasks  # terminal -> pruned
 
 
 @pytest.mark.asyncio
@@ -255,6 +267,8 @@ async def test_on_task_notification_batch():
     backend = await _init_backend()
     backend._tasks["t.001"] = {"uid": "t.001", "state": "SUBMITTED"}
     backend._tasks["t.002"] = {"uid": "t.002", "state": "SUBMITTED"}
+    cb = MagicMock()
+    backend.register_callback(cb)
 
     backend._on_task_notification(
         endpoint="hpc1",
@@ -269,9 +283,13 @@ async def test_on_task_notification_batch():
     )
     await asyncio.sleep(0)
 
-    assert backend._tasks["t.001"]["state"] == "DONE"
-    assert backend._tasks["t.002"]["state"] == "FAILED"
-    assert backend._tasks["t.002"]["error"] == "boom"
+    fired = {c.args[0]["uid"]: c.args for c in cb.call_args_list}
+    assert fired["t.001"][1] == "DONE"
+    assert fired["t.002"][1] == "FAILED"
+    assert fired["t.002"][0]["error"] == "boom"
+    # both terminal -> pruned
+    assert "t.001" not in backend._tasks
+    assert "t.002" not in backend._tasks
 
 
 @pytest.mark.asyncio
@@ -293,6 +311,8 @@ async def test_on_task_notification_coerces_string_exception():
     raises it instead of silently treating the failed task as successful."""
     backend = await _init_backend()
     backend._tasks["t.001"] = {"uid": "t.001", "state": "SUBMITTED"}
+    cb = MagicMock()
+    backend.register_callback(cb)
 
     backend._on_task_notification(
         endpoint="hpc1",
@@ -302,7 +322,8 @@ async def test_on_task_notification_coerces_string_exception():
     )
     await asyncio.sleep(0)
 
-    exc = backend._tasks["t.001"]["exception"]
+    task, _ = cb.call_args[0]
+    exc = task["exception"]
     assert isinstance(exc, BaseException)
     assert "remote boom" in str(exc)
 
@@ -532,8 +553,10 @@ async def test_cancel_all_updates_local_state_and_callbacks():
 
     await backend.cancel_all_tasks()
 
-    assert backend._tasks["t.1"]["state"] == "CANCELED"
-    assert backend._tasks["t.3"]["state"] == "CANCELED"
+    # cancelled tasks fire CANCELED then are pruned; the already-terminal one
+    # is left untouched.
+    assert "t.1" not in backend._tasks
+    assert "t.3" not in backend._tasks
     assert backend._tasks["t.2"]["state"] == "DONE"
 
     fired = {call.args[0]["uid"] for call in cb.call_args_list}
@@ -550,10 +573,19 @@ async def test_terminal_callback_fires_once_across_cancel_and_sse():
     cb = MagicMock()
     backend.register_callback(cb)
 
-    await backend.cancel_task("t.1")  # local path fires once
-    backend._fire_callback(backend._tasks["t.1"], "CANCELED")  # SSE path: dedup
+    await backend.cancel_task("t.1")  # local path fires once, prunes t.1
+    # the matching CANCELED SSE notification arrives afterwards and is ignored
+    # because t.1 is no longer tracked
+    backend._on_task_notification(
+        endpoint="hpc1",
+        plugin="rhapsody",
+        topic="task_status",
+        data={"uid": "t.1", "state": "CANCELED"},
+    )
+    await asyncio.sleep(0)
 
     assert cb.call_count == 1
+    assert "t.1" not in backend._tasks
 
 
 # ---------------------------------------------------------------------------
@@ -677,7 +709,7 @@ async def test_sse_notification_applied_on_loop_thread():
             endpoint="e",
             plugin="rhapsody",
             topic="task_status",
-            data={"uid": "t.1", "state": "DONE"},
+            data={"uid": "t.1", "state": "RUNNING"},  # non-terminal: stays tracked
         )
 
     t = threading.Thread(target=deliver)
@@ -693,4 +725,75 @@ async def test_sse_notification_applied_on_loop_thread():
     loop_thread = threading.get_ident()
     assert applied["thread"] == loop_thread  # applied on the loop thread
     assert applied["thread"] != sse["thread"]  # not the SSE (caller) thread
-    assert backend._tasks["t.1"]["state"] == "DONE"
+    assert backend._tasks["t.1"]["state"] == "RUNNING"
+
+
+# ---------------------------------------------------------------------------
+# Memory bounding + cancel of still-buffered tasks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_terminal_tasks_are_pruned():
+    """Reaching a terminal state drops the task from _tasks and _terminal_fired so the backend does
+    not retain every task it ever ran."""
+    backend = await _init_backend(batch_window=0)
+    await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/true"}])
+    assert "t.1" in backend._tasks
+
+    backend._on_task_notification(
+        endpoint="e",
+        plugin="rhapsody",
+        topic="task_status",
+        data={"uid": "t.1", "state": "DONE"},
+    )
+    await asyncio.sleep(0)
+
+    assert "t.1" not in backend._tasks
+    assert "t.1" not in backend._terminal_fired
+
+
+@pytest.mark.asyncio
+async def test_cancel_buffered_task_skips_remote_and_is_not_flushed():
+    """Cancelling a task still in the batch buffer removes it from the buffer, skips the remote
+    cancel (endpoint never received it), and it is not sent on the next flush."""
+    backend = await _init_backend(batch_window=10, batch_limit=100)  # stays buffered
+
+    await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/true"}])
+    assert any(t.get("uid") == "t.1" for t in backend._batch_buffer)
+
+    ok = await backend.cancel_task("t.1")
+    assert ok is True
+    backend._mock_rh.cancel_task.assert_not_called()  # not submitted yet
+    assert not any(t.get("uid") == "t.1" for t in backend._batch_buffer)  # dropped
+
+    # A subsequent shutdown flush must not send the cancelled task.
+    await backend.shutdown()
+    backend._mock_rh.submit_tasks.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancel_submitted_task_calls_remote():
+    """A task already submitted (not buffered) still goes to the remote cancel."""
+    backend = await _init_backend(batch_window=0)  # immediate submit, no buffering
+    await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/true"}])
+    assert not backend._batch_buffer
+
+    ok = await backend.cancel_task("t.1")
+    assert ok is True
+    backend._mock_rh.cancel_task.assert_called_once_with("t.1")
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_drops_buffered_tasks():
+    """cancel_all_tasks clears the local buffer so buffered tasks are not flushed after
+    cancellation."""
+    backend = await _init_backend(batch_window=10, batch_limit=100)
+    await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/true"}])
+    assert backend._batch_buffer
+
+    await backend.cancel_all_tasks()
+    assert backend._batch_buffer == []
+
+    await backend.shutdown()
+    backend._mock_rh.submit_tasks.assert_not_called()
