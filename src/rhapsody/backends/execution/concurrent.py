@@ -3,6 +3,8 @@
 This module provides a backend that executes tasks on local or single node HPC resources.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
@@ -347,7 +349,7 @@ class ConcurrentExecutionBackend(BaseBackend):
         await self.shutdown()
 
     @classmethod
-    async def create(cls, executor: Executor) -> "ConcurrentExecutionBackend":
+    async def create(cls, executor: Executor) -> ConcurrentExecutionBackend:
         """Alternative factory method for creating initialized backend.
 
         Args:
