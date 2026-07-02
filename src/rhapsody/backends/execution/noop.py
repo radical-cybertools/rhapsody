@@ -118,7 +118,7 @@ class NoopExecutionBackend(BaseBackend):
     async def state(self) -> str:
         return self._backend_state.value
 
-    def task_state_cb(self):
+    def task_state_cb(self, task, state):
         pass
 
     async def __aenter__(self):
@@ -128,3 +128,9 @@ class NoopExecutionBackend(BaseBackend):
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.shutdown()
+
+    @classmethod
+    async def create(cls, name: str = "noop") -> "NoopExecutionBackend":
+        """Alternative factory that returns an initialized backend."""
+        backend = cls(name=name)
+        return await backend
