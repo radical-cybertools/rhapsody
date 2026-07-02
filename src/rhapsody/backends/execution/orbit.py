@@ -10,6 +10,8 @@ optimizations (template compression, pipelined batching, SSE-based
 wait, batch notifications) are inherited automatically.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 from typing import Any
