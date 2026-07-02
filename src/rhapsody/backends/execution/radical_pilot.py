@@ -10,6 +10,7 @@ import asyncio
 import copy
 import logging
 import os
+import shlex
 import threading
 from collections.abc import Generator
 from typing import Any
@@ -244,7 +245,9 @@ class RadicalExecutionBackend(BaseBackend):
             self.tasks = {}
             self.raptor_mode = False
 
-            # Extract and remove partition info from resources
+            # Extract and remove partition info from resources.  Copy first so
+            # we don't mutate the caller-provided dict in place.
+            self.resources = dict(self.resources)
             partition = self.resources.pop("partition", {})
             partition_nodelist = partition.get("nodelist", [])
             partition_env = partition.get("env", {})
@@ -261,8 +264,13 @@ class RadicalExecutionBackend(BaseBackend):
                 pd.nodes = len(partition_nodelist)
 
             if partition_env:
-                # Create shell environment with export directives
-                export_cmds = [f"export {k}={v}" for k, v in partition_env.items()]
+                # Create shell environment with export directives.  Quote keys
+                # and values with shlex to avoid shell injection / breakage on
+                # spaces or special characters.
+                export_cmds = [
+                    f"export {shlex.quote(str(k))}={shlex.quote(str(v))}"
+                    for k, v in partition_env.items()
+                ]
                 pd.prepare_env = {
                     "partition": {
                         "type": "shell",
