@@ -1,12 +1,12 @@
 """Orbit execution backend for remote task execution via ORBIT.
 
 This module provides a backend that submits tasks to a remote HPC node
-through the ORBIT bridge/plugin infrastructure.  The Endpoint node
+through the ORBIT broker/endpoint infrastructure.  The Endpoint node
 runs a Rhapsody plugin with a local backend (e.g. Dragon V3) that
 actually executes the work.
 
 Internally delegates to ``RhapsodyClient`` so all transport-level
-optimizations (template compression, pipelined batching, SSE-based
+optimizations (template compression, pipelined batching, event-based
 wait, batch notifications) are inherited automatically.
 """
 
@@ -22,17 +22,17 @@ from ..constants import BackendMainStates
 from ..constants import StateMapper
 
 # ``radical.orbit`` is imported at module level so that tests can patch
-# ``BridgeClient`` here.  When the package isn't installed we keep
-# ``BridgeClient = None`` and remember the original ImportError; the
+# ``EndpointRuntime`` here.  When the package isn't installed we keep
+# ``EndpointRuntime = None`` and remember the original ImportError; the
 # actual chained re-raise happens in ``OrbitExecutionBackend.__init__``
 # so the user sees the real cause (e.g. a downstream import failure
 # inside ``radical.orbit`` itself, not just "package missing").
 try:
-    from radical.orbit import BridgeClient
+    from radical.orbit import EndpointRuntime
 
     _radical_orbit_import_error = None
 except ImportError as exc:
-    BridgeClient = None
+    EndpointRuntime = None
     _radical_orbit_import_error = exc
 
 try:
@@ -44,9 +44,9 @@ except ImportError:
 class OrbitExecutionBackend(BaseBackend):
     """Execution backend that delegates to a remote ORBIT node.
 
-    Uses ``radical.orbit.BridgeClient`` and ``RhapsodyClient`` for all
+    Uses ``radical.orbit.EndpointRuntime`` and ``RhapsodyClient`` for all
     communication — inheriting batching, template compression,
-    pipelined submission, and SSE-based notifications.
+    pipelined submission, and event-based notifications.
 
     When tasks are submitted individually (one at a time), a batching
     layer collects them over a short time window (default 0.1 s) and
@@ -54,15 +54,19 @@ class OrbitExecutionBackend(BaseBackend):
     per-task HTTP round-trip overhead.
 
     Args:
-        bridge_url:    URL of the ORBIT bridge
+        broker_url:    URL of the ORBIT broker
                        (e.g. ``"https://localhost:8000"``).  If omitted,
-                       falls back to the ``RADICAL_ORBIT_BRIDGE_URL`` env var
-                       (resolved by ``BridgeClient`` itself).
+                       falls back to the ``RADICAL_ORBIT_BROKER_URL`` env var
+                       or ``~/.radical/orbit/broker.url`` (resolved by
+                       ``EndpointRuntime`` itself; the bearer token is
+                       resolved the same way from
+                       ``RADICAL_ORBIT_BROKER_TOKEN`` /
+                       ``~/.radical/orbit/broker.token``).
         endpoint_name:     Name of the endpoint to target.  If omitted, the
-                       backend auto-selects the first connected endpoint
-                       that advertises an enabled rhapsody plugin
-                       (the synthetic ``'bridge'`` endpoint is always
-                       skipped).  Raises ``RuntimeError`` from
+                       backend auto-selects the first present endpoint whose
+                       topology entry advertises a rhapsody plugin; the
+                       broker and pure consumers (including this runtime
+                       itself) are skipped.  Raises ``RuntimeError`` from
                        ``await backend`` if no candidate is found.
         backends:      Backend names to request on the remote session
                        (default ``["dragon_v3"]``).
@@ -72,51 +76,53 @@ class OrbitExecutionBackend(BaseBackend):
                        (default 0.25).  Set to 0 to disable batching.
         batch_limit:   Max tasks per batch — triggers an immediate flush
                        when reached (default 1024).
-        notify_batch_window:  Endpoint-side notification batch window
-                       (seconds).  ``None`` uses server default.
-        notify_batch_size:    Endpoint-side notification batch size.
-                       ``None`` uses server default.
+        start_timeout: Seconds to wait for broker registration and the
+                       first topology frame (default 30).
+        init_timeout:  Seconds to wait for the remote session to become
+                       ready after registration (default 120).  Together
+                       with ``start_timeout`` this bounds the whole
+                       ``await backend`` initialization.
     """
 
     _DEFAULT_BATCH_WINDOW = 0.25
-    _ENDPOINTS_TO_SKIP = ["bridge"]
     _PLUGIN_NAME = "rhapsody"
     _TERMINAL_STATES = frozenset({"DONE", "FAILED", "CANCELED", "COMPLETED"})
 
     def __init__(
         self,
-        bridge_url: str | None = None,
+        broker_url: str | None = None,
         endpoint_name: str | None = None,
         backends: list[str] | None = None,
         name: str = "orbit",
         plugin_name: str = _PLUGIN_NAME,
         batch_window: float | None = None,
         batch_limit: int = 1024,
-        notify_batch_window: float | None = None,
-        notify_batch_size: int | None = None,
+        start_timeout: float = 30.0,
+        init_timeout: float = 120.0,
     ):
         super().__init__(name=name)
 
-        if BridgeClient is None:
+        if EndpointRuntime is None:
             raise ImportError(
                 f"OrbitExecutionBackend: cannot import radical.orbit: {_radical_orbit_import_error}"
             ) from _radical_orbit_import_error
 
         self.logger = logging.getLogger(__name__)
-        self._bridge_url = bridge_url
+        self._broker_url = broker_url
         self._endpoint_name = endpoint_name
         self._plugin_name = plugin_name
         self._remote_backends = backends or ["dragon_v3"]
-        self._notify_batch_window = notify_batch_window
-        self._notify_batch_size = notify_batch_size
+        self._start_timeout = start_timeout
+        self._init_timeout = init_timeout
         self._endpoint_python_mm: tuple | None = None
         self._endpoint_python_lookup_done = False
 
-        self._bc = None  # BridgeClient
+        self._runtime = None  # EndpointRuntime
         self._rh = None  # RhapsodyClient (from get_rhapsody_handle)
         self._tasks: dict[str, dict] = {}
         # uids for which a terminal state callback has already fired, so the
-        # SSE and local-cancel paths don't double-fire the same terminal state
+        # notification and local-cancel paths don't double-fire the same
+        # terminal state
         self._terminal_fired: set[str] = set()
 
         self._callback_func: Callable = lambda t, s: None
@@ -175,8 +181,10 @@ class OrbitExecutionBackend(BaseBackend):
         StateMapper.register_backend_states_with_defaults(backend=self)
         StateMapper.register_backend_tasks_states_with_defaults(backend=self)
 
-        # Runs blocking network I/O (BridgeClient, endpoint/plugin queries),
-        # so keep it off the event loop.
+        # Runs blocking network I/O (EndpointRuntime.start, topology scan,
+        # remote session registration) so keep it off the event loop.  Can
+        # block up to ``start_timeout + init_timeout`` — all connection and
+        # session waiting is paid here, never on the submit path.
         self._rh = await asyncio.to_thread(self._get_rhapsody_handle)
 
         # Register persistent notification callback for task completions
@@ -199,7 +207,7 @@ class OrbitExecutionBackend(BaseBackend):
     # ------------------------------------------------------------------
 
     def _on_task_notification(self, endpoint, plugin, topic, data):
-        """SSE callback — runs on the client's background (SSE) thread.
+        """Notification callback — runs on the runtime's callback thread.
 
         Marshal the whole update onto the event loop so that every read/write of
         ``self._tasks`` and the task dicts happens single-threaded there, never
@@ -218,7 +226,7 @@ class OrbitExecutionBackend(BaseBackend):
             self._apply_task_update(data)
 
     def _apply_task_update(self, body: dict):
-        """Apply a single task status update from SSE."""
+        """Apply a single task status update from a notification."""
         if not isinstance(body, dict):
             return
 
@@ -274,7 +282,7 @@ class OrbitExecutionBackend(BaseBackend):
     def _fire_callback(self, task: dict, state: str) -> None:
         """Invoke the Rhapsody state callback, at most once per terminal state.
 
-        Both the SSE notification path and the local cancel path can report
+        Both the remote notification path and the local cancel path can report
         the same terminal state for a task (e.g. a cancel fires the callback
         locally *and* the endpoint emits a matching CANCELED notification).
         This guard ensures consumers that resolve a future on the terminal
@@ -286,7 +294,8 @@ class OrbitExecutionBackend(BaseBackend):
         by ``_apply_task_update`` because the uid is no longer tracked.
 
         Must run on the event loop thread — ``_terminal_fired`` is accessed
-        without a lock, and every caller (SSE via ``call_soon_threadsafe``,
+        without a lock, and every caller (notifications via
+        ``call_soon_threadsafe``,
         cancel paths from coroutine bodies) already runs there.
         """
         uid = task.get("uid")
@@ -305,52 +314,74 @@ class OrbitExecutionBackend(BaseBackend):
     # ------------------------------------------------------------------
 
     def _get_rhapsody_handle(self) -> Any:
-        """Either create an RhapsodyClient for the named endpoint, or pick the first endpoint that
-        advertises an enabled rhapsody plugin.
+        """Connect the EndpointRuntime, pick an endpoint, return a RhapsodyClient.
 
-        Plugins hosted by the
-        Bridge are skipped.
-        Raises ``RuntimeError`` if no candidate is found.
+        The endpoint is either the named one, or auto-selected as the first
+        present endpoint whose topology entry advertises a rhapsody plugin
+        (the broker and pure consumers — including this runtime itself — are
+        skipped).  Raises ``RuntimeError`` if no candidate is found.
+
+        Runs blocking network I/O; always called via ``asyncio.to_thread``.
         """
+        import uuid
 
-        self._bc = BridgeClient(url=self._bridge_url)
-        self._bridge_url = self._bc.url
+        # A unique name suffix avoids the broker's name-in-use rejection when
+        # several rhapsody clients connect (or one restarts within the
+        # liveness grace window).
+        rt = EndpointRuntime(
+            broker_url=self._broker_url,
+            name=f"rhapsody.{uuid.uuid4().hex[:8]}",
+        )
+        try:
+            rt.start(wait=True, timeout=self._start_timeout)
+            # start() returns silently on timeout — check registration
+            # explicitly, or the failure would surface further down as a
+            # misleading "no endpoint found".
+            if not rt.wait_registered(timeout=0):
+                raise RuntimeError(
+                    f"failed to register with ORBIT broker {rt.broker_url!r} "
+                    f"within {self._start_timeout}s"
+                )
+            self._broker_url = rt.broker_url
 
-        # find a suitable endpoint and load rhapsody plugin
-        if not self._endpoint_name:
-            for eid in self._bc.list_endpoints():
-                if eid in self._ENDPOINTS_TO_SKIP:
-                    continue
-
-                # An offline or misbehaving endpoint must not abort the whole
-                # auto-selection scan — skip it and keep probing the rest.
-                try:
-                    plugins = self._bc.get_endpoint_client(eid).list_plugins()
-                    info = plugins.get(self._plugin_name)
-                    if info and info.get("enabled"):
+            # find a suitable endpoint from the (local) topology snapshot
+            if not self._endpoint_name:
+                for eid, info in rt.topology().items():
+                    if eid == rt.name:
+                        continue  # this runtime itself
+                    if info.get("role") in ("broker", "consumer"):
+                        continue
+                    if info.get("liveness") not in (None, "present"):
+                        continue  # suspect / lost
+                    if self._plugin_name in (info.get("plugins") or {}):
                         self.logger.info(
                             "auto-selected endpoint %r (plugin %r)", eid, self._plugin_name
                         )
                         self._endpoint_name = eid
                         break
-                except Exception as exc:
-                    self.logger.debug("failed to query plugins on endpoint %r: %s", eid, exc)
 
-        if not self._endpoint_name:
-            raise RuntimeError(
-                f"no endpoint advertises an enabled {self._plugin_name!r} plugin "
-                f"on bridge {self._bridge_url}"
+            if not self._endpoint_name:
+                raise RuntimeError(
+                    f"no endpoint advertises a {self._plugin_name!r} plugin "
+                    f"on broker {self._broker_url}"
+                )
+
+            # get_plugin() registers the remote session and blocks until it
+            # is ready (bounded by init_timeout).
+            rh = rt.get_plugin(
+                self._endpoint_name,
+                self._plugin_name,
+                backends=self._remote_backends,
+                init_timeout=self._init_timeout,
             )
+        except Exception:
+            # Don't leak the runtime's daemon threads / WebSocket on a failed
+            # init — callers that never reach shutdown() would keep it alive.
+            rt.stop()
+            raise
 
-        ec = self._bc.get_endpoint_client(self._endpoint_name)
-
-        kwargs = {"backends": self._remote_backends}
-        if self._notify_batch_window is not None:
-            kwargs["notify_batch_window"] = self._notify_batch_window
-        if self._notify_batch_size is not None:
-            kwargs["notify_batch_size"] = self._notify_batch_size
-
-        return ec.get_plugin(self._plugin_name, **kwargs)
+        self._runtime = rt
+        return rh
 
     # ------------------------------------------------------------------
     # Python-version compatibility for cloudpickled function tasks
@@ -390,8 +421,14 @@ class OrbitExecutionBackend(BaseBackend):
             info = None
 
             def _lookup():
-                ec = self._bc.get_endpoint_client(self._endpoint_name)
-                return ec.get_plugin("sysinfo").host_role()
+                # get_plugin() auto-registers an ephemeral session even
+                # though host_role() needs none — close the client so failed
+                # retries don't accumulate sessions on the endpoint.
+                si = self._runtime.get_plugin(self._endpoint_name, "sysinfo")
+                try:
+                    return si.host_role()
+                finally:
+                    si.close()
 
             try:
                 # Blocking network I/O — run off the event loop.
@@ -598,7 +635,8 @@ class OrbitExecutionBackend(BaseBackend):
         Mirrors ``cancel_task``: marks each non-terminal local task CANCELED
         and fires its state callback, so consumers that resolve futures via
         callbacks don't hang.  ``_fire_callback`` dedups against the matching
-        CANCELED SSE notification, so each task's terminal callback fires once.
+        CANCELED remote notification, so each task's terminal callback fires
+        once.
         """
         if not self._initialized:
             await self._async_init()
@@ -621,7 +659,7 @@ class OrbitExecutionBackend(BaseBackend):
         return result.get("canceled", 0)
 
     async def shutdown(self) -> None:
-        """Flush pending tasks, close session and BridgeClient."""
+        """Flush pending tasks, close session and EndpointRuntime."""
         try:
             await self._locked_flush()
         except Exception as e:
@@ -643,12 +681,13 @@ class OrbitExecutionBackend(BaseBackend):
                 self.logger.warning("Failed to close session: %s", e)
             self._rh = None
 
-        if self._bc:
+        # stop() joins the runtime's threads and does blocking teardown calls.
+        if self._runtime:
             try:
-                await asyncio.to_thread(self._bc.close)
+                await asyncio.to_thread(self._runtime.stop)
             except Exception as e:
-                self.logger.warning("Failed to close bridge client: %s", e)
-            self._bc = None
+                self.logger.warning("Failed to stop endpoint runtime: %s", e)
+            self._runtime = None
 
         if self._prof:
             self._prof.close()

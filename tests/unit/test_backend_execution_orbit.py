@@ -15,19 +15,19 @@ from rhapsody.backends.execution.orbit import OrbitExecutionBackend
 
 
 @pytest.fixture(autouse=True)
-def _stub_bridge_client():
+def _stub_endpoint_runtime():
     """Allow the suite to run without ``radical.orbit`` installed (e.g. in CI).
 
     ``OrbitExecutionBackend.__init__`` raises ``ImportError`` when the optional
-    ``radical.orbit`` package is missing (module-level ``BridgeClient`` is
-    ``None``).  Every test mocks the bridge/rhapsody chain anyway, so when the
+    ``radical.orbit`` package is missing (module-level ``EndpointRuntime`` is
+    ``None``).  Every test mocks the runtime/rhapsody chain anyway, so when the
     real package is absent stub the symbol to a non-``None`` mock so the
     backend can be constructed.  When it is installed this is a no-op.
     """
-    if orbit_mod.BridgeClient is not None:
+    if orbit_mod.EndpointRuntime is not None:
         yield
         return
-    with patch.object(orbit_mod, "BridgeClient", MagicMock()):
+    with patch.object(orbit_mod, "EndpointRuntime", MagicMock()):
         yield
 
 
@@ -48,22 +48,27 @@ def _mock_rhapsody_client(sid="session.abc123"):
     return rh
 
 
-def _mock_bridge_client(rh=None):
-    """Return a mock BridgeClient whose chain produces *rh*."""
+def _mock_runtime(rh=None, topology=None):
+    """Return a mock EndpointRuntime whose ``get_plugin`` produces *rh*."""
     if rh is None:
         rh = _mock_rhapsody_client()
-    ec = MagicMock()
-    ec.get_plugin = MagicMock(return_value=rh)
-    bc = MagicMock()
-    bc.get_endpoint_client = MagicMock(return_value=ec)
-    bc.close = MagicMock()
-    return bc, rh
+    rt = MagicMock()
+    # NOTE: ``MagicMock(name=...)`` sets the mock's repr, not the attribute —
+    # ``name`` must be assigned after construction.
+    rt.name = "rhapsody.test0000"
+    rt.broker_url = "http://localhost:8000"
+    rt.start = MagicMock(return_value=rt)
+    rt.wait_registered = MagicMock(return_value=True)
+    rt.topology = MagicMock(return_value=topology or {})
+    rt.get_plugin = MagicMock(return_value=rh)
+    rt.stop = MagicMock()
+    return rt, rh
 
 
 def _make_backend(**kwargs):
     """Create an OrbitExecutionBackend (not yet initialised)."""
     defaults = {
-        "bridge_url": "http://localhost:8000",
+        "broker_url": "http://localhost:8000",
         "endpoint_name": "test_endpoint",
     }
     defaults.update(kwargs)
@@ -71,13 +76,14 @@ def _make_backend(**kwargs):
 
 
 async def _init_backend(**kwargs):
-    """Create and initialise a backend with mocked BridgeClient chain."""
+    """Create and initialise a backend with a mocked EndpointRuntime chain."""
+    topology = kwargs.pop("topology", None)
     backend = _make_backend(**kwargs)
-    bc, rh = _mock_bridge_client()
-    with patch("rhapsody.backends.execution.orbit.BridgeClient", return_value=bc):
+    rt, rh = _mock_runtime(topology=topology)
+    with patch("rhapsody.backends.execution.orbit.EndpointRuntime", return_value=rt):
         await backend._async_init()
     # Expose mocks for assertions
-    backend._mock_bc = bc
+    backend._mock_rt = rt
     backend._mock_rh = rh
     return backend
 
@@ -89,7 +95,7 @@ async def _init_backend(**kwargs):
 
 def test_endpoint_backend_construction():
     backend = _make_backend()
-    assert backend._bridge_url == "http://localhost:8000"
+    assert backend._broker_url == "http://localhost:8000"
     assert backend._endpoint_name == "test_endpoint"
     assert backend._plugin_name == "rhapsody"
     assert backend._remote_backends == ["dragon_v3"]
@@ -117,14 +123,15 @@ async def test_async_init_creates_client_chain():
     backend = await _init_backend()
 
     assert backend._initialized is True
-    assert backend._bc is not None
+    assert backend._runtime is not None
     assert backend._rh is not None
 
-    # get_endpoint_client called with the endpoint name
-    backend._mock_bc.get_endpoint_client.assert_called_once_with("test_endpoint")
-    # get_plugin called with plugin name + backends
-    ec = backend._mock_bc.get_endpoint_client.return_value
-    ec.get_plugin.assert_called_once_with("rhapsody", backends=["dragon_v3"])
+    # runtime started and registration verified
+    backend._mock_rt.start.assert_called_once_with(wait=True, timeout=30.0)
+    # get_plugin called with endpoint + plugin name + session kwargs
+    backend._mock_rt.get_plugin.assert_called_once_with(
+        "test_endpoint", "rhapsody", backends=["dragon_v3"], init_timeout=120.0
+    )
 
     # Notification callbacks registered
     calls = backend._mock_rh.register_notification_callback.call_args_list
@@ -227,9 +234,9 @@ async def test_shutdown_closes_clients():
     await backend.shutdown()
 
     backend._mock_rh.close.assert_called_once()
-    backend._mock_bc.close.assert_called_once()
+    backend._mock_rt.stop.assert_called_once()
     assert backend._rh is None
-    assert backend._bc is None
+    assert backend._runtime is None
     assert await backend.state() == "SHUTDOWN"
 
 
@@ -342,11 +349,88 @@ async def test_state():
 @pytest.mark.asyncio
 async def test_context_manager():
     backend = _make_backend()
-    bc, rh = _mock_bridge_client()
-    with patch("rhapsody.backends.execution.orbit.BridgeClient", return_value=bc):
+    rt, rh = _mock_runtime()
+    with patch("rhapsody.backends.execution.orbit.EndpointRuntime", return_value=rt):
         async with backend as b:
             assert b._initialized is True
         assert await b.state() == "SHUTDOWN"
+
+
+# ---------------------------------------------------------------------------
+# Endpoint auto-selection from the topology + registration failure
+# ---------------------------------------------------------------------------
+
+
+def _topo_entry(role, liveness="present", plugins=()):
+    return {
+        "role": role,
+        "liveness": liveness,
+        "plugins": {p: {"namespace": f"/{p}", "enabled": True} for p in plugins},
+    }
+
+
+@pytest.mark.asyncio
+async def test_auto_select_endpoint_from_topology():
+    """With no endpoint_name, the first present endpoint advertising a rhapsody plugin is picked."""
+    topology = {
+        "ep0": _topo_entry("endpoint", plugins=["sysinfo"]),  # no rhapsody
+        "ep1": _topo_entry("endpoint", plugins=["rhapsody", "sysinfo"]),
+        "ep2": _topo_entry("endpoint", plugins=["rhapsody"]),
+    }
+    backend = await _init_backend(endpoint_name=None, topology=topology)
+
+    assert backend._endpoint_name == "ep1"
+    backend._mock_rt.get_plugin.assert_called_once_with(
+        "ep1", "rhapsody", backends=["dragon_v3"], init_timeout=120.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_select_skips_broker_consumer_self_and_lost():
+    """The broker (even if it hosts a rhapsody plugin), pure consumers, this runtime's own topology
+    entry, and non-present endpoints must all be skipped."""
+    topology = {
+        "broker": _topo_entry("broker", plugins=["rhapsody"]),
+        "rhapsody.test0000": _topo_entry("consumer", plugins=["rhapsody"]),  # self
+        "watcher": _topo_entry("consumer", plugins=["rhapsody"]),
+        "ep.lost": _topo_entry("endpoint", liveness="lost", plugins=["rhapsody"]),
+        "ep.good": _topo_entry("endpoint", plugins=["rhapsody"]),
+    }
+    backend = await _init_backend(endpoint_name=None, topology=topology)
+
+    assert backend._endpoint_name == "ep.good"
+
+
+@pytest.mark.asyncio
+async def test_auto_select_no_candidate_raises():
+    """An empty/ineligible topology raises RuntimeError and stops the runtime."""
+    topology = {
+        "broker": _topo_entry("broker", plugins=["rhapsody"]),
+        "ep0": _topo_entry("endpoint", plugins=["sysinfo"]),
+    }
+    backend = _make_backend(endpoint_name=None)
+    rt, _ = _mock_runtime(topology=topology)
+    with patch("rhapsody.backends.execution.orbit.EndpointRuntime", return_value=rt):
+        with pytest.raises(RuntimeError, match="no endpoint advertises"):
+            await backend._async_init()
+
+    rt.stop.assert_called_once()  # failed init must not leak the runtime
+    assert backend._initialized is False
+
+
+@pytest.mark.asyncio
+async def test_registration_timeout_raises():
+    """start() returns silently on timeout — the backend must detect the missed registration and
+    fail with a message naming the broker, not a misleading 'no endpoint found'."""
+    backend = _make_backend()
+    rt, _ = _mock_runtime()
+    rt.wait_registered = MagicMock(return_value=False)
+    with patch("rhapsody.backends.execution.orbit.EndpointRuntime", return_value=rt):
+        with pytest.raises(RuntimeError, match="failed to register with ORBIT broker"):
+            await backend._async_init()
+
+    rt.stop.assert_called_once()
+    assert backend._initialized is False
 
 
 # ---------------------------------------------------------------------------
@@ -359,9 +443,9 @@ async def test_context_manager():
 # ---------------------------------------------------------------------------
 
 
-def _bridge_with_sysinfo(rh, sysinfo_python_version):
-    """Bridge mock whose ``ec.get_plugin('sysinfo')`` returns a sysinfo plugin reporting the given
-    python_version, and whose ``ec.get_plugin('rhapsody', ...)`` returns *rh*."""
+def _runtime_with_sysinfo(rh, sysinfo_python_version):
+    """Runtime mock whose ``get_plugin(eid, 'sysinfo')`` returns a sysinfo plugin reporting the
+    given python_version, and whose ``get_plugin(eid, 'rhapsody', ...)`` returns *rh*."""
     sysinfo = MagicMock()
     sysinfo.host_role = MagicMock(
         return_value={
@@ -372,16 +456,15 @@ def _bridge_with_sysinfo(rh, sysinfo_python_version):
             "python_version": sysinfo_python_version,
         }
     )
+    sysinfo.close = MagicMock()
 
-    def _get_plugin(name, **kwargs):
-        return sysinfo if name == "sysinfo" else rh
+    rt, _ = _mock_runtime(rh=rh)
 
-    ec = MagicMock()
-    ec.get_plugin = MagicMock(side_effect=_get_plugin)
-    bc = MagicMock()
-    bc.get_endpoint_client = MagicMock(return_value=ec)
-    bc.close = MagicMock()
-    return bc, sysinfo
+    def _get_plugin(eid, pname, **kwargs):
+        return sysinfo if pname == "sysinfo" else rh
+
+    rt.get_plugin = MagicMock(side_effect=_get_plugin)
+    return rt, sysinfo
 
 
 async def _init_backend_with_sysinfo(sysinfo_python_version, **kwargs):
@@ -390,10 +473,10 @@ async def _init_backend_with_sysinfo(sysinfo_python_version, **kwargs):
     kwargs.setdefault("batch_window", 0)  # immediate flush, no timer
     backend = _make_backend(**kwargs)
     rh = _mock_rhapsody_client()
-    bc, si = _bridge_with_sysinfo(rh, sysinfo_python_version)
-    with patch("rhapsody.backends.execution.orbit.BridgeClient", return_value=bc):
+    rt, si = _runtime_with_sysinfo(rh, sysinfo_python_version)
+    with patch("rhapsody.backends.execution.orbit.EndpointRuntime", return_value=rt):
         await backend._async_init()
-    backend._mock_bc = bc
+    backend._mock_rt = rt
     backend._mock_rh = rh
     backend._mock_sysinfo = si
     return backend
@@ -506,6 +589,19 @@ async def test_python_compat_fails_fast_under_default_batching():
 
     backend._mock_rh.submit_tasks.assert_not_called()
     assert "t.1" not in backend._tasks
+
+
+@pytest.mark.asyncio
+async def test_sysinfo_client_closed_after_compat_lookup():
+    """The throwaway sysinfo client is closed after the lookup so its auto-registered ephemeral
+    session does not linger on the endpoint."""
+    client_mm = f"{sys.version_info.major}.{sys.version_info.minor}.0"
+    backend = await _init_backend_with_sysinfo(client_mm)
+
+    await backend.submit_tasks([{"uid": "t.1", "function": "cloudpickle::ABCDEF"}])
+
+    backend._mock_sysinfo.host_role.assert_called_once()
+    backend._mock_sysinfo.close.assert_called_once()
 
 
 @pytest.mark.asyncio
