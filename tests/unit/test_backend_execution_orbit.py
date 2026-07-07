@@ -420,8 +420,8 @@ async def test_auto_select_no_candidate_raises():
 
 @pytest.mark.asyncio
 async def test_registration_timeout_raises():
-    """start() returns silently on timeout — the backend must detect the missed registration and
-    fail with a message naming the broker, not a misleading 'no endpoint found'."""
+    """A silent start() timeout must be detected as a missed registration, failing with a message
+    naming the broker — not a misleading 'no endpoint found'."""
     backend = _make_backend()
     rt, _ = _mock_runtime()
     rt.wait_registered = MagicMock(return_value=False)
