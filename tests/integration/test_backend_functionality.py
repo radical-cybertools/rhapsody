@@ -9,7 +9,7 @@ Set RHAPSODY_TEST_MODE environment variable to control which backends are tested
 - RHAPSODY_TEST_MODE=regular (default): Tests non-Dragon backends (concurrent, dask, radical_pilot)
   Run with: pytest tests/integration/test_backend_functionality.py
 
-- RHAPSODY_TEST_MODE=dragon: Tests Dragon backends only (dragon_v1, dragon_v2, dragon_v3)
+- RHAPSODY_TEST_MODE=dragon: Tests Dragon backends only (dragon)
   Run with: dragon pytest tests/integration/test_backend_functionality.py
 
 - RHAPSODY_TEST_MODE=all: Tests all backends
@@ -47,10 +47,10 @@ def get_available_backends_for_mode() -> list[str]:
 
     if mode == "dragon":
         # Only Dragon backends
-        return [name for name in available if name.startswith("dragon_")]
+        return [name for name in available if name == "dragon" or name.startswith("dragon_")]
     elif mode == "regular":
         # Exclude Dragon backends
-        return [name for name in available if not name.startswith("dragon_")]
+        return [name for name in available if name != "dragon" and not name.startswith("dragon_")]
     else:  # mode == "all"
         # All available backends
         return available

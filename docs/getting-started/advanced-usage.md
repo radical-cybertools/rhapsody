@@ -216,7 +216,7 @@ named after the task UID (`task.000001.stdout`, `task.000001.stderr`).
 
 !!! note "Supported backends"
     `capture_stdio` is supported by `ConcurrentExecutionBackend`,
-    `DaskExecutionBackend`, and `DragonExecutionBackendV3`. Function tasks
+    `DaskExecutionBackend`, and `DragonExecutionBackend`. Function tasks
     (`function=`) are unaffected regardless of the flag value.
 
 !!! note "Session work_dir"
@@ -240,7 +240,7 @@ import asyncio
 import rhapsody
 from rhapsody.api import Session
 from rhapsody.api import ComputeTask
-from rhapsody.backends import ConcurrentExecutionBackend, DragonExecutionBackendV3
+from rhapsody.backends import ConcurrentExecutionBackend, DragonExecutionBackend
 
 
 async def compute_function():
@@ -250,7 +250,7 @@ async def compute_function():
 async def multi_backend_demo():
     # Initialize two different backends
     be_local = ConcurrentExecutionBackend(name="local_cpu")
-    be_remote = DragonExecutionBackendV3(name="hpc_gpu")
+    be_remote = DragonExecutionBackend(name="hpc_gpu")
     await asyncio.gather(be_local, be_remote)
 
 
@@ -302,12 +302,12 @@ For large-scale HPC deployments, the Dragon backend provides native integration 
 import asyncio
 import rhapsody
 from rhapsody.api import Session, ComputeTask
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
 async def dragon_demo():
     # Initialize the Dragon backend (optimized for HPC)
     # V3 uses native Dragon Batch for high-performance wait/callbacks
-    dragon_be = await DragonExecutionBackendV3(
+    dragon_be = await DragonExecutionBackend(
         name="dragon_hpc"
     )
 
@@ -336,7 +336,7 @@ if __name__ == "__main__":
 
 ## Dragon Process Templates
 
-When using `DragonExecutionBackendV3`, you can pass Dragon-native process configuration to `ComputeTask` via the `task_backend_specific_kwargs` parameter. This exposes the `process_template` and `process_templates` options, which map directly to Dragon's [ProcessTemplate](https://dragonhpc.github.io/dragon/doc/_build/html/ref/native/dragon.native.process.html#dragon.native.process.ProcessTemplate).
+When using `DragonExecutionBackend`, you can pass Dragon-native process configuration to `ComputeTask` via the `task_backend_specific_kwargs` parameter. This exposes the `process_template` and `process_templates` options, which map directly to Dragon's [ProcessTemplate](https://dragonhpc.github.io/dragon/doc/_build/html/ref/native/dragon.native.process.html#dragon.native.process.ProcessTemplate).
 
 The `ProcessTemplate` accepts the following parameters:
 
@@ -351,7 +351,7 @@ The `ProcessTemplate` accepts the following parameters:
 | `options` | `ProcessOptions`, optional | Process options, such as allowing the process to connect to the infrastructure |
 
 !!! warning "Excluded Parameters"
-    `DragonExecutionBackendV3` manages `target` (the binary or Python callable), `args`, and `kwargs` internally through the `ComputeTask` interface. These three parameters are **not** available in `process_template` / `process_templates` — use `ComputeTask.executable`, `ComputeTask.arguments`, and `ComputeTask.function` instead.
+    `DragonExecutionBackend` manages `target` (the binary or Python callable), `args`, and `kwargs` internally through the `ComputeTask` interface. These three parameters are **not** available in `process_template` / `process_templates` — use `ComputeTask.executable`, `ComputeTask.arguments`, and `ComputeTask.function` instead.
 
 ### Single-Process Template
 
@@ -409,7 +409,7 @@ from dragon.infrastructure.policy import Policy
 
 import rhapsody
 from rhapsody.api import ComputeTask, Session
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
 
 from dragon.native.machine import System, Node
@@ -446,7 +446,7 @@ def make_policies(all_gpus, nprocs=32):
 
 
 async def main():
-    backend = await DragonExecutionBackendV3()
+    backend = await DragonExecutionBackend()
     session = Session(backends=[backend])
 
     all_gpus = find_gpus()  # e.g. [("node-0", 0), ("node-0", 1), ("node-1", 0), ...]
@@ -497,11 +497,11 @@ The following example demonstrates mixing native functions, single-process tasks
 import asyncio
 import rhapsody
 from rhapsody.api import ComputeTask, Session
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
 
 async def main():
-    backend = await DragonExecutionBackendV3()
+    backend = await DragonExecutionBackend()
     session = Session(backends=[backend])
 
     async def single_function():

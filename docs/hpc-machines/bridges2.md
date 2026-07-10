@@ -84,7 +84,7 @@ dragon -w ssh --network-config slurm.yaml -t tcp 01-workload-async-gather.py
 ## Example
 
 This example submits a heterogeneous workload mixing function tasks and
-executable tasks using RHAPSODY's `Session` API with `DragonExecutionBackendV3`.
+executable tasks using RHAPSODY's `Session` API with `DragonExecutionBackend`.
 
 ```python title="01-workload-async-gather.py"
 import asyncio
@@ -92,7 +92,7 @@ import logging
 
 import rhapsody
 from rhapsody.api import ComputeTask, Session
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
 rhapsody.enable_logging(level=logging.DEBUG)
 
@@ -102,7 +102,7 @@ def compute(x: int) -> int:
 
 
 async def main():
-    backend = await DragonExecutionBackendV3()
+    backend = await DragonExecutionBackend()
     session = Session(backends=[backend])
 
     tasks = [ComputeTask(function=compute, args=(i,)) for i in range(16)]

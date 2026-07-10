@@ -43,14 +43,14 @@ import multiprocessing as mp
 
 from rhapsody import Session
 from rhapsody.api import AITask, ComputeTask
-from rhapsody.backends import DragonExecutionBackendV3, DragonVllmInferenceBackend
+from rhapsody.backends import DragonExecutionBackend, DragonVllmInferenceBackend
 
 async def main():
     # Set Dragon as the multiprocessing start method
     mp.set_start_method("dragon")
 
     # Initialize execution backend for compute tasks
-    execution_backend = await DragonExecutionBackendV3()
+    execution_backend = await DragonExecutionBackend()
 
     # Initialize inference backend for AI tasks
     inference_backend = DragonVllmInferenceBackend(
@@ -231,14 +231,14 @@ import asyncio
 import multiprocessing as mp
 
 from radical.asyncflow import WorkflowEngine
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
 async def main():
     # Set Dragon as the multiprocessing start method
     mp.set_start_method("dragon")
 
     # Initialize RHAPSODY backend
-    backend = await DragonExecutionBackendV3()
+    backend = await DragonExecutionBackend()
 
     # Create AsyncFlow workflow engine with RHAPSODY backend
     flow = await WorkflowEngine.create(backend=backend)
@@ -347,8 +347,8 @@ from rhapsody.backends import DaskExecutionBackend
 backend = await DaskExecutionBackend()
 
 # Dragon HPC
-from rhapsody.backends import DragonExecutionBackendV3
-backend = await DragonExecutionBackendV3()
+from rhapsody.backends import DragonExecutionBackend
+backend = await DragonExecutionBackend()
 
 # Create workflow with chosen backend
 flow = await WorkflowEngine.create(backend=backend)

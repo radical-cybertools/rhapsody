@@ -6,7 +6,7 @@ import rhapsody
 from rhapsody.api import AITask
 from rhapsody.api import ComputeTask
 from rhapsody.api import Session
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 from rhapsody.backends import DragonVllmInferenceBackend
 
 rhapsody.enable_logging(level=logging.DEBUG)
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 async def main():
     mp.set_start_method("dragon")
 
-    execution_backend = await DragonExecutionBackendV3()
+    execution_backend = await DragonExecutionBackend()
 
     inference_backend = DragonVllmInferenceBackend(
         config_file="config.yaml",

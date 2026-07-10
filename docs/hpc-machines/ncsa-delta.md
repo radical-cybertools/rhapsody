@@ -60,7 +60,7 @@ dragon <script.py>
 
 ## Example
 
-This example runs 32 MPI jobs concurrently using RHAPSODY's `Session` API with the `DragonExecutionBackendV3`. Each job gets a random number of ranks (between 2 and 32), all scheduled across the 2 allocated nodes. Worker count is determined automatically by Dragon from the allocation.
+This example runs 32 MPI jobs concurrently using RHAPSODY's `Session` API with the `DragonExecutionBackend`. Each job gets a random number of ranks (between 2 and 32), all scheduled across the 2 allocated nodes. Worker count is determined automatically by Dragon from the allocation.
 
 ```python title="mpi-rhapsody.py"
 import asyncio
@@ -70,7 +70,7 @@ import time
 
 import rhapsody
 from rhapsody.api import ComputeTask, Session
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
 rhapsody.enable_logging(level=logging.DEBUG)
 
@@ -97,7 +97,7 @@ async def main():
     sleepsecs = 2
     maxranks = 32
 
-    backend = await DragonExecutionBackendV3()
+    backend = await DragonExecutionBackend()
     session = Session(backends=[backend])
 
     print("--- Submitting Tasks ---")
@@ -140,7 +140,7 @@ dragon mpi-rhapsody.py
     2026-03-25 23:07:36,938 | DEBUG    | [api_setup] | got handshake
     2026-03-25 23:07:36,938 | INFO     | [api_setup] | debug entry hooked
     2026-03-25 23:07:36,942 | DEBUG    | [dragon.native.queue] | Created queue {self!r}
-    2026-03-25 23:07:37,648 | INFO     | [rhapsody.backends.execution.dragon] | DragonExecutionBackendV3: 128 workers, 2 managers
+    2026-03-25 23:07:37,648 | INFO     | [rhapsody.backends.execution.dragon] | DragonExecutionBackend: 128 workers, 2 managers
     2026-03-25 23:07:37,648 | DEBUG    | [rhapsody.backends.execution.dragon] | Starting Dragon backend V3 async initialization...
     2026-03-25 23:07:37,648 | DEBUG    | [rhapsody.backends.execution.dragon] | Registering backend states...
     2026-03-25 23:07:37,649 | DEBUG    | [rhapsody.backends.execution.dragon] | Registering task states...

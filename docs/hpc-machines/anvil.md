@@ -63,7 +63,7 @@ dragon <script.py>
 
 ## Example
 
-This example runs 32 MPI jobs concurrently using RHAPSODY's `Session` API with `DragonExecutionBackendV3`. Each job gets a random number of ranks (between 2 and 32), all scheduled across the 2 allocated nodes. Worker count is determined automatically by Dragon from the allocation.
+This example runs 32 MPI jobs concurrently using RHAPSODY's `Session` API with `DragonExecutionBackend`. Each job gets a random number of ranks (between 2 and 32), all scheduled across the 2 allocated nodes. Worker count is determined automatically by Dragon from the allocation.
 
 ```python title="rhapsody-mpi.py"
 import asyncio
@@ -73,7 +73,7 @@ import time
 
 import rhapsody
 from rhapsody.api import ComputeTask, Session
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
 rhapsody.enable_logging(level=logging.DEBUG)
 
@@ -100,7 +100,7 @@ async def main():
     sleepsecs = 2
     maxranks = 32
 
-    backend = await DragonExecutionBackendV3()
+    backend = await DragonExecutionBackend()
     session = Session(backends=[backend])
 
     print("--- Submitting Tasks ---")

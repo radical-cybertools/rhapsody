@@ -9,7 +9,7 @@ Different examples require different launchers depending on the backend they use
 | Backend | Launcher | Command |
 |---------|----------|---------|
 | `ConcurrentExecutionBackend` | Standard Python | `python example.py` |
-| `DragonExecutionBackendV3` | Dragon runtime | `dragon example.py` |
+| `DragonExecutionBackend` | Dragon runtime | `dragon example.py` |
 | `DragonVllmInferenceBackend` | Dragon runtime + GPU | `dragon example.py` |
 
 > **Why `dragon` instead of `python`?**
@@ -37,7 +37,7 @@ The simplest possible RHAPSODY example. Uses `ConcurrentExecutionBackend` (Pytho
 dragon 01-workload-async-gather.py
 ```
 
-Submits **1024 function tasks** to `DragonExecutionBackendV3` and awaits all of them with `asyncio.gather()`. Demonstrates RHAPSODY's batch submission throughput and the `async with session` context manager pattern.
+Submits **1024 function tasks** to `DragonExecutionBackend` and awaits all of them with `asyncio.gather()`. Demonstrates RHAPSODY's batch submission throughput and the `async with session` context manager pattern.
 
 **What you'll learn:** Large-scale batch submission, `asyncio.gather(*futures)` for collecting results, Dragon backend initialization.
 
@@ -69,7 +69,7 @@ Runs **five different execution modes** in a single session:
 dragon 03-workload-ai-hpc.py
 ```
 
-Combines `DragonExecutionBackendV3` (HPC compute) with `DragonVllmInferenceBackend` (LLM inference) in a single session. Submits a mix of `AITask` and `ComputeTask` objects — RHAPSODY routes each to the correct backend automatically.
+Combines `DragonExecutionBackend` (HPC compute) with `DragonVllmInferenceBackend` (LLM inference) in a single session. Submits a mix of `AITask` and `ComputeTask` objects — RHAPSODY routes each to the correct backend automatically.
 
 **Requires:** GPU access, vLLM installed, and a `config.yaml` file. You must create this config file for your environment based on the sample at [vllm-dragonhpc/config.sample](https://github.com/radical-cybertools/vllm-dragonhpc/blob/main/config.sample).
 

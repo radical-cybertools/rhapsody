@@ -79,7 +79,7 @@ dragon <script.py>
 This example demonstrates a two-phase HPC-AI workflow on Perlmutter:
 
 1. **Simulation phase** — run a batch of scientific simulations using LLM inference (`DragonVllmInferenceBackend`). Each `AITask` sends a domain-specific prompt and collects the generated output as synthetic simulation data.
-2. **Training phase** — fine-tune a small model on the collected simulation outputs using a `ComputeTask` dispatched through `DragonExecutionBackendV3`.
+2. **Training phase** — fine-tune a small model on the collected simulation outputs using a `ComputeTask` dispatched through `DragonExecutionBackend`.
 
 Both phases run within the same RHAPSODY `Session`, sharing the same Dragon runtime across GPU and CPU resources.
 
@@ -90,7 +90,7 @@ import multiprocessing as mp
 
 import rhapsody
 from rhapsody.api import AITask, ComputeTask, Session
-from rhapsody.backends import DragonExecutionBackendV3, DragonVllmInferenceBackend
+from rhapsody.backends import DragonExecutionBackend, DragonVllmInferenceBackend
 
 rhapsody.enable_logging(level=logging.INFO)
 
@@ -160,7 +160,7 @@ def fine_tune(simulation_outputs: list):
 async def main():
     mp.set_start_method("dragon")
 
-    execution_backend = await DragonExecutionBackendV3()
+    execution_backend = await DragonExecutionBackend()
 
     inference_backend = await DragonVllmInferenceBackend(
         config_file="config.yaml",
