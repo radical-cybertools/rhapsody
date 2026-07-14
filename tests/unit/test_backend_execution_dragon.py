@@ -310,14 +310,21 @@ async def test_task_cancellation(session):
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_backend_state(session):
-    """Test backend state is queryable and non-null."""
+    """Backend state is RUNNING while tasks are being processed and after they complete."""
     backend = next(iter(session.backends.values()))
-    state = await backend.state()
-    assert state is not None
 
-    task = ComputeTask(executable="echo", arguments=["test"])
+    task = ComputeTask(executable="echo", arguments=["state-test"])
     await session.submit_tasks([task])
+
+    # state() must return "RUNNING" from the moment the first task was submitted
+    # (earlier tests in this module-scoped session have already triggered RUNNING)
+    state_mid = await backend.state()
+    assert state_mid == "RUNNING", f"Expected RUNNING during processing, got {state_mid!r}"
+
     await session.wait_tasks([task])
+
+    state_after = await backend.state()
+    assert state_after == "RUNNING", f"Expected RUNNING after completion, got {state_after!r}"
 
 
 # ============================================================================
@@ -420,107 +427,93 @@ async def test_executable_with_cwd_via_process_template(session_dragon):
     assert "/tmp" in results[0].get("stdout", "")
 
 
-@pytest.mark.asyncio(loop_scope="module")
-async def test_process_template_cwd_built_and_passed(session_dragon):
-    """Test A: process_template with cwd produces a ProcessTemplate with correct cwd."""
+@pytest.mark.asyncio
+async def test_process_template_cwd_built_and_passed(backend_dragon):
+    """Test A: process_template with cwd produces a ProcessTemplate with correct cwd.
+
+    Uses backend_dragon (mocked Batch) — no Dragon cluster required.  The code calls
+    batch.options(...).process(pt); we capture pt via a mock proxy on batch.options.
+    """
     from dragon.native.process import ProcessTemplate
 
-    backend = session_dragon.backends["dragon"]
-    captured = []
-
-    def capture(pt, **kw):
-        captured.append(pt)
-        return MagicMock()
+    captured_pt = []
+    mock_proxy = MagicMock()
+    mock_proxy.process.side_effect = lambda pt: captured_pt.append(pt) or MagicMock()
 
     task = _make_task_dict(lambda: None, backend_specific={"process_template": {"cwd": "/tmp"}})
 
-    with patch.object(backend.batch, "process", side_effect=capture):
-        await backend.build_task(task)
+    with patch.object(backend_dragon.batch, "options", return_value=mock_proxy):
+        await backend_dragon.build_task(task)
 
-    assert len(captured) == 1
-    pt = captured[0]
+    assert len(captured_pt) == 1
+    pt = captured_pt[0]
     assert isinstance(pt, ProcessTemplate)
     assert pt.cwd == "/tmp"
 
 
-@pytest.mark.asyncio(loop_scope="module")
-async def test_process_template_policy_gpu_affinity_built_and_passed(session_dragon):
+@pytest.mark.asyncio
+async def test_process_template_policy_gpu_affinity_built_and_passed(backend_dragon):
     """Test B: process_template with policy(gpu_affinity) produces ProcessTemplate with correct policy."""
     from dragon.infrastructure.policy import Policy
     from dragon.native.process import ProcessTemplate
 
-    backend = session_dragon.backends["dragon"]
-    captured = []
-
-    def capture(pt, **kw):
-        captured.append(pt)
-        return MagicMock()
+    captured_pt = []
+    mock_proxy = MagicMock()
+    mock_proxy.process.side_effect = lambda pt: captured_pt.append(pt) or MagicMock()
 
     policy = Policy(gpu_affinity=[0, 1, 2, 3])
     task = _make_task_dict(lambda: None, backend_specific={"process_template": {"policy": policy}})
 
-    with patch.object(backend.batch, "process", side_effect=capture):
-        await backend.build_task(task)
+    with patch.object(backend_dragon.batch, "options", return_value=mock_proxy):
+        await backend_dragon.build_task(task)
 
-    assert len(captured) == 1
-    pt = captured[0]
+    assert len(captured_pt) == 1
+    pt = captured_pt[0]
     assert isinstance(pt, ProcessTemplate)
     assert pt.policy is policy
     assert pt.policy.gpu_affinity == [0, 1, 2, 3]
 
 
-@pytest.mark.asyncio(loop_scope="module")
-async def test_process_template_empty_dict_uses_process_mode(session_dragon):
-    """Test C: process_template={} still routes to batch.process(), not batch.function().
+@pytest.mark.asyncio
+async def test_process_template_empty_dict_uses_process_mode(backend_dragon):
+    """Test C: process_template={} still routes to proxy.process(), not proxy.function().
 
-    Regression test: a truthiness check on the dict silently falls through on an
-    empty dict; the ``is not None`` guard in build_task prevents this.
+    Regression: a truthiness check on the dict falls through on an empty dict; the
+    ``is not None`` guard in build_task prevents this.
     """
-    backend = session_dragon.backends["dragon"]
     process_calls = []
     function_calls = []
-
-    def capture_process(pt, **kw):
-        process_calls.append(pt)
-        return MagicMock()
-
-    def capture_function(target, *args, **kw):
-        function_calls.append(target)
-        return MagicMock()
+    mock_proxy = MagicMock()
+    mock_proxy.process.side_effect = lambda pt: process_calls.append(pt) or MagicMock()
+    mock_proxy.function.side_effect = lambda fn, *a, **kw: function_calls.append(fn) or MagicMock()
 
     task = _make_task_dict(lambda: None, backend_specific={"process_template": {}})
 
-    with (
-        patch.object(backend.batch, "process", side_effect=capture_process),
-        patch.object(backend.batch, "function", side_effect=capture_function),
-    ):
-        await backend.build_task(task)
+    with patch.object(backend_dragon.batch, "options", return_value=mock_proxy):
+        await backend_dragon.build_task(task)
 
-    assert len(process_calls) == 1, "batch.process() should have been called (Priority 2)"
+    assert len(process_calls) == 1, "options().process() should have been called (Priority 2)"
     assert len(function_calls) == 0, (
-        "batch.function() must NOT be called when process_template is provided"
+        "options().function() must NOT be called when process_template is provided"
     )
 
 
-@pytest.mark.asyncio(loop_scope="module")
-async def test_process_templates_list_built_and_passed_to_job(session_dragon):
-    """Test D: process_templates list produces correct (nranks, ProcessTemplate) tuples for batch.job()."""
+@pytest.mark.asyncio
+async def test_process_templates_list_built_and_passed_to_job(backend_dragon):
+    """Test D: process_templates list produces correct (nranks, ProcessTemplate) tuples for job()."""
     from dragon.native.process import ProcessTemplate
 
-    backend = session_dragon.backends["dragon"]
     captured_args = []
-
-    def capture_job(templates, **kw):
-        captured_args.append(templates)
-        return MagicMock()
+    mock_proxy = MagicMock()
+    mock_proxy.job.side_effect = lambda templates: captured_args.append(templates) or MagicMock()
 
     task = _make_task_dict(
         lambda: None,
         backend_specific={"process_templates": [(2, {"cwd": "/tmp"})]},
     )
 
-    with patch.object(backend.batch, "job", side_effect=capture_job):
-        await backend.build_task(task)
+    with patch.object(backend_dragon.batch, "options", return_value=mock_proxy):
+        await backend_dragon.build_task(task)
 
     assert len(captured_args) == 1
     templates = captured_args[0]
@@ -531,19 +524,16 @@ async def test_process_templates_list_built_and_passed_to_job(session_dragon):
     assert pt.cwd == "/tmp"
 
 
-@pytest.mark.asyncio(loop_scope="module")
-async def test_process_template_combined_spec_policy_cwd_args(session_dragon):
-    """Test E: process_template with policy + cwd all land on the ProcessTemplate correctly."""
+@pytest.mark.asyncio
+async def test_process_template_combined_spec_policy_cwd_args(backend_dragon):
+    """Test E: process_template with policy + cwd + args all land on ProcessTemplate correctly."""
     import cloudpickle
     from dragon.infrastructure.policy import Policy
     from dragon.native.process import ProcessTemplate
 
-    backend = session_dragon.backends["dragon"]
-    captured = []
-
-    def capture(pt, **kw):
-        captured.append(pt)
-        return MagicMock()
+    captured_pt = []
+    mock_proxy = MagicMock()
+    mock_proxy.process.side_effect = lambda pt: captured_pt.append(pt) or MagicMock()
 
     policy = Policy(gpu_affinity=[0])
     task = _make_task_dict(
@@ -553,11 +543,11 @@ async def test_process_template_combined_spec_policy_cwd_args(session_dragon):
         backend_specific={"process_template": {"policy": policy, "cwd": "/tmp"}},
     )
 
-    with patch.object(backend.batch, "process", side_effect=capture):
-        await backend.build_task(task)
+    with patch.object(backend_dragon.batch, "options", return_value=mock_proxy):
+        await backend_dragon.build_task(task)
 
-    assert len(captured) == 1
-    pt = captured[0]
+    assert len(captured_pt) == 1
+    pt = captured_pt[0]
     assert isinstance(pt, ProcessTemplate)
     assert pt.policy is policy
     assert pt.cwd == "/tmp"
@@ -587,7 +577,7 @@ def test_constructor_batch_kwargs_forwarded_verbatim():
     ) as mock_batch_cls:
         backend = DragonExecutionBackend(batch_kwargs=kwargs)
 
-    mock_batch_cls.assert_called_once_with(**kwargs)
+    mock_batch_cls.assert_called_once_with(task_logs=True, **kwargs)
     assert backend.batch is mock_batch
 
 
@@ -604,7 +594,7 @@ def test_constructor_no_batch_kwargs_calls_batch_with_no_args():
     ) as mock_batch_cls:
         DragonExecutionBackend()
 
-    mock_batch_cls.assert_called_once_with()
+    mock_batch_cls.assert_called_once_with(task_logs=True)
 
 
 def test_constructor_rejects_bare_batch_params():
@@ -632,6 +622,21 @@ def test_constructor_rejects_bare_batch_params():
             DragonExecutionBackend(disable_background_batching=True)
         with pytest.raises(TypeError):
             DragonExecutionBackend(disable_batch_submission=True)
+
+
+@pytest.mark.asyncio
+async def test_initial_state_is_initialized():
+    """A freshly created backend reports INITIALIZED before any tasks are submitted."""
+    from rhapsody.backends.execution.dragon import DragonExecutionBackend
+
+    mock_batch = MagicMock()
+    mock_batch.num_workers = 4
+    mock_batch.num_managers = 1
+
+    with patch("rhapsody.backends.execution.dragon.Batch", return_value=mock_batch):
+        backend = DragonExecutionBackend()
+
+    assert await backend.state() == "INITIALIZED"
 
 
 def test_deliver_batch_success_stores_value_and_fires_done(backend_dragon):
@@ -710,59 +715,153 @@ def test_fence_delegates_to_batch(backend_dragon):
     backend_dragon.batch.fence.assert_called_once()
 
 
+def _run_monitor_one_cycle(backend, poll_tuid, monitored_entry=None, task_registry_entry=None):
+    """Drive _monitor_loop for one completion cycle and return the captured mock_loop.
+
+    - poll call 1 returns `poll_tuid` (the tuid to deliver)
+    - poll call ≥2 sets _shutdown_event and returns None (draining + outer loop → exits)
+    - backend._loop is replaced with a MagicMock so call_soon_threadsafe is capturable
+    - If `monitored_entry` is given, it is inserted into _monitored_batches under poll_tuid
+    - If `task_registry_entry` is given, it is inserted into _task_registry
+    """
+    mock_loop = MagicMock()
+    backend._loop = mock_loop
+
+    if monitored_entry is not None:
+        backend._monitored_batches[poll_tuid] = monitored_entry
+    if task_registry_entry is not None:
+        uid = task_registry_entry["uid"]
+        backend._task_registry[uid] = task_registry_entry
+
+    calls = [0]
+
+    def poll_side_effect(timeout=0):
+        calls[0] += 1
+        if calls[0] == 1:
+            return poll_tuid
+        backend._shutdown_event.set()
+        return None
+
+    backend.batch.poll.side_effect = poll_side_effect
+    backend._monitor_loop()
+    return mock_loop
+
+
 def test_monitor_loop_get_called_after_poll(backend_dragon):
-    """After poll() returns a tuid, get(block=False) is called on the corresponding task."""
+    """_monitor_loop calls batch_task.get(block=False) after poll() returns its tuid."""
     uid = "task.poll-get"
+    tuid = "dragon-tuid-poll-get"
     mock_task = MagicMock()
     mock_task.get.return_value = "done-result"
     mock_task.traceback = None
     mock_task.stdout_path = None
     mock_task.stderr_path = None
-    backend_dragon._monitored_batches[uid] = (mock_task, "flow-uid")
+    mock_task.get_stdout.return_value = None
+    mock_task.get_stderr.return_value = None
 
-    # Simulate the drain: poll returned uid, now process it
-    entry = backend_dragon._monitored_batches.pop(uid, None)
-    assert entry is not None
-    batch_task, flow_uid = entry
-    result = batch_task.get(block=False)
-    stdout = batch_task.stdout_path or ""
-    stderr = batch_task.stderr_path or ""
-    completed = [(flow_uid, result, None, False, stdout, stderr)]
+    mock_loop = _run_monitor_one_cycle(
+        backend_dragon,
+        poll_tuid=tuid,
+        monitored_entry=(mock_task, uid),
+        task_registry_entry={"uid": uid, "description": {"uid": uid}, "is_native_function": True},
+    )
 
     mock_task.get.assert_called_once_with(block=False)
-    assert completed == [("flow-uid", "done-result", None, False, "", "")]
+    mock_loop.call_soon_threadsafe.assert_called_once()
+    _, completions = mock_loop.call_soon_threadsafe.call_args.args
+    assert completions == [(uid, "done-result", None, False, "", "")]
 
 
 def test_monitor_loop_skips_cancelled_tuid(backend_dragon):
-    """When poll() returns a tuid not in _monitored_batches (cancelled task), it is skipped."""
-    uid = "task.poll-cancelled"
-    backend_dragon._monitored_batches.pop(uid, None)  # ensure absent (simulates cancel_task)
+    """When poll() returns a tuid absent from _monitored_batches, _deliver_batch is not called.
 
-    completed = []
-    entry = backend_dragon._monitored_batches.pop(uid, None)
-    if entry is not None:
-        completed.append(entry)
+    This is the user-cancel path: cancel_task() eagerly pops from _monitored_batches before
+    the monitor loop sees the tuid via poll().  The loop must silently skip it.
+    """
+    tuid = "dragon-cancelled-tuid"
+    # Intentionally not inserting into _monitored_batches — simulates cancel_task already popped it.
+    mock_loop = _run_monitor_one_cycle(backend_dragon, poll_tuid=tuid)
 
-    assert completed == []  # skipped — no entry present
+    mock_loop.call_soon_threadsafe.assert_not_called()
 
 
 def test_monitor_loop_reads_paths_from_batch_task(backend_dragon):
-    """stdout/stderr paths come from batch_task.stdout_path/stderr_path, not _task_registry."""
+    """Stdout/stderr paths are taken from batch_task.stdout_path/.stderr_path after poll().
+
+    The monitor loop must NOT look up paths from _task_registry — they live on the
+    batch_task object as set at submission time via Batch.options(stdout=..., stderr=...).
+    """
     uid = "task.poll-paths"
+    tuid = "dragon-tuid-paths"
     mock_task = MagicMock()
     mock_task.get.return_value = "result"
     mock_task.traceback = None
     mock_task.stdout_path = "/work/uid.stdout"
     mock_task.stderr_path = "/work/uid.stderr"
-    backend_dragon._monitored_batches[uid] = (mock_task, "flow-paths")
 
-    entry = backend_dragon._monitored_batches.pop(uid)
-    batch_task, _ = entry
-    stdout = batch_task.stdout_path or ""
-    stderr = batch_task.stderr_path or ""
+    mock_loop = _run_monitor_one_cycle(
+        backend_dragon,
+        poll_tuid=tuid,
+        monitored_entry=(mock_task, uid),
+        task_registry_entry={
+            "uid": uid,
+            "description": {"uid": uid, "capture_stdio": True},
+            "is_native_function": False,
+        },
+    )
 
-    assert stdout == "/work/uid.stdout"
-    assert stderr == "/work/uid.stderr"
+    mock_loop.call_soon_threadsafe.assert_called_once()
+    _, completions = mock_loop.call_soon_threadsafe.call_args.args
+    assert len(completions) == 1
+    assert completions[0][4] == "/work/uid.stdout"
+    assert completions[0][5] == "/work/uid.stderr"
+
+
+def test_monitor_loop_nonzero_exit_delivers_failed(backend_dragon):
+    """Process task: get() returning int 1 must produce raised=True + SystemExit(1)."""
+    uid, tuid = "task.exit-1", "tuid-exit-1"
+    mock_task = MagicMock()
+    mock_task.get.return_value = 1
+    mock_task.traceback = None
+    mock_task.get_stdout.return_value = None
+    mock_task.get_stderr.return_value = None
+
+    mock_loop = _run_monitor_one_cycle(
+        backend_dragon,
+        poll_tuid=tuid,
+        monitored_entry=(mock_task, uid),
+        task_registry_entry={"uid": uid, "description": {"uid": uid}, "is_native_function": False},
+    )
+
+    _, completions = mock_loop.call_soon_threadsafe.call_args.args
+    uid_c, result_c, _tb, raised_c, *_ = completions[0]
+    assert uid_c == uid
+    assert raised_c is True
+    assert isinstance(result_c, SystemExit)
+    assert result_c.code == 1
+
+
+def test_monitor_loop_function_int_return_delivers_done(backend_dragon):
+    """Function task returning int 42 must deliver DONE — exit-code check must not fire."""
+    uid, tuid = "task.func-42", "tuid-func-42"
+    mock_task = MagicMock()
+    mock_task.get.return_value = 42
+    mock_task.traceback = None
+    mock_task.get_stdout.return_value = None
+    mock_task.get_stderr.return_value = None
+
+    mock_loop = _run_monitor_one_cycle(
+        backend_dragon,
+        poll_tuid=tuid,
+        monitored_entry=(mock_task, uid),
+        task_registry_entry={"uid": uid, "description": {"uid": uid}, "is_native_function": True},
+    )
+
+    _, completions = mock_loop.call_soon_threadsafe.call_args.args
+    uid_c, result_c, _tb, raised_c, *_ = completions[0]
+    assert uid_c == uid
+    assert raised_c is False
+    assert result_c == 42
 
 
 @pytest.mark.asyncio
@@ -895,13 +994,13 @@ async def test_shutdown_calls_join_and_destroy_not_close(backend_dragon):
 
 @pytest.mark.asyncio
 async def test_capture_stdio_true_passes_paths_to_batch(backend_dragon, tmp_path):
-    """capture_stdio=True passes stdout/stderr file paths to batch.process() — no shell script."""
-    backend_dragon._work_dir = str(tmp_path)
-    captured_kwargs = {}
+    """capture_stdio=True passes stdout/stderr file paths to Batch.options() — no shell script.
 
-    def capture_process(pt, **kw):
-        captured_kwargs.update(kw)
-        return MagicMock()
+    Dragon 0.14.1-rc requires metadata (name, timeout, stdio paths) in Batch.options(), not as
+    direct kwargs to process()/function().  The old patch on batch.process is dead code. Assert via
+    batch.options call_args instead.
+    """
+    backend_dragon._work_dir = str(tmp_path)
 
     task = {
         "uid": "task.capture-test-001",
@@ -915,11 +1014,11 @@ async def test_capture_stdio_true_passes_paths_to_batch(backend_dragon, tmp_path
         "capture_stdio": True,
     }
 
-    with patch.object(backend_dragon.batch, "process", side_effect=capture_process):
-        await backend_dragon.build_task(task)
+    await backend_dragon.build_task(task)
 
-    assert captured_kwargs.get("stdout", "").endswith(".stdout")
-    assert captured_kwargs.get("stderr", "").endswith(".stderr")
+    options_kwargs = backend_dragon.batch.options.call_args.kwargs
+    assert options_kwargs["stdout"].endswith(".stdout")
+    assert options_kwargs["stderr"].endswith(".stderr")
     # No shell script written — Dragon handles redirection natively
     assert not list(tmp_path.glob("*.sh"))
     # Registry no longer stores paths — they live on the batch_task object
@@ -929,13 +1028,8 @@ async def test_capture_stdio_true_passes_paths_to_batch(backend_dragon, tmp_path
 
 @pytest.mark.asyncio
 async def test_capture_stdio_false_passes_none_to_batch(backend_dragon, tmp_path):
-    """capture_stdio=False (default) passes stdout=None, stderr=None to batch — no capture."""
+    """capture_stdio=False (default) passes stdout=None, stderr=None to Batch.options()."""
     backend_dragon._work_dir = str(tmp_path)
-    captured_kwargs = {}
-
-    def capture_process(pt, **kw):
-        captured_kwargs.update(kw)
-        return MagicMock()
 
     task = {
         "uid": "task.capture-test-002",
@@ -949,23 +1043,18 @@ async def test_capture_stdio_false_passes_none_to_batch(backend_dragon, tmp_path
         "capture_stdio": False,
     }
 
-    with patch.object(backend_dragon.batch, "process", side_effect=capture_process):
-        await backend_dragon.build_task(task)
+    await backend_dragon.build_task(task)
 
-    assert captured_kwargs.get("stdout") is None
-    assert captured_kwargs.get("stderr") is None
+    options_kwargs = backend_dragon.batch.options.call_args.kwargs
+    assert options_kwargs["stdout"] is None
+    assert options_kwargs["stderr"] is None
     assert not list(tmp_path.glob("*.sh"))
 
 
 @pytest.mark.asyncio
 async def test_capture_stdio_function_task_passes_paths_to_batch_function(backend_dragon, tmp_path):
-    """capture_stdio=True on a function task passes stdout/stderr paths to batch.function()."""
+    """capture_stdio=True on a function task passes stdout/stderr paths to Batch.options()."""
     backend_dragon._work_dir = str(tmp_path)
-    captured_kwargs = {}
-
-    def capture_function(fn, *args, **kw):
-        captured_kwargs.update(kw)
-        return MagicMock()
 
     task = {
         "uid": "task.capture-test-003",
@@ -979,11 +1068,11 @@ async def test_capture_stdio_function_task_passes_paths_to_batch_function(backen
         "capture_stdio": True,
     }
 
-    with patch.object(backend_dragon.batch, "function", side_effect=capture_function):
-        await backend_dragon.build_task(task)
+    await backend_dragon.build_task(task)
 
-    assert captured_kwargs.get("stdout", "").endswith(".stdout")
-    assert captured_kwargs.get("stderr", "").endswith(".stderr")
+    options_kwargs = backend_dragon.batch.options.call_args.kwargs
+    assert options_kwargs["stdout"].endswith(".stdout")
+    assert options_kwargs["stderr"].endswith(".stderr")
     assert not list(tmp_path.glob("*.sh"))
 
 
@@ -1008,10 +1097,10 @@ def test_deliver_batch_empty_dragon_stdout_written_as_empty_string(backend_drago
 
 @pytest.mark.result_contract
 def test_deliver_batch_path_from_tuple_stored_on_task(backend_dragon):
-    """stdout/stderr paths in the completion tuple are stored directly on task_desc.
+    """Stdout/stderr paths in the completion tuple are stored directly on task_desc.
 
-    The monitor loop passes batch_task.stdout_path as the 5th element; _deliver_batch
-    stores it verbatim — no registry lookup needed.
+    The monitor loop passes batch_task.stdout_path as the 5th element; _deliver_batch stores it
+    verbatim — no registry lookup needed.
     """
     uid = "task.contract-redirect"
     task_desc = {"uid": uid}

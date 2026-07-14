@@ -120,7 +120,13 @@ class DragonExecutionBackend(BaseBackend):
         super().__init__(name=name)
 
         self.logger = _get_logger()
-        self.batch = Batch(**(batch_kwargs or {}))
+        effective_kwargs = {"task_logs": True, **(batch_kwargs or {})}
+        if not effective_kwargs.get("task_logs", True):
+            self.logger.warning(
+                "task_logs is disabled: task['stdout']/task['stderr'] will be empty "
+                "for capture_stdio=False tasks; output goes directly to the console."
+            )
+        self.batch = Batch(**effective_kwargs)
 
         self._backend_state = BackendMainStates.INITIALIZED
         self._callback_func: Callable = lambda t, s: None
@@ -175,9 +181,9 @@ class DragonExecutionBackend(BaseBackend):
     def _monitor_loop(self) -> None:
         """Single thread to monitor all active tasks via event-driven Batch.poll().
 
-        Blocks on poll() at the OS queue level — zero CPU when idle. Drains all
-        simultaneously available completions before waking the asyncio event loop,
-        preserving O(sweeps) cross-thread wakeups instead of O(tasks).
+        Blocks on poll() at the OS queue level — zero CPU when idle. Drains all simultaneously
+        available completions before waking the asyncio event loop, preserving O(sweeps) cross-
+        thread wakeups instead of O(tasks).
         """
         self.logger.debug("Starting Dragon batch monitor loop (event-driven)")
 
@@ -216,11 +222,34 @@ class DragonExecutionBackend(BaseBackend):
                     except Exception as exc:
                         result, raised, tb = exc, True, batch_task.traceback
 
-                    # Match ConcurrentExecutionBackend contract:
-                    #   capture_stdio=True  → stdout/stderr = file path (files exist on disk)
-                    #   capture_stdio=False → stdout/stderr = "" (output forwarded to console)
-                    stdout = batch_task.stdout_path or ""
-                    stderr = batch_task.stderr_path or ""
+                    task_reg = self._task_registry.get(uid)
+                    is_native_function = (
+                        task_reg.get("is_native_function", False) if task_reg else False
+                    )
+                    if not is_native_function:
+                        # Dragon returns exit codes as int/list[int] for process/job tasks.
+                        # Normalize non-zero to raised=True so Rhapsody delivers FAILED.
+                        if isinstance(result, int) and result != 0:
+                            result = SystemExit(result)
+                            raised = True
+                        elif isinstance(result, list) and any(
+                            c != 0 for c in result if isinstance(c, int)
+                        ):
+                            result = SystemExit(result)
+                            raised = True
+
+                    capture_stdio = (
+                        task_reg.get("description", {}).get("capture_stdio") if task_reg else False
+                    )
+                    if capture_stdio:
+                        stdout = batch_task.stdout_path or ""
+                        stderr = batch_task.stderr_path or ""
+                    else:
+                        try:
+                            stdout = batch_task.get_stdout(block=False) or ""
+                            stderr = batch_task.get_stderr(block=False) or ""
+                        except OSError:
+                            stdout, stderr = "", ""
                     completed.append((uid, result, tb, raised, stdout, stderr))
 
                 if completed:
@@ -235,8 +264,8 @@ class DragonExecutionBackend(BaseBackend):
         """Deliver a batch of completed tasks. Runs on the asyncio event loop (via
         call_soon_threadsafe).
 
-        Called once per monitor drain with all tasks that completed in that sweep, reducing
-        cross-thread wakeups from O(tasks) to O(sweeps).
+        Called once per monitor drain with all tasks that completed in that sweep, reducing cross-
+        thread wakeups from O(tasks) to O(sweeps).
         """
         for uid, result, tb, raised, stdout, stderr in completions:
             task_info = self._task_registry.pop(uid, None)
@@ -362,6 +391,9 @@ class DragonExecutionBackend(BaseBackend):
         # Get template configs once
         process_templates_config = backend_kwargs.get("process_templates")
         process_template_config = backend_kwargs.get("process_template")
+        is_native_function = (
+            is_function and process_templates_config is None and process_template_config is None
+        )
 
         # Compute per-task stdio paths when capture is requested.
         # Dragon creates parent directories automatically.
@@ -375,6 +407,16 @@ class DragonExecutionBackend(BaseBackend):
             """Build ProcessTemplate kwargs from user config."""
             return {**template_cfg, "args": task_args, "kwargs": task_kwargs}
 
+        # Build task options once and reuse across all submission paths.
+        # Dragon 0.14.1-rc requires metadata (name, timeout, stdio paths) to go through
+        # Batch.options() rather than as direct kwargs to process/job/function.
+        task_opts = self.batch.options(
+            name=name,
+            timeout=timeout,
+            stdout=stdout_path,
+            stderr=stderr_path,
+        )
+
         # Single decision tree - no redundant checks
         if process_templates_config is not None:
             # Priority 1: Job with user templates
@@ -382,61 +424,35 @@ class DragonExecutionBackend(BaseBackend):
                 (nranks, ProcessTemplate(target, **_build_process_template_kwargs(tc)))
                 for nranks, tc in process_templates_config
             ]
-            batch_task = self.batch.job(
-                process_templates, name=name, timeout=timeout,
-                stdout=stdout_path, stderr=stderr_path,
-            )
-            execution_mode = "job"
+            batch_task = task_opts.job(process_templates)
 
         elif process_template_config is not None:
             # Priority 2: Process with user template
-            batch_task = self.batch.process(
-                ProcessTemplate(target, **_build_process_template_kwargs(process_template_config)),
-                name=name, timeout=timeout,
-                stdout=stdout_path, stderr=stderr_path,
+            batch_task = task_opts.process(
+                ProcessTemplate(target, **_build_process_template_kwargs(process_template_config))
             )
-            execution_mode = "process"
-
-        elif backend_kwargs.get("type") == "mpi":
-            # Priority 3: Job auto-build
-            batch_task = self.batch.job(
-                [
-                    (
-                        backend_kwargs.get("ranks", 1),
-                        ProcessTemplate(target, **_build_process_template_kwargs({})),
-                    )
-                ],
-                name=name, timeout=timeout,
-                stdout=stdout_path, stderr=stderr_path,
-            )
-            execution_mode = "job"
 
         elif is_function:
-            # Priority 4: Function native
-            batch_task = self.batch.function(
-                target, *task_args, name=name, timeout=timeout,
-                stdout=stdout_path, stderr=stderr_path,
-                **task_kwargs,
-            )
-            execution_mode = "function"
+            # Priority 3: Function native (batch.function — returns Python value, not exit code)
+            batch_task = task_opts.function(target, *task_args, **task_kwargs)
 
         else:
-            # Priority 5: Executable process auto-build
-            batch_task = self.batch.process(
-                ProcessTemplate(target, **_build_process_template_kwargs({})),
-                name=name, timeout=timeout,
-                stdout=stdout_path, stderr=stderr_path,
+            # Priority 4: Executable process auto-build
+            batch_task = task_opts.process(
+                ProcessTemplate(target, **_build_process_template_kwargs({}))
             )
-            execution_mode = "process"
 
         # Register and return
         self._task_registry[uid] = {
             "uid": uid,
             "description": task,
             "batch_task": batch_task,
+            "is_native_function": is_native_function,
         }
 
-        self.logger.debug(f"Created {execution_mode} task: {uid}")
+        self.logger.debug(
+            f"Created {'function' if is_native_function else 'process/job'} task: {uid}"
+        )
 
         return batch_task
 

@@ -216,8 +216,11 @@ named after the task UID (`task.000001.stdout`, `task.000001.stderr`).
 
 !!! note "Supported backends"
     `capture_stdio` is supported by `ConcurrentExecutionBackend`,
-    `DaskExecutionBackend`, and `DragonExecutionBackend`. Function tasks
-    (`function=`) are unaffected regardless of the flag value.
+    `DaskExecutionBackend`, and `DragonExecutionBackend`. On
+    `ConcurrentExecutionBackend` and `DaskExecutionBackend`, function tasks
+    (`function=`) are unaffected by this flag. On `DragonExecutionBackend`,
+    `capture_stdio` applies to **all** task types including function tasks — see
+    [Dragon: Task Output and File Paths](#dragon-task-output-and-file-paths).
 
 !!! note "Session work_dir"
     Files are placed in `{session.work_dir}/{session.uid}/`. Pass `work_dir=`
@@ -572,6 +575,25 @@ if __name__ == "__main__":
     ```bash
     dragon my_heterogeneous_workload.py
     ```
+
+## Dragon: Task Output and File Paths
+
+After a task completes, `task.stdout` and `task.stderr` work as follows:
+
+- **`capture_stdio=False` (default)** — content is an inline string (whatever the task printed). Read it directly: `task.stdout`.
+- **`capture_stdio=True`** — content is a file path under the Rhapsody session directory (`rhapsody.session.{uid}/task.000001.stdout`). Open it to read: `open(task.stdout).read()`.
+
+!!! note "Performance at scale"
+    At 100K+ tasks on shared filesystems, the default file-read overhead (~100–400 s on Lustre) can be avoided by passing `batch_kwargs={"task_logs": False}` to `DragonExecutionBackend`. With this option, `task.stdout` and `task.stderr` will be **empty** for all `capture_stdio=False` tasks — output goes to the console only. A warning is logged when this option is active.
+
+!!! warning "Functions launched via process_template or process_templates"
+    If you use `function=` together with `process_template` or `process_templates`,
+    Dragon runs the callable as a subprocess — **not** in Dragon's native function pool.
+    In this mode `task.return_value` is the **exit code** (`0` on success), not the
+    Python return value of your function. Use a bare `ComputeTask(function=my_fn)` (no
+    templates) when you need the actual return value.
+
+---
 
 ## Mixed HPC and AI Workloads
 
