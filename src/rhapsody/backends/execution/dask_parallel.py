@@ -219,7 +219,8 @@ class DaskExecutionBackend(BaseBackend):
             task = self.tasks[uid]
             future = task.get("future")
             if future:
-                return await future.cancel()
+                await future.cancel()
+                return True
         return False
 
     async def submit_tasks(self, tasks: list[dict[str, Any]]) -> None:
