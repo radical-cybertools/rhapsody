@@ -112,7 +112,7 @@ async def setup_test_backend(backend_name=None):
 
     try:
         # Initialize backend with proper resources
-        backend = rhapsody.get_backend(backend_name)
+        backend = await rhapsody.get_backend(backend_name)
 
         # Handle async initialization for backends that need it
         if hasattr(backend, "__await__"):
@@ -182,7 +182,7 @@ class TestBackendFunctionality:
             pytest.skip(f"No backends available for test mode: {get_test_mode()}")
 
         backend_name = available_names[0]
-        backend = rhapsody.get_backend(backend_name)
+        backend = await rhapsody.get_backend(backend_name)
         task = rhapsody.ComputeTask(
             executable="/bin/echo", arguments=[f"resource-test {backend_name}"]
         )
@@ -259,7 +259,7 @@ class TestBackendFunctionality:
             pytest.skip("Async pattern test uses dask only")
 
         try:
-            backend = rhapsody.get_backend("dask")
+            backend = await rhapsody.get_backend("dask")
         except (ImportError, Exception):
             pytest.skip("Dask backend not available for async pattern testing")
 
@@ -290,7 +290,7 @@ class TestBackendCompatibility:
 
         for name in available_names:
             try:
-                backend = rhapsody.get_backend(name)
+                backend = await rhapsody.get_backend(name)
             except (ImportError, Exception):
                 continue  # skip backends whose runtime deps are not installed
 
@@ -329,7 +329,7 @@ class TestBackendCompatibility:
         tested = 0
         for name in available_names:
             try:
-                backend = rhapsody.get_backend(name)
+                backend = await rhapsody.get_backend(name)
             except (ImportError, Exception):
                 continue  # skip backends whose runtime deps are not installed
 
@@ -361,7 +361,7 @@ async def main():
             return
 
         backend_name = available_names[0]
-        backend = rhapsody.get_backend(backend_name)
+        backend = await rhapsody.get_backend(backend_name)
         tasks = [
             rhapsody.ComputeTask(
                 executable="/bin/echo",
