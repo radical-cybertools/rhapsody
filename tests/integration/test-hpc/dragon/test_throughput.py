@@ -1,7 +1,7 @@
-import time
 import argparse
 import asyncio
 import logging
+import time
 
 import rhapsody
 from rhapsody.api import ComputeTask
@@ -23,9 +23,8 @@ async def run_tasks(session: Session, num_tasks: int, warmup: bool = False, back
 
     tasks = [ComputeTask(function=no_op) for _ in range(num_tasks)]
     futures = await session.submit_tasks(tasks)
-    #await asyncio.gather(*futures)
 
-    backend.batch.fence()
+    backend.wait()  # high performance wait loop
 
     end_time = time.time()
 
@@ -36,8 +35,9 @@ async def run_tasks(session: Session, num_tasks: int, warmup: bool = False, back
             f"{num_tasks:<{width_num_tasks}} {throughput:<{width_throughput}}",
             flush=True,
         )
-    
+
     backend.batch.clear_results()
+
 
 async def run_bench(session: Session, min_tasks: int, max_tasks: int, backend=None) -> None:
     print("task throughput benchmark", flush=True)
@@ -69,16 +69,11 @@ async def main(min_tasks: int, max_tasks: int) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Task throughput benchmark")
-    parser.add_argument(
-        "--min_tasks", type=int, default=4, help="minimum number of tasks to run"
-    )
-    parser.add_argument(
-        "--max_tasks", type=int, default=128, help="maximum number of tasks to run"
-    )
+    parser.add_argument("--min_tasks", type=int, default=4, help="minimum number of tasks to run")
+    parser.add_argument("--max_tasks", type=int, default=128, help="maximum number of tasks to run")
     args = parser.parse_args()
 
     if args.max_tasks < args.min_tasks:
         args.max_tasks = args.min_tasks
 
     asyncio.run(main(args.min_tasks, args.max_tasks))
-

@@ -543,9 +543,19 @@ class DragonExecutionBackend(BaseBackend):
         self._state = "idle"
         self.logger.info("Dragon backend shutdown complete")
 
-    # Batch features
-    def fence(self):
-        self.batch.fence()
+    def wait(self, timeout: Optional[float] = None) -> None:
+        """Wait for all submitted tasks to complete.
+
+        Delegates to Dragon's Batch.fence(). Tasks submitted before this call
+        will all complete before any tasks submitted after it are started.
+
+        Args:
+            timeout: Maximum seconds to wait. Uses Dragon's default if not set.
+        """
+        if timeout is not None:
+            self.batch.fence(timeout=timeout)
+        else:
+            self.batch.fence()
 
     def create_ddict(self, *args, **kwargs):
         from dragon.data.ddict.ddict import DDict
