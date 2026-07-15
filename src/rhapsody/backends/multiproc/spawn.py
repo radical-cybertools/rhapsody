@@ -110,7 +110,7 @@ def spawn_backend_host(
         try:
             proc.terminate()
         except Exception:
-            pass
+            logger.debug("spawn: terminating child failed", exc_info=True)
         listener.close()
         _cleanup_sockdir(sockdir)
         raise

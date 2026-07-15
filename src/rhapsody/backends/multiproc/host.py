@@ -144,7 +144,7 @@ async def _run() -> int:
         try:
             conn.close()
         except Exception:
-            pass
+            logger.debug("host: closing connection failed", exc_info=True)
 
     return 0
 

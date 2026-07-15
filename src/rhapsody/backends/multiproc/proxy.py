@@ -158,7 +158,7 @@ class RemoteBackendProxy(BaseBackend):
         try:
             send_msg(self._host.conn, {"op": OP_SHUTDOWN})
         except Exception:
-            pass
+            logger.debug("proxy: sending SHUTDOWN to child failed", exc_info=True)
 
         # Give the child a chance to exit cleanly, then close.
         try:
@@ -173,11 +173,11 @@ class RemoteBackendProxy(BaseBackend):
         try:
             self._host.conn.close()
         except Exception:
-            pass
+            logger.debug("proxy: closing connection failed", exc_info=True)
         try:
             self._host.listener.close()
         except Exception:
-            pass
+            logger.debug("proxy: closing listener failed", exc_info=True)
 
         if self._reader_thread:
             self._reader_thread.join(timeout=2)
