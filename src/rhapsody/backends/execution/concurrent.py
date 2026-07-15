@@ -112,14 +112,14 @@ class ConcurrentExecutionBackend(BaseBackend):
 
             cores = psutil.cpu_count(logical=True) or 0
         except Exception:
-            pass
+            self.logger.debug("psutil core probe failed", exc_info=True)
         try:
             import pynvml  # type: ignore[import-not-found]
 
             pynvml.nvmlInit()
             gpus = int(pynvml.nvmlDeviceGetCount())
         except Exception:
-            pass
+            self.logger.debug("pynvml gpu probe failed", exc_info=True)
         return [{"id": socket.gethostname(), "cores": cores, "gpus": gpus}]
 
     async def _execute_task(self, task: dict) -> tuple[dict, str]:
