@@ -3118,6 +3118,7 @@ class DragonExecutionBackendV3(BaseBackend):
         self,
         batch_kwargs: Optional[dict] = None,
         name: Optional[str] = "dragon",
+        resources: Optional[dict] = None,
     ):
         if not Batch:
             raise RuntimeError("Dragon Batch not available")
@@ -3125,6 +3126,9 @@ class DragonExecutionBackendV3(BaseBackend):
         super().__init__(name=name)
 
         self.logger = _get_logger()
+        self._resources = resources or {}
+        if self._resources:
+            raise NotImplementedError("DragonExecutionBackendV3 does not yet support resources")
         self.batch = Batch(**(batch_kwargs or {}))
 
         self._backend_state = BackendMainStates.INITIALIZED

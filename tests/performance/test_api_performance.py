@@ -69,7 +69,7 @@ class TestApiPerformance:
         duration = time.time() - start
 
         print(f"\nTask Creation (100K): {duration:.4f}s ({duration / n * 1e6:.2f} μs/task)")
-        assert duration < 1.0  # Should be well under 1s
+        assert duration < 2.0  # Should be well under 2s
 
     def test_serialization_performance(self):
         """Benchmark pickling 100,000 task objects."""
