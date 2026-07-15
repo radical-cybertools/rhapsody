@@ -1,4 +1,6 @@
 import asyncio
+import functools
+import glob
 import logging
 import os
 import shlex
@@ -363,6 +365,7 @@ class ResultCollectorV1:
                 "exit_code": result.exit_code,
                 "return_value": result.return_value,
                 "exception": result.exception,
+                "traceback": result.traceback,
                 "success": result.success,
             }
         else:
@@ -389,6 +392,10 @@ class ResultCollectorV1:
                 "exception": None
                 if all_successful
                 else "; ".join(str(r.exception) for r in results if not r.success),
+                "traceback": None
+                if all_successful
+                else "\n".join(r.traceback for r in results
+                               if not r.success and r.traceback),
                 "success": all_successful,
             }
 
@@ -1654,6 +1661,38 @@ class TaskStateMapperV3:
     FAILED = "FAILED"
     CANCELED = "CANCELED"
     terminal_states = {DONE, FAILED, CANCELED}
+
+
+def _v3_function_wrapper(user_func, stdout_path, stderr_path, *args, **kwargs):
+    """Run *user_func* with sys.stdout/stderr redirected to per-rank files.
+
+    Dragon batch surfaces only a dragon-side ``DragonUserCodeError`` when a
+    ProcessGroup rank exits non-zero — the rank's own Python traceback is
+    dropped.  Persisting it to ``<stderr_path>.<rank>`` before re-raising
+    lets ``_deliver_batch`` read it post-mortem.
+    """
+    import os
+    import sys
+    import traceback
+
+    rank = (os.environ.get("DRAGON_RANK")
+            or os.environ.get("PMI_RANK")
+            or os.environ.get("OMPI_COMM_WORLD_RANK")
+            or os.environ.get("PALS_RANKID")
+            or os.environ.get("SLURM_PROCID")
+            or f"pid{os.getpid()}")
+
+    with open(f"{stdout_path}.{rank}", "w") as out, \
+            open(f"{stderr_path}.{rank}", "w") as err:
+        old_out, old_err = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = out, err
+        try:
+            return user_func(*args, **kwargs)
+        except BaseException:
+            traceback.print_exc(file=err)
+            raise
+        finally:
+            sys.stdout, sys.stderr = old_out, old_err
 
 
 # ============================================================================
@@ -3218,9 +3257,19 @@ class DragonExecutionBackendV3(BaseBackend):
                         )[tuid]
                     except KeyError:
                         continue
-
                     self._monitored_batches.pop(tuid, None)
-                    completed.append((uid, result, tb, raised, stdout, stderr))
+                    # Drain the per-rank function stdout/stderr files here, in
+                    # the monitor thread, so the file I/O never blocks the
+                    # asyncio loop that runs `_deliver_batch`.  Executable tasks
+                    # redirect via a shell script (`script_path` set) and have no
+                    # per-rank files to drain.
+                    fn_stdout = fn_stderr = None
+                    info = self._task_registry.get(uid)
+                    if info and not info.get("script_path"):
+                        fn_stdout = self._drain_rank_files(info.get("stdout_path"))
+                        fn_stderr = self._drain_rank_files(info.get("stderr_path"))
+                    completed.append((uid, result, tb, raised, stdout, stderr,
+                                      fn_stdout, fn_stderr))
 
                 # One cross-thread wakeup for the entire sweep batch
                 if completed:
@@ -3235,14 +3284,46 @@ class DragonExecutionBackendV3(BaseBackend):
 
         self.logger.debug("Dragon batch monitor loop stopped")
 
+    @staticmethod
+    def _drain_rank_files(path: str) -> str:
+        """Read and unlink all per-rank ``<path>.<rank>`` files written by
+        :func:`_v3_function_wrapper`, returning their concatenated content.
+
+        Runs in the monitor thread (never the event loop), reads both the
+        success and failure output of every rank, and removes the files
+        afterwards so they do not accumulate in the work dir.
+        """
+        if not path:
+            return ""
+        chunks = []
+        for f in sorted(glob.glob(f"{path}.*")):
+            try:
+                # Worker output may contain non-UTF-8 bytes (C libs, progress
+                # bars); replace rather than drop the rank's whole output.
+                with open(f, encoding="utf-8", errors="replace") as fh:
+                    content = fh.read()
+            except Exception:
+                content = ""
+            try:
+                os.unlink(f)
+            except OSError:
+                pass
+            if content:
+                rank = f.rsplit(".", 1)[-1]
+                chunks.append(f"[rank {rank}]\n{content}")
+        return "\n".join(chunks)
+
     def _deliver_batch(self, completions: list) -> None:
         """Deliver a batch of completed tasks. Runs on the asyncio event loop (via
         call_soon_threadsafe).
 
         Called once per monitor sweep with all tasks that completed in that sweep, reducing cross-
-        thread wakeups from O(tasks) to O(sweeps).
+        thread wakeups from O(tasks) to O(sweeps).  Per-rank function output has
+        already been drained off-loop by the monitor thread and arrives as
+        ``fn_stdout`` / ``fn_stderr`` strings, so this method does no file I/O.
         """
-        for uid, result, tb, raised, stdout, stderr in completions:
+        for (uid, result, tb, raised, stdout, stderr,
+             fn_stdout, fn_stderr) in completions:
             task_info = self._task_registry.pop(uid, None)
             if not task_info:
                 continue
@@ -3252,15 +3333,48 @@ class DragonExecutionBackendV3(BaseBackend):
             task_desc = task_info["description"]
             stdout_path = task_info.get("stdout_path")
             stderr_path = task_info.get("stderr_path")
+            # Executable redirect writes one literal file per path (script_path
+            # set), so callers receive the path.  Function tasks stream to
+            # per-rank files already folded into fn_stdout / fn_stderr.
+            is_exec_redirect = bool(task_info.get("script_path"))
             if raised:
-                task_desc["exception"] = result
-                task_desc["stderr"] = stderr_path if stderr_path else (tb if tb else str(result))
-                task_desc["stdout"] = stdout_path or stdout or ""
+                if is_exec_redirect:
+                    task_desc["exception"] = result
+                    task_desc["stderr"] = stderr_path or (tb if tb else str(result))
+                    task_desc["stdout"] = stdout_path or stdout or ""
+                else:
+                    diagnostic = fn_stderr or ""
+                    if diagnostic:
+                        # Fold the rank's own traceback into the exception so a
+                        # re-raise surfaces the real cause, not just Dragon's
+                        # generic DragonUserCodeError.
+                        try:
+                            cls = type(result)
+                            # A non-BaseException result (e.g. a string from a
+                            # serialization fallback) would build fine but never
+                            # be raised by session.py, silently masking the
+                            # failure as success — coerce it to RuntimeError.
+                            if not issubclass(cls, BaseException):
+                                raise TypeError("result is not a BaseException")
+                            augmented = cls(f"{result}\n--- worker output ---\n{diagnostic}")
+                        except Exception:
+                            augmented = RuntimeError(
+                                f"{result}\n--- worker output ---\n{diagnostic}"
+                            )
+                        task_desc["exception"] = augmented
+                    else:
+                        task_desc["exception"] = result
+                    task_desc["stderr"] = diagnostic or stderr or (tb if tb else str(result))
+                    task_desc["stdout"] = fn_stdout or stdout or ""
                 self._callback_func(task_desc, "FAILED")
             else:
                 task_desc["return_value"] = result
-                task_desc["stdout"] = stdout_path or stdout or ""
-                task_desc["stderr"] = stderr_path or stderr or ""
+                if is_exec_redirect:
+                    task_desc["stdout"] = stdout_path or stdout or ""
+                    task_desc["stderr"] = stderr_path or stderr or ""
+                else:
+                    task_desc["stdout"] = fn_stdout or stdout or ""
+                    task_desc["stderr"] = fn_stderr or stderr or ""
                 self._callback_func(task_desc, "DONE")
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
@@ -3400,6 +3514,15 @@ class DragonExecutionBackendV3(BaseBackend):
                 )
             target = "/bin/bash"
             task_args = (script_path,)
+
+        # Wrap every function target so each rank persists its own
+        # stdout/stderr; see _v3_function_wrapper for why.
+        if is_function:
+            stdout_path = os.path.join(self._work_dir, f"{uid}.stdout")
+            stderr_path = os.path.join(self._work_dir, f"{uid}.stderr")
+            target = functools.partial(
+                _v3_function_wrapper, target, stdout_path, stderr_path
+            )
 
         def _build_process_template_kwargs(template_cfg: dict[str, Any]) -> dict[str, Any]:
             """Build ProcessTemplate kwargs: stdout_pipe as default; user config overrides."""
