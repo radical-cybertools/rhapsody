@@ -26,6 +26,13 @@ except ImportError:
     pass
 
 try:
+    from .el import EnsembleBackend  # noqa: F401
+
+    __all__.append("EnsembleBackend")
+except ImportError:
+    pass
+
+try:
     from .dragon import DragonExecutionBackendV1  # noqa: F401
     from .dragon import DragonExecutionBackendV2  # noqa: F401
     from .dragon import DragonExecutionBackendV3  # noqa: F401
