@@ -211,8 +211,6 @@ class EnsembleBackend(BaseBackend):
         cpu_affinity = list(map(int, backend_kwargs.get("cpu_affinity").split(","))) if "cpu_affinity" in backend_kwargs else []
         gpu_affinity = list(map(int, backend_kwargs.get("gpu_affinity").split(","))) if "gpu_affinity" in backend_kwargs else []
 
-        print(cpu_affinity, gpu_affinity)
-
         func = task.get("function")
         if func is not None and inspect.iscoroutinefunction(func):
             task_class = AsyncELTask
