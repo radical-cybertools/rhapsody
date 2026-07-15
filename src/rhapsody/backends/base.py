@@ -164,3 +164,24 @@ class BaseBackend(ABC):
             NotImplementedError: If the backend doesn't support cancellation
         """
         raise NotImplementedError("Not implemented in the base backend")
+
+    @classmethod
+    def build_launch_prefix(cls, partition: dict | None) -> list[str]:
+        """Return the argv prefix that wraps ``python -m
+        rhapsody.backends.multiproc.host`` when this backend is hosted in a
+        child process by :class:`RemoteBackendProxy`.
+
+        Default: no prefix (the child is launched as a plain Python process).
+        Backends with their own runtime launcher (Dragon, Flux, …) override
+        this to construct the appropriate CLI from the partition spec —
+        keeping launcher-specific details out of the proxy and the call site.
+
+        Args:
+            partition: The partition spec (``rhapsody_rm.partition_spec`` shape:
+                ``{"nodelist": [Node…], "env": {…}}``), or ``None`` for an
+                unpartitioned launch.
+
+        Returns:
+            argv prefix; empty list for plain ``python``.
+        """
+        return []

@@ -23,6 +23,7 @@ from typing import Callable
 
 from ..base import BaseBackend
 from ..constants import BackendMainStates
+from ..discovery import BackendRegistry
 from .spawn import SpawnedHost
 from .spawn import spawn_backend_host
 from .wire import OP_CANCEL
@@ -64,8 +65,15 @@ class RemoteBackendProxy(BaseBackend):
         super().__init__(name=name)
         self._backend_name = backend
         self._resources = resources or {}
-        self._extra_env = extra_env or {}
-        self._launch_prefix = list(launch_prefix or [])
+        # ``None`` (not ``[]``/``{}``) means "derive from the backend class +
+        # partition spec at init time".  Explicit values override.
+        self._extra_env_override: dict | None = extra_env
+        self._launch_prefix_override: list[str] | None = (
+            list(launch_prefix) if launch_prefix is not None else None
+        )
+        # Resolved at init time (after derivation).
+        self._extra_env: dict = {}
+        self._launch_prefix: list[str] = []
 
         self._callback_func: Callable = lambda t, s: None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -87,6 +95,21 @@ class RemoteBackendProxy(BaseBackend):
             return self
 
         self._loop = asyncio.get_running_loop()
+
+        # Derive the launcher prefix and child env from the backend class +
+        # partition spec, unless the user passed explicit overrides.  This is
+        # where launcher-specific knowledge (Dragon's --hostlist, ports, etc.)
+        # lives on the backend, keeping the proxy and call site Dragon-blind.
+        partition = (self._resources or {}).get("partition")
+        if self._launch_prefix_override is not None:
+            self._launch_prefix = self._launch_prefix_override
+        else:
+            backend_cls = BackendRegistry.get_backend_class(self._backend_name)
+            self._launch_prefix = list(backend_cls.build_launch_prefix(partition))
+        if self._extra_env_override is not None:
+            self._extra_env = self._extra_env_override
+        else:
+            self._extra_env = dict((partition or {}).get("env") or {})
 
         # spawn_backend_host blocks on listener.accept(); run in executor so
         # the driver loop keeps spinning.
