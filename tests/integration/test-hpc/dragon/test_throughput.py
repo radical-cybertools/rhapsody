@@ -1,14 +1,11 @@
 import argparse
 import asyncio
-import logging
 import time
 
 import rhapsody
 from rhapsody.api import ComputeTask
 from rhapsody.api import Session
 from rhapsody.backends import DragonExecutionBackend
-
-rhapsody.enable_logging(level=logging.DEBUG)
 
 width_num_tasks = 10
 width_throughput = 20
@@ -62,7 +59,7 @@ async def run_bench(session: Session, min_tasks: int, max_tasks: int, backend=No
 
 
 async def main(min_tasks: int, max_tasks: int) -> None:
-    backend = await DragonExecutionBackend()
+    backend = await DragonExecutionBackend(batch_kwargs={"task_logs": False})
     async with Session(backends=[backend]) as session:
         await run_bench(session, min_tasks, max_tasks, backend=backend)
 

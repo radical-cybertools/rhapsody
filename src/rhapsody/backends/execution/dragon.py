@@ -209,9 +209,10 @@ class DragonExecutionBackend(BaseBackend):
                     batch_task, uid = entry
 
                     try:
-                        # poll() guarantees result is in DDict before returning tuid;
-                        # get(block=False) is safe here.
-                        result = batch_task.get(block=False)
+                        # Block until the result is fully committed to the DDict.
+                        # poll() and the DDict write are not atomic; block=True here
+                        # ensures get_stdout(block=False) is safe afterward.
+                        result = batch_task.get(block=True)
                         raised, tb = False, None
                     except TaskCancelledError:
                         # Dragon-side timeout / upstream cancel (not a user cancel_task call)
@@ -339,18 +340,16 @@ class DragonExecutionBackend(BaseBackend):
         """Translate AsyncFlow task to Dragon Batch task.
 
         Translation Priority (in order):
-        1. If process_templates (list) provided → Job mode (ignore type='mpi', ignore ranks) [function/executable]
+        1. If process_templates (list) provided → Job mode [function/executable]
         2. If process_template (single) provided → Process mode [function/executable]
-        3. If type='mpi' AND ranks provided (no templates) → Job mode (auto-build) [function/executable]
-        4. If is_function (no templates, no MPI) → Function mode (native) [function only]
-        5. If is_executable (no templates, no MPI) → Process mode (auto-build) [executable only]
+        3. If is_function (no templates) → Function mode (native) [function only]
+        4. If is_executable (no templates) → Process mode (auto-build) [executable only]
 
         Execution Modes:
         - Function Native: batch.function() - direct Python function call
         - Function Process: batch.process() - function wrapped in ProcessTemplate
-        - Function Job: batch.job() - function in MPI job with multiple ranks
         - Executable Process: batch.process() - single executable process
-        - Executable Job: batch.job() - executable in MPI job with multiple ranks
+        - Executable Job: batch.job() - executable in MPI job via process_templates
 
         Setting cwd (working directory):
             Pass ``cwd`` inside ``process_template`` or each entry of ``process_templates``
