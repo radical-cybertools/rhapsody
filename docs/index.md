@@ -11,7 +11,7 @@ RHAPSODY is a high-performance runtime system designed for orchestrating complex
 
 - **Heterogeneous Task Support**: Seamlessly mix and scale `ComputeTask` (HPC/Binary) and `AITask` (Inference) in a single workflow.
 - **Asynchronous API**: Built on Python's `asyncio`, allowing for high-throughput task submission and non-blocking state monitoring.
-- **Extensible Backends**: Scale to large number of nodes with multiple execution backends including Dragon, Dask, RADICAL-Pilot, and local concurrent workers.
+- **Extensible Backends**: Scale to large number of nodes with multiple execution backends including Dragon, Dask, RADICAL-Pilot, remote execution via ORBIT, and local concurrent workers.
 - **Integrations**: Integrates with with highly scalable workflow systems such `radical.asyncflow` and agentic frameworks such as `flowgentic`
 
 ## Quick Example
