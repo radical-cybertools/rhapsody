@@ -23,6 +23,7 @@ def mock_flux_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "flux.job", flux_job_mock)
 
     from rhapsody.backends.execution.flux.flux_module import FluxModule
+
     monkeypatch.setattr(FluxModule, "_flux_core", None)
     monkeypatch.setattr(FluxModule, "_flux_job", None)
     monkeypatch.setattr(FluxModule, "_flux_exc", None)
@@ -134,3 +135,54 @@ def test_flux_service_banner_parsing(mock_flux_module):
         assert fs.uri == "local:///somepath"
         assert fs.r_uri == "ssh://testhost/somepath"
         assert fs._ready.is_set()
+
+
+# ---------------------------------------------------------------------------
+# Partition support — no Flux runtime needed (pure class/static methods).
+# ---------------------------------------------------------------------------
+
+
+class _FakeNode:
+    """Duck-typed Node per rhapsody_rm's CONTRACT.md — only ``.name`` is read."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+
+def _partition_spec():
+    return {"nodelist": [_FakeNode("n0"), _FakeNode("n1")], "env": {}}
+
+
+def test_flux_launch_prefix_is_empty():
+    """Flux wraps nothing around a proxied child: the partition constraint is
+    applied via the FluxService launcher, and the AF_UNIX proxy control plane
+    requires the child to stay on the driver's node."""
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    assert FluxExecutionBackend.build_launch_prefix(None) == []
+    assert FluxExecutionBackend.build_launch_prefix(_partition_spec()) == []
+
+
+def test_flux_partition_launcher():
+    """The derived srun launcher pins one broker per partition node."""
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    launcher = FluxExecutionBackend._partition_launcher(_partition_spec())
+    argv = launcher.split()
+    assert argv[0] == "srun"
+    assert "--overlap" in argv
+    assert "--nodes=2" in argv
+    assert "--ntasks=2" in argv
+    assert "--ntasks-per-node=1" in argv
+    assert "--nodelist=n0,n1" in argv
+
+
+def test_flux_backend_resources_validation():
+    """The partition key is accepted; anything else raises."""
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    backend = FluxExecutionBackend(resources={"partition": _partition_spec()})
+    assert backend._partition["nodelist"][0].name == "n0"
+
+    with pytest.raises(NotImplementedError, match="unsupported resources keys"):
+        FluxExecutionBackend(resources={"gpus": 4})

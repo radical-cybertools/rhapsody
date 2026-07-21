@@ -38,16 +38,32 @@ class FluxExecutionBackend(BaseBackend):
             uri: Optional existing FLUX_URI. If None, a new Flux instance
                 will be started using FluxService.
             launcher: Optional launcher prefix (e.g. MPI launcher) if
-                starting a new Flux instance.
+                starting a new Flux instance.  When unset and a partition
+                is given, an ``srun`` launcher is derived from the
+                partition spec (see :meth:`_partition_launcher`).
             name: Name of the backend.
-            resources: Optional resources config.
+            resources: Optional resource spec.  Supported key: ``partition``
+                — a ``rhapsody_rm.partition_spec``-shaped dict
+                (``{"nodelist": [Node…], "env": {…}}``).  The Flux instance
+                is constrained to the partition's nodes via the derived
+                launcher; the backend connects to it through the
+                ssh-reachable URI (the instance's rank-0 broker runs on the
+                partition's first node, not necessarily this host).
         """
         super().__init__(name=name)
 
         self.logger = logger
         self._uri = uri
         self._launcher = launcher
-        self._resources = resources or {}
+        # Accept the documented ``partition`` key; reject any other resources
+        # keys we don't yet support so silent failures are impossible.
+        self._resources = dict(resources or {})
+        partition = self._resources.pop("partition", None)
+        if self._resources:
+            raise NotImplementedError(
+                f"FluxExecutionBackend: unsupported resources keys: {list(self._resources)}"
+            )
+        self._partition: dict = partition or {}
 
         self._flux_service: FluxService | None = None
         self._flux_helper: FluxHelper | None = None
@@ -57,6 +73,45 @@ class FluxExecutionBackend(BaseBackend):
 
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
+
+    # ------------------------------------------------------------------
+    # Launcher construction (rhapsody-partitions hook).
+    #
+    # Flux differs from Dragon here: a Flux client reaches its instance
+    # through a URI, so the child process hosting this backend needs no
+    # argv wrapper (and must not get one — the RemoteBackendProxy control
+    # plane is an AF_UNIX socket, so the child has to stay on the driver's
+    # node).  The partition is consumed *inside* the backend instead: the
+    # (partition-constrained) Flux instance is bootstrapped by FluxService
+    # under an srun launcher derived from the spec, and the backend
+    # connects via the ssh-reachable URI.
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def build_launch_prefix(cls, partition: dict | None) -> list[str]:
+        """Return the (empty) argv prefix for a proxied child host.
+
+        Flux intentionally returns the base default: the partition
+        constraint is applied via the ``srun`` launcher that
+        :meth:`_partition_launcher` hands to ``FluxService``, not by
+        wrapping the child process.
+        """
+        return []
+
+    @staticmethod
+    def _partition_launcher(partition: dict) -> str:
+        """Build the ``srun`` prefix that pins ``flux start`` to the partition.
+
+        Honours :func:`rhapsody_rm.partition_spec` output: one broker per
+        partition node, constrained via ``--nodelist``.  ``--overlap`` lets
+        the step share the allocation with other partitions' runtimes.
+        """
+        nodes = partition["nodelist"]
+        hosts = ",".join(node.name for node in nodes)
+        return (
+            f"srun --overlap --nodes={len(nodes)} --ntasks={len(nodes)} "
+            f"--ntasks-per-node=1 --nodelist={hosts}"
+        )
 
     def __await__(self):
         """Make backend awaitable."""
@@ -75,13 +130,27 @@ class FluxExecutionBackend(BaseBackend):
                 self._backend_state = BackendMainStates.INITIALIZED
 
                 if not self._uri:
-                    self.logger.info("No FLUX_URI provided, starting a new FluxService")
-                    self._flux_service = FluxService(launcher=self._launcher)
+                    launcher = self._launcher
+                    partition_launch = False
+                    if not launcher and self._partition.get("nodelist"):
+                        launcher = self._partition_launcher(self._partition)
+                        partition_launch = True
+                    self.logger.info(
+                        "No FLUX_URI provided, starting a new FluxService (launcher: %s)",
+                        launcher or "none",
+                    )
+                    self._flux_service = FluxService(launcher=launcher)
                     # Use asyncio.to_thread to avoid blocking the event loop
                     success = await asyncio.to_thread(self._flux_service.start, 60.0)
                     if not success:
                         raise RuntimeError("FluxService failed to start within timeout")
-                    self._uri = self._flux_service.uri
+                    # A partition-launched instance has its rank-0 broker on
+                    # the partition's first node — the local socket URI is not
+                    # reachable from here; use the ssh-derived one instead.
+                    if partition_launch:
+                        self._uri = self._flux_service.r_uri
+                    else:
+                        self._uri = self._flux_service.uri
 
                 self.logger.info("Connecting FluxHelper to %s", self._uri)
                 self._flux_helper = FluxHelper(uri=self._uri, log=self.logger)
