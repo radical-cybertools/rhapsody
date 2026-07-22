@@ -6,6 +6,7 @@ import pytest
 from rhapsody import ComputeTask
 from rhapsody.api import Session
 from rhapsody.api import TaskStateManager
+from rhapsody.api.errors import TaskExecutionError
 from rhapsody.backends import ConcurrentExecutionBackend
 
 
@@ -187,3 +188,78 @@ async def test_session_invalid_backend():
     async with session:
         with pytest.raises(ValueError, match="Backend 'invalid' requested by task .* not found"):
             await session.submit_tasks([task])
+
+
+# ---------------------------------------------------------------------------
+# Future exception propagation tests (Bug 1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_session_future_set_result_on_successful_command_task():
+    """Future resolves to the task object when a command task succeeds."""
+    backend = await ConcurrentExecutionBackend()
+    session = Session(backends=[backend])
+    task = ComputeTask(uid="ok_task", executable="echo", arguments=["hello"])
+
+    async with session:
+        futures = await session.submit_tasks([task])
+        result = await futures[0]
+
+    assert result is task
+    assert task.state == "DONE"
+
+
+@pytest.mark.asyncio
+async def test_session_future_raises_task_execution_error_on_failed_command_task():
+    """Future raises TaskExecutionError when a command task fails (non-zero exit code)."""
+    backend = await ConcurrentExecutionBackend()
+    session = Session(backends=[backend])
+    task = ComputeTask(uid="fail_task", executable="false")
+
+    async with session:
+        futures = await session.submit_tasks([task])
+        with pytest.raises(TaskExecutionError) as exc_info:
+            await futures[0]
+
+    assert task.state == "FAILED"
+    assert exc_info.value.task_uid == "fail_task"
+
+
+@pytest.mark.asyncio
+async def test_session_future_propagates_function_exception():
+    """Future raises the original exception when a function task raises."""
+    backend = await ConcurrentExecutionBackend()
+    session = Session(backends=[backend])
+
+    def boom():
+        raise ValueError("intentional failure")
+
+    task = ComputeTask(uid="exc_task", function=boom)
+
+    async with session:
+        futures = await session.submit_tasks([task])
+        with pytest.raises(ValueError, match="intentional failure"):
+            await futures[0]
+
+    assert task.state == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_session_future_set_result_on_successful_function_task():
+    """Future resolves to the task object when a function task succeeds."""
+    backend = await ConcurrentExecutionBackend()
+    session = Session(backends=[backend])
+
+    def add(a, b):
+        return a + b
+
+    task = ComputeTask(uid="fn_ok_task", function=add, args=[1, 2])
+
+    async with session:
+        futures = await session.submit_tasks([task])
+        result = await futures[0]
+
+    assert result is task
+    assert task.state == "DONE"
+    assert task["return_value"] == 3

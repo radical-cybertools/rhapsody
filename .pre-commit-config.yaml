@@ -72,3 +72,14 @@ repos:
           - (?i)(^\.?venv/|^\.direnv/|^\.mypy_cache/|^\.ruff_cache/|^\.pytest_cache/|^\.tox/|^\.cache/|^dist/|^build/|^site/|^htmlcov/|^node_modules/|^docs/_build/|^\.ipynb_checkpoints/|\.(png|jpe?g|gif|svg|pdf|zip|tar|gz|tgz|xz|bz2|zst|woff2?)$)
           - --exclude-lines
           - (?i)(^\s*POSTGRES_PASSWORD:\s*postgres$|postgresql://postgres:postgres@localhost(:\d+)?/|(user|username|password)\s*=\s*(test|example|dummy))
+
+  - repo: local
+    hooks:
+      - id: docs-build
+        name: Build docs (strict)
+        language: python
+        additional_dependencies: [tox]
+        entry: tox -e docs
+        pass_filenames: false
+        files: ^(docs/|src/|mkdocs\.yml|README\.md|pyproject\.toml)
+        types: [file]

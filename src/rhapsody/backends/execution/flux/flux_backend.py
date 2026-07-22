@@ -14,6 +14,7 @@ from rhapsody.backends.base import BaseBackend
 from rhapsody.backends.constants import BackendMainStates
 from rhapsody.backends.constants import StateMapper
 from rhapsody.backends.constants import TasksMainStates
+
 from .flux_helper import FluxHelper
 from .flux_module import spec_from_dict
 from .flux_service import FluxService

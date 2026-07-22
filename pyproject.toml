@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rhapsody-py"
-version = "0.1.2"
+version = "0.4.0"
 description = "Runtime system for executing heterogeneous HPC-AI workflows with dynamic task graphs on high-performance computing infrastructures."
 license = { text = "MIT" }
 authors = [
@@ -42,10 +42,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Telemetry
+telemetry = ["opentelemetry-sdk>=1.20.0", "nvidia-ml-py"]
+
 # Backend-specific dependencies
 dask = ["dask[distributed]>=2023.0.0"]
 radical_pilot = ["radical.pilot>=1.30.0"]
-dragon = ["dragonhpc"]  # Requires Python >= 3.10
+multiproc = ["cloudpickle>=2.0.0"]  # RemoteBackendProxy child-process hosting
+dragon = ["dragonhpc==0.14.0"]  # Requires Python >= 3.10, supports up to 3.13
+orbit = ["radical.orbit>=0.3.0"]  # Requires Python >= 3.10
 vllm-dragon = [
     "aiohttp>=3.8.0",
     "pyyaml>=6.0",
@@ -64,6 +69,7 @@ dev = [
     "docformatter>=1.7.0",
     "tomli>=2.2.0",
     "detect-secrets>=1.5.0",
+    "cloudpickle>=2.0.0",
 ]
 docs = [
     "mkdocs>=1.5.0",
@@ -87,7 +93,7 @@ examples = [
 
 # Complete installation with all backends
 backends = [
-    "rhapsody-py[dask,radical_pilot,dragon,vllm-dragon]"
+    "rhapsody-py[dask,radical_pilot,dragon,vllm-dragon,orbit]"
 ]
 
 all = [
@@ -126,7 +132,8 @@ markers = [
     "radical_pilot: marks tests that use RADICAL-Pilot backend",
     "performance: marks tests as performance benchmarks",
     "integration: marks integration tests",
-    "dragon: marks tests that use Dragon backend"
+    "dragon: marks tests that use Dragon backend",
+    "result_contract: marks tests that verify the task callback contract — required fields, types, and state transitions — across all backends"
 ]
 
 [tool.ruff]
@@ -161,9 +168,10 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["F401", "F841", "F811", "S", "T20", "PT", "B017"]  # Allow unused imports, variables, redefinitions, security, prints, pytest style, broad exceptions in tests
-"docs/*" = ["E402", "F841", "E722", "F401", "T20", "S", "B007"]  # More lenient for docs/examples, allow unused loop variables
-"examples/*" = ["E402", "F841", "E722", "F401", "T20", "S", "B007"]  # More lenient for examples
+"tests/*" = ["F401", "F841", "F811", "S", "T20", "PT", "B017", "E741", "N806"]  # Allow unused imports, variables, redefinitions, security, prints, pytest style, broad exceptions in tests
+"docs/*" = ["E402", "F841", "E722", "F401", "T20", "S", "B007", "E741", "N806", "E702", "I", "F"]  # More lenient for docs
+"examples/*" = ["E402", "F841", "E722", "F401", "T20", "S", "B007", "E741", "N806", "E702", "I", "F"]  # More lenient for examples
+"tutorials/*" = ["E402", "F841", "E722", "F401", "T20", "S", "B007", "E741", "N806", "E702", "I", "F"]  # More lenient for notebooks
 
 [tool.ruff.lint.isort]
 force-single-line = true

@@ -15,7 +15,7 @@ A unified runtime for executing **AI and HPC workloads** on supercomputing infra
 - **Unified AI-HPC API**: Single interface for compute tasks and AI inference
 - **Multi-Backend Execution**: Run on local machines, HPC clusters ([Dragon](https://dragonhpc.github.io/dragon/doc/_build/html/index.html)), or distributed systems ([Dask](https://docs.dask.org/en/stable/))
 - **Async-First Design**: Native asyncio integration for efficient task orchestration
-- **Integratable Design**: RHAPSODY is designed to be integratable with existing workflows and tools such as [AsyncFlow](https://github.com/radical-cybertools/asyncflow) and [LangGraph/FlowGentic](https://github.com/stride-research/flowgentic).
+- **Integratable Design**: RHAPSODY is designed to be integratable with existing workflows and tools such as [AsyncFlow](https://github.com/radical-cybertools/radical.asyncflow) and [LangGraph/FlowGentic](https://github.com/stride-research/flowgentic).
 - **Scale-Ready**: Scale your workload and workflows to thousands of tasks and nodes.
 
 ## Quick Example: AI-HPC Workflow
@@ -27,7 +27,7 @@ from rhapsody.backends import DragonExecutionBackendV3, DragonVllmInferenceBacke
 
 async def main():
     # Initialize backends
-    hpc_backend = await DragonExecutionBackendV3(name="hpc", num_workers=128)
+    hpc_backend = await DragonExecutionBackendV3(name="hpc")
     ai_backend = await DragonVllmInferenceBackend(name="vllm", model="Qwen2.5-7B")
 
     # Create session with multiple backends
@@ -53,8 +53,8 @@ async def main():
         sim_result = await simulation
         ai_result = await analysis
 
-        print(f"Simulation: {sim_result['state']}")
-        print(f"AI Analysis: {ai_result['output']}")
+        print(f"Simulation: {sim_result['stdout']}")
+        print(f"AI Analysis: {ai_result['response']}")
 
 asyncio.run(main())
 ```
@@ -106,7 +106,12 @@ RHAPSODY is licensed under the [MIT License](LICENSE.md).
 
 ## Acknowledgments
 
-RHAPSODY is developed by the [RADICAL Research Group](http://radical.rutgers.edu/) at Rutgers University.
+RHAPSODY is a collaborative project between two teams:
+
+- **[RADICAL Research Group](https://radical.rutgers.edu/)** — Rutgers University, New Jersey: core architecture, API design, session management, telemetry, and backend abstraction.
+- **[Hewlett Packard Enterprise (HPE)](https://www.hpe.com/)** — USA / Canada: DragonHPC runtime integration and Dragon backend development.
+
+See the full [Team](https://radical-cybertools.github.io/rhapsody/project/team/) page for details.
 
 ### Related Projects
 
@@ -123,7 +128,7 @@ If you use RHAPSODY in your research, please cite:
 ```bibtex
 @software{rhapsody2024,
   title={RHAPSODY: Runtime for Heterogeneous Applications, Service Orchestration and Dynamism},
-  author={RADICAL Research Team},
+  author={RADICAL Research Group, Rutgers University and Hewlett Packard Enterprise},
   year={2024},
   url={https://github.com/radical-cybertools/rhapsody},
   version={0.1.0}

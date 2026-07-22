@@ -1,12 +1,8 @@
 import asyncio
-import glob
-import json
 import logging
 import os
-import queue
-import socket
+import shlex
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -17,7 +13,6 @@ from typing import Any
 from typing import Callable
 from typing import Optional
 
-import psutil
 import typeguard
 
 from ..base import BaseBackend
@@ -29,8 +24,6 @@ try:
 
     import dragon
     from dragon.data.ddict.ddict import DDict
-    from dragon.infrastructure.gpu_desc import AccVendor
-    from dragon.infrastructure.gpu_desc import find_accelerators
     from dragon.infrastructure.policy import Policy
 
     # Node Telemetry only
@@ -42,7 +35,6 @@ try:
     from dragon.native.process_group import DragonUserCodeError
     from dragon.native.process_group import ProcessGroup
     from dragon.native.queue import Queue
-    from dragon.telemetry import Telemetry
     from dragon.workflows.batch import Batch
 
 except ImportError:  # pragma: no cover - environment without Dragon
@@ -57,9 +49,6 @@ except ImportError:  # pragma: no cover - environment without Dragon
     Policy = None
     Batch = None
     Event = None
-    Telemetry = None
-    AccVendor = None
-    find_accelerators = None
 
 
 def _get_logger() -> logging.Logger:
@@ -3091,20 +3080,55 @@ class DragonExecutionBackendV2(BaseBackend):
 
 
 class DragonExecutionBackendV3(BaseBackend):
-    """Fast Dragon Batch integration using .wait() in threads.
+    """Dragon Batch backend using the streaming pipeline model.
 
-    No polling! Each compiled batch gets a thread that calls .wait() and triggers callbacks when
-    done. This is the Dragon-native way.
+    Tasks submitted via batch.function()/process()/job() are auto-dispatched by the Batch
+    background thread. A single monitor thread polls each task's manager-specific DDict shard
+    and fires callbacks when results become available.
+
+    Args:
+        batch_kwargs: Forwarded verbatim to ``dragon.workflows.batch.Batch()``.
+
+            Supported keys (Dragon 0.14.0):
+
+            - ``num_nodes`` *(int, optional)* — nodes to use; defaults to the full
+              allocation.
+            - ``disable_telem`` *(bool)* — disable Dragon's internal telemetry
+              (default ``False``).
+            - ``scheduler_workers`` *(int, optional)* — size of the scheduler's local
+              worker pool; defaults to ``num_nodes``. Increase this when running many
+              concurrent multi-node (MPI) jobs.
+            - ``results_ddict_mem`` *(int, optional)* — bytes to allocate for the
+              results DDict (default: 1 GiB × num_nodes). Increase for workloads that
+              return large arrays or submit millions of tasks.
+            - ``pool_nodes`` — **no-op in Dragon 0.14.0**, kept for API compatibility.
+
+    Note on working directory:
+        DragonExecutionBackendV3 does not support a backend-level working directory.
+        Set it per task via ``task_backend_specific_kwargs`` with ``process_template``
+        (single process) or ``process_templates`` (MPI job)::
+
+            ComputeTask(
+                function=my_func,
+                task_backend_specific_kwargs={
+                    "process_template": {"cwd": "/path/to/dir"}
+                },
+            )
+
+            # For MPI jobs:
+            ComputeTask(
+                function=my_func,
+                task_backend_specific_kwargs={
+                    "process_templates": [(nranks, {"cwd": "/path/to/dir"})]
+                },
+            )
     """
 
     def __init__(
         self,
-        num_workers: Optional[int] = None,
-        working_directory: Optional[str] = None,
-        disable_background_batching: bool = False,
-        disable_telemetry: bool = False,
-        disable_batch_submission: bool = False,
+        batch_kwargs: Optional[dict] = None,
         name: Optional[str] = "dragon",
+        resources: Optional[dict] = None,
     ):
         if not Batch:
             raise RuntimeError("Dragon Batch not available")
@@ -3112,29 +3136,87 @@ class DragonExecutionBackendV3(BaseBackend):
         super().__init__(name=name)
 
         self.logger = _get_logger()
-        self.batch = Batch(
-            num_workers=num_workers or 0,
-            disable_telem=disable_telemetry,
-            disable_background_batching=disable_background_batching,
-        )
+        # Accept the documented ``partition`` key (consumed at the Dragon
+        # launcher level via ``--hostlist``; informational here).  Reject any
+        # other resources keys we don't yet support so silent failures are
+        # impossible.
+        self._resources = dict(resources or {})
+        partition = self._resources.pop("partition", None)
+        if self._resources:
+            raise NotImplementedError(
+                f"DragonExecutionBackendV3: unsupported resources keys: {list(self._resources)}"
+            )
+        self._partition: dict = partition or {}
+
+        effective_kwargs = dict(batch_kwargs or {})
+        # If num_nodes wasn't specified explicitly, derive it from the
+        # partition spec.  Dragon's runtime is already constrained at the
+        # launcher level (--hostlist), so this just keeps Batch() in sync.
+        if effective_kwargs.get("num_nodes") is None and self._partition.get("nodelist"):
+            effective_kwargs["num_nodes"] = len(self._partition["nodelist"])
+        self.batch = Batch(**effective_kwargs)
 
         self._backend_state = BackendMainStates.INITIALIZED
         self._callback_func: Callable = lambda t, s: None
         self._task_registry: dict[str, Any] = {}
         self._task_states = TaskStateMapperV3()
         self._initialized = False
-        self._cancelled_tasks = []
-        self._disable_batch_submission = disable_batch_submission
-        # compiled_tuid -> (compiled_task, list_of_tasks)
+        self._cancelled_tasks: set[str] = set()
         self._monitored_batches = {}
         self._batch_monitor_thread = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         self._shutdown_event = threading.Event()
 
         self.logger.info(
             f"DragonExecutionBackendV3: {self.batch.num_workers} workers, "
-            f"{self.batch.num_managers} managers, disable_batch_submission={self._disable_batch_submission}"
+            f"{self.batch.num_managers} managers"
         )
+
+    # ------------------------------------------------------------------
+    # Launcher prefix construction (rhapsody-partitions hook).
+    #
+    # Multiple Dragon front-ends co-resident on the head node would clash
+    # on the default ports (7575 / 6565 / 6566).  A class-level counter,
+    # bumped per build, hands each child a disjoint port triplet.
+    # ------------------------------------------------------------------
+    _port_offset_lock: threading.Lock = threading.Lock()
+    _next_port_offset: int = 0
+    _port_offset_step: int = 100
+
+    @classmethod
+    def _allocate_port_offset(cls) -> int:
+        with cls._port_offset_lock:
+            offset = cls._next_port_offset
+            cls._next_port_offset += cls._port_offset_step
+        return offset
+
+    @classmethod
+    def build_launch_prefix(cls, partition: Optional[dict]) -> list:
+        """Construct the ``dragon ...`` argv prefix for a child host.
+
+        Honours :func:`rhapsody_rm.partition_spec` output: if ``partition``
+        carries a ``nodelist``, the Dragon launcher is constrained via
+        ``-N`` and ``--hostlist`` (and ``--wlm slurm``).  All three Dragon
+        ports are offset per-instance so two front-ends on the same head
+        node don't collide.
+        """
+        offset = cls._allocate_port_offset()
+        cmd: list = [
+            "dragon",
+            "--port",          str(7575 + offset),
+            "--overlay-port",  str(6565 + offset),
+            "--frontend-port", str(6566 + offset),
+        ]
+        if partition and partition.get("nodelist"):
+            nodes = partition["nodelist"]
+            hosts = ",".join(n.name for n in nodes)
+            cmd += [
+                "-N", str(len(nodes)),
+                "--wlm", "slurm",
+                "--hostlist", hosts,
+            ]
+        return cmd
 
     def __await__(self):
         return self._async_init().__await__()
@@ -3160,15 +3242,6 @@ class DragonExecutionBackendV3(BaseBackend):
                 self.logger.debug("Registering task states...")
                 StateMapper.register_backend_tasks_states_with_defaults(backend=self)
 
-                # Step 4: Start monitor thread
-                if self._batch_monitor_thread is None or not self._batch_monitor_thread.is_alive():
-                    self._shutdown_event.clear()
-                    self._batch_monitor_thread = threading.Thread(
-                        target=self._monitor_loop, name="dragon_monitor_loop", daemon=True
-                    )
-                    self._batch_monitor_thread.start()
-                    self.logger.debug("Dragon monitor thread started during initialization")
-
                 self._initialized = True
                 self.logger.info("Dragon backend V3 fully initialized and ready")
 
@@ -3179,10 +3252,10 @@ class DragonExecutionBackendV3(BaseBackend):
         return self
 
     def _monitor_loop(self):
-        """Single thread to monitor all active batches using public wait() API.
+        """Single thread to monitor all active tasks.
 
-        This uses a polling approach with a small timeout (0.01s) to avoid busy-waiting while
-        maintaining low latency.
+        Tasks are auto-dispatched by the Batch background thread the moment they are created. This
+        loop polls each registered task non-blocking and fires callbacks when results arrive.
         """
         self.logger.debug("Starting Dragon batch monitor loop (polling mode)")
 
@@ -3192,36 +3265,42 @@ class DragonExecutionBackendV3(BaseBackend):
                 batch_tuids = list(self._monitored_batches.keys())
 
                 if not batch_tuids:
-                    # No active batches, sleep briefly to avoid high CPU
+                    # No active tasks, sleep briefly to avoid high CPU
                     time.sleep(0.01)
                     continue
 
+                # Collect all completed tasks in this sweep, then deliver in one batch
+                completed = []
                 for tuid in batch_tuids:
-                    if tuid not in self._monitored_batches:
+                    entry = self._monitored_batches.get(tuid)
+                    if entry is None:
+                        continue
+                    batch_task, uid = entry
+
+                    # Wait until the Batch client compiler has placed this task on a manager.
+                    # manager_idx is None in the window between submission and compile.
+                    manager_idx = batch_task.core.manager_idx
+                    if manager_idx is None:
                         continue
 
-                    compiled_tasks, task_uids = self._monitored_batches[tuid]
+                    # SCHEDULER_MANAGER_IDX == -1 maps to shard 0; subnode managers map 1-to-1.
+                    ddict_shard_idx = 0 if manager_idx == -1 else manager_idx
 
                     try:
-                        # Public API wait with minimal timeout
-                        # Returns quickly if not done, returns instantly if done
-                        compiled_tasks.wait(timeout=0.01)
-
-                        # If we reach here, batch is finished (or raised an internal error)
-                        self.logger.debug(f"Batch {tuid} complete, processing results")
-                        self._process_batch_results(compiled_tasks, task_uids)
-                        self._monitored_batches.pop(tuid)
-
-                    except TimeoutError:
-                        # Batch not done yet, continue to next one
+                        result, tb, raised, stdout, stderr = self.batch.results_ddict.manager(
+                            ddict_shard_idx
+                        )[tuid]
+                    except KeyError:
                         continue
-                    except Exception as e:
-                        self.logger.exception(f"Error while waiting for batch {tuid}: {e}")
-                        # Even on error, we should process results to trigger FAILED callbacks
-                        self._process_batch_results(compiled_tasks, task_uids)
-                        self._monitored_batches.pop(tuid)
 
-                # Small sleep after each full sweep to prevent tight loop if all batches were polled
+                    self._monitored_batches.pop(tuid, None)
+                    completed.append((uid, result, tb, raised, stdout, stderr))
+
+                # One cross-thread wakeup for the entire sweep batch
+                if completed:
+                    self._loop.call_soon_threadsafe(self._deliver_batch, completed)
+
+                # Small sleep after each full sweep to prevent tight loop
                 time.sleep(0.005)
 
             except Exception as e:
@@ -3230,43 +3309,33 @@ class DragonExecutionBackendV3(BaseBackend):
 
         self.logger.debug("Dragon batch monitor loop stopped")
 
-    def _process_batch_results(self, compiled_tasks, task_uids):
-        """Extract results from a finished batch and trigger callbacks."""
-        for uid in task_uids:
-            task_info = self._task_registry.get(uid)
-            if not task_info or uid in self._cancelled_tasks:
+    def _deliver_batch(self, completions: list) -> None:
+        """Deliver a batch of completed tasks. Runs on the asyncio event loop (via
+        call_soon_threadsafe).
+
+        Called once per monitor sweep with all tasks that completed in that sweep, reducing cross-
+        thread wakeups from O(tasks) to O(sweeps).
+        """
+        for uid, result, tb, raised, stdout, stderr in completions:
+            task_info = self._task_registry.pop(uid, None)
+            if not task_info:
                 continue
-
-            batch_task = task_info["batch_task"]
+            if uid in self._cancelled_tasks:
+                self._cancelled_tasks.discard(uid)
+                continue
             task_desc = task_info["description"]
-
-            try:
-                # Use small timeout for safety, but data is guaranteed to be local now
-                try:
-                    stdout = batch_task.stdout.get(timeout=0.01)
-                    task_desc["stdout"] = stdout if stdout is not None else ""
-                except Exception:
-                    task_desc["stdout"] = ""
-
-                try:
-                    result = batch_task.result.get(timeout=0.01)
-                    task_desc["return_value"] = result
-                    self._callback_func(task_desc, "DONE")
-                except Exception as e:
-                    self.logger.exception(f"Task {uid} failed: {e}")
-                    task_desc["exception"] = e
-                    try:
-                        stderr = batch_task.stderr.get(timeout=0.01)
-                        task_desc["stderr"] = stderr if stderr else str(e)
-                    except Exception:
-                        task_desc["stderr"] = str(e)
-                    self._callback_func(task_desc, "FAILED")
-
-            except Exception as e:
-                self.logger.exception(f"Batch extraction failed for task {uid}: {e}")
-                task_desc["exception"] = e
-                task_desc["stderr"] = str(e)
+            stdout_path = task_info.get("stdout_path")
+            stderr_path = task_info.get("stderr_path")
+            if raised:
+                task_desc["exception"] = result
+                task_desc["stderr"] = stderr_path if stderr_path else (tb if tb else str(result))
+                task_desc["stdout"] = stdout_path or stdout or ""
                 self._callback_func(task_desc, "FAILED")
+            else:
+                task_desc["return_value"] = result
+                task_desc["stdout"] = stdout_path or stdout or ""
+                task_desc["stderr"] = stderr_path or stderr or ""
+                self._callback_func(task_desc, "DONE")
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
         """Submit tasks to the backend.
@@ -3281,12 +3350,27 @@ class DragonExecutionBackendV3(BaseBackend):
             self._backend_state = BackendMainStates.RUNNING
             self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
+        # Capture event loop for cross-thread batch delivery
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
+
+        # Start monitor thread on first submission (lazy — avoids idle spin before tasks exist)
+        if self._batch_monitor_thread is None or not self._batch_monitor_thread.is_alive():
+            self._shutdown_event.clear()
+            self._batch_monitor_thread = threading.Thread(
+                target=self._monitor_loop, name="dragon_monitor_loop", daemon=True
+            )
+            self._batch_monitor_thread.start()
+
         # Build tasks
         batch_tasks_data = []
         for task in tasks:
             try:
                 batch_task = await self.build_task(task)
                 batch_tasks_data.append((task["uid"], batch_task))
+                # This is the moment Dragon takes ownership was called
+                # inside build_task) and start executing it.
+                self._callback_func(task, "RUNNING")
             except Exception as e:
                 self.logger.error(f"Failed to create task {task.get('uid')}: {e}", exc_info=True)
                 task["exception"] = e
@@ -3295,23 +3379,12 @@ class DragonExecutionBackendV3(BaseBackend):
         if not batch_tasks_data:
             return
 
-        # Choose submission strategy
-        if self._disable_batch_submission:
-            # Stream mode: individual single-task batches
-            for uid, batch_task in batch_tasks_data:
-                compiled = self.batch.compile([batch_task])
-                tuid = compiled.core.tuid
-                self._monitored_batches[tuid] = (compiled, [uid])
-                compiled.start()
-            self.logger.info(f"Submitted {len(batch_tasks_data)} individual tasks in stream mode")
-        else:
-            # Batch mode: one multi-task batch
-            uids, btasks = map(list, zip(*batch_tasks_data))
-            compiled = self.batch.compile(btasks)
-            tuid = compiled.core.tuid
-            self._monitored_batches[tuid] = (compiled, uids)
-            compiled.start()
-            self.logger.info(f"Submitted {len(btasks)} tasks in a single batch")
+        # Tasks are already in-flight — the Batch background thread auto-dispatches them
+        # the moment they are created via batch.function()/process()/job().
+        # Register each task individually for result monitoring.
+        for uid, batch_task in batch_tasks_data:
+            self._monitored_batches[batch_task.uid] = (batch_task, uid)
+        self.logger.info(f"Submitted {len(batch_tasks_data)} tasks (streaming, auto-dispatched)")
 
     async def build_task(self, task: dict):
         """Translate AsyncFlow task to Dragon Batch task.
@@ -3329,6 +3402,17 @@ class DragonExecutionBackendV3(BaseBackend):
         - Function Job: batch.job() - function in MPI job with multiple ranks
         - Executable Process: batch.process() - single executable process
         - Executable Job: batch.job() - executable in MPI job with multiple ranks
+
+        Setting cwd (working directory):
+            Pass ``cwd`` inside ``process_template`` or each entry of ``process_templates``
+            via ``task_backend_specific_kwargs``::
+
+                ComputeTask(
+                    function=my_func,
+                    task_backend_specific_kwargs={
+                        "process_template": {"cwd": "/path/to/dir"}
+                    },
+                )
         """
         # Fast path: extract everything upfront
         uid = task["uid"]
@@ -3359,25 +3443,61 @@ class DragonExecutionBackendV3(BaseBackend):
         process_templates_config = backend_kwargs.get("process_templates")
         process_template_config = backend_kwargs.get("process_template")
 
+        # When capture_stdio is requested for subprocess tasks, write a shell script that
+        # redirects both stdout and stderr to files, then invoke it as `bash script.sh`.
+        # Dragon's PIPE for the bash wrapper sees an empty stream → immediate EOF → no hang.
+        redirect = task.get("capture_stdio") and not is_function
+
+        # Dragon 0.13.2 unconditionally set template.stdout = Popen.PIPE for every
+        # process task, so stdout was always captured.  Dragon 0.14.0 removed that —
+        # needs_output is only True when the template explicitly carries stdout=Popen.PIPE.
+        # Restore that behavior for subprocess tasks:
+        #   • no capture_stdio redirect → stdout=Popen.PIPE (direct capture via DDict)
+        #   • capture_stdio redirect     → stdout=None      (bash script writes to file;
+        #                                                     PIPE would just see EOF)
+        # Functions capture stdout via io.StringIO internally; no PIPE needed.
+        stdout_pipe = None if (redirect or is_function) else Popen.PIPE
+        stdout_path = stderr_path = script_path = None
+        if redirect:
+            stdout_path = os.path.join(self._work_dir, f"{uid}.stdout")
+            stderr_path = os.path.join(self._work_dir, f"{uid}.stderr")
+            script_path = os.path.join(self._work_dir, f"{uid}.sh")
+            cmd_line = " ".join(
+                [shlex.quote(str(target))] + [shlex.quote(str(a)) for a in task_args]
+            )
+            with open(script_path, "w") as _f:
+                _f.write(
+                    f"#!/usr/bin/bash\n"
+                    f"{cmd_line}"
+                    f" 1>{shlex.quote(stdout_path)}"
+                    f" 2>{shlex.quote(stderr_path)}\n"
+                )
+            target = "/bin/bash"
+            task_args = (script_path,)
+
+        def _build_process_template_kwargs(template_cfg: dict[str, Any]) -> dict[str, Any]:
+            """Build ProcessTemplate kwargs: stdout_pipe as default; user config overrides."""
+            return {"stdout": stdout_pipe, **template_cfg, "args": task_args, "kwargs": task_kwargs}
+
         # Single decision tree - no redundant checks
-        if process_templates_config:
+        if process_templates_config is not None:
             # Priority 1: Job with user templates
+            # stdout_pipe is the default; user's tc dict can override it.
             process_templates = [
                 (
                     nranks,
-                    ProcessTemplate(target, **{**tc, "args": task_args, "kwargs": task_kwargs}),
+                    ProcessTemplate(target, **_build_process_template_kwargs(tc)),
                 )
                 for nranks, tc in process_templates_config
             ]
             batch_task = self.batch.job(process_templates, name=name, timeout=timeout)
             execution_mode = "job"
 
-        elif process_template_config:
+        elif process_template_config is not None:
             # Priority 2: Process with user template
+            # stdout_pipe is the default; user's process_template_config can override it.
             batch_task = self.batch.process(
-                ProcessTemplate(
-                    target, **{**process_template_config, "args": task_args, "kwargs": task_kwargs}
-                ),
+                ProcessTemplate(target, **_build_process_template_kwargs(process_template_config)),
                 name=name,
                 timeout=timeout,
             )
@@ -3389,7 +3509,7 @@ class DragonExecutionBackendV3(BaseBackend):
                 [
                     (
                         backend_kwargs.get("ranks", 1),
-                        ProcessTemplate(target, args=task_args, kwargs=task_kwargs),
+                        ProcessTemplate(target, **_build_process_template_kwargs({})),
                     )
                 ],
                 name=name,
@@ -3407,7 +3527,7 @@ class DragonExecutionBackendV3(BaseBackend):
         else:
             # Priority 5: Executable process auto-build
             batch_task = self.batch.process(
-                ProcessTemplate(target, args=task_args, kwargs=task_kwargs),
+                ProcessTemplate(target, **_build_process_template_kwargs({})),
                 name=name,
                 timeout=timeout,
             )
@@ -3418,6 +3538,9 @@ class DragonExecutionBackendV3(BaseBackend):
             "uid": uid,
             "description": task,
             "batch_task": batch_task,
+            "stdout_path": stdout_path,
+            "stderr_path": stderr_path,
+            "script_path": script_path,
         }
 
         self.logger.debug(f"Created {execution_mode} task: {uid}")
@@ -3448,14 +3571,28 @@ class DragonExecutionBackendV3(BaseBackend):
         if uid not in self._task_registry:
             raise ValueError(f"Task {uid} not found")
 
-        # NOTE: dragon.batch does not expose nor support
-        # process/function/job cancellation, we just notify
-        # the asyncflow that the task is cancelled so not to block the flow
-        task = self._task_registry[uid]["description"]
-        self._callback_func(task, "CANCELED")
-        self._cancelled_tasks.append(uid)
+        batch_task = self._task_registry[uid]["batch_task"]
+        loop = asyncio.get_running_loop()
 
-        return True
+        try:
+            cancelled = await loop.run_in_executor(None, batch_task.cancel)
+        except Exception as e:
+            self.logger.warning(f"Dragon cancel failed for {uid}: {e}; falling back to soft-cancel")
+            cancelled = True
+
+        if cancelled:
+            registry_entry = self._task_registry.pop(uid, None)
+            if registry_entry is None:
+                # Task completed naturally between the executor call and here — not cancelled.
+                return False
+            task_desc = registry_entry["description"]
+            # Stop the monitor loop from polling this task's DDict entry. Without this,
+            # the blocking DDict IPC for a cancelled task can stall the monitor thread
+            # and delay result delivery for subsequently submitted tasks.
+            self._monitored_batches.pop(batch_task.uid, None)
+            self._callback_func(task_desc, "CANCELED")
+
+        return cancelled
 
     async def shutdown(self) -> None:
         """Shutdown the backend and clean up resources."""
@@ -3481,10 +3618,11 @@ class DragonExecutionBackendV3(BaseBackend):
         # Close Batch
         if self.batch:
             try:
-                self.logger.debug("Closing batch...")
-                self.batch.close()
+                self.logger.debug("Joining batch...")
                 self.batch.join(timeout=10.0)
-                self.logger.debug("Batch closed successfully")
+                self.logger.debug("Destroying batch...")
+                self.batch.destroy(timeout=15.0)
+                self.logger.debug("Batch destroyed successfully")
             except Exception as e:
                 self.logger.warning(f"Error closing batch gracefully: {e}")
                 try:
@@ -3502,786 +3640,15 @@ class DragonExecutionBackendV3(BaseBackend):
         self.batch.fence()
 
     def create_ddict(self, *args, **kwargs):
-        return self.batch.ddict(*args, **kwargs)
+        from dragon.data.ddict.ddict import DDict
+
+        return DDict(*args, **kwargs)
 
     @classmethod
     async def create(
         cls,
-        num_workers: Optional[int] = None,
-        working_directory: Optional[str] = None,
-        disable_background_batching: bool = False,
-        disable_telemetry: bool = False,
-        disable_batch_submission: bool = False,
+        batch_kwargs: Optional[dict] = None,
     ):
         """Create and initialize a DragonExecutionBackendV3."""
-        backend = cls(
-            num_workers=num_workers,
-            working_directory=working_directory,
-            disable_background_batching=disable_background_batching,
-            disable_telemetry=disable_telemetry,
-            disable_batch_submission=disable_batch_submission,
-        )
+        backend = cls(batch_kwargs=batch_kwargs)
         return await backend
-
-
-class DragonTelemetryCollector:
-    """Telemetry collection class that spawns one collector process per node to monitor CPU, GPU
-    memory, and RAM utilization.
-
-    This class integrates with Dragon's built-in Telemetry infrastructure and periodically
-    checkpoints all collected metrics (system + user custom) to JSON files for persistence.
-
-    Example usage:
-
-    .. highlight:: python
-    .. code-block:: python
-
-        import dragon
-        import multiprocessing as mp
-        from dragon.telemetry.node_collector import DragonTelemetryCollector
-
-        if __name__ == "__main__":
-            mp.set_start_method("dragon")
-
-            # Initialize and start collector
-            collector = DragonTelemetryCollector(
-                collection_rate=1.0,
-                checkpoint_interval=30.0,
-                checkpoint_dir="/scratch/telemetry",
-                checkpoint_count=10
-            )
-            collector.start()
-
-            # Run workload
-            pool = mp.Pool(16)
-            results = pool.map(compute_func, data)
-            pool.close()
-            pool.join()
-
-            # Add custom metrics
-            collector.add_custom_metric("final_accuracy", 0.95)
-
-            # Stop and checkpoint
-            collector.stop()
-    """
-
-    def __init__(
-        self,
-        collection_rate: float = 1.0,
-        checkpoint_interval: float = 30.0,
-        checkpoint_dir: str = "/tmp",  # noqa: S108
-        checkpoint_count: int = 5,
-        enable_cpu: bool = True,
-        enable_gpu: bool = True,
-        enable_memory: bool = True,
-        metric_prefix: str = "user",
-    ):
-        """Initialize the DragonTelemetryCollector.
-
-        :param collection_rate: How often to collect metrics in seconds, defaults to 1.0
-        :type collection_rate: float, optional
-        :param checkpoint_interval: How often to write checkpoints in seconds, defaults to 30.0
-        :type checkpoint_interval: float, optional
-        :param checkpoint_dir: Directory to write checkpoint files, defaults to "/tmp"
-        :type checkpoint_dir: str, optional
-        :param checkpoint_count: Maximum number of checkpoint files to keep (0 for unlimited),
-            defaults to 5
-        :type checkpoint_count: int, optional
-        :param enable_cpu: Enable CPU metric collection, defaults to True
-        :type enable_cpu: bool, optional
-        :param enable_gpu: Enable GPU metric collection, defaults to True
-        :type enable_gpu: bool, optional
-        :param enable_memory: Enable memory metric collection, defaults to True
-        :type enable_memory: bool, optional
-        :param metric_prefix: Prefix for all metric names, defaults to "user"
-        :type metric_prefix: str, optional
-        """
-
-        if not Telemetry:
-            raise RuntimeError("Dragon Telemetry not available")
-
-        if not AccVendor:
-            raise RuntimeError("Dragon AccVendor not available")
-
-        if not find_accelerators:
-            raise RuntimeError("Dragon find_accelerators not available")
-
-        # Configuration
-        self._collection_rate = collection_rate
-        self._checkpoint_interval = checkpoint_interval
-        self._checkpoint_dir = checkpoint_dir
-        self._checkpoint_count = checkpoint_count
-        self._enable_cpu = enable_cpu
-        self._enable_gpu = enable_gpu
-        self._enable_memory = enable_memory
-        self._metric_prefix = metric_prefix
-
-        # Process management
-        self._process_group = None
-        self._end_event = None
-        self._custom_metric_queue = None
-        self._started = False
-
-    def start(self):
-        """Start telemetry collection on all nodes.
-
-        Spawns one collector process per node using Dragon's ProcessGroup. Each collector monitors
-        CPU, GPU, and memory metrics and sends them to Dragon's TSDB while also checkpointing to
-        JSON files.
-
-        :raises RuntimeError: if collector is already started
-        """
-        if self._started:
-            raise RuntimeError("Collector already started")
-
-        # Create shutdown event
-        self._end_event = Event()
-
-        # Create custom metric queue
-        self._custom_metric_queue = Queue()
-
-        # Get one policy per node (hostname-based)
-        sys = System()
-        policies = sys.hostname_policies()
-
-        # Create process group
-        self._process_group = ProcessGroup(restart=False, pmi=None)
-
-        # Add one collector process per node
-        for policy in policies:
-            self._process_group.add_process(
-                nproc=1,
-                template=ProcessTemplate(
-                    target=self._collector_main,
-                    args=(
-                        self._end_event,
-                        self._custom_metric_queue,
-                        self._collection_rate,
-                        self._checkpoint_interval,
-                        self._checkpoint_dir,
-                        self._checkpoint_count,
-                        self._enable_cpu,
-                        self._enable_gpu,
-                        self._enable_memory,
-                        self._metric_prefix,
-                    ),
-                    policy=policy,
-                ),
-            )
-
-        # Initialize and start
-        self._process_group.init()
-        self._process_group.start()
-        self._started = True
-
-        print(f"DragonTelemetryCollector: Started collection on {len(policies)} node(s)")
-
-    def stop(self, timeout: float = 10.0):
-        """Stop telemetry collection with clean shutdown.
-
-        Triggers a final checkpoint before exiting and waits for all collector processes to finish.
-
-        :param timeout: Seconds to wait for processes to finish, defaults to 10.0
-        :type timeout: float, optional
-        """
-        if not self._started:
-            return
-
-        print("DragonTelemetryCollector: Stopping collection...")
-
-        # Signal shutdown
-        self._end_event.set()
-
-        # Wait for processes to complete
-        try:
-            self._process_group.join(timeout=timeout)
-        except TimeoutError:
-            print(f"Warning: Processes did not finish within {timeout}s")
-
-        # Cleanup
-        self._process_group.close()
-        self._custom_metric_queue.close()
-
-        self._started = False
-        print("DragonTelemetryCollector: Collection stopped")
-
-    def add_custom_metric(self, metric_name: str, value: float):
-        """Add a custom metric to be collected on all nodes.
-
-        The metric will be sent to Dragon's TSDB and included in checkpoints.
-
-        :param metric_name: Name of the metric (will be prefixed with metric_prefix)
-        :type metric_name: str
-        :param value: Metric value
-        :type value: float
-        :raises RuntimeError: if collector is not started
-        """
-        if not self._started:
-            raise RuntimeError("Collector not started. Call start() first.")
-
-        # Broadcast to all collector processes
-        self._custom_metric_queue.put(
-            {"metric_name": metric_name, "value": value, "timestamp": int(time.time())}
-        )
-
-    @staticmethod
-    def _collector_main(
-        end_event,
-        custom_metric_queue,
-        collection_rate,
-        checkpoint_interval,
-        checkpoint_dir,
-        checkpoint_count,
-        enable_cpu,
-        enable_gpu,
-        enable_memory,
-        metric_prefix,
-    ):
-        """Main collector process - runs on each node.
-
-        This is the entry point for each collector process spawned per node.
-        """
-        # Initialize telemetry client
-        dt = Telemetry()
-        hostname = socket.gethostname()
-
-        # Thread-safe storage for all collected data (for checkpointing)
-        checkpoint_lock = threading.Lock()
-        all_metrics_history = []
-
-        # Start checkpoint thread
-        checkpoint_thread = threading.Thread(
-            target=DragonTelemetryCollector._checkpoint_worker,
-            args=(
-                end_event,
-                checkpoint_lock,
-                all_metrics_history,
-                hostname,
-                checkpoint_interval,
-                checkpoint_dir,
-                checkpoint_count,
-                collection_rate,
-                metric_prefix,
-            ),
-            daemon=True,
-        )
-        checkpoint_thread.start()
-
-        # Main collection loop
-        last_collection = time.time()
-
-        print(f"DragonTelemetryCollector: Collector started on {hostname}")
-
-        while not end_event.is_set():
-            current_time = time.time()
-
-            # Collect at specified rate
-            if current_time - last_collection >= collection_rate:
-                timestamp = int(current_time)
-                metrics_collected = {}
-
-                # Collect CPU metrics
-                if enable_cpu:
-                    try:
-                        cpu_data = DragonTelemetryCollector._collect_cpu_metrics()
-                        metrics_collected.update(cpu_data)
-                        for metric_name, value in cpu_data.items():
-                            dt.add_data(
-                                ts_metric_name=f"{metric_prefix}.{metric_name}",
-                                ts_data=value,
-                                timestamp=timestamp,
-                            )
-                    except Exception as e:
-                        print(f"Warning: Failed to collect CPU metrics on {hostname}: {e}")
-
-                # Collect memory metrics
-                if enable_memory:
-                    try:
-                        mem_data = DragonTelemetryCollector._collect_memory_metrics()
-                        metrics_collected.update(mem_data)
-                        for metric_name, value in mem_data.items():
-                            dt.add_data(
-                                ts_metric_name=f"{metric_prefix}.{metric_name}",
-                                ts_data=value,
-                                timestamp=timestamp,
-                            )
-                    except Exception as e:
-                        print(f"Warning: Failed to collect memory metrics on {hostname}: {e}")
-
-                # Collect GPU metrics
-                if enable_gpu:
-                    try:
-                        gpu_data = DragonTelemetryCollector._collect_gpu_metrics(
-                            dt, timestamp, metric_prefix
-                        )
-                        metrics_collected.update(gpu_data)
-                    except Exception as e:
-                        print(f"Warning: Failed to collect GPU metrics on {hostname}: {e}")
-
-                # Collect custom user metrics from queue
-                try:
-                    while True:
-                        msg = custom_metric_queue.get_nowait()
-                        metric_name = msg["metric_name"]
-                        value = msg["value"]
-                        msg_timestamp = msg.get("timestamp", timestamp)
-
-                        dt.add_data(
-                            ts_metric_name=f"{metric_prefix}.{metric_name}",
-                            ts_data=value,
-                            timestamp=msg_timestamp,
-                        )
-                        metrics_collected[metric_name] = value
-                except queue.Empty:
-                    pass
-                except Exception as e:
-                    print(f"Warning: Failed to collect custom metrics on {hostname}: {e}")
-
-                # Store for checkpointing
-                with checkpoint_lock:
-                    all_metrics_history.append(
-                        {"timestamp": timestamp, "hostname": hostname, "metrics": metrics_collected}
-                    )
-
-                last_collection = current_time
-
-            # Sleep briefly to avoid busy-waiting
-            time.sleep(0.1)
-
-        # Wait for checkpoint thread to finish
-        print(f"DragonTelemetryCollector: Collector on {hostname} shutting down...")
-        checkpoint_thread.join(timeout=5)
-        print(f"DragonTelemetryCollector: Collector on {hostname} stopped")
-
-    @staticmethod
-    def _collect_cpu_metrics():
-        """Collect CPU utilization metrics.
-
-        :return: Dictionary of CPU metrics
-        :rtype: dict
-        """
-        load1, load5, load15 = os.getloadavg()
-        cpu_percent = psutil.cpu_percent(interval=None)
-
-        return {
-            "cpu_percent": cpu_percent,
-            "load_average_1m": load1,
-            "load_average_5m": load5,
-            "load_average_15m": load15,
-        }
-
-    @staticmethod
-    def _collect_memory_metrics():
-        """Collect memory utilization metrics.
-
-        :return: Dictionary of memory metrics
-        :rtype: dict
-        """
-        mem = psutil.virtual_memory()
-
-        return {
-            "memory_percent": mem.percent,
-            "memory_available_gb": mem.available / (1024**3),
-            "memory_used_gb": mem.used / (1024**3),
-            "memory_total_gb": mem.total / (1024**3),
-        }
-
-    @staticmethod
-    def _collect_gpu_metrics(dt, timestamp, metric_prefix):
-        """Collect GPU metrics for all GPUs on this node.
-
-        :param dt: Telemetry client instance
-        :type dt: Telemetry
-        :param timestamp: Current timestamp
-        :type timestamp: int
-        :param metric_prefix: Metric name prefix
-        :type metric_prefix: str
-        :return: Dictionary of GPU metrics
-        :rtype: dict
-        """
-        gpu_metrics = {}
-
-        try:
-            # Detect GPU vendor and count
-            vendor, gpu_count = DragonTelemetryCollector._identify_gpu()
-
-            if vendor is None or gpu_count == 0:
-                return gpu_metrics
-
-            # Collect based on vendor
-            if vendor == AccVendor.NVIDIA:
-                for i in range(gpu_count):
-                    try:
-                        metrics = DragonTelemetryCollector._get_nvidia_metrics(i)
-                        for metric_name, value in metrics.items():
-                            dt.add_data(
-                                ts_metric_name=f"{metric_prefix}.gpu_{metric_name}",
-                                ts_data=value,
-                                timestamp=timestamp,
-                                tagk="gpu",
-                                tagv=str(i),
-                            )
-                            gpu_metrics[f"gpu_{i}_{metric_name}"] = value
-                    except Exception as e:
-                        print(f"Warning: Failed to collect GPU {i} metrics: {e}")
-
-            elif vendor == AccVendor.AMD:
-                for i in range(gpu_count):
-                    try:
-                        metrics = DragonTelemetryCollector._get_amd_metrics(i)
-                        for metric_name, value in metrics.items():
-                            dt.add_data(
-                                ts_metric_name=f"{metric_prefix}.gpu_{metric_name}",
-                                ts_data=value,
-                                timestamp=timestamp,
-                                tagk="gpu",
-                                tagv=str(i),
-                            )
-                            gpu_metrics[f"gpu_{i}_{metric_name}"] = value
-                    except Exception as e:
-                        print(f"Warning: Failed to collect GPU {i} metrics: {e}")
-
-            elif vendor == AccVendor.INTEL:
-                try:
-                    all_metrics = DragonTelemetryCollector._get_intel_metrics()
-                    for gpu_id, metrics in all_metrics.items():
-                        for metric_name, value in metrics.items():
-                            dt.add_data(
-                                ts_metric_name=f"{metric_prefix}.gpu_{metric_name}",
-                                ts_data=value,
-                                timestamp=timestamp,
-                                tagk="gpu",
-                                tagv=str(gpu_id),
-                            )
-                            gpu_metrics[f"gpu_{gpu_id}_{metric_name}"] = value
-                except Exception as e:
-                    print(f"Warning: Failed to collect Intel GPU metrics: {e}")
-
-        except Exception as e:
-            print(f"Warning: GPU detection failed: {e}")
-
-        return gpu_metrics
-
-    @staticmethod
-    def _identify_gpu():
-        """Identify GPU vendor and count.
-
-        :return: Tuple of (vendor, count) or (None, 0)
-        :rtype: tuple
-        """
-        try:
-            accelerator = find_accelerators()
-            if accelerator is None:
-                return None, 0
-
-            vendor = accelerator.vendor
-
-            if vendor == AccVendor.NVIDIA:
-                import pynvml
-
-                pynvml.nvmlInit()
-                count = pynvml.nvmlDeviceGetCount()
-                pynvml.nvmlShutdown()
-                return vendor, count
-
-            elif vendor == AccVendor.AMD:
-                import sys
-
-                rocm_path = os.path.join(
-                    os.environ.get("ROCM_PATH", "/opt/rocm/"), "libexec/rocm_smi"
-                )
-                sys.path.append(rocm_path)
-                import rocm_smi
-
-                rocm_smi.initializeRsmi()
-                count = len(rocm_smi.listDevices())
-                return vendor, count
-
-            elif vendor == AccVendor.INTEL:
-                # strip out tiling
-                count = len(set(map(int, accelerator.device_list)))
-                return vendor, count
-
-            return None, 0
-
-        except Exception:
-            return None, 0
-
-    @staticmethod
-    def _get_nvidia_metrics(gpu_id):
-        """Collect metrics for a single NVIDIA GPU.
-
-        :param gpu_id: GPU device ID
-        :type gpu_id: int
-        :return: Dictionary of GPU metrics
-        :rtype: dict
-        """
-        import pynvml
-
-        pynvml.nvmlInit()
-        try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
-
-            # Utilization
-            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-
-            # Memory
-            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            mem_percent = (mem.used / mem.total) * 100
-
-            # Power (optional)
-            try:
-                power_mw = pynvml.nvmlDeviceGetPowerUsage(handle)
-                power_w = power_mw / 1000.0
-            except Exception:
-                power_w = 0.0
-
-            return {
-                "utilization": util.gpu,
-                "memory_percent": mem_percent,
-                "memory_used_gb": mem.used / (1024**3),
-                "memory_total_gb": mem.total / (1024**3),
-                "power_watts": power_w,
-            }
-        finally:
-            pynvml.nvmlShutdown()
-
-    @staticmethod
-    def _get_amd_metrics(gpu_id):
-        """Collect metrics for a single AMD GPU.
-
-        :param gpu_id: GPU device ID
-        :type gpu_id: int
-        :return: Dictionary of GPU metrics
-        :rtype: dict
-        """
-
-        rocm_path = os.path.join(os.environ.get("ROCM_PATH", "/opt/rocm/"), "libexec/rocm_smi")
-        sys.path.append(rocm_path)
-        import rocm_smi
-
-        rocm_smi.initializeRsmi()
-
-        utilization_gpu = rocm_smi.getGpuUse(gpu_id)
-        mem_used, mem_total = rocm_smi.getMemInfo(gpu_id, "vram")
-        mem_percent = (float(mem_used) / float(mem_total)) * 100
-
-        power = rocm_smi.getPower(gpu_id).get("power", 0.0)
-        if power == "N/A":
-            power = 0.0
-        else:
-            power = float(power)
-
-        return {
-            "utilization": utilization_gpu,
-            "memory_percent": mem_percent,
-            "memory_used_gb": mem_used / (1024**3),
-            "memory_total_gb": mem_total / (1024**3),
-            "power_watts": power,
-        }
-
-    @staticmethod
-    def _get_intel_metrics():
-        """Collect metrics for all Intel GPUs using xpu-smi.
-
-        :return: Dictionary mapping gpu_id to metrics dict
-        :rtype: dict
-        """
-        import subprocess
-
-        # Run xpu-smi to get metrics for all GPUs
-        output = subprocess.run(
-            ["xpu-smi", "dump", "-d", "-1", "-m", "0,1,5", "-n", "1"],  # noqa: S607
-            text=True,
-            capture_output=True,
-        )
-        output_string = output.stdout
-        output_lines = output_string.splitlines()
-
-        all_gpu_metrics = {}
-
-        # Parse output
-        for device_stats in output_lines[1:]:
-            device_info = device_stats.split(",")
-            device_id = int(device_info[1].strip())
-
-            utilization_gpu = 0 if device_info[2].strip() == "N/A" else float(device_info[2])
-            mem_percent = 0 if device_info[4].strip() == "N/A" else float(device_info[4])
-            power_w = 0 if device_info[3].strip() == "N/A" else float(device_info[3])
-
-            all_gpu_metrics[device_id] = {
-                "utilization": utilization_gpu,
-                "memory_percent": mem_percent,
-                "power_watts": power_w,
-            }
-
-        return all_gpu_metrics
-
-    @staticmethod
-    def _checkpoint_worker(
-        end_event,
-        checkpoint_lock,
-        all_metrics_history,
-        hostname,
-        checkpoint_interval,
-        checkpoint_dir,
-        checkpoint_count,
-        collection_rate,
-        metric_prefix,
-    ):
-        """Background thread that periodically writes checkpoints.
-
-        This runs as a daemon thread in each collector process.
-        """
-        checkpoint_id = 0
-        last_checkpoint = time.time()
-
-        while not end_event.is_set():
-            current_time = time.time()
-
-            # Check if it's time to checkpoint
-            if current_time - last_checkpoint >= checkpoint_interval:
-                # Acquire lock and copy data
-                with checkpoint_lock:
-                    metrics_to_save = list(all_metrics_history)
-                    all_metrics_history.clear()
-
-                # Write checkpoint (without holding lock)
-                if metrics_to_save:
-                    DragonTelemetryCollector._write_checkpoint(
-                        hostname,
-                        checkpoint_id,
-                        metrics_to_save,
-                        checkpoint_dir,
-                        checkpoint_count,
-                        collection_rate,
-                        metric_prefix,
-                    )
-                    checkpoint_id += 1
-
-                last_checkpoint = current_time
-
-            # Sleep briefly
-            time.sleep(1)
-
-        # Final checkpoint on shutdown
-        with checkpoint_lock:
-            if all_metrics_history:
-                DragonTelemetryCollector._write_checkpoint(
-                    hostname,
-                    checkpoint_id,
-                    all_metrics_history,
-                    checkpoint_dir,
-                    checkpoint_count,
-                    collection_rate,
-                    metric_prefix,
-                )
-
-    @staticmethod
-    def _write_checkpoint(
-        hostname,
-        checkpoint_id,
-        metrics_data,
-        checkpoint_dir,
-        checkpoint_count,
-        collection_rate,
-        metric_prefix,
-    ):
-        """Write checkpoint to JSON file with atomic rename pattern.
-
-        :param hostname: Hostname of this node
-        :type hostname: str
-        :param checkpoint_id: Sequential checkpoint ID
-        :type checkpoint_id: int
-        :param metrics_data: List of metric dictionaries
-        :type metrics_data: list
-        :param checkpoint_dir: Directory to write checkpoint
-        :type checkpoint_dir: str
-        :param checkpoint_count: Max checkpoint files to keep
-        :type checkpoint_count: int
-        :param collection_rate: Collection rate for metadata
-        :type collection_rate: float
-        :param metric_prefix: Metric prefix for metadata
-        :type metric_prefix: str
-        """
-        try:
-            timestamp = int(time.time())
-            filename = f"telemetry_checkpoint_{hostname}_{timestamp}.json"
-            filepath = os.path.join(checkpoint_dir, filename)
-
-            # Ensure directory exists
-            os.makedirs(checkpoint_dir, exist_ok=True)
-
-            # Prepare checkpoint data
-            checkpoint_data = {
-                "checkpoint_metadata": {
-                    "hostname": hostname,
-                    "timestamp": timestamp,
-                    "collection_rate": collection_rate,
-                    "metric_prefix": metric_prefix,
-                    "checkpoint_id": checkpoint_id,
-                    "num_samples": len(metrics_data),
-                },
-                "metrics": metrics_data,
-            }
-
-            # Write to temp file first (atomic write pattern)
-            temp_fd, temp_path = tempfile.mkstemp(
-                dir=checkpoint_dir, prefix=f"tmp_checkpoint_{hostname}_", suffix=".json"
-            )
-
-            try:
-                with os.fdopen(temp_fd, "w") as f:
-                    json.dump(checkpoint_data, f, indent=2)
-
-                # Atomic rename
-                os.rename(temp_path, filepath)
-
-                print(
-                    f"DragonTelemetryCollector: Wrote checkpoint {filepath} ({len(metrics_data)} samples)"
-                )
-
-            except Exception:
-                # Clean up temp file on error
-                try:
-                    os.remove(temp_path)
-                except Exception:  # noqa: S110
-                    pass
-                raise
-
-            # Rotate old files
-            DragonTelemetryCollector._rotate_checkpoints(hostname, checkpoint_dir, checkpoint_count)
-
-        except Exception as e:
-            print(f"Warning: Failed to write checkpoint on {hostname}: {e}")
-
-    @staticmethod
-    def _rotate_checkpoints(hostname, checkpoint_dir, checkpoint_count):
-        """Remove old checkpoint files beyond the count limit.
-
-        :param hostname: Hostname to filter checkpoint files
-        :type hostname: str
-        :param checkpoint_dir: Directory containing checkpoints
-        :type checkpoint_dir: str
-        :param checkpoint_count: Max files to keep (0 for unlimited)
-        :type checkpoint_count: int
-        """
-        if checkpoint_count <= 0:
-            return
-
-        try:
-            # Find all checkpoint files for this hostname
-            pattern = os.path.join(checkpoint_dir, f"telemetry_checkpoint_{hostname}_*.json")
-            checkpoint_files = sorted(glob.glob(pattern))
-
-            # Remove oldest files if beyond limit
-            while len(checkpoint_files) > checkpoint_count:
-                oldest = checkpoint_files.pop(0)
-                try:
-                    os.remove(oldest)
-                    print(f"DragonTelemetryCollector: Removed old checkpoint {oldest}")
-                except OSError as e:
-                    print(f"Warning: Failed to remove old checkpoint {oldest}: {e}")
-
-        except Exception as e:
-            print(f"Warning: Failed to rotate checkpoints for {hostname}: {e}")

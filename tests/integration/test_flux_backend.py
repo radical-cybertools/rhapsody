@@ -3,6 +3,7 @@ These tests require a live Flux instance.
 """
 
 import asyncio
+
 import pytest
 
 from rhapsody.backends.constants import BackendMainStates
@@ -45,7 +46,7 @@ async def test_flux_backend_submit_and_callback():
 
     try:
         await backend.submit_tasks([task])
-        
+
         # Wait up to 10 seconds for the task to finish
         for _ in range(100):
             if TasksMainStates.DONE.value in states or TasksMainStates.FAILED.value in states:
@@ -82,7 +83,7 @@ async def test_flux_backend_cancel():
 
     try:
         await backend.submit_tasks([task])
-        
+
         # Wait briefly for it to start
         for _ in range(20):
             if TasksMainStates.RUNNING.value in states:

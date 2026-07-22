@@ -6,6 +6,7 @@ implement.
 
 from __future__ import annotations
 
+import os
 from abc import ABC
 from abc import abstractmethod
 from typing import TYPE_CHECKING
@@ -21,11 +22,23 @@ class BaseBackend(ABC):
 
     This class defines the interface for backends that handle task submission, state management, and
     lifecycle in a distributed or parallel execution environment.
+
+    Attributes:
+        _work_dir: Output directory for capture_stdio files. Defaults to cwd;
+            overwritten by Session.add_backend / WorkflowEngine._attach_backend.
+        is_attached: True once this backend has been registered with a session
+            or workflow engine.
+        attached_to: Ordered list of session/engine UIDs this backend has been
+            attached to (most recent last).
     """
 
     def __init__(self, name: str | None = None):
         """Initialize the backend."""
         self._name = name
+        # Default output directory for capture_stdio tasks; overridden by Session.add_backend
+        self._work_dir: str = os.getcwd()
+        self.is_attached: bool = False
+        self.attached_to: list[str] = []
 
     @property
     def name(self) -> str:
@@ -151,3 +164,24 @@ class BaseBackend(ABC):
             NotImplementedError: If the backend doesn't support cancellation
         """
         raise NotImplementedError("Not implemented in the base backend")
+
+    @classmethod
+    def build_launch_prefix(cls, partition: dict | None) -> list[str]:
+        """Return the argv prefix that wraps ``python -m
+        rhapsody.backends.multiproc.host`` when this backend is hosted in a
+        child process by :class:`RemoteBackendProxy`.
+
+        Default: no prefix (the child is launched as a plain Python process).
+        Backends with their own runtime launcher (Dragon, Flux, …) override
+        this to construct the appropriate CLI from the partition spec —
+        keeping launcher-specific details out of the proxy and the call site.
+
+        Args:
+            partition: The partition spec (``rhapsody_rm.partition_spec`` shape:
+                ``{"nodelist": [Node…], "env": {…}}``), or ``None`` for an
+                unpartitioned launch.
+
+        Returns:
+            argv prefix; empty list for plain ``python``.
+        """
+        return []

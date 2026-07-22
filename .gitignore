@@ -224,3 +224,8 @@ pip-audit.json
 
 # GitHub instructions
 .github/instructions
+
+# Telemetry output
+*.png
+*.jpeg
+*.jsonl

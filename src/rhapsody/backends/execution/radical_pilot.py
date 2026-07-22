@@ -10,6 +10,7 @@ import asyncio
 import copy
 import logging
 import os
+import shlex
 import threading
 from collections.abc import Generator
 from typing import Any
@@ -234,16 +235,54 @@ class RadicalExecutionBackend(BaseBackend):
         return self
 
     async def _initialize(self) -> None:
-        """Initialize Radical Pilot components."""
+        """Initialize Radical Pilot components.
+
+        If partition info is provided in resources, configures the pilot to:
+        - Use only the specified number of nodes
+        - Set partition environment variables via prepare_env
+        """
         try:
             self.tasks = {}
             self.raptor_mode = False
+
+            # Work on a local copy and strip "partition" from it, so the pilot
+            # description doesn't receive partition config while self.resources
+            # stays intact (caller's dict is not mutated, and a retry of
+            # _initialize still sees the partition entry).
+            resources = dict(self.resources)
+            # ``or {}`` also covers an explicit ``"partition": None`` in the
+            # resources (pop's default only applies when the key is absent).
+            partition = resources.pop("partition", None) or {}
+            partition_nodelist = partition.get("nodelist", [])
+            partition_env = partition.get("env", {})
+
             self.session = rp.Session(uid=ru.generate_id("rhapsody.session", mode=ru.ID_PRIVATE))
             self.task_manager = rp.TaskManager(self.session)
             self.pilot_manager = rp.PilotManager(self.session)
-            self.resource_pilot = self.pilot_manager.submit_pilots(
-                rp.PilotDescription(self.resources)
-            )
+
+            # Create pilot description
+            pd = rp.PilotDescription(resources)
+
+            # Configure partition if specified
+            if partition_nodelist:
+                pd.nodes = len(partition_nodelist)
+
+            if partition_env:
+                # Create shell environment with export directives.  Quote keys
+                # and values with shlex to avoid shell injection / breakage on
+                # spaces or special characters.
+                export_cmds = [
+                    f"export {shlex.quote(str(k))}={shlex.quote(str(v))}"
+                    for k, v in partition_env.items()
+                ]
+                pd.prepare_env = {
+                    "partition": {
+                        "type": "shell",
+                        "pre_exec": export_cmds,
+                    }
+                }
+
+            self.resource_pilot = self.pilot_manager.submit_pilots(pd)
             self.pilot_manager.register_callback(self.handle_pilot_state_callback)
 
             self.task_manager.add_pilots(self.resource_pilot)
