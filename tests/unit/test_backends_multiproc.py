@@ -141,3 +141,46 @@ async def test_session_terminal_states_picked_up_from_proxy():
             assert task["state"] == "DONE"
     finally:
         await proxy.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Dragon launch-prefix construction (no Dragon runtime needed:
+# ``build_launch_prefix`` is a pure classmethod on the backend class).
+# ---------------------------------------------------------------------------
+
+
+class _FakeNode:
+    """Duck-typed Node per rhapsody_rm's CONTRACT.md — only ``.name`` is read."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+
+def test_dragon_launch_prefix_unpartitioned():
+    """No partition: bare ``dragon`` launcher with a port triplet, no hostlist."""
+    from rhapsody.backends.execution.dragon import DragonExecutionBackendV3
+
+    prefix = DragonExecutionBackendV3.build_launch_prefix(None)
+    assert prefix[0] == "dragon"
+    assert "--port" in prefix and "--overlay-port" in prefix and "--frontend-port" in prefix
+    assert "--hostlist" not in prefix and "-N" not in prefix
+
+
+def test_dragon_launch_prefix_partitioned_and_disjoint_ports():
+    """Partition spec constrains the launcher; consecutive builds get disjoint ports."""
+    from rhapsody.backends.execution.dragon import DragonExecutionBackendV3
+
+    spec = {"nodelist": [_FakeNode("n0"), _FakeNode("n1")], "env": {}}
+    p0 = DragonExecutionBackendV3.build_launch_prefix(spec)
+    p1 = DragonExecutionBackendV3.build_launch_prefix(spec)
+
+    for prefix in (p0, p1):
+        assert prefix[0] == "dragon"
+        assert prefix[prefix.index("-N") + 1] == "2"
+        assert prefix[prefix.index("--wlm") + 1] == "slurm"
+        assert prefix[prefix.index("--hostlist") + 1] == "n0,n1"
+
+    # Two co-resident front-ends must not clash on any of the three ports.
+    ports0 = {p0[p0.index(f) + 1] for f in ("--port", "--overlay-port", "--frontend-port")}
+    ports1 = {p1[p1.index(f) + 1] for f in ("--port", "--overlay-port", "--frontend-port")}
+    assert not ports0 & ports1
