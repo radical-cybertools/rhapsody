@@ -644,7 +644,7 @@ def test_v3_deliver_batch_success_stores_value_and_fires_done(backend_v3):
     task_desc = {"uid": uid}
     backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
 
-    backend_v3._deliver_batch([(uid, 42, None, False, None, None)])
+    backend_v3._deliver_batch([(uid, 42, None, False, None, None, None, None)])
 
     assert task_desc["return_value"] == 42
     assert task_desc["stdout"] == ""
@@ -659,7 +659,7 @@ def test_v3_deliver_batch_propagates_stdout_stderr(backend_v3):
     task_desc = {"uid": uid}
     backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
 
-    backend_v3._deliver_batch([(uid, "ok", None, False, "hello\n", "warn\n")])
+    backend_v3._deliver_batch([(uid, "ok", None, False, "hello\n", "warn\n", None, None)])
 
     assert task_desc["stdout"] == "hello\n"
     assert task_desc["stderr"] == "warn\n"
@@ -673,7 +673,7 @@ def test_v3_deliver_batch_failure_stores_exc_and_fires_failed(backend_v3):
     exc = RuntimeError("something went wrong")
 
     # raised=True, tb=None: stderr falls back to str(exc)
-    backend_v3._deliver_batch([(uid, exc, None, True, None, None)])
+    backend_v3._deliver_batch([(uid, exc, None, True, None, None, None, None)])
 
     assert task_desc["exception"] is exc
     assert "something went wrong" in task_desc["stderr"]
@@ -689,9 +689,27 @@ def test_v3_deliver_batch_prefers_traceback_over_str_exc(backend_v3):
     exc = RuntimeError("boom")
     tb = "Traceback (most recent call last):\n  File ...\nRuntimeError: boom"
 
-    backend_v3._deliver_batch([(uid, exc, tb, True, None, None)])
+    backend_v3._deliver_batch([(uid, exc, tb, True, None, None, None, None)])
 
     assert task_desc["stderr"] == tb
+
+
+def test_v3_deliver_batch_non_exception_result_coerced_to_baseexception(backend_v3):
+    """A non-BaseException failure result must still surface as a raisable
+    exception, otherwise session.py would silently treat the failure as DONE."""
+    uid = "task.unit-failed-str"
+    task_desc = {"uid": uid}
+    backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
+
+    # result is a plain string (e.g. a cross-node serialization fallback) and a
+    # per-rank diagnostic is present, so the augmentation path runs.
+    backend_v3._deliver_batch(
+        [(uid, "remote failure", None, True, None, None, None, "[rank 0]\ntb")]
+    )
+
+    assert isinstance(task_desc["exception"], BaseException)
+    assert "remote failure" in str(task_desc["exception"])
+    backend_v3._callback_func.assert_called_once_with(task_desc, "FAILED")
 
 
 def test_v3_cancelled_task_skips_callback(backend_v3):
@@ -701,7 +719,7 @@ def test_v3_cancelled_task_skips_callback(backend_v3):
     backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
     backend_v3._cancelled_tasks.add(uid)
 
-    backend_v3._deliver_batch([(uid, 99, None, False, None, None)])
+    backend_v3._deliver_batch([(uid, 99, None, False, None, None, None, None)])
 
     backend_v3._callback_func.assert_not_called()
     assert "return_value" not in task_desc
@@ -1036,7 +1054,7 @@ def test_v3_deliver_batch_empty_dragon_stdout_written_as_empty_string(backend_v3
     task_desc = {"uid": uid}
     backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
 
-    backend_v3._deliver_batch([(uid, 0, None, False, "", "")])
+    backend_v3._deliver_batch([(uid, 0, None, False, "", "", None, None)])
 
     assert isinstance(task_desc["stdout"], str)
     assert isinstance(task_desc["stderr"], str)
@@ -1053,9 +1071,13 @@ def test_v3_deliver_batch_stdout_path_takes_priority_over_empty_stdout(backend_v
         "description": task_desc,
         "stdout_path": "/work/uid.stdout",
         "stderr_path": "/work/uid.stderr",
+        # capture_stdio redirect writes a wrapper script alongside the literal
+        # stdout/stderr files; script_path marks this as an exec redirect (vs a
+        # function-wrap glob prefix), which is what makes the path take priority.
+        "script_path": "/work/uid.sh",
     }
 
-    backend_v3._deliver_batch([(uid, 0, None, False, "", "")])
+    backend_v3._deliver_batch([(uid, 0, None, False, "", "", None, None)])
 
     assert task_desc["stdout"] == "/work/uid.stdout"
     assert task_desc["stderr"] == "/work/uid.stderr"
@@ -1068,6 +1090,6 @@ def test_v3_deliver_batch_failed_stdout_is_string(backend_v3):
     task_desc = {"uid": uid}
     backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
 
-    backend_v3._deliver_batch([(uid, RuntimeError("boom"), None, True, "", "")])
+    backend_v3._deliver_batch([(uid, RuntimeError("boom"), None, True, "", "", None, None)])
 
     assert isinstance(task_desc["stdout"], str)
