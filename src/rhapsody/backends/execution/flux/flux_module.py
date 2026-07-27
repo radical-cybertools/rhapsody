@@ -218,11 +218,13 @@ def spec_from_dict(td: dict) -> Any:
     if user["priority"] is not None:
         user["priority"] = min(max(int(user["priority"]), 1), 31)
 
-    if "environment" in td:
+    # Value checks, not key presence: a present-but-None entry would emit a
+    # JSON null, which flux-shell fatally rejects ("Expected string, got null").
+    if td.get("environment") is not None:
         system["environment"] = td["environment"]
-    if "sandbox" in td:
+    if td.get("sandbox") is not None:
         system["cwd"] = td["sandbox"]
-    if "shell" in td:
+    if td.get("shell") is not None:
         system["shell"] = td["shell"]
 
     attributes = {"system": system, "user": user}

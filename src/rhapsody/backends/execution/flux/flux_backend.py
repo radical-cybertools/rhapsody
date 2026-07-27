@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 from rhapsody.backends.base import BaseBackend
@@ -184,14 +185,15 @@ class FluxExecutionBackend(BaseBackend):
         if event_name in ("submit", "alloc", "start"):
             state = TasksMainStates.RUNNING.value
         elif event_name == "finish":
-            # Context schema for finish usually has 'status' (the exit code)
+            # The finish context 'status' is a wait(2) status (RFC 21), not an
+            # exit code — decode it (negative = terminated by signal).
             status = getattr(event, "context", {}).get("status", 0)
-            if status == 0:
+            exit_code = os.waitstatus_to_exitcode(status)
+            task["exit_code"] = exit_code
+            if exit_code == 0:
                 state = TasksMainStates.DONE.value
-                task["exit_code"] = 0
             else:
                 state = TasksMainStates.FAILED.value
-                task["exit_code"] = status
         elif event_name == "exception":
             state = TasksMainStates.FAILED.value
             task["exit_code"] = 1
