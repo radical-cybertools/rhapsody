@@ -148,6 +148,7 @@ so they have their own event loop and do not share the session's loop.
 | `ConcurrentExecutionBackend` (default) | `ThreadPoolExecutor` | called directly | run via `asyncio.run` |
 | `ConcurrentExecutionBackend` | `ProcessPoolExecutor` | called directly | run via `asyncio.run` |
 | `DaskExecutionBackend` | Dask workers | submitted natively | wrapped transparently |
+| `OrbitExecutionBackend` | remote ORBIT endpoint | shipped via `cloudpickle` | shipped via `cloudpickle` |
 
 !!! note "ProcessPoolExecutor requires cloudpickle"
     Functions are serialised with `cloudpickle` before being sent to the worker

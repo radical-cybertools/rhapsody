@@ -48,8 +48,8 @@ telemetry = ["opentelemetry-sdk>=1.20.0", "nvidia-ml-py"]
 # Backend-specific dependencies
 dask = ["dask[distributed]>=2023.0.0"]
 radical_pilot = ["radical.pilot>=1.30.0"]
-
-dragon = ["dragonhpc"]  # Requires Python >= 3.10, supports up to 3.13
+dragon = ["dragonhpc==0.14.1"]  # Requires Python >= 3.10, supports up to 3.13
+orbit = ["radical.orbit>=0.3.0"]  # Requires Python >= 3.10
 
 vllm-dragon = [
     "aiohttp>=3.8.0",
@@ -92,7 +92,7 @@ examples = [
 
 # Complete installation with all backends
 backends = [
-    "rhapsody-py[dask,radical_pilot,dragon,vllm-dragon]"
+    "rhapsody-py[dask,radical_pilot,dragon,vllm-dragon,orbit]"
 ]
 
 all = [

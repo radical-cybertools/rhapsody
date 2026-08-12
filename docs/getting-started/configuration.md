@@ -87,6 +87,78 @@ backend = DragonExecutionBackend(
 !!! note "Dragon Versions"
     `DragonExecutionBackend` is the only supported Dragon backend as of RHAPSODY 0.5.0.
 
+### Orbit Backend
+Remote execution on an HPC system through the ORBIT broker/endpoint infrastructure.
+
+[ORBIT](https://github.com/radical-cybertools/radical.orbit) is a lightweight
+communication fabric for reaching compute resources that are not directly
+accessible from where your application runs (e.g. behind an HPC login node or
+firewall). Both your application and the remote resource connect *outbound* to
+a shared **broker**, which routes messages between them. On the remote side, an
+**endpoint** process runs on the HPC system and exposes plugins — one of which
+is a Rhapsody plugin hosting a local execution backend (Dragon V3 by default)
+that actually runs your tasks. The `OrbitExecutionBackend` connects to the
+broker, discovers a suitable endpoint from the live topology, and from then on
+behaves like any other Rhapsody backend: tasks submitted to the local session
+are batched, shipped to the remote endpoint, executed there, and their results
+and state updates streamed back via notifications.
+
+```mermaid
+flowchart LR
+    subgraph Client["Your machine"]
+        APP["Rhapsody Session +<br/>OrbitExecutionBackend"]
+    end
+    subgraph Broker["ORBIT broker"]
+        BR["Message routing +<br/>topology"]
+    end
+    subgraph HPC["HPC system"]
+        EP["ORBIT endpoint"]
+        PL["Rhapsody plugin"]
+        BE["Local backend<br/>(e.g. Dragon V3)"]
+        EP --> PL --> BE
+    end
+    APP -- "tasks (batched)" --> BR --> EP
+    EP -. "state updates, results" .-> BR -.-> APP
+```
+
+```python
+from rhapsody.backends import OrbitExecutionBackend
+
+backend = await OrbitExecutionBackend(
+    broker_url="https://broker.example.org:8000",
+    endpoint_name="frontier_ep",   # optional — auto-selected if omitted
+    backends=["dragon_v3"],        # backend(s) to run on the remote endpoint
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `broker_url` | `str` | `None` | ORBIT broker URL; falls back to `RADICAL_ORBIT_BROKER_URL` or `~/.radical/orbit/broker.url` |
+| `endpoint_name` | `str` | `None` | Endpoint to target; auto-selects the first live endpoint advertising a Rhapsody plugin if omitted |
+| `backends` | `list` | `["dragon_v3"]` | Backend names to start in the remote session |
+| `name` | `str` | `"orbit"` | Backend identifier used for task routing |
+| `batch_window` | `float` | `0.25` | Seconds to collect tasks before flushing as one bulk request; `0` disables batching |
+| `batch_limit` | `int` | `1024` | Max tasks per batch — triggers an immediate flush when reached |
+| `start_timeout` | `float` | `30` | Seconds to wait for broker registration |
+| `init_timeout` | `float` | `120` | Seconds to wait for the remote session to become ready |
+
+The broker bearer token is resolved the same way as the URL, from
+`RADICAL_ORBIT_BROKER_TOKEN` or `~/.radical/orbit/broker.token`.
+
+!!! note "Submission batching"
+    Tasks submitted individually are collected over a short time window and
+    flushed as a single bulk request, which drastically reduces per-task
+    round-trip overhead. Bulk submissions and transport-level optimizations
+    (template compression, pipelined batching, event-based waiting) are
+    inherited from the ORBIT client.
+
+!!! warning "Function tasks require matching Python versions"
+    Function tasks are shipped with `cloudpickle`, which is not portable
+    across Python *minor* versions — the client and the remote endpoint must
+    run the same `major.minor` Python (the backend checks this and fails
+    fast on a mismatch). Executable and import-path tasks are unaffected.
+    The `orbit` extra itself requires Python >= 3.10.
+
 ### RADICAL-Pilot Backend
 Large-scale HPC execution using RADICAL-Pilot.
 

@@ -7,8 +7,9 @@ environments.
 from __future__ import annotations
 
 from .concurrent import ConcurrentExecutionBackend  # noqa: F401
+from .noop import NoopExecutionBackend  # noqa: F401
 
-__all__ = ["ConcurrentExecutionBackend"]
+__all__ = ["ConcurrentExecutionBackend", "NoopExecutionBackend"]
 
 # Try to import optional backends
 try:
@@ -29,5 +30,13 @@ try:
     from .dragon import DragonExecutionBackend  # noqa: F401
 
     __all__.append("DragonExecutionBackend")
+
+except ImportError:
+    pass
+
+try:
+    from .orbit import OrbitExecutionBackend  # noqa: F401
+
+    __all__.append("OrbitExecutionBackend")
 except ImportError:
     pass
