@@ -225,6 +225,9 @@ pip-audit.json
 # GitHub instructions
 .github/instructions
 
+# Rhapsody artifacts
+rhapsody.session.*
+
 # Telemetry output
 *.png
 *.jpeg

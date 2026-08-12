@@ -1058,6 +1058,30 @@ async def test_shutdown_calls_join_and_destroy_not_close(backend_dragon):
     backend_dragon.batch.close.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_shutdown_removes_task_logs_directory(backend_dragon, tmp_path):
+    """Shutdown() removes the directory returned by batch.log_dir()."""
+    log_dir = tmp_path / "runinfo" / "run-1" / "client-0" / "task_logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "manifest.jsonl").write_text("{}\n")
+    backend_dragon.batch.log_dir.return_value = log_dir
+
+    await backend_dragon.shutdown()
+
+    assert not log_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_skips_cleanup_when_task_logs_disabled(backend_dragon):
+    """Shutdown() tolerates batch.log_dir() raising RuntimeError (task_logs disabled)."""
+    backend_dragon.batch.log_dir.side_effect = RuntimeError("task logging is disabled")
+
+    await backend_dragon.shutdown()
+
+    backend_dragon.batch.join.assert_called_once()
+    backend_dragon.batch.destroy.assert_called_once()
+
+
 # ============================================================================
 # V3 capture_stdio tests — no Dragon cluster required
 # ============================================================================

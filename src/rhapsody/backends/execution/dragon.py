@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import shutil
 import threading
 import time
 from typing import Any
@@ -559,6 +560,14 @@ class DragonExecutionBackend(BaseBackend):
                     self.batch.terminate()
                 except Exception as te:
                     self.logger.warning(f"Error terminating batch: {te}")
+
+            # Remove Dragon's task_logs directory
+            try:
+                shutil.rmtree(self.batch.log_dir(), ignore_errors=True)
+            except RuntimeError:
+                pass  # task_logs was explicitly disabled; nothing to remove
+            except Exception as e:
+                self.logger.warning(f"Failed to remove Dragon task_logs directory: {e}")
 
         self._task_registry.clear()
         self._pending_tuids.clear()
