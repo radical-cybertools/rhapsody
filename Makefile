@@ -87,12 +87,15 @@ test-dragon-only:  ## Run Dragon tests only (requires 'dragon' launcher)
 		exit 1; \
 	fi
 
-test-ci:  ## CI test - regular tests + Dragon tests if available (fails gracefully)
+test-ci:  ## CI test - regular tests + Dragon tests when the dragon launcher is available
 	@echo "Running CI tests..."
 	@$(MAKE) test-regular
 	@echo ""
-	@echo "Attempting Dragon tests (optional, skips if unavailable)..."
-	@$(MAKE) test-dragon-only 2>/dev/null || echo "Dragon tests skipped (Dragon not available on this Python version)"
+	@if command -v dragon >/dev/null 2>&1; then \
+		$(MAKE) test-dragon-only; \
+	else \
+		echo "Dragon launcher not available on this Python version, skipping Dragon tests."; \
+	fi
 
 test-dask:  ## Run Dask backend tests only
 	@echo "Running Dask tests..."
