@@ -710,12 +710,14 @@ def test_cancelled_task_skips_callback(backend_dragon):
 
 
 def test_fence_delegates_to_batch(backend_dragon):
-    """backend.fence() calls batch.fence() exactly once."""
-    backend_dragon.fence()
+    """backend.wait() calls batch.fence() exactly once."""
+    backend_dragon.wait()
     backend_dragon.batch.fence.assert_called_once()
 
 
-def _run_monitor_one_cycle(backend, poll_tuid, monitored_entry=None, task_registry_entry=None):
+def _run_monitor_one_cycle(
+    backend, poll_tuid, monitored_entry=None, task_registry_entry=None, cancelled=False
+):
     """Drive _monitor_loop for one completion cycle and return the captured mock_loop.
 
     - poll call 1 returns `poll_tuid` (the tuid to deliver)
@@ -723,6 +725,8 @@ def _run_monitor_one_cycle(backend, poll_tuid, monitored_entry=None, task_regist
     - backend._loop is replaced with a MagicMock so call_soon_threadsafe is capturable
     - If `monitored_entry` is given, it is inserted into _monitored_batches under poll_tuid
     - If `task_registry_entry` is given, it is inserted into _task_registry
+    - If `cancelled` is True, `poll_tuid` is inserted into _cancelled_tuids so a miss is
+      resolved immediately instead of being retried through the pending-tuid buffer
     """
     mock_loop = MagicMock()
     backend._loop = mock_loop
@@ -732,6 +736,8 @@ def _run_monitor_one_cycle(backend, poll_tuid, monitored_entry=None, task_regist
     if task_registry_entry is not None:
         uid = task_registry_entry["uid"]
         backend._task_registry[uid] = task_registry_entry
+    if cancelled:
+        backend._cancelled_tuids.add(poll_tuid)
 
     calls = [0]
 
@@ -773,16 +779,79 @@ def test_monitor_loop_get_called_after_poll(backend_dragon):
 
 
 def test_monitor_loop_skips_cancelled_tuid(backend_dragon):
-    """When poll() returns a tuid absent from _monitored_batches, _deliver_batch is not called.
+    """When poll() returns a tuid recorded in _cancelled_tuids, _deliver_batch is not called.
 
-    This is the user-cancel path: cancel_task() eagerly pops from _monitored_batches before
-    the monitor loop sees the tuid via poll().  The loop must silently skip it.
+    This is the user-cancel path: cancel_task() eagerly pops from _monitored_batches and
+    records the tuid in _cancelled_tuids before the monitor loop sees it via poll(). The loop
+    must discard it immediately (single sweep) rather than retrying it through the
+    pending-tuid buffer, which is reserved for tuids that are merely not registered yet.
     """
     tuid = "dragon-cancelled-tuid"
-    # Intentionally not inserting into _monitored_batches — simulates cancel_task already popped it.
-    mock_loop = _run_monitor_one_cycle(backend_dragon, poll_tuid=tuid)
+    # Intentionally not inserting into _monitored_batches — simulates cancel_task already popped
+    # it — but cancelled=True records it in _cancelled_tuids, simulating cancel_task's own add().
+    mock_loop = _run_monitor_one_cycle(backend_dragon, poll_tuid=tuid, cancelled=True)
 
     mock_loop.call_soon_threadsafe.assert_not_called()
+    assert tuid not in backend_dragon._cancelled_tuids
+    assert tuid not in backend_dragon._pending_tuids
+
+
+def test_monitor_loop_buffers_unregistered_tuid_until_it_lands(backend_dragon):
+    """A tuid polled before its _monitored_batches registration lands is retried, not dropped.
+
+    Simulates build_task racing the monitor thread: poll() returns the tuid on sweep 1 while
+    _monitored_batches is still empty for it (build_task hasn't written its registration yet).
+    The registration lands as a side effect of the next poll() call — before sweep 2's
+    tuid-processing loop runs, exactly as build_task's synchronous write would land before the
+    monitor thread's next pass. The completion must be delivered on sweep 2, not silently
+    dropped as "cancelled".
+    """
+    uid = "task.late-registration"
+    tuid = "dragon-tuid-late-registration"
+    mock_task = MagicMock()
+    mock_task.get.return_value = "late-result"
+    mock_task.traceback = None
+    mock_task.stdout_path = None
+    mock_task.stderr_path = None
+    mock_task.get_stdout.return_value = None
+    mock_task.get_stderr.return_value = None
+
+    backend_dragon._task_registry[uid] = {
+        "uid": uid,
+        "description": {"uid": uid},
+        "is_native_function": True,
+    }
+
+    mock_loop = MagicMock()
+    backend_dragon._loop = mock_loop
+
+    calls = [0]
+
+    def poll_side_effect(timeout=0):
+        calls[0] += 1
+        if calls[0] == 1:
+            # Sweep 1 outer poll: tuid arrives, but not yet registered.
+            return tuid
+        if calls[0] == 2:
+            # Sweep 1 inner drain: nothing else queued.
+            return None
+        if calls[0] == 3:
+            # Sweep 2 outer poll: the registration lands right here, before sweep 2's
+            # processing loop runs — then request shutdown so the loop exits once this
+            # sweep delivers the now-resolved completion.
+            backend_dragon._monitored_batches[tuid] = (mock_task, uid)
+            backend_dragon._shutdown_event.set()
+            return None
+        return None
+
+    backend_dragon.batch.poll.side_effect = poll_side_effect
+
+    backend_dragon._monitor_loop()
+
+    mock_loop.call_soon_threadsafe.assert_called_once()
+    _, completions = mock_loop.call_soon_threadsafe.call_args.args
+    assert completions == [(uid, "late-result", None, False, "", "")]
+    assert tuid not in backend_dragon._pending_tuids
 
 
 def test_monitor_loop_reads_paths_from_batch_task(backend_dragon):
@@ -895,6 +964,8 @@ async def test_cancel_task_calls_dragon_cancel(backend_dragon):
     # Task must be eagerly removed so the monitor loop stops polling
     assert uid not in backend_dragon._task_registry
     assert mock_batch_task.uid not in backend_dragon._monitored_batches
+    # Recorded so _monitor_loop discards this tuid immediately if it later arrives via poll().
+    assert mock_batch_task.uid in backend_dragon._cancelled_tuids
 
 
 @pytest.mark.asyncio

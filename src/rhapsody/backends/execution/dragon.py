@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import threading
+import time
 from typing import Any
 from typing import Callable
 from typing import Optional
@@ -14,19 +15,14 @@ DRAGON_BATCH_INIT_ERROR = None
 
 try:
     import dragon
-    from dragon.infrastructure.policy import Policy
     from dragon.native.process import ProcessTemplate
     from dragon.workflows.batch import Batch
-    from dragon.workflows.batch import BatchError
     from dragon.workflows.batch import TaskCancelledError
-    from dragon.workflows.batch import TaskNotReadyError
 
 except ImportError as e:  # pragma: no cover - environment without Dragon
     dragon = None
     ProcessTemplate = None
-    Policy = None
     Batch = None
-    BatchError = None
     TaskCancelledError = None
     TaskNotReadyError = None
     DRAGON_BATCH_INIT_ERROR = e
@@ -109,6 +105,9 @@ class DragonExecutionBackend(BaseBackend):
             )
     """
 
+    # Hygiene backstop: max wall-clock seconds a tuid can stay pending before it's dropped.
+    PENDING_TUID_TIMEOUT = 30.0
+
     def __init__(
         self,
         batch_kwargs: Optional[dict] = None,
@@ -135,6 +134,10 @@ class DragonExecutionBackend(BaseBackend):
         self._initialized = False
         self._cancelled_tasks: set[str] = set()
         self._monitored_batches = {}
+        # Tuids polled before registration landed; retried each sweep. tuid -> first-seen time.
+        self._pending_tuids: dict[str, float] = {}
+        # Dragon tuids confirmed cancelled, so _monitor_loop discards them instead of retrying.
+        self._cancelled_tuids: set[str] = set()
         self._batch_monitor_thread = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -187,25 +190,42 @@ class DragonExecutionBackend(BaseBackend):
         """
         self.logger.debug("Starting Dragon batch monitor loop (event-driven)")
 
-        while not self._shutdown_event.is_set() or self._monitored_batches:
+        while not self._shutdown_event.is_set() or self._monitored_batches or self._pending_tuids:
             try:
                 tuid = self.batch.poll(timeout=0.05)
-                if tuid is None:
-                    continue
 
-                # Drain all already-queued completions in one pass
-                tuids = [tuid]
-                while True:
-                    nxt = self.batch.poll(timeout=0)
-                    if nxt is None:
-                        break
-                    tuids.append(nxt)
+                tuids = []
+                if tuid is not None:
+                    tuids.append(tuid)
+                    # Drain all already-queued completions in one pass
+                    while True:
+                        nxt = self.batch.poll(timeout=0)
+                        if nxt is None:
+                            break
+                        tuids.append(nxt)
+
+                # Retry tuids not yet registered when last seen.
+                if self._pending_tuids:
+                    tuids = list(self._pending_tuids.keys()) + tuids
+
+                if not tuids:
+                    continue
 
                 completed = []
                 for t in tuids:
                     entry = self._monitored_batches.pop(t, None)
                     if entry is None:
-                        continue  # user-cancelled: already delivered as CANCELED
+                        if t in self._cancelled_tuids:
+                            self._cancelled_tuids.discard(t)
+                            self._pending_tuids.pop(t, None)
+                            continue
+                        # Not registered yet; keep retrying instead of assuming cancellation.
+                        first_seen = self._pending_tuids.setdefault(t, time.monotonic())
+                        if time.monotonic() - first_seen > self.PENDING_TUID_TIMEOUT:
+                            self.logger.warning(f"Dragon tuid {t} never registered; dropping")
+                            self._pending_tuids.pop(t, None)
+                        continue
+                    self._pending_tuids.pop(t, None)
                     batch_task, uid = entry
 
                     try:
@@ -329,11 +349,10 @@ class DragonExecutionBackend(BaseBackend):
         if not batch_tasks_data:
             return
 
-        # Tasks are already in-flight — the Batch background thread auto-dispatches them
-        # the moment they are created via batch.function()/process()/job().
-        # Register each task individually for result monitoring.
-        for uid, batch_task in batch_tasks_data:
-            self._monitored_batches[batch_task.uid] = (batch_task, uid)
+        # Tasks are already in-flight and registered for result monitoring —
+        # build_task() registers each one into _monitored_batches immediately
+        # after Dragon dispatch, not in a second pass here (a fast task can
+        # otherwise complete and be polled before this loop even finishes).
         self.logger.info(f"Submitted {len(batch_tasks_data)} tasks (streaming, auto-dispatched)")
 
     async def build_task(self, task: dict):
@@ -441,13 +460,14 @@ class DragonExecutionBackend(BaseBackend):
                 ProcessTemplate(target, **_build_process_template_kwargs({}))
             )
 
-        # Register and return
+        # Register and return. Write _task_registry before _monitored_batches (order matters).
         self._task_registry[uid] = {
             "uid": uid,
             "description": task,
             "batch_task": batch_task,
             "is_native_function": is_native_function,
         }
+        self._monitored_batches[batch_task.uid] = (batch_task, uid)
 
         self.logger.debug(
             f"Created {'function' if is_native_function else 'process/job'} task: {uid}"
@@ -496,7 +516,9 @@ class DragonExecutionBackend(BaseBackend):
             task_desc = registry_entry["description"]
             # Eagerly pop from _monitored_batches so when the cancelled tuid arrives from
             # poll(), the None entry is skipped without delivering a spurious result.
+            # Mark cancelled so _monitor_loop drops it instead of retrying it forever.
             self._monitored_batches.pop(batch_task.uid, None)
+            self._cancelled_tuids.add(batch_task.uid)
             self._callback_func(task_desc, "CANCELED")
 
         return cancelled
@@ -539,6 +561,8 @@ class DragonExecutionBackend(BaseBackend):
                     self.logger.warning(f"Error terminating batch: {te}")
 
         self._task_registry.clear()
+        self._pending_tuids.clear()
+        self._cancelled_tuids.clear()
         self._state = "idle"
         self.logger.info("Dragon backend shutdown complete")
 
