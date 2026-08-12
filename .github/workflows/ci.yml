@@ -44,8 +44,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev,dask,radical_pilot]"
-          # Dragon 0.14.0 supports Python 3.10–3.13. Fails gracefully on 3.9.
-          pip install dragonhpc || echo "Dragon not available for Python ${{ matrix.python-version }}, skipping"
+          pip install -e ".[dragon]" || echo "Dragon not available for Python ${{ matrix.python-version }}, skipping"
 
       - name: Run tests
         run: make test-ci
