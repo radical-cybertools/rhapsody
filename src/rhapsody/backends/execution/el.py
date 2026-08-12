@@ -1,7 +1,7 @@
 """Ensemble Launcher execution backend for distributed computing.
 
-This module provides a backend that executes tasks via the Ensemble Launcher framework,
-supporting MPI-based distributed execution environments.
+This module provides a backend that executes tasks via the Ensemble Launcher framework, supporting
+MPI-based distributed execution environments.
 """
 
 from __future__ import annotations
@@ -13,8 +13,6 @@ import os
 import uuid
 from typing import Any
 from typing import Callable
-from typing import Optional
-from typing import Union
 
 from ensemble_launcher import EnsembleLauncher
 from ensemble_launcher.config import LauncherConfig
@@ -32,24 +30,25 @@ from ..constants import StateMapper
 
 
 class EnsembleBackend(BaseBackend):
-
-    def __init__(self, name: str | None = None,
-                 child_executor_name: str = "async_mpi",
-                 return_stdout: bool = True,
-                 worker_logs: bool = True,
-                 master_logs: bool = True,
-                 gpu_selector: str = "ZE_AFFINITY_MASK",
-                 children_scheduler_policy: str = "fixed_leafs_children_policy",
-                 task_scheduler_policy: str = "large_resource_policy",
-                 enable_workstealing: bool = False,
-                 checkpoint_dir: str | None = None,
-                 mpi_flavour: str = "mpich",
-                 nlevels: int = 0,
-                 nleafs: int | None = None,
-                 cpus: list[int] | None = None,
-                 gpus: list[int] | None = None,
-                 client_only: bool = False,
-                 node_id: str = "global",
+    def __init__(
+        self,
+        name: str | None = None,
+        child_executor_name: str = "async_mpi",
+        return_stdout: bool = True,
+        worker_logs: bool = True,
+        master_logs: bool = True,
+        gpu_selector: str = "ZE_AFFINITY_MASK",
+        children_scheduler_policy: str = "fixed_leafs_children_policy",
+        task_scheduler_policy: str = "large_resource_policy",
+        enable_workstealing: bool = False,
+        checkpoint_dir: str | None = None,
+        mpi_flavour: str = "mpich",
+        nlevels: int = 0,
+        nleafs: int | None = None,
+        cpus: list[int] | None = None,
+        gpus: list[int] | None = None,
+        client_only: bool = False,
+        node_id: str = "global",
     ):
         super().__init__(name=name)
 
@@ -80,7 +79,9 @@ class EnsembleBackend(BaseBackend):
         cpus = cpus or list(range(os.cpu_count()))
         ngpus = len(gpus) if gpus is not None else 0
         gpus = gpus or []
-        self._sys_config = SystemConfig(name="cluster", ncpus=len(cpus), cpus=cpus, ngpus=ngpus, gpus=gpus)
+        self._sys_config = SystemConfig(
+            name="cluster", ncpus=len(cpus), cpus=cpus, ngpus=ngpus, gpus=gpus
+        )
         self._el: EnsembleLauncher | None = None
         self._client: ClusterClient | None = None
         self.tasks: dict = {}
@@ -144,7 +145,7 @@ class EnsembleBackend(BaseBackend):
             result = await asyncio.wrap_future(fut)
             if is_executable:
                 task["return_value"] = ""
-                task["stdout"] = result.split(",")[0] ## EL returns "stdout,stderr"
+                task["stdout"] = result.split(",")[0]  ## EL returns "stdout,stderr"
                 task["stderr"] = result.split(",")[1]
             else:
                 task["return_value"] = result
@@ -208,8 +209,16 @@ class EnsembleBackend(BaseBackend):
         ppn = backend_kwargs.get("ranks", 1) // nnodes
         ngpus_per_process = backend_kwargs.get("gpus_per_rank", 0)
         env = backend_kwargs.get("env", {})
-        cpu_affinity = list(map(int, backend_kwargs.get("cpu_affinity").split(","))) if "cpu_affinity" in backend_kwargs else []
-        gpu_affinity = list(map(int, backend_kwargs.get("gpu_affinity").split(","))) if "gpu_affinity" in backend_kwargs else []
+        cpu_affinity = (
+            list(map(int, backend_kwargs.get("cpu_affinity").split(",")))
+            if "cpu_affinity" in backend_kwargs
+            else []
+        )
+        gpu_affinity = (
+            list(map(int, backend_kwargs.get("gpu_affinity").split(",")))
+            if "gpu_affinity" in backend_kwargs
+            else []
+        )
 
         func = task.get("function")
         if func is not None and inspect.iscoroutinefunction(func):

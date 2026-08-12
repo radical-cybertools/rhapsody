@@ -91,9 +91,11 @@ async def test_el_backend_async_init(mock_nodes):
     mock_el = MagicMock()
     mock_client = MagicMock()
 
-    with patch("rhapsody.backends.execution.el.EnsembleLauncher", return_value=mock_el), \
-         patch("rhapsody.backends.execution.el.ClusterClient", return_value=mock_client), \
-         patch("rhapsody.backends.execution.el.asyncio.to_thread", side_effect=_sync_to_thread):
+    with (
+        patch("rhapsody.backends.execution.el.EnsembleLauncher", return_value=mock_el),
+        patch("rhapsody.backends.execution.el.ClusterClient", return_value=mock_client),
+        patch("rhapsody.backends.execution.el.asyncio.to_thread", side_effect=_sync_to_thread),
+    ):
         result = await backend
         assert result is backend
         assert backend._initialized
@@ -108,9 +110,11 @@ async def test_el_backend_async_init_client_only(mock_nodes):
 
     mock_client = MagicMock()
 
-    with patch("rhapsody.backends.execution.el.EnsembleLauncher") as mock_el_cls, \
-         patch("rhapsody.backends.execution.el.ClusterClient", return_value=mock_client), \
-         patch("rhapsody.backends.execution.el.asyncio.to_thread", side_effect=_sync_to_thread):
+    with (
+        patch("rhapsody.backends.execution.el.EnsembleLauncher") as mock_el_cls,
+        patch("rhapsody.backends.execution.el.ClusterClient", return_value=mock_client),
+        patch("rhapsody.backends.execution.el.asyncio.to_thread", side_effect=_sync_to_thread),
+    ):
         await backend
         assert backend._initialized
         assert backend._el is None
@@ -131,9 +135,11 @@ async def test_el_backend_context_manager(mock_nodes):
     mock_el = MagicMock()
     mock_client = MagicMock()
 
-    with patch("rhapsody.backends.execution.el.EnsembleLauncher", return_value=mock_el), \
-         patch("rhapsody.backends.execution.el.ClusterClient", return_value=mock_client), \
-         patch("rhapsody.backends.execution.el.asyncio.to_thread", side_effect=_sync_to_thread):
+    with (
+        patch("rhapsody.backends.execution.el.EnsembleLauncher", return_value=mock_el),
+        patch("rhapsody.backends.execution.el.ClusterClient", return_value=mock_client),
+        patch("rhapsody.backends.execution.el.asyncio.to_thread", side_effect=_sync_to_thread),
+    ):
         async with backend as b:
             assert b._initialized
             assert b is backend
@@ -182,9 +188,11 @@ async def test_el_backend_state(mock_nodes):
 async def test_el_backend_state_mapper(mock_nodes):
     backend = EnsembleBackend()
 
-    with patch("rhapsody.backends.execution.el.EnsembleLauncher", return_value=MagicMock()), \
-         patch("rhapsody.backends.execution.el.ClusterClient", return_value=MagicMock()), \
-         patch("rhapsody.backends.execution.el.asyncio.to_thread", side_effect=_sync_to_thread):
+    with (
+        patch("rhapsody.backends.execution.el.EnsembleLauncher", return_value=MagicMock()),
+        patch("rhapsody.backends.execution.el.ClusterClient", return_value=MagicMock()),
+        patch("rhapsody.backends.execution.el.asyncio.to_thread", side_effect=_sync_to_thread),
+    ):
         await backend
 
     mapper = backend.get_task_states_map()
@@ -216,6 +224,7 @@ async def test_el_backend_submit_tasks(mock_nodes):
     backend = EnsembleBackend()
     backend._initialized = True
     from rhapsody.backends.constants import BackendMainStates
+
     backend._backend_state = BackendMainStates.INITIALIZED
 
     captured = []
@@ -256,6 +265,7 @@ async def test_el_submit_multiple_tasks_complete(mock_nodes):
     backend = EnsembleBackend()
     backend._initialized = True
     from rhapsody.backends.constants import BackendMainStates
+
     backend._backend_state = BackendMainStates.INITIALIZED
     backend.register_callback(lambda t, s: None)
 
@@ -264,10 +274,7 @@ async def test_el_submit_multiple_tasks_complete(mock_nodes):
     mock_client.submit.side_effect = futs
     backend._client = mock_client
 
-    tasks = [
-        ComputeTask(function=lambda: 1, args=(), kwargs={})
-        for _ in range(3)
-    ]
+    tasks = [ComputeTask(function=lambda: 1, args=(), kwargs={}) for _ in range(3)]
 
     await backend.submit_tasks(tasks)
     async_tasks = [backend.tasks[t["uid"]]["future"] for t in tasks]
@@ -291,6 +298,7 @@ async def test_el_backend_submit_after_shutdown(mock_nodes):
     backend = EnsembleBackend()
     backend._initialized = True
     from rhapsody.backends.constants import BackendMainStates
+
     backend._backend_state = BackendMainStates.SHUTDOWN
 
     with pytest.raises(RuntimeError, match="Cannot submit during shutdown"):
@@ -469,6 +477,7 @@ async def test_el_callback_done(mock_nodes):
     backend = EnsembleBackend()
     backend._initialized = True
     from rhapsody.backends.constants import BackendMainStates
+
     backend._backend_state = BackendMainStates.INITIALIZED
 
     captured = []
@@ -499,6 +508,7 @@ async def test_el_callback_failed(mock_nodes):
     backend = EnsembleBackend()
     backend._initialized = True
     from rhapsody.backends.constants import BackendMainStates
+
     backend._backend_state = BackendMainStates.INITIALIZED
 
     captured = []
