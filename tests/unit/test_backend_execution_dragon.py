@@ -754,7 +754,12 @@ def _run_monitor_one_cycle(
 
 
 def test_monitor_loop_get_called_after_poll(backend_dragon):
-    """_monitor_loop calls batch_task.get(block=False) after poll() returns its tuid."""
+    """_monitor_loop calls batch_task.get(block=True) after poll() returns its tuid.
+
+    block=True (not block=False) is required: poll() and the DDict write are not atomic, so blocking
+    here ensures the result is fully committed before get_stdout(block=False) is called afterward
+    (see the matching comment in dragon.py's _monitor_loop).
+    """
     uid = "task.poll-get"
     tuid = "dragon-tuid-poll-get"
     mock_task = MagicMock()
@@ -772,7 +777,7 @@ def test_monitor_loop_get_called_after_poll(backend_dragon):
         task_registry_entry={"uid": uid, "description": {"uid": uid}, "is_native_function": True},
     )
 
-    mock_task.get.assert_called_once_with(block=False)
+    mock_task.get.assert_called_once_with(block=True)
     mock_loop.call_soon_threadsafe.assert_called_once()
     _, completions = mock_loop.call_soon_threadsafe.call_args.args
     assert completions == [(uid, "done-result", None, False, "", "")]
