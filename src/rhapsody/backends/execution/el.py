@@ -50,6 +50,28 @@ class EnsembleExecutionBackend(BaseBackend):
         client_only: bool = False,
         node_id: str = "global",
     ):
+        """Initialize the Ensemble Launcher execution backend.
+
+        Args:
+            name: Optional name for the backend instance.
+            child_executor_name: Executor used for child processes.
+            return_stdout: Whether to capture and return stdout from tasks.
+            worker_logs: Enable logging on worker processes.
+            master_logs: Enable logging on the master process.
+            gpu_selector: Environment variable name used for GPU affinity selection.
+            children_scheduler_policy: Policy for scheduling child processes across nodes.
+            task_scheduler_policy: Policy for scheduling tasks onto resources.
+            enable_workstealing: Allow idle workers to steal tasks from busy ones.
+            checkpoint_dir: Directory for task checkpoints. Auto-generated if not provided.
+            mpi_flavour: MPI implementation to use (e.g., "mpich", "openmpi").
+            nlevels: Number of hierarchy levels in the launcher tree.
+            nleafs: Number of leaf nodes. Defaults to the number of available nodes.
+            cpus: List of CPU IDs available for tasks. Defaults to all CPUs.
+            gpus: List of GPU IDs available for tasks.
+            client_only: If True, only start the client without launching the ensemble.
+            node_id: Scheduler node ID for the ClusterClient to connect to.
+                "global" (default) connects to the global master node.
+        """
         super().__init__(name=name)
 
         self.logger = logging.getLogger(__name__)
@@ -76,7 +98,7 @@ class EnsembleExecutionBackend(BaseBackend):
             checkpoint_dir=checkpoint_dir or os.path.join(os.getcwd(), f"ckpt_{uuid.uuid4()}"),
             mpi_config=MPIConfig(flavor=mpi_flavour),
         )
-        cpus = cpus or list(range(os.cpu_count()))
+        cpus = cpus or list(range(os.cpu_count() or 1))
         ngpus = len(gpus) if gpus is not None else 0
         gpus = gpus or []
         self._sys_config = SystemConfig(
@@ -91,6 +113,17 @@ class EnsembleExecutionBackend(BaseBackend):
         return self._async_init().__await__()
 
     async def _async_init(self):
+        """Perform asynchronous initialization of the backend.
+
+        Registers backend and task states, then starts the ensemble launcher
+        and cluster client. This method is idempotent.
+
+        Returns:
+            The initialized EnsembleExecutionBackend instance.
+
+        Raises:
+            Exception: If initialization fails, the backend remains uninitialized.
+        """
         if not self._initialized:
             try:
                 self.logger.debug("Registering backend states...")
@@ -114,6 +147,11 @@ class EnsembleExecutionBackend(BaseBackend):
         return self
 
     async def _initialize(self):
+        """Start the EnsembleLauncher and ClusterClient.
+
+        If ``client_only`` is False, starts the full ensemble launcher first.
+        Always starts a ClusterClient connected to the checkpoint directory.
+        """
         if not self._client_only:
             self._el = EnsembleLauncher(
                 ensemble_file={},
@@ -129,6 +167,7 @@ class EnsembleExecutionBackend(BaseBackend):
         await asyncio.to_thread(self._client.start)
 
     def _ensure_initialized(self):
+        """Raise RuntimeError if the backend has not been awaited yet."""
         if not self._initialized:
             raise RuntimeError(
                 "EnsembleExecutionBackend must be awaited before use. "
@@ -136,12 +175,21 @@ class EnsembleExecutionBackend(BaseBackend):
             )
 
     async def _handle_task(self, task: dict) -> None:
+        """Submit a single task to the cluster and await its result.
+
+        Builds an EL task, submits it via the cluster client, and populates
+        the task dict with return_value/stdout/stderr on success or
+        exception/stderr on failure. Invokes the registered callback with
+        the appropriate state ("RUNNING", "DONE", or "FAILED").
+
+        Args:
+            task: Mutable task dictionary. Updated in-place with results.
+        """
         try:
             is_executable = task.get("executable", None) is not None
             self._callback_func(task, "RUNNING")
             el_task = self.build_task(task)
             fut = self._client.submit(el_task)
-            task["future"] = fut
             result = await asyncio.wrap_future(fut)
             if is_executable:
                 task["return_value"] = ""
@@ -159,6 +207,18 @@ class EnsembleExecutionBackend(BaseBackend):
             self._callback_func(task, "FAILED")
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
+        """Submit a batch of tasks for asynchronous execution.
+
+        Each task is scheduled as an independent asyncio task. The backend
+        transitions to RUNNING state on the first submission.
+
+        Args:
+            tasks: List of task dictionaries, each containing at minimum a
+                "uid" key and either "function" or "executable".
+
+        Raises:
+            RuntimeError: If the backend is not initialized or has been shut down.
+        """
         self._ensure_initialized()
 
         if self._backend_state == BackendMainStates.SHUTDOWN:
@@ -174,14 +234,19 @@ class EnsembleExecutionBackend(BaseBackend):
             self.tasks[task["uid"]]["future"] = future
 
     async def shutdown(self) -> None:
+        """Shut down the backend, tearing down the client and launcher.
+
+        Clears all tracked tasks and resets initialization state. Safe to
+        call multiple times.
+        """
         self._backend_state = BackendMainStates.SHUTDOWN
         self.logger.debug(f"Backend state set to: {self._backend_state.value}")
 
         try:
             if self._client is not None:
-                self._client.teardown()
+                await asyncio.to_thread(self._client.teardown)
             if self._el is not None:
-                self._el.stop()
+                await asyncio.to_thread(self._el.stop)
         except Exception as e:
             self.logger.exception(f"Error during shutdown: {e}")
         finally:
@@ -192,20 +257,58 @@ class EnsembleExecutionBackend(BaseBackend):
             self.logger.info("Ensemble execution backend shutdown complete")
 
     async def state(self) -> str:
+        """Return the current backend state as a string."""
         return self._backend_state.value
 
     def task_state_cb(self, task: dict, state: str) -> None:
+        """Invoke the registered callback with a task and its new state.
+
+        Args:
+            task: The task dictionary whose state changed.
+            state: The new state string (e.g., "RUNNING", "DONE", "FAILED").
+        """
         self._callback_func(task, state)
 
     def register_callback(self, func: Callable[[dict[str, Any], str], None]) -> None:
+        """Register a callback to be invoked on task state transitions.
+
+        Args:
+            func: A callable accepting (task_dict, state_string).
+        """
         self._callback_func = func
 
     def get_task_states_map(self) -> Any:
+        """Return a StateMapper instance for this backend's task states."""
         return StateMapper(backend=self)
 
     def build_task(self, task: dict) -> ELTask | AsyncELTask:
+        """Convert a task dictionary into an Ensemble Launcher Task object.
+
+        Selects ``AsyncELTask`` if the task's function is a coroutine,
+        otherwise uses ``ELTask``. For executable-based tasks, the executable
+        and arguments are combined into a single command string.
+
+        Args:
+            task: Task dictionary containing "uid" and either "function" with
+                "args"/"kwargs" or "executable" with "arguments", plus optional
+                "task_backend_specific_kwargs" for resource configuration:
+
+                - **nnodes** (int): Number of nodes to run on. Defaults to 1.
+                - **ranks** (int): Total number of MPI ranks. Divided by
+                  ``nnodes`` to get processes-per-node (ppn). Defaults to 1.
+                - **gpus_per_rank** (int): GPUs allocated per MPI rank.
+                  Defaults to 0.
+                - **env** (dict): Extra environment variables passed to the task.
+                - **cpu_affinity** (str): Comma-separated CPU IDs for pinning
+                  (e.g., ``"0,1,2,3"``).
+                - **gpu_affinity** (str): Comma-separated GPU IDs for pinning
+                  (e.g., ``"0,1"``).
+
+        Returns:
+            An ``ELTask`` or ``AsyncELTask`` configured for submission.
+        """
         backend_kwargs = task.get("task_backend_specific_kwargs", {})
-        nnodes = backend_kwargs.get("nnodes", 1)
+        nnodes = max(backend_kwargs.get("nnodes", 1),1)
         ppn = backend_kwargs.get("ranks", 1) // nnodes
         ngpus_per_process = backend_kwargs.get("gpus_per_rank", 0)
         env = backend_kwargs.get("env", {})
@@ -229,7 +332,7 @@ class EnsembleExecutionBackend(BaseBackend):
         is_executable = task.get("executable", None) is not None
         if is_executable:
             ## When ELTask.executable is str, it ignore args and kwargs.
-            exec = task["executable"] + " " + " ".join([str(x) for x in task["arguments"]])
+            exec = task["executable"] + " " + " ".join([str(x) for x in task.get("arguments",[])])
         else:
             exec = func
 
@@ -248,6 +351,14 @@ class EnsembleExecutionBackend(BaseBackend):
         )
 
     def link_implicit_data_deps(self, src_task: dict[str, Any], dst_task: dict[str, Any]) -> None:  # noqa: B027
+        """Register an implicit data dependency between two tasks.
+
+        Not implemented for this backend; this is a no-op.
+
+        Args:
+            src_task: The upstream task that produces data.
+            dst_task: The downstream task that consumes data.
+        """
         pass
 
     def link_explicit_data_deps(  # noqa: B027
@@ -257,9 +368,27 @@ class EnsembleExecutionBackend(BaseBackend):
         file_name: str | None = None,
         file_path: str | None = None,
     ) -> None:
+        """Register an explicit file-based data dependency between two tasks.
+
+        Not implemented for this backend; this is a no-op.
+
+        Args:
+            src_task: The upstream task that produces the file.
+            dst_task: The downstream task that consumes the file.
+            file_name: Name of the shared file.
+            file_path: Path to the shared file.
+        """
         pass
 
     async def cancel_task(self, uid: str) -> bool:
+        """Cancel a previously submitted task by its UID.
+
+        Args:
+            uid: Unique identifier of the task to cancel.
+
+        Returns:
+            True if the task was found and successfully cancelled, False otherwise.
+        """
         if uid in self.tasks:
             future = self.tasks[uid].get("future")
             if future:
@@ -267,9 +396,11 @@ class EnsembleExecutionBackend(BaseBackend):
         return False
 
     async def __aenter__(self):
+        """Enter the async context manager, initializing the backend if needed."""
         if not self._initialized:
             await self._async_init()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Exit the async context manager, shutting down the backend."""
         await self.shutdown()
