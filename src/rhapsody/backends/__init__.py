@@ -60,9 +60,9 @@ except ImportError:
     pass
 
 try:
-    from .execution import EnsembleBackend
+    from .execution import EnsembleExecutionBackend
 
-    __all__.append(EnsembleBackend)
+    __all__.append(EnsembleExecutionBackend)
 
 except ImportError:
     pass

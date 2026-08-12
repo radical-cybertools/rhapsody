@@ -29,7 +29,7 @@ from ..constants import BackendMainStates
 from ..constants import StateMapper
 
 
-class EnsembleBackend(BaseBackend):
+class EnsembleExecutionBackend(BaseBackend):
     def __init__(
         self,
         name: str | None = None,
@@ -87,7 +87,7 @@ class EnsembleBackend(BaseBackend):
         self.tasks: dict = {}
 
     def __await__(self):
-        """Make EnsembleBackend awaitable."""
+        """Make EnsembleExecutionBackend awaitable."""
         return self._async_init().__await__()
 
     async def _async_init(self):
@@ -131,8 +131,8 @@ class EnsembleBackend(BaseBackend):
     def _ensure_initialized(self):
         if not self._initialized:
             raise RuntimeError(
-                "EnsembleBackend must be awaited before use. "
-                "Use: backend = await EnsembleBackend(...)"
+                "EnsembleExecutionBackend must be awaited before use. "
+                "Use: backend = await EnsembleExecutionBackend(...)"
             )
 
     async def _handle_task(self, task: dict) -> None:

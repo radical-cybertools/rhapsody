@@ -10,7 +10,7 @@ import pytest
 from rhapsody import ComputeTask
 
 try:
-    from rhapsody.backends.execution.el import EnsembleBackend
+    from rhapsody.backends.execution.el import EnsembleExecutionBackend
 
     _el_available = True
 except ImportError:
@@ -25,15 +25,16 @@ pytestmark = pytest.mark.skipif(not _el_available, reason="ensemble_launcher not
 
 
 def test_el_backend_import():
-    from rhapsody.backends.execution import EnsembleBackend as EB
-
-    assert EB is not None
+    try:
+        from rhapsody.backends.execution import EnsembleExecutionBackend
+    except ModuleNotFoundError:
+        raise ModuleNotFoundError
 
 
 def test_el_backend_inherits_base():
     from rhapsody.backends.base import BaseBackend
 
-    assert issubclass(EnsembleBackend, BaseBackend)
+    assert issubclass(EnsembleExecutionBackend, BaseBackend)
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +44,7 @@ def test_el_backend_inherits_base():
 
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 def test_el_backend_init_defaults(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
     assert backend is not None
     assert not backend._initialized
     assert backend._client is None
@@ -55,21 +56,23 @@ def test_el_backend_init_defaults(mock_nodes):
 
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 def test_el_backend_init_client_only(mock_nodes):
-    backend = EnsembleBackend(client_only=True, node_id="main.w0", checkpoint_dir="/tmp/ckpt")
+    backend = EnsembleExecutionBackend(
+        client_only=True, node_id="main.w0", checkpoint_dir="/tmp/ckpt"
+    )
     assert backend._client_only is True
     assert backend._node_id == "main.w0"
 
 
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 def test_el_backend_init_custom_name(mock_nodes):
-    backend = EnsembleBackend(name="my_el")
+    backend = EnsembleExecutionBackend(name="my_el")
     assert backend.name == "my_el"
 
 
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 def test_el_backend_init_default_name(mock_nodes):
-    backend = EnsembleBackend()
-    assert backend.name == "EnsembleBackend"
+    backend = EnsembleExecutionBackend()
+    assert backend.name == "EnsembleExecutionBackend"
 
 
 # ---------------------------------------------------------------------------
@@ -79,14 +82,14 @@ def test_el_backend_init_default_name(mock_nodes):
 
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 def test_el_backend_is_awaitable(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
     assert hasattr(backend, "__await__")
 
 
 @pytest.mark.asyncio
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 async def test_el_backend_async_init(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
 
     mock_el = MagicMock()
     mock_client = MagicMock()
@@ -106,7 +109,7 @@ async def test_el_backend_async_init(mock_nodes):
 @pytest.mark.asyncio
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 async def test_el_backend_async_init_client_only(mock_nodes):
-    backend = EnsembleBackend(client_only=True, checkpoint_dir="/tmp/ckpt")
+    backend = EnsembleExecutionBackend(client_only=True, checkpoint_dir="/tmp/ckpt")
 
     mock_client = MagicMock()
 
@@ -130,7 +133,7 @@ async def test_el_backend_async_init_client_only(mock_nodes):
 @pytest.mark.asyncio
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 async def test_el_backend_context_manager(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
 
     mock_el = MagicMock()
     mock_client = MagicMock()
@@ -156,7 +159,7 @@ async def test_el_backend_context_manager(mock_nodes):
 
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 def test_el_backend_callback_registration(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
 
     def my_cb(task, state):
         pass
@@ -173,7 +176,7 @@ def test_el_backend_callback_registration(mock_nodes):
 @pytest.mark.asyncio
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 async def test_el_backend_state(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
     state = await backend.state()
     assert state == "INITIALIZED"
 
@@ -186,7 +189,7 @@ async def test_el_backend_state(mock_nodes):
 @pytest.mark.asyncio
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 async def test_el_backend_state_mapper(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
 
     with (
         patch("rhapsody.backends.execution.el.EnsembleLauncher", return_value=MagicMock()),
@@ -207,9 +210,9 @@ async def test_el_backend_state_mapper(mock_nodes):
 @pytest.mark.asyncio
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 async def test_el_backend_submit_not_initialized(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
 
-    with pytest.raises(RuntimeError, match="EnsembleBackend must be awaited"):
+    with pytest.raises(RuntimeError, match="EnsembleExecutionBackend must be awaited"):
         await backend.submit_tasks([])
 
 
@@ -221,7 +224,7 @@ async def test_el_backend_submit_not_initialized(mock_nodes):
 @pytest.mark.asyncio
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 async def test_el_backend_submit_tasks(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
     backend._initialized = True
     from rhapsody.backends.constants import BackendMainStates
 
@@ -262,7 +265,7 @@ async def test_el_backend_submit_tasks(mock_nodes):
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 async def test_el_submit_multiple_tasks_complete(mock_nodes):
     """All submitted tasks complete and fire callbacks."""
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
     backend._initialized = True
     from rhapsody.backends.constants import BackendMainStates
 
@@ -295,7 +298,7 @@ async def test_el_submit_multiple_tasks_complete(mock_nodes):
 @pytest.mark.asyncio
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 async def test_el_backend_submit_after_shutdown(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
     backend._initialized = True
     from rhapsody.backends.constants import BackendMainStates
 
@@ -314,7 +317,7 @@ async def test_el_backend_submit_after_shutdown(mock_nodes):
 def test_el_build_task_sync_function(mock_nodes):
     from ensemble_launcher.ensemble import Task as ELTask
 
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
 
     def my_func(a, b):
         return a + b
@@ -337,7 +340,7 @@ def test_el_build_task_sync_function(mock_nodes):
 def test_el_build_task_async_function(mock_nodes):
     from ensemble_launcher.ensemble import AsyncTask as AsyncELTask
 
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
 
     async def my_async_func(a):
         return a
@@ -356,7 +359,7 @@ def test_el_build_task_async_function(mock_nodes):
 def test_el_build_task_executable(mock_nodes):
     from ensemble_launcher.ensemble import Task as ELTask
 
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
 
     task = ComputeTask(
         executable="/bin/echo",
@@ -371,7 +374,7 @@ def test_el_build_task_executable(mock_nodes):
 
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 def test_el_build_task_default_resources(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
 
     task = ComputeTask(
         function=lambda: 1,
@@ -393,7 +396,7 @@ def test_el_build_task_default_resources(mock_nodes):
 @pytest.mark.asyncio
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 async def test_el_cancel_task_success(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
 
     mock_future = MagicMock()
     mock_future.cancel.return_value = True
@@ -407,7 +410,7 @@ async def test_el_cancel_task_success(mock_nodes):
 @pytest.mark.asyncio
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 async def test_el_cancel_task_not_found(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
     result = await backend.cancel_task("nonexistent")
     assert result is False
 
@@ -420,7 +423,7 @@ async def test_el_cancel_task_not_found(mock_nodes):
 @pytest.mark.asyncio
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 async def test_el_shutdown(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
     backend._initialized = True
 
     mock_client = MagicMock()
@@ -444,7 +447,7 @@ async def test_el_shutdown(mock_nodes):
 @pytest.mark.asyncio
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 async def test_el_shutdown_client_only(mock_nodes):
-    backend = EnsembleBackend(client_only=True, checkpoint_dir="/tmp/ckpt")
+    backend = EnsembleExecutionBackend(client_only=True, checkpoint_dir="/tmp/ckpt")
     backend._initialized = True
 
     mock_client = MagicMock()
@@ -461,7 +464,7 @@ async def test_el_shutdown_client_only(mock_nodes):
 @pytest.mark.asyncio
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 async def test_el_shutdown_without_init(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
     await backend.shutdown()
     assert not backend._initialized
 
@@ -474,7 +477,7 @@ async def test_el_shutdown_without_init(mock_nodes):
 @pytest.mark.asyncio
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 async def test_el_callback_done(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
     backend._initialized = True
     from rhapsody.backends.constants import BackendMainStates
 
@@ -505,7 +508,7 @@ async def test_el_callback_done(mock_nodes):
 @pytest.mark.asyncio
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 async def test_el_callback_failed(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
     backend._initialized = True
     from rhapsody.backends.constants import BackendMainStates
 
@@ -540,7 +543,7 @@ async def test_el_callback_failed(mock_nodes):
 
 @patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
 def test_el_task_state_cb(mock_nodes):
-    backend = EnsembleBackend()
+    backend = EnsembleExecutionBackend()
     captured = []
     backend.register_callback(lambda t, s: captured.append(s))
 

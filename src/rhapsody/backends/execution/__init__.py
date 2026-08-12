@@ -26,9 +26,9 @@ except ImportError:
     pass
 
 try:
-    from .el import EnsembleBackend  # noqa: F401
+    from .el import EnsembleExecutionBackend  # noqa: F401
 
-    __all__.append("EnsembleBackend")
+    __all__.append("EnsembleExecutionBackend")
 except ImportError:
     pass
 
