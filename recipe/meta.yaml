@@ -1,0 +1,57 @@
+{% set name = "rhapsody-py" %}
+{% set version = "0.4.0" %}
+{% set python_min = python_min | default("3.9") %}
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  url: https://pypi.org/packages/source/r/{{ name }}/rhapsody_py-{{ version }}.tar.gz
+  sha256: e1f8c29b469ca667867f18d1bc4f6638c0e697061c0a1c0dd23b21d8172973a8
+
+build:
+  noarch: python
+  script: {{ PYTHON }} -m pip install . -vv --no-deps --no-build-isolation
+  number: 0
+
+requirements:
+  host:
+    - python {{ python_min }}
+    - setuptools >=61.0
+    - wheel
+    - pip
+  run:
+    - python >={{ python_min }}
+    - pydantic >=2.0.0
+    - typeguard >=4.0.0
+    - requests >=2.25.0
+
+test:
+  imports:
+    - rhapsody
+  commands:
+    - pip check
+  requires:
+    - python {{ python_min }}
+    - pip
+
+about:
+  home: https://github.com/radical-cybertools/rhapsody
+  summary: Runtime system for heterogeneous HPC-AI workflows with dynamic task graphs
+  description: |
+    RHAPSODY executes heterogeneous HPC-AI workflows with dynamic task
+    graphs on high-performance computing infrastructures, running
+    services (e.g. inference servers) alongside tasks. Execution
+    backends (Dask, RADICAL-Pilot, Dragon, Flux, ORBIT) are optional;
+    this package ships the core. Backend dependencies are installed
+    separately, e.g. `conda install dask radical.pilot` or
+    `pip install dragonhpc` for the Dragon backend.
+  license: MIT
+  license_file: LICENSE.md
+  doc_url: https://radical-cybertools.github.io/rhapsody/
+  dev_url: https://github.com/radical-cybertools/rhapsody
+
+extra:
+  recipe-maintainers:
+    - andre-merzky
