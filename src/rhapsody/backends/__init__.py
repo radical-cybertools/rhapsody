@@ -51,9 +51,9 @@ try:
 except ImportError:
     pass
 
-# Try to import optional inference backends
+# Try to import optional AI (inference) backends
 try:
-    from .inference.vllm import DragonVllmInferenceBackend  # noqa: F401
+    from .ai.vllm import DragonVllmInferenceBackend  # noqa: F401
 
     __all__.append("DragonVllmInferenceBackend")
 except ImportError:

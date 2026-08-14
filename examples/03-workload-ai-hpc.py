@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import multiprocessing as mp
+import os
 
 import rhapsody
 from rhapsody.api import AITask
@@ -8,6 +9,8 @@ from rhapsody.api import ComputeTask
 from rhapsody.api import Session
 from rhapsody.backends import DragonExecutionBackend
 from rhapsody.backends import DragonVllmInferenceBackend
+from rhapsody.backends.ai.config import HardwareConfig
+from rhapsody.backends.ai.config import ModelConfig
 
 rhapsody.enable_logging(level=logging.DEBUG)
 
@@ -20,13 +23,17 @@ async def main():
     execution_backend = await DragonExecutionBackend()
 
     inference_backend = DragonVllmInferenceBackend(
-        config_file="config.yaml",
-        model_name="Qwen2.5-0.5B-Instruct",
-        num_nodes=1,
-        num_gpus=1,
-        tp_size=1,
+        model=ModelConfig(
+            model_name="Qwen2.5-0.5B-Instruct",
+            hf_token=os.environ.get("HF_TOKEN", ""),
+            tp_size=1,
+        ),
+        hardware=HardwareConfig(
+            num_nodes=1,
+            num_gpus=1,
+            node_offset=0,  # Change this to control the number of nodes each inference pipeline takes
+        ),
         port=8001,
-        offset=0,  # Change this to control the number of nodes each inference pipeline takes
     )
 
     # Initialize ALL services concurrently

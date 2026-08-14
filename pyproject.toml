@@ -53,8 +53,7 @@ orbit = ["radical.orbit>=0.3.0"]  # Requires Python >= 3.10
 
 vllm-dragon = [
     "aiohttp>=3.8.0",
-    "pyyaml>=6.0",
-] # For Dragon-VLLM inference backend (also requires vllm-dragonhpc, see installation docs)
+] # For Dragon-VLLM inference backend (also requires dragonhpc[ai], see installation docs)
 
 # Development and testing
 dev = [
@@ -108,7 +107,7 @@ Issues = "https://github.com/radical-cybertools/rhapsody/issues"
 [project.entry-points."rhapsody.backends"]
 dask = "rhapsody.backends.execution.dask_parallel:DaskExecutionBackend"
 radical_pilot = "rhapsody.backends.execution.radical_pilot:RadicalExecutionBackend"
-vllm-dragon = "rhapsody.backends.inference.vllm:DragonVllmInferenceBackend"
+vllm-dragon = "rhapsody.backends.ai.vllm:DragonVllmInferenceBackend"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -2,9 +2,7 @@
 batches to pipeline for efficiency."""
 
 import asyncio
-import copy
 import logging
-import multiprocessing as mp
 import socket
 import time
 import uuid
@@ -14,16 +12,22 @@ from typing import Any
 from typing import Callable
 from typing import Optional
 
-import yaml
 from aiohttp import web
 
 try:
     import dragon
-    from dragon_vllm.dragon_inference_utils import DragonInference
+    from dragon.native.queue import Queue as DragonQueue
 except ImportError:
     dragon = None
-    DragonInference = None
+    DragonQueue = None
 
+from rhapsody.backends.ai.config import BatchingConfig
+from rhapsody.backends.ai.config import DynamicWorkerConfig
+from rhapsody.backends.ai.config import GuardrailsConfig
+from rhapsody.backends.ai.config import HardwareConfig
+from rhapsody.backends.ai.config import Inference
+from rhapsody.backends.ai.config import InferenceConfig
+from rhapsody.backends.ai.config import ModelConfig
 from rhapsody.backends.base import BaseBackend
 from rhapsody.backends.constants import StateMapper
 
@@ -31,6 +35,18 @@ logger = logging.getLogger(__name__)
 
 # Global registry for queues (to avoid serialization)
 _QUEUE_REGISTRY = {}
+
+
+def _unwrap_assistant_response(response: Any) -> Any:
+    """Extract generated text from an ``Inference.query()`` response.
+
+    ``Inference.query()`` responses are dicts keyed by ``"assistant"`` plus
+    latency/throughput metrics; the batch processor's own timeout/error
+    sentinel strings pass through unchanged.
+    """
+    if isinstance(response, dict):
+        return response.get("assistant", response)
+    return response
 
 
 @dataclass
@@ -63,12 +79,11 @@ class DragonVllmInferenceBackend(BaseBackend):
 
     def __init__(
         self,
-        config_file: str,
-        model_name: str,
-        offset: int = 0,
-        num_nodes: int = 1,
-        num_gpus: int = 1,
-        tp_size: int = 1,
+        model: ModelConfig,
+        hardware: Optional[HardwareConfig] = None,
+        batching: Optional[BatchingConfig] = None,
+        guardrails: Optional[GuardrailsConfig] = None,
+        dynamic_worker: Optional[DynamicWorkerConfig] = None,
         port: int = 8000,
         use_service: bool = True,
         max_batch_size: int = 1024,
@@ -78,24 +93,34 @@ class DragonVllmInferenceBackend(BaseBackend):
         if dragon is None:
             raise ImportError("Dragon is required for DragonVllmInferenceBackend.")
 
-        if DragonInference is None:
-            raise ImportError("DragonVllm is required for DragonVllmInferenceBackend.")
+        if Inference is None:
+            raise ImportError("dragon.ai.inference is required for DragonVllmInferenceBackend.")
 
         super().__init__(name=name)
 
         # Register states in StateMapper
         StateMapper.register_backend_tasks_states_with_defaults(self.name)
 
-        self.config_file = config_file
-        self.model_name = model_name
-        self.num_nodes = num_nodes
-        self.num_gpus = num_gpus
-        self.tp_size = tp_size
+        # Dragon AI config objects, re-imported as-is (see rhapsody.backends.ai.config)
+        self.model = model
+        self.model_name = model.model_name  # convenience field for HTTP handlers
+        self.hardware = hardware or HardwareConfig()
+        self.batching = batching or BatchingConfig(enabled=True, batch_type="pre-batch")
+        self.guardrails = guardrails or GuardrailsConfig(enabled=False)
+        self.dynamic_worker = dynamic_worker or DynamicWorkerConfig(enabled=False)
+
+        if self.batching.batch_type != "pre-batch":
+            raise NotImplementedError(
+                f"DragonVllmInferenceBackend only supports batching.batch_type='pre-batch' "
+                f"today, got {self.batching.batch_type!r}. 'dynamic' batch_type requires "
+                f"per-prompt query submission and is not yet supported by this backend."
+            )
+
         self.port = port
-        self.offset = offset
         self.use_service = use_service
 
-        # Batching parameters
+        # Batching parameters (RHAPSODY's own client-side accumulator, distinct from
+        # self.batching.max_batch_size which controls vLLM's internal max_num_seqs)
         self.max_batch_size = max_batch_size
         self.max_batch_wait_ms = max_batch_wait_ms
 
@@ -122,23 +147,23 @@ class DragonVllmInferenceBackend(BaseBackend):
         self._callback_func = None
         self._tasks_in_flight = {}  # UID -> AITask
 
-    def update_config(self, base_config):
-        """Update config with custom parameters."""
-        config = copy.deepcopy(base_config)
-        config["required"]["model_name"] = self.model_name
-        config["hardware"]["num_nodes"] = self.num_nodes
-        config["hardware"]["num_gpus"] = self.num_gpus
-        config["required"]["tp_size"] = self.tp_size
-        config["input_batching"]["toggle_on"] = True
-        config["input_batching"]["type"] = "pre-batch"
-        config["guardrails"]["toggle_on"] = False
-        config["dynamic_inf_wrkr"]["toggle_on"] = False
-        return config
+    def _build_inference_config(self) -> InferenceConfig:
+        """Assemble the Dragon AI InferenceConfig from the stored config objects."""
+        return InferenceConfig(
+            model=self.model,
+            hardware=self.hardware,
+            batching=self.batching,
+            guardrails=self.guardrails,
+            dynamic_worker=self.dynamic_worker,
+        )
 
     def _get_or_create_queues(self):
         """Get queues from registry or create new ones."""
         if self._instance_id not in _QUEUE_REGISTRY:
-            _QUEUE_REGISTRY[self._instance_id] = {"input": mp.Queue(), "response": mp.Queue()}
+            _QUEUE_REGISTRY[self._instance_id] = {
+                "input": DragonQueue(),
+                "response": DragonQueue(),
+            }
         return _QUEUE_REGISTRY[self._instance_id]
 
     def _get_input_queue(self):
@@ -198,11 +223,7 @@ class DragonVllmInferenceBackend(BaseBackend):
             f"Batching: max_size={self.max_batch_size}, max_wait={self.max_batch_wait_ms}ms"
         )
 
-        # Load config
-        with open(self.config_file) as f:
-            base_config = yaml.safe_load(f)
-
-        config = self.update_config(base_config)
+        config = self._build_inference_config()
 
         # Get queues from registry (lazy initialization)
         input_queue = self._get_input_queue()
@@ -211,9 +232,7 @@ class DragonVllmInferenceBackend(BaseBackend):
         logger.info("Initializing VLLM pipeline...")
 
         def _init_pipeline():
-            self.inference_pipeline = DragonInference(
-                config, self.num_nodes, self.offset, input_queue
-            )
+            self.inference_pipeline = Inference(config, input_queue)
             self.inference_pipeline.initialize()
 
         # Run in thread pool to avoid blocking
@@ -296,10 +315,9 @@ class DragonVllmInferenceBackend(BaseBackend):
                 )
 
                 # Submit to pipeline
-                logger.debug("Submitting batch to DragonInference pipeline...")
+                logger.debug("Submitting batch to Inference pipeline...")
 
-                # Try to capture return value in case DragonInference returns synchronously
-                query_result = self.inference_pipeline.query((all_prompts, response_queue))
+                self.inference_pipeline.query((all_prompts, response_queue))
 
                 logger.debug("Batch submitted, waiting for responses...")
                 # Collect responses
@@ -314,7 +332,7 @@ class DragonVllmInferenceBackend(BaseBackend):
                     while True:
                         poll_count += 1
                         if not response_queue.empty():
-                            response = response_queue.get_nowait()
+                            response = _unwrap_assistant_response(response_queue.get_nowait())
                             all_results.append(response)
                             logger.debug(
                                 f"Received response {i + 1}/{len(all_prompts)} after {poll_count} polls"
@@ -475,14 +493,14 @@ class DragonVllmInferenceBackend(BaseBackend):
             if self.runner:
                 await self.runner.cleanup()
 
-        # Shutdown pipeline
+        # Shutdown pipeline. Inference.destroy() already closes the input queue
+        # internally, so only the response queue needs cleaning up below.
         if self.inference_pipeline:
             self.inference_pipeline.destroy()
 
         # Clean up queues from registry
         if self._instance_id in _QUEUE_REGISTRY:
             queues = _QUEUE_REGISTRY[self._instance_id]
-            queues["input"].close()
             queues["response"].close()
             del _QUEUE_REGISTRY[self._instance_id]
 
@@ -500,7 +518,7 @@ class DragonVllmInferenceBackend(BaseBackend):
             # Extract OpenAI-style parameters
             messages = data.get("messages", [])
 
-            # FIXME pass to self.generate() if DragonInference supports these params
+            # FIXME pass to self.generate() if Inference supports these params
             data.get("max_tokens", 1000)
             data.get("temperature", 0.7)
             model = data.get("model", self.model_name)
@@ -532,9 +550,10 @@ class DragonVllmInferenceBackend(BaseBackend):
             def normalize_response(text):
                 """Handle both string and dict responses from vLLM."""
                 if isinstance(text, dict):
-                    # Try common dict keys
+                    # Try common dict keys ("assistant" is what Inference.query() uses)
                     return text.get(
-                        "text", text.get("content", text.get("generated_text", str(text)))
+                        "assistant",
+                        text.get("text", text.get("content", text.get("generated_text", str(text)))),
                     )
                 return str(text) if text else ""
 
@@ -703,5 +722,5 @@ class DragonVllmInferenceBackend(BaseBackend):
         pass
 
     async def cancel_task(self, uid: str) -> bool:
-        # vLLM/DragonInference doesn't easily support cancellation of single queries
+        # vLLM/Inference doesn't easily support cancellation of single queries
         return False
