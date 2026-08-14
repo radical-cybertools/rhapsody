@@ -553,7 +553,9 @@ class DragonVllmInferenceBackend(BaseBackend):
                     # Try common dict keys ("assistant" is what Inference.query() uses)
                     return text.get(
                         "assistant",
-                        text.get("text", text.get("content", text.get("generated_text", str(text)))),
+                        text.get(
+                            "text", text.get("content", text.get("generated_text", str(text)))
+                        ),
                     )
                 return str(text) if text else ""
 

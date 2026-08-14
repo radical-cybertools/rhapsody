@@ -66,7 +66,9 @@ def test_build_inference_config_passes_objects_through_verbatim():
 
 def test_defaults_match_current_rhapsody_behavior():
     """Omitting hardware/batching/guardrails/dynamic_worker preserves today's forced defaults:
-    pre-batch batching enabled, guardrails off, dynamic workers off."""
+
+    pre-batch batching enabled, guardrails off, dynamic workers off.
+    """
     backend = DragonVllmInferenceBackend(model=_model_config(), use_service=False)
 
     assert backend.batching.enabled is True
@@ -78,7 +80,9 @@ def test_defaults_match_current_rhapsody_behavior():
 
 def test_model_name_convenience_field():
     """self.model_name mirrors model.model_name for the HTTP handlers."""
-    backend = DragonVllmInferenceBackend(model=_model_config(model_name="my-model"), use_service=False)
+    backend = DragonVllmInferenceBackend(
+        model=_model_config(model_name="my-model"), use_service=False
+    )
 
     assert backend.model_name == "my-model"
 

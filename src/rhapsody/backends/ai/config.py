@@ -8,15 +8,13 @@ here once instead of being duplicated per consumer.
 from __future__ import annotations
 
 try:
-    from dragon.ai.inference import (
-        BatchingConfig,
-        DynamicWorkerConfig,
-        GuardrailsConfig,
-        HardwareConfig,
-        Inference,
-        InferenceConfig,
-        ModelConfig,
-    )
+    from dragon.ai.inference import BatchingConfig
+    from dragon.ai.inference import DynamicWorkerConfig
+    from dragon.ai.inference import GuardrailsConfig
+    from dragon.ai.inference import HardwareConfig
+    from dragon.ai.inference import Inference
+    from dragon.ai.inference import InferenceConfig
+    from dragon.ai.inference import ModelConfig
 except ImportError:
     BatchingConfig = None
     DynamicWorkerConfig = None

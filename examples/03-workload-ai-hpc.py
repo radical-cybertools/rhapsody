@@ -24,13 +24,15 @@ async def main():
 
     inference_backend = DragonVllmInferenceBackend(
         model=ModelConfig(
-            model_name="Qwen2.5-0.5B-Instruct",
-            hf_token=os.environ.get("HF_TOKEN", ""),
             tp_size=1,
+            vllm_log_level="debug",
+            gpu_memory_utilization=0.85,
+            model_name="Qwen/Qwen2.5-0.5B-Instruct",
+            hf_token=os.environ.get("HF_TOKEN", ""),
         ),
         hardware=HardwareConfig(
-            num_nodes=1,
-            num_gpus=1,
+            num_nodes=2,
+            num_gpus=2,
             node_offset=0,  # Change this to control the number of nodes each inference pipeline takes
         ),
         port=8001,
