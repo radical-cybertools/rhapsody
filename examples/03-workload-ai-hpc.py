@@ -35,7 +35,6 @@ async def main():
             num_gpus=2,
             node_offset=0,  # Change this to control the number of nodes each inference pipeline takes
         ),
-        port=8001,
     )
 
     # Initialize ALL services concurrently

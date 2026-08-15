@@ -28,7 +28,7 @@ from rhapsody.backends.ai.vllm import _unwrap_assistant_response
 
 
 def _model_config(**overrides):
-    kwargs = dict(model_name="test-model", hf_token="hf-test-token", tp_size=1)
+    kwargs = {"model_name": "test-model", "hf_token": "hf-test-token", "tp_size": 1}
     kwargs.update(overrides)
     return ModelConfig(**kwargs)
 
