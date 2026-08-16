@@ -31,8 +31,8 @@ async def main():
             hf_token=os.environ.get("HF_TOKEN", ""),
         ),
         hardware=HardwareConfig(
-            num_nodes=2,
-            num_gpus=2,
+            num_nodes=2,  # total number of nodes requested to be occupied by the engine
+            num_gpus=2,  # this corresponds to --gpus-per-node and not total gpus
             node_offset=0,  # Change this to control the number of nodes each inference pipeline takes
         ),
     )
