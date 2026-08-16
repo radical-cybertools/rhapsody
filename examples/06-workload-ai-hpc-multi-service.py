@@ -1,5 +1,5 @@
-"""Two independent vLLM inference services, driven both directly (AITask) and
-over HTTP (ComputeTask + aiohttp).
+"""Two independent vLLM inference services, driven both directly (AITask) and over HTTP (ComputeTask
++ aiohttp).
 
 Where 03-workload-ai-hpc.py submits AITask objects to a single
 DragonVllmInferenceBackend, this example runs *two* services at once and
@@ -71,7 +71,7 @@ def _make_vllm_backend(name: str, port: int, node_offset: int) -> DragonVllmInfe
     """
     return DragonVllmInferenceBackend(
         model=ModelConfig(
-            model_name="Qwen/Qwen2.5-0.5B-Instruct", # or the snapshot path on disk
+            model_name="Qwen/Qwen2.5-0.5B-Instruct",  # or the snapshot path on disk
             hf_token="",
             tp_size=1,
             gpu_memory_utilization=0.65,
@@ -140,7 +140,9 @@ async def main():
             print(f"Task {i + 1} [AI] ({backend_name}): {task.response}", flush=True)
         elif task.get("function"):
             return_value = task.return_value
-            summary = f"{len(return_value)} results" if isinstance(return_value, list) else return_value
+            summary = (
+                f"{len(return_value)} results" if isinstance(return_value, list) else return_value
+            )
             print(f"Task {i + 1} [Compute/fn] ({backend_name}): {summary}", flush=True)
         else:
             print(

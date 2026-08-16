@@ -44,6 +44,8 @@ pip install "rhapsody-py[dragon]"
 This step is required for Dragon to use Cray's high-speed libfabric instead of the default transport:
 
 ```bash
+dragon-config add --ofi-build-lib=/opt/cray/libfabric/1.22.0/lib64
+dragon-config add --ofi-include=/opt/cray/libfabric/1.22.0/include
 dragon-config add --ofi-runtime-lib=/opt/cray/libfabric/1.22.0/lib64
 ```
 
