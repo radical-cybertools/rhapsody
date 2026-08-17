@@ -10,12 +10,30 @@
   matching the 0.14.1 API. `V1`/`V2` backends and the `BatchError`/`Policy`
   imports they required are removed; `DragonExecutionBackendV3` is kept only as
   a deprecated alias.
+- **`DragonVllmInferenceBackend` migrated to `dragon.ai.inference`** — moved from
+  `rhapsody.backends.inference` to `rhapsody.backends.ai`, and from a YAML
+  `config_file=` argument to typed config objects (`ModelConfig`,
+  `HardwareConfig`, `BatchingConfig`, `GuardrailsConfig`, `DynamicWorkerConfig`
+  in the new `rhapsody.backends.ai.config`), re-exported as-is from
+  `dragon.ai.inference`. **Breaking change** for existing callers still passing
+  `config_file="config.yaml"` — see `docs/integrations.md` for the new
+  constructor shape.
 - `DragonVllmInferenceBackend` now supports `await DragonVllmInferenceBackend(...)`
   as a single step, consistent with every other backend (`DragonExecutionBackend`,
   `ConcurrentExecutionBackend`, `DaskExecutionBackend`, `RadicalExecutionBackend`).
   The existing two-step `backend = DragonVllmInferenceBackend(...); await backend.initialize()`
   pattern still works unchanged. Docs, README, examples, and the tutorial
   notebook updated to the new pattern.
+
+  - **`OrbitExecutionBackend`** — submits tasks to a remote HPC node through the
+  ORBIT broker/endpoint infrastructure (`radical.orbit`); the endpoint node
+  runs a RHAPSODY plugin with a local backend (e.g. Dragon) that actually
+  executes the work. Delegates to `RhapsodyClient` internally, inheriting
+  template compression, pipelined batching, and event-based wait/batch
+  notifications.
+- **`NoopExecutionBackend`** — tasks are marked `DONE` immediately without
+  executing anything; for benchmarking RHAPSODY's own submission/orchestration
+  overhead independent of any real backend.
 
 ### Fixed
 
