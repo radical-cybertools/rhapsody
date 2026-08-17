@@ -605,12 +605,16 @@ import asyncio
 import rhapsody
 from rhapsody.api import Session, ComputeTask, AITask
 from rhapsody.backends import ConcurrentExecutionBackend
-from rhapsody.backends.inference import DragonVllmInferenceBackend
+from rhapsody.backends import DragonVllmInferenceBackend
+from rhapsody.backends.ai.config import ModelConfig
 
 async def mixed_workload():
     # 1. Setup Compute (HPC) and Inference (AI) backends
     hpc_backend = await ConcurrentExecutionBackend(name="hpc_cluster")
-    ai_backend = await DragonVllmInferenceBackend(name="vllm_service", model="llama-3")
+    ai_backend = await DragonVllmInferenceBackend(
+        name="vllm_service",
+        model=ModelConfig(model_name="llama-3", hf_token="...", tp_size=1),
+    )
 
     async with Session(backends=[hpc_backend, ai_backend]) as session:
 
