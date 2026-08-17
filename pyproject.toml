@@ -57,6 +57,7 @@ vllm-dragon = [
 
 # Development and testing
 dev = [
+    "aiohttp",
     "ruff>=0.8.0",
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
