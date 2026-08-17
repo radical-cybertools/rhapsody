@@ -147,6 +147,15 @@ class DragonVllmInferenceBackend(BaseBackend):
         self._callback_func = None
         self._tasks_in_flight = {}  # UID -> AITask
 
+    def __await__(self):
+        """Enable `backend = await DragonVllmInferenceBackend(...)`, consistent with the other
+        execution backends.
+
+        Delegates to the same initialize() used by __aenter__ and the explicit two-step construction
+        pattern — no behavior change for existing callers.
+        """
+        return self.initialize().__await__()
+
     def _build_inference_config(self) -> InferenceConfig:
         """Assemble the Dragon AI InferenceConfig from the stored config objects."""
         return InferenceConfig(

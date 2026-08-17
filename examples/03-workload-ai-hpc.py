@@ -22,7 +22,7 @@ async def main():
 
     execution_backend = await DragonExecutionBackend()
 
-    inference_backend = DragonVllmInferenceBackend(
+    inference_backend = await DragonVllmInferenceBackend(
         model=ModelConfig(
             tp_size=1,
             vllm_log_level="debug",
@@ -36,10 +36,6 @@ async def main():
             node_offset=0,  # Change this to control the number of nodes each inference pipeline takes
         ),
     )
-
-    # Initialize ALL services concurrently
-    logger.info("Initializing 1 service...")
-    await inference_backend.initialize()
 
     # Define multiple tasks with single or multiple prompts
     # Note: Explicit backend mapping by user

@@ -15,8 +15,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# Skip the entire module when the Dragon runtime is not installed.
-pytest.importorskip("dragon", reason="Dragon is required for DragonVllmInferenceBackend tests")
+# Skip the entire module when dragon.ai.inference (dragonhpc[ai]) is not installed.
+# Bare `dragon` can import fine while `dragon.ai.inference` still fails — its
+# dependency closure (vllm, torch, etc.) is only pulled in by the [ai] extra,
+# which isn't available on every Python version (e.g. 3.9/3.10 in some envs).
+pytest.importorskip(
+    "dragon.ai.inference",
+    reason="dragon.ai.inference (dragonhpc[ai]) is required for DragonVllmInferenceBackend tests",
+)
 
 from rhapsody.backends.ai.config import BatchingConfig
 from rhapsody.backends.ai.config import DynamicWorkerConfig
@@ -95,6 +101,19 @@ def test_dynamic_batch_type_rejected():
             batching=BatchingConfig(enabled=True, batch_type="dynamic"),
             use_service=False,
         )
+
+
+@pytest.mark.asyncio
+async def test_await_backend_delegates_to_initialize():
+    """Await backend (and thus await DragonVllmInferenceBackend(...)) delegates to initialize() and
+    returns the backend itself, matching the other execution backends' __await__ contract."""
+    backend = DragonVllmInferenceBackend(model=_model_config(), use_service=False)
+    backend.initialize = AsyncMock(return_value=backend)
+
+    result = await backend
+
+    backend.initialize.assert_called_once()
+    assert result is backend
 
 
 # ============================================================================

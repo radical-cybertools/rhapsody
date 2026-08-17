@@ -24,11 +24,14 @@ A unified runtime for executing **AI and HPC workloads** on supercomputing infra
 import asyncio
 from rhapsody.api import Session, ComputeTask, AITask
 from rhapsody.backends import DragonExecutionBackend, DragonVllmInferenceBackend
+from rhapsody.backends.ai.config import ModelConfig
 
 async def main():
     # Initialize backends
     hpc_backend = await DragonExecutionBackend(name="hpc")
-    ai_backend = await DragonVllmInferenceBackend(name="vllm", model="Qwen2.5-7B")
+    ai_backend = await DragonVllmInferenceBackend(
+        name="vllm", model=ModelConfig(model_name="Qwen2.5-7B", hf_token="...", tp_size=1)
+    )
 
     # Create session with multiple backends
     async with Session(backends=[hpc_backend, ai_backend]) as session:

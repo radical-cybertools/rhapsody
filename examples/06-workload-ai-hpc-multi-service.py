@@ -13,7 +13,7 @@ exercises both ways of talking to them:
   to the Dragon queues (e.g. a separate client process), or to fan work out
   across more than one inference service in the same allocation.
 
-Requires: GPU access, vLLM installed (dragonhpc[ai]), and a locally
+Requires: GPU access, rhapsody-py[ai], and a locally
 downloaded model directory (see the migration notes on HF_HUB_OFFLINE for why
 a local path is used instead of a bare HF hub ID).
 """
@@ -62,14 +62,14 @@ async def run_inference(prompts, endpoint):
     return data["results"]
 
 
-def _make_vllm_backend(name: str, port: int, node_offset: int) -> DragonVllmInferenceBackend:
-    """Build one single-node, single-GPU vLLM service at a disjoint node slice.
+async def _make_vllm_backend(name: str, port: int, node_offset: int) -> DragonVllmInferenceBackend:
+    """Build and initialize one single-node, single-GPU vLLM service at a disjoint node slice.
 
     node_offset gives each service its own node within the allocation — see
     the Dragon AI inference cookbook, "Example 5 - Two Services in One
     Allocation".
     """
-    return DragonVllmInferenceBackend(
+    return await DragonVllmInferenceBackend(
         model=ModelConfig(
             model_name="Qwen/Qwen2.5-0.5B-Instruct",  # or the snapshot path on disk
             hf_token="",
@@ -89,11 +89,11 @@ async def main():
 
     execution_backend = await DragonExecutionBackend()
 
-    inference_backend_1 = _make_vllm_backend("vllm-1", port=8001, node_offset=0)
-    inference_backend_2 = _make_vllm_backend("vllm-2", port=8002, node_offset=1)
-
     logger.info("Initializing 2 vLLM services concurrently...")
-    await asyncio.gather(inference_backend_1.initialize(), inference_backend_2.initialize())
+    inference_backend_1, inference_backend_2 = await asyncio.gather(
+        _make_vllm_backend("vllm-1", port=8001, node_offset=0),
+        _make_vllm_backend("vllm-2", port=8002, node_offset=1),
+    )
 
     endpoint_1 = inference_backend_1.get_endpoint()
     endpoint_2 = inference_backend_2.get_endpoint()
