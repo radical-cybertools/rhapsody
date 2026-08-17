@@ -71,7 +71,7 @@ dragon 03-workload-ai-hpc.py
 
 Combines `DragonExecutionBackend` (HPC compute) with `DragonVllmInferenceBackend` (LLM inference) in a single session. Submits a mix of `AITask` and `ComputeTask` objects — RHAPSODY routes each to the correct backend automatically.
 
-**Requires:** GPU access and vLLM installed (`dragonhpc[ai]`). Configuration is passed directly as `ModelConfig`/`HardwareConfig` objects — no YAML file needed.
+**Requires:** GPU access and AI package installed (`pip install rhapsody-py[ai]`) Configuration is passed directly as `ModelConfig`/`HardwareConfig` objects — no YAML file needed.
 
 **What you'll learn:** Multi-backend sessions, `AITask` with single and batched prompts, task routing via the `backend` field.
 
