@@ -8,6 +8,9 @@ and distributed computing systems.
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+
 from .api import AITask
 from .api import BackendError
 from .api import BaseTask
@@ -23,7 +26,10 @@ from .backends import discover_backends
 from .backends import get_backend
 from .logger import enable_logging
 
-__version__ = "0.2.0"
+try:
+    __version__ = _pkg_version("rhapsody-py")
+except PackageNotFoundError:  # uninstalled source tree
+    __version__ = "0.0.0.dev0"
 
 __all__ = [
     "__version__",
