@@ -337,6 +337,9 @@ class OrbitExecutionBackend(BaseBackend):
         rt = EndpointRuntime(
             broker_url=self._broker_url,
             name=self._participant_name or f"rhapsody.{uuid.uuid4().hex[:8]}",
+            # the advertised role defaults to 'consumer', which says nothing.
+            # This participant is the workflow engine's hand-off into ORBIT.
+            role="engine",
         )
         try:
             rt.start(wait=True, timeout=self._start_timeout)
