@@ -1,6 +1,6 @@
 {% set name = "rhapsody-py" %}
 {% set version = "0.4.0" %}
-{% set python_min = python_min | default("3.9") %}
+{% set python_min = python_min | default("3.10") %}
 
 package:
   name: {{ name|lower }}
@@ -43,7 +43,7 @@ about:
     RHAPSODY executes heterogeneous HPC-AI workflows with dynamic task
     graphs on high-performance computing infrastructures, running
     services (e.g. inference servers) alongside tasks. Execution
-    backends (Dask, RADICAL-Pilot, Dragon, Flux, ORBIT) are optional;
+    backends (Dask, RADICAL-Pilot, Dragon) are optional;
     this package ships the core. Backend dependencies are installed
     separately, e.g. `conda install dask radical.pilot` or
     `pip install dragonhpc` for the Dragon backend.
