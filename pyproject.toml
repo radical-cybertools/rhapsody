@@ -48,8 +48,8 @@ telemetry = ["opentelemetry-sdk>=1.20.0", "nvidia-ml-py"]
 # Backend-specific dependencies
 dask = ["dask[distributed]>=2023.0.0"]
 radical_pilot = ["radical.pilot>=1.30.0"]
-dragon = ["dragonhpc==0.14.1", "flask", "gunicorn"]  # Requires Python >= 3.10, supports up to 3.13
-orbit = ["radical.orbit]  # Requires Python >= 3.10
+dragon = ["dragonhpc==0.14.1", "flask", "gunicorn"]  # Requires Python >= 3.11, supports up to 3.13
+orbit = ["radical.orbit"]  # Requires Python >= 3.10
 
 ai = [
     "aiohttp>=3.8.0",
