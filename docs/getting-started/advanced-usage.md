@@ -217,8 +217,11 @@ named after the task UID (`task.000001.stdout`, `task.000001.stderr`).
 
 !!! note "Supported backends"
     `capture_stdio` is supported by `ConcurrentExecutionBackend`,
-    `DaskExecutionBackend`, and `DragonExecutionBackendV3`. Function tasks
-    (`function=`) are unaffected regardless of the flag value.
+    `DaskExecutionBackend`, and `DragonExecutionBackend`. On
+    `ConcurrentExecutionBackend` and `DaskExecutionBackend`, function tasks
+    (`function=`) are unaffected by this flag. On `DragonExecutionBackend`,
+    `capture_stdio` applies to **all** task types including function tasks — see
+    [Dragon: Task Output and File Paths](#dragon-task-output-and-file-paths).
 
 !!! note "Session work_dir"
     Files are placed in `{session.work_dir}/{session.uid}/`. Pass `work_dir=`
@@ -241,7 +244,7 @@ import asyncio
 import rhapsody
 from rhapsody.api import Session
 from rhapsody.api import ComputeTask
-from rhapsody.backends import ConcurrentExecutionBackend, DragonExecutionBackendV3
+from rhapsody.backends import ConcurrentExecutionBackend, DragonExecutionBackend
 
 
 async def compute_function():
@@ -251,7 +254,7 @@ async def compute_function():
 async def multi_backend_demo():
     # Initialize two different backends
     be_local = ConcurrentExecutionBackend(name="local_cpu")
-    be_remote = DragonExecutionBackendV3(name="hpc_gpu")
+    be_remote = DragonExecutionBackend(name="hpc_gpu")
     await asyncio.gather(be_local, be_remote)
 
 
@@ -303,12 +306,12 @@ For large-scale HPC deployments, the Dragon backend provides native integration 
 import asyncio
 import rhapsody
 from rhapsody.api import Session, ComputeTask
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
 async def dragon_demo():
     # Initialize the Dragon backend (optimized for HPC)
     # V3 uses native Dragon Batch for high-performance wait/callbacks
-    dragon_be = await DragonExecutionBackendV3(
+    dragon_be = await DragonExecutionBackend(
         name="dragon_hpc"
     )
 
@@ -337,7 +340,7 @@ if __name__ == "__main__":
 
 ## Dragon Process Templates
 
-When using `DragonExecutionBackendV3`, you can pass Dragon-native process configuration to `ComputeTask` via the `task_backend_specific_kwargs` parameter. This exposes the `process_template` and `process_templates` options, which map directly to Dragon's [ProcessTemplate](https://dragonhpc.github.io/dragon/doc/_build/html/ref/native/dragon.native.process.html#dragon.native.process.ProcessTemplate).
+When using `DragonExecutionBackend`, you can pass Dragon-native process configuration to `ComputeTask` via the `task_backend_specific_kwargs` parameter. This exposes the `process_template` and `process_templates` options, which map directly to Dragon's [ProcessTemplate](https://dragonhpc.github.io/dragon/doc/_build/html/ref/native/dragon.native.process.html#dragon.native.process.ProcessTemplate).
 
 The `ProcessTemplate` accepts the following parameters:
 
@@ -352,7 +355,7 @@ The `ProcessTemplate` accepts the following parameters:
 | `options` | `ProcessOptions`, optional | Process options, such as allowing the process to connect to the infrastructure |
 
 !!! warning "Excluded Parameters"
-    `DragonExecutionBackendV3` manages `target` (the binary or Python callable), `args`, and `kwargs` internally through the `ComputeTask` interface. These three parameters are **not** available in `process_template` / `process_templates` — use `ComputeTask.executable`, `ComputeTask.arguments`, and `ComputeTask.function` instead.
+    `DragonExecutionBackend` manages `target` (the binary or Python callable), `args`, and `kwargs` internally through the `ComputeTask` interface. These three parameters are **not** available in `process_template` / `process_templates` — use `ComputeTask.executable`, `ComputeTask.arguments`, and `ComputeTask.function` instead.
 
 ### Single-Process Template
 
@@ -410,7 +413,7 @@ from dragon.infrastructure.policy import Policy
 
 import rhapsody
 from rhapsody.api import ComputeTask, Session
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
 
 from dragon.native.machine import System, Node
@@ -447,7 +450,7 @@ def make_policies(all_gpus, nprocs=32):
 
 
 async def main():
-    backend = await DragonExecutionBackendV3()
+    backend = await DragonExecutionBackend()
     session = Session(backends=[backend])
 
     all_gpus = find_gpus()  # e.g. [("node-0", 0), ("node-0", 1), ("node-1", 0), ...]
@@ -498,11 +501,11 @@ The following example demonstrates mixing native functions, single-process tasks
 import asyncio
 import rhapsody
 from rhapsody.api import ComputeTask, Session
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
 
 async def main():
-    backend = await DragonExecutionBackendV3()
+    backend = await DragonExecutionBackend()
     session = Session(backends=[backend])
 
     async def single_function():
@@ -574,6 +577,25 @@ if __name__ == "__main__":
     dragon my_heterogeneous_workload.py
     ```
 
+## Dragon: Task Output and File Paths
+
+After a task completes, `task.stdout` and `task.stderr` work as follows:
+
+- **`capture_stdio=False` (default)** — content is an inline string (whatever the task printed). Read it directly: `task.stdout`.
+- **`capture_stdio=True`** — content is a file path under the Rhapsody session directory (`rhapsody.session.{uid}/task.000001.stdout`). Open it to read: `open(task.stdout).read()`.
+
+!!! note "Performance at scale"
+    At 100K+ tasks on shared filesystems, the default file-read overhead (~100–400 s on Lustre) can be avoided by passing `batch_kwargs={"task_logs": False}` to `DragonExecutionBackend`. With this option, `task.stdout` and `task.stderr` will be **empty** for all `capture_stdio=False` tasks — output goes to the console only. A warning is logged when this option is active.
+
+!!! warning "Functions launched via process_template or process_templates"
+    If you use `function=` together with `process_template` or `process_templates`,
+    Dragon runs the callable as a subprocess — **not** in Dragon's native function pool.
+    In this mode `task.return_value` is the **exit code** (`0` on success), not the
+    Python return value of your function. Use a bare `ComputeTask(function=my_fn)` (no
+    templates) when you need the actual return value.
+
+---
+
 ## Mixed HPC and AI Workloads
 
 One of RHAPSODY's most powerful features is the ability to orchestrate traditional binaries alongside AI inference services (like vLLM).
@@ -583,12 +605,16 @@ import asyncio
 import rhapsody
 from rhapsody.api import Session, ComputeTask, AITask
 from rhapsody.backends import ConcurrentExecutionBackend
-from rhapsody.backends.inference import DragonVllmInferenceBackend
+from rhapsody.backends import DragonVllmInferenceBackend
+from rhapsody.backends.ai.config import ModelConfig
 
 async def mixed_workload():
     # 1. Setup Compute (HPC) and Inference (AI) backends
     hpc_backend = await ConcurrentExecutionBackend(name="hpc_cluster")
-    ai_backend = await DragonVllmInferenceBackend(name="vllm_service", model="llama-3")
+    ai_backend = await DragonVllmInferenceBackend(
+        name="vllm_service",
+        model=ModelConfig(model_name="llama-3", hf_token="...", tp_size=1),
+    )
 
     async with Session(backends=[hpc_backend, ai_backend]) as session:
 

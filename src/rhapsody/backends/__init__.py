@@ -45,23 +45,15 @@ except ImportError:
     pass
 
 try:
-    from .execution import DragonExecutionBackendV1  # noqa: F401
-    from .execution import DragonExecutionBackendV2  # noqa: F401
-    from .execution import DragonExecutionBackendV3  # noqa: F401
+    from .execution import DragonExecutionBackend  # noqa: F401
 
-    __all__.extend(
-        [
-            "DragonExecutionBackendV1",
-            "DragonExecutionBackendV2",
-            "DragonExecutionBackendV3",
-        ]
-    )
+    __all__.append("DragonExecutionBackend")
 except ImportError:
     pass
 
-# Try to import optional inference backends
+# Try to import optional AI (inference) backends
 try:
-    from .inference.vllm import DragonVllmInferenceBackend  # noqa: F401
+    from .ai.vllm import DragonVllmInferenceBackend  # noqa: F401
 
     __all__.append("DragonVllmInferenceBackend")
 except ImportError:

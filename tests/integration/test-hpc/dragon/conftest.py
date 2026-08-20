@@ -106,20 +106,20 @@ def _apply_topology_skips(request, topology, gpu_nodes):
 
 @pytest.fixture(scope="module")
 async def dragon_backend(request):
-    """Initialise a DragonExecutionBackendV3 for the test module.
+    """Initialise a DragonExecutionBackend for the test module.
 
     Scale tests can override batch_kwargs via indirect parametrisation or by setting the
     RHAPSODY_DDICT_MEM_GB env var (default: 2 GiB/node).
     """
     from dragon.native.machine import System
 
-    from rhapsody.backends import DragonExecutionBackendV3
+    from rhapsody.backends import DragonExecutionBackend
 
     num_nodes = len(list(System().nodes))
     ddict_mem_gb = int(os.environ.get("RHAPSODY_DDICT_MEM_GB", 2))
     ddict_mem = ddict_mem_gb * num_nodes * (1024**3)
 
-    backend = await DragonExecutionBackendV3(batch_kwargs={"results_ddict_mem": ddict_mem})
+    backend = await DragonExecutionBackend(batch_kwargs={"results_ddict_mem": ddict_mem})
     yield backend
     await backend.shutdown()
 

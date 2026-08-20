@@ -4,13 +4,13 @@ import time
 
 from radical.asyncflow import WorkflowEngine
 
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
 
 async def main():
     mp.set_start_method("dragon")
 
-    backend = await DragonExecutionBackendV3()
+    backend = await DragonExecutionBackend()
     flow = await WorkflowEngine.create(backend=backend)
 
     @flow.function_task

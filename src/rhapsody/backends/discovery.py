@@ -61,13 +61,17 @@ class BackendRegistry:
                 # ConcurrentExecutionBackend -> concurrent
                 # DaskExecutionBackend -> dask
                 # RadicalExecutionBackend -> radical_pilot
-                # DragonExecutionBackendV1 -> dragon_v1
+                # DragonExecutionBackend -> dragon
                 backend_name = cls._derive_backend_name(class_name)
 
                 cls._backends[backend_name] = backend_class
             except AttributeError:
                 # Backend class not available despite being in __all__
                 pass
+
+        # Deprecated name alias — dragon_v3 resolves to dragon for backward compatibility
+        if "dragon" in cls._backends:
+            cls._backends.setdefault("dragon_v3", cls._backends["dragon"])
 
         cls._initialized = True
 
@@ -80,7 +84,7 @@ class BackendRegistry:
         - ConcurrentExecutionBackend -> concurrent
         - DaskExecutionBackend -> dask
         - RadicalExecutionBackend -> radical_pilot
-        - DragonExecutionBackendV1 -> dragon_v1
+        - DragonExecutionBackend -> dragon
 
         Args:
             class_name: The class name (e.g., "DaskExecutionBackend")

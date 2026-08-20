@@ -9,7 +9,7 @@ Different examples require different launchers depending on the backend they use
 | Backend | Launcher | Command |
 |---------|----------|---------|
 | `ConcurrentExecutionBackend` | Standard Python | `python example.py` |
-| `DragonExecutionBackendV3` | Dragon runtime | `dragon example.py` |
+| `DragonExecutionBackend` | Dragon runtime | `dragon example.py` |
 | `DragonVllmInferenceBackend` | Dragon runtime + GPU | `dragon example.py` |
 
 > **Why `dragon` instead of `python`?**
@@ -37,7 +37,7 @@ The simplest possible RHAPSODY example. Uses `ConcurrentExecutionBackend` (Pytho
 dragon 01-workload-async-gather.py
 ```
 
-Submits **1024 function tasks** to `DragonExecutionBackendV3` and awaits all of them with `asyncio.gather()`. Demonstrates RHAPSODY's batch submission throughput and the `async with session` context manager pattern.
+Submits **1024 function tasks** to `DragonExecutionBackend` and awaits all of them with `asyncio.gather()`. Demonstrates RHAPSODY's batch submission throughput and the `async with session` context manager pattern.
 
 **What you'll learn:** Large-scale batch submission, `asyncio.gather(*futures)` for collecting results, Dragon backend initialization.
 
@@ -69,9 +69,9 @@ Runs **five different execution modes** in a single session:
 dragon 03-workload-ai-hpc.py
 ```
 
-Combines `DragonExecutionBackendV3` (HPC compute) with `DragonVllmInferenceBackend` (LLM inference) in a single session. Submits a mix of `AITask` and `ComputeTask` objects — RHAPSODY routes each to the correct backend automatically.
+Combines `DragonExecutionBackend` (HPC compute) with `DragonVllmInferenceBackend` (LLM inference) in a single session. Submits a mix of `AITask` and `ComputeTask` objects — RHAPSODY routes each to the correct backend automatically.
 
-**Requires:** GPU access, vLLM installed, and a `config.yaml` file. You must create this config file for your environment based on the sample at [vllm-dragonhpc/config.sample](https://github.com/radical-cybertools/vllm-dragonhpc/blob/main/config.sample).
+**Requires:** GPU access and AI package installed (`pip install rhapsody-py[ai]`) Configuration is passed directly as `ModelConfig`/`HardwareConfig` objects — no YAML file needed.
 
 **What you'll learn:** Multi-backend sessions, `AITask` with single and batched prompts, task routing via the `backend` field.
 
@@ -88,3 +88,17 @@ Integrates RHAPSODY with [RADICAL AsyncFlow](https://github.com/radical-cybertoo
 **Requires:** `radical.asyncflow` installed.
 
 **What you'll learn:** `WorkflowEngine`, `@flow.function_task` decorator, task dependencies, concurrent workflow execution.
+
+---
+
+### 06 — Multi-Service AI-HPC Workflow (Dragon + vLLM)
+
+```bash
+dragon 06-workload-ai-hpc-multi-service.py
+```
+
+Runs **two independent `DragonVllmInferenceBackend` services** at once (one per node, via `HardwareConfig(node_offset=...)`) and drives each of them two ways in the same session: `AITask` submitted directly (no HTTP, same as 03), and a `ComputeTask(function=...)` that POSTs a batch of N prompts to each service's `/generate` endpoint over `aiohttp`.
+
+**Requires:** GPU access (2 GPUs), vLLM installed (`dragonhpc[ai]`), and a locally downloaded model directory (`HF_HUB_OFFLINE=1` recommended — see the model download notes for this backend).
+
+**What you'll learn:** Running multiple inference services in one allocation, `use_service=True` HTTP endpoints, `get_endpoint()`, mixing direct (`AITask`) and service-style (`ComputeTask` + `aiohttp`) access to the same backend type.

@@ -17,12 +17,13 @@ conda activate rhap_conda_env
 !!! note
     `PYTHONNOUSERSITE=1` prevents user-site packages from leaking into the conda environment, which is important on shared systems like Perlmutter.
 
-### 2. Install Dragon and RHAPSODY with Dragon-VLLM support
+### 2. Install RHAPSODY with Dragon AI (vLLM) support
 
 ```bash
-pip install dragonhpc
-pip install "rhapsody-py[vllm-dragon]"
+pip install "rhapsody-py[ai]"
 ```
+
+This installs the vLLM package thus, no separate install step needed.
 
 ### 3. Set the HuggingFace cache directory
 
@@ -40,23 +41,37 @@ export HF_HOME=$SCRATCH/cache/huggingface
 Dragon needs to be pointed to the Cray libfabric library for inter-node communication:
 
 ```bash
+dragon-config add --ofi-build-lib=/opt/cray/libfabric/1.22.0/lib64
+dragon-config add --ofi-include=/opt/cray/libfabric/1.22.0/include
 dragon-config add --ofi-runtime-lib=/opt/cray/libfabric/1.22.0/lib64
 ```
 
 !!! warning
     This step is required on Perlmutter. Without it, Dragon will fail to initialize its transport layer across nodes.
 
-### 5. Download the vLLM config file
+### 5. Download the model
+
+`DragonVllmInferenceBackend` no longer reads a YAML config file — model settings are passed directly as a `ModelConfig` object (see the [Integrations guide](../integrations.md#dragon-vllm-inference-backend)). Perlmutter's `$HOME`/`$PSCRATCH` filesystems don't support the `flock()` calls the HuggingFace Hub client uses while downloading, so download to local disk first and copy the snapshot over rather than downloading directly to scratch:
 
 ```bash
-wget https://raw.githubusercontent.com/radical-cybertools/vllm-dragonhpc/main/config.sample -O config.yaml
+# Download to node-local /tmp on the login node (flock works there)
+export HF_HOME=/tmp/${USER}_hf_dl
+huggingface-cli download Qwen/Qwen2.5-0.5B-Instruct \
+    --local-dir /tmp/${USER}_hf_dl/Qwen2.5-0.5B-Instruct
+
+# Move it to scratch — a plain file copy, no flock involved
+mkdir -p $SCRATCH/models
+rsync -av /tmp/${USER}_hf_dl/Qwen2.5-0.5B-Instruct/ $SCRATCH/models/Qwen2.5-0.5B-Instruct/
 ```
 
-Edit `config.yaml` and set at minimum:
+Then set, before launching your job, so the model loads from the local snapshot with no further Hub/lock calls:
 
-```yaml
-model_name: Qwen/Qwen2.5-0.5B-Instruct # it will be overridden by the python API entry
+```bash
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
 ```
+
+Pass the local snapshot directory as `ModelConfig(model_name=...)` in your script (see step 6 below).
 
 ### 6. Allocate a GPU node
 
@@ -79,7 +94,7 @@ dragon <script.py>
 This example demonstrates a two-phase HPC-AI workflow on Perlmutter:
 
 1. **Simulation phase** — run a batch of scientific simulations using LLM inference (`DragonVllmInferenceBackend`). Each `AITask` sends a domain-specific prompt and collects the generated output as synthetic simulation data.
-2. **Training phase** — fine-tune a small model on the collected simulation outputs using a `ComputeTask` dispatched through `DragonExecutionBackendV3`.
+2. **Training phase** — fine-tune a small model on the collected simulation outputs using a `ComputeTask` dispatched through `DragonExecutionBackend`.
 
 Both phases run within the same RHAPSODY `Session`, sharing the same Dragon runtime across GPU and CPU resources.
 
@@ -87,10 +102,12 @@ Both phases run within the same RHAPSODY `Session`, sharing the same Dragon runt
 import asyncio
 import logging
 import multiprocessing as mp
+import os
 
 import rhapsody
 from rhapsody.api import AITask, ComputeTask, Session
-from rhapsody.backends import DragonExecutionBackendV3, DragonVllmInferenceBackend
+from rhapsody.backends import DragonExecutionBackend, DragonVllmInferenceBackend
+from rhapsody.backends.ai.config import HardwareConfig, ModelConfig
 
 rhapsody.enable_logging(level=logging.INFO)
 
@@ -160,19 +177,18 @@ def fine_tune(simulation_outputs: list):
 async def main():
     mp.set_start_method("dragon")
 
-    execution_backend = await DragonExecutionBackendV3()
+    execution_backend = await DragonExecutionBackend()
 
     inference_backend = await DragonVllmInferenceBackend(
-        config_file="config.yaml",
-        model_name="Qwen/Qwen2.5-0.5B-Instruct",
-        num_nodes=1,
-        num_gpus=1,
-        tp_size=1,
+        model=ModelConfig(
+            model_name=f"{os.environ['SCRATCH']}/models/Qwen2.5-0.5B-Instruct",
+            hf_token="",
+            tp_size=1,
+        ),
+        hardware=HardwareConfig(num_nodes=1, num_gpus=1, node_offset=0),
         port=8001,
-        offset=0,
     )
 
-    inference_backend = await inference_backend.initialize()
     session = Session([execution_backend, inference_backend])
 
     async with session:
@@ -244,7 +260,7 @@ dragon ai-hpc.py
 
 !!! tip "Scaling up"
     - Increase `SIMULATION_PROMPTS` to hundreds or thousands of scenarios to generate a larger training corpus
-    - Use `num_gpus=4` and `tp_size=4` on Perlmutter's A100 nodes for larger inference models
+    - Use `HardwareConfig(num_gpus=4)` and `ModelConfig(tp_size=4)` on Perlmutter's A100 nodes for larger inference models
     - Replace `Qwen/Qwen2.5-0.5B-Instruct` in `fine_tune()` with any HuggingFace model that fits in GPU memory
 
 ---

@@ -62,9 +62,9 @@ ComputeTask(
 High-performance execution using the Dragon runtime.
 
 ```python
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
-backend = DragonExecutionBackendV3(
+backend = DragonExecutionBackend(
     name="dragon",
     num_nodes=4,            # Total nodes for the worker pool (optional)
     pool_nodes=2,           # Nodes per worker pool (optional)
@@ -80,12 +80,12 @@ backend = DragonExecutionBackendV3(
 | `disable_telemetry` | `bool` | `False` | Disable Dragon internal telemetry |
 
 !!! note "Streaming pipeline"
-    `DragonExecutionBackendV3` uses Dragon's streaming batch pipeline — tasks submitted via
+    `DragonExecutionBackend` uses Dragon's streaming batch pipeline — tasks submitted via
     `session.submit_tasks()` are dispatched individually by a continuously running background
     thread. There is no compile or start step; tasks begin executing as soon as they are submitted.
 
 !!! note "Dragon Versions"
-    While `DragonExecutionBackendV3` is recommended for most users and will be always maintained, V1 and V2 are also available for legacy compatibility.
+    `DragonExecutionBackend` is the only supported Dragon backend as of RHAPSODY 0.5.0.
 
 ### Orbit Backend
 Remote execution on an HPC system through the ORBIT broker/endpoint infrastructure.

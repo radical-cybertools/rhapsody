@@ -48,15 +48,17 @@ telemetry = ["opentelemetry-sdk>=1.20.0", "nvidia-ml-py"]
 # Backend-specific dependencies
 dask = ["dask[distributed]>=2023.0.0"]
 radical_pilot = ["radical.pilot>=1.30.0"]
-dragon = ["dragonhpc==0.14.0"]  # Requires Python >= 3.10, supports up to 3.13
-orbit = ["radical.orbit>=0.3.0"]  # Requires Python >= 3.10
-vllm-dragon = [
+dragon = ["dragonhpc==0.14.1", "flask", "gunicorn"]  # Requires Python >= 3.11, supports up to 3.13
+orbit = ["radical.orbit"]  # Requires Python >= 3.10
+
+ai = [
     "aiohttp>=3.8.0",
-    "pyyaml>=6.0",
-] # For Dragon-VLLM inference backend (also requires vllm-dragonhpc, see installation docs)
+    "dragonhpc[ai]"
+] # For the ai backend
 
 # Development and testing
 dev = [
+    "aiohttp",
     "ruff>=0.8.0",
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
@@ -91,7 +93,7 @@ examples = [
 
 # Complete installation with all backends
 backends = [
-    "rhapsody-py[dask,radical_pilot,dragon,vllm-dragon,orbit]"
+    "rhapsody-py[dask,radical_pilot,dragon,ai,orbit]"
 ]
 
 all = [
@@ -107,7 +109,7 @@ Issues = "https://github.com/radical-cybertools/rhapsody/issues"
 [project.entry-points."rhapsody.backends"]
 dask = "rhapsody.backends.execution.dask_parallel:DaskExecutionBackend"
 radical_pilot = "rhapsody.backends.execution.radical_pilot:RadicalExecutionBackend"
-vllm-dragon = "rhapsody.backends.inference.vllm:DragonVllmInferenceBackend"
+ai = "rhapsody.backends.ai.vllm:DragonVllmInferenceBackend"
 
 [tool.setuptools.packages.find]
 where = ["src"]

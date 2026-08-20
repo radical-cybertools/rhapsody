@@ -427,7 +427,7 @@ class RadicalExecutionBackend(BaseBackend):
 
             try:
                 if rp_task.mode == rp.TASK_SERVICE and state == rp.AGENT_EXECUTING:
-                    service_callback = service_ready_callback
+                    service_callback = service_ready_callback  # noqa: F841
 
                 # Get the original Task object
                 original_task = self.tasks.get(rp_task.uid)
@@ -457,7 +457,7 @@ class RadicalExecutionBackend(BaseBackend):
                     original_task["exception"] = rp_task_dict["exception"]
 
                 # Call the registered callback with the original Task object
-                func(original_task, state, service_callback=service_callback)
+                func(original_task, state)
             except Exception:
                 self.logger.exception(
                     f"Backend callback failed for task {getattr(rp_task, 'uid', None)} "

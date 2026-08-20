@@ -18,18 +18,15 @@ The `DragonVllmInferenceBackend` offers:
 
 ### Installation
 
-Install RHAPSODY with Dragon-VLLM support:
+Install RHAPSODY with Dragon AI (vLLM) support — this pulls in `dragonhpc[ai]` (which bundles vLLM and the Dragon vLLM compatibility plugin) automatically:
 
 ```bash
-pip install "rhapsody-py[vllm-dragon]"
-pip install git+https://github.com/radical-cybertools/vllm-dragonhpc.git@main
+pip install "rhapsody-py[ai]"
 ```
 
 !!! warning "Prerequisites"
     The Dragon-VLLM backend requires:
 
-    - Dragon runtime (`dragonhpc`)
-    - Dragon-VLLM package (`dragon-vllm`)
     - Python >= 3.10
     - GPU nodes with CUDA support
 
@@ -43,28 +40,26 @@ import multiprocessing as mp
 
 from rhapsody import Session
 from rhapsody.api import AITask, ComputeTask
-from rhapsody.backends import DragonExecutionBackendV3, DragonVllmInferenceBackend
+from rhapsody.backends import DragonExecutionBackend, DragonVllmInferenceBackend
+from rhapsody.backends.ai.config import HardwareConfig, ModelConfig
 
 async def main():
     # Set Dragon as the multiprocessing start method
     mp.set_start_method("dragon")
 
     # Initialize execution backend for compute tasks
-    execution_backend = await DragonExecutionBackendV3()
+    execution_backend = await DragonExecutionBackend()
 
     # Initialize inference backend for AI tasks
-    inference_backend = DragonVllmInferenceBackend(
-        config_file="config.yaml",
-        model_name="Qwen2.5-0.5B-Instruct",
-        num_nodes=1,
-        num_gpus=1,
-        tp_size=1,
+    inference_backend = await DragonVllmInferenceBackend(
+        model=ModelConfig(
+            model_name="Qwen2.5-0.5B-Instruct",  # or a local snapshot path
+            hf_token="...",
+            tp_size=1,
+        ),
+        hardware=HardwareConfig(num_nodes=1, num_gpus=1, node_offset=0),
         port=8001,
-        offset=0,
     )
-
-    # Initialize the inference service
-    await inference_backend.initialize()
 
     # Create a session with both backends
     session = Session([execution_backend, inference_backend])
@@ -113,33 +108,51 @@ if __name__ == "__main__":
     dragon -m my_script.py
     ```
 
-### Configuration File
+### Configuration
 
-The `DragonVllmInferenceBackend` requires a YAML configuration file (`config.yaml`) that defines model settings, hardware allocation, batching behavior, and optional guardrails. A sample configuration is maintained in the [vllm-dragonhpc](https://github.com/radical-cybertools/vllm-dragonhpc) repository:
+`DragonVllmInferenceBackend` takes typed configuration objects — re-exported as-is from `dragon.ai.inference` via `rhapsody.backends.ai.config` — instead of a YAML file. `model` is required; `hardware`, `batching`, `guardrails`, and `dynamic_worker` are optional and default to sensible values (single node/GPU, request batching enabled, guardrails and dynamic worker scaling off) when omitted.
 
-```bash
-# Download the sample config
-wget https://raw.githubusercontent.com/radical-cybertools/vllm-dragonhpc/main/config.sample -O config.yaml
+```python
+from rhapsody.backends.ai.config import (
+    BatchingConfig,
+    DynamicWorkerConfig,
+    GuardrailsConfig,
+    HardwareConfig,
+    ModelConfig,
+)
+
+inference_backend = await DragonVllmInferenceBackend(
+    model=ModelConfig(
+        model_name="Qwen2.5-0.5B-Instruct",  # or a local snapshot path
+        hf_token="...",
+        tp_size=1,
+        max_tokens=256,
+    ),
+    hardware=HardwareConfig(num_nodes=1, num_gpus=1, node_offset=0),
+    batching=BatchingConfig(enabled=True, batch_type="pre-batch"),  # only "pre-batch" is supported today
+    guardrails=GuardrailsConfig(enabled=False),
+    dynamic_worker=DynamicWorkerConfig(enabled=False),
+    port=8001,
+)
 ```
-
-Edit `config.yaml` to match your environment — at minimum, set `model_name` to your target HuggingFace model and `hf_token` to your access token. The sample includes sections for hardware allocation, LLM parameters (precision, token limits, sampling), input batching, guardrails, and dynamic inference worker scaling. See the [config.sample](https://github.com/radical-cybertools/vllm-dragonhpc/blob/main/config.sample) for all available options and their defaults.
 
 ### Configuration Options
 
-The `DragonVllmInferenceBackend` supports the following parameters:
+`DragonVllmInferenceBackend`'s own constructor parameters:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `config_file` | str | Required | Path to vLLM configuration YAML file |
-| `model_name` | str | Required | HuggingFace model name or local path |
-| `num_nodes` | int | 1 | Number of nodes for inference |
-| `num_gpus` | int | 1 | Number of GPUs per node |
-| `tp_size` | int | 1 | Tensor parallelism size |
-| `port` | int | 8000 | HTTP server port (if use_service=True) |
-| `offset` | int | 0 | Node offset for multi-service deployments |
+| `model` | `ModelConfig` | Required | Model name/path, HF token, tensor-parallel size, sampling defaults |
+| `hardware` | `HardwareConfig` | `HardwareConfig()` | Node/GPU allocation, node offset for multi-service deployments |
+| `batching` | `BatchingConfig` | pre-batch enabled | Request batching mode (`batch_type="dynamic"` is not yet supported by this backend) |
+| `guardrails` | `GuardrailsConfig` | disabled | Optional PromptGuard-based prompt filtering |
+| `dynamic_worker` | `DynamicWorkerConfig` | disabled | Optional automatic GPU worker spin-up/spin-down |
+| `port` | int | 8000 | HTTP server port (if `use_service=True`) |
 | `use_service` | bool | True | Enable HTTP server with OpenAI-compatible API |
-| `max_batch_size` | int | 1024 | Maximum requests per batch |
-| `max_batch_wait_ms` | int | 500 | Maximum time to wait for batch accumulation |
+| `max_batch_size` | int | 1024 | Maximum requests RHAPSODY accumulates client-side per pipeline call |
+| `max_batch_wait_ms` | int | 500 | Maximum time to wait for client-side batch accumulation |
+
+`ModelConfig`/`HardwareConfig`/`BatchingConfig`/`GuardrailsConfig`/`DynamicWorkerConfig` are `dragon.ai.inference` dataclasses — see the [Dragon AI inference API reference](https://dragonhpc.github.io/dragon/doc/_build/html/ref/ai/inference/index.html) for the full field list on each.
 
 ### Server Mode vs Engine Mode
 
@@ -148,14 +161,11 @@ The `DragonVllmInferenceBackend` supports the following parameters:
 When `use_service=True`, the backend starts an HTTP server with OpenAI-compatible endpoints:
 
 ```python
-inference_backend = DragonVllmInferenceBackend(
-    config_file="config.yaml",
-    model_name="llama-3-8b",
+inference_backend = await DragonVllmInferenceBackend(
+    model=ModelConfig(model_name="llama-3-8b", hf_token="...", tp_size=1),
     use_service=True,
     port=8000
 )
-
-await inference_backend.initialize()
 
 # Access via HTTP
 # GET  http://<hostname>:8000/health
@@ -169,13 +179,10 @@ await inference_backend.initialize()
 When `use_service=False`, use the Python API directly:
 
 ```python
-inference_backend = DragonVllmInferenceBackend(
-    config_file="config.yaml",
-    model_name="llama-3-8b",
+inference_backend = await DragonVllmInferenceBackend(
+    model=ModelConfig(model_name="llama-3-8b", hf_token="...", tp_size=1),
     use_service=False
 )
-
-await inference_backend.initialize()
 
 # Direct inference
 results = await inference_backend.generate(
@@ -198,7 +205,7 @@ This is significantly more efficient than processing requests individually, espe
 !!! tip "Performance Tuning"
     - Increase `max_batch_size` for higher throughput with more memory
     - Reduce `max_batch_wait_ms` for lower latency
-    - Use `tp_size > 1` for large models that don't fit on a single GPU
+    - Use `ModelConfig(tp_size=...)` greater than 1 for large models that don't fit on a single GPU
 
 ## RADICAL AsyncFlow Integration
 
@@ -231,14 +238,14 @@ import asyncio
 import multiprocessing as mp
 
 from radical.asyncflow import WorkflowEngine
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
 async def main():
     # Set Dragon as the multiprocessing start method
     mp.set_start_method("dragon")
 
     # Initialize RHAPSODY backend
-    backend = await DragonExecutionBackendV3()
+    backend = await DragonExecutionBackend()
 
     # Create AsyncFlow workflow engine with RHAPSODY backend
     flow = await WorkflowEngine.create(backend=backend)
@@ -347,8 +354,8 @@ from rhapsody.backends import DaskExecutionBackend
 backend = await DaskExecutionBackend()
 
 # Dragon HPC
-from rhapsody.backends import DragonExecutionBackendV3
-backend = await DragonExecutionBackendV3()
+from rhapsody.backends import DragonExecutionBackend
+backend = await DragonExecutionBackend()
 
 # Create workflow with chosen backend
 flow = await WorkflowEngine.create(backend=backend)

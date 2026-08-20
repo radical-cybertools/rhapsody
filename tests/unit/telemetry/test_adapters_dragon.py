@@ -85,7 +85,7 @@ def test_noop_when_telemetry_level_zero():
         loop = asyncio.new_event_loop()
         adapter = DragonTelemetryAdapter(
             session_id="test-session",
-            backend_name="dragon_v3",
+            backend_name="dragon",
             interval=0.5,
         )
         manager = _FakeManager()
@@ -130,7 +130,7 @@ def test_adapter_emits_resource_update():
 
         adapter = DragonTelemetryAdapter(
             session_id="test-dragon-adapter",
-            backend_name="dragon_v3",
+            backend_name="dragon",
             interval=1.0,
         )
         manager = _FakeManager()
@@ -157,7 +157,7 @@ def test_adapter_emits_resource_update():
 
         ev = updates[0]
         assert ev.session_id == "test-dragon-adapter"
-        assert ev.backend == "dragon_v3"
+        assert ev.backend == "dragon"
         assert ev.node_id is not None and ev.node_id != ""
 
         # cpu_percent and memory_percent must be collected at level=1
@@ -191,7 +191,7 @@ def test_adapter_stops_cleanly():
 
         adapter = DragonTelemetryAdapter(
             session_id="test-stop",
-            backend_name="dragon_v3",
+            backend_name="dragon",
             interval=1.0,
         )
         manager = _FakeManager()

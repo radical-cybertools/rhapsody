@@ -1,5 +1,79 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Dragon 0.14.1 public API migration completed** for `DragonExecutionBackend`
+  — task metadata (`name`, `timeout`, `stdout`/`stderr`) now goes through
+  `Batch.options()` rather than direct kwargs to `process()`/`job()`/`function()`,
+  matching the 0.14.1 API. `V1`/`V2` backends and the `BatchError`/`Policy`
+  imports they required are removed; `DragonExecutionBackendV3` is kept only as
+  a deprecated alias.
+- **`DragonVllmInferenceBackend` migrated to `dragon.ai.inference`** — moved from
+  `rhapsody.backends.inference` to `rhapsody.backends.ai`, and from a YAML
+  `config_file=` argument to typed config objects (`ModelConfig`,
+  `HardwareConfig`, `BatchingConfig`, `GuardrailsConfig`, `DynamicWorkerConfig`
+  in the new `rhapsody.backends.ai.config`), re-exported as-is from
+  `dragon.ai.inference`. **Breaking change** for existing callers still passing
+  `config_file="config.yaml"` — see `docs/integrations.md` for the new
+  constructor shape.
+- `DragonVllmInferenceBackend` now supports `await DragonVllmInferenceBackend(...)`
+  as a single step, consistent with every other backend (`DragonExecutionBackend`,
+  `ConcurrentExecutionBackend`, `DaskExecutionBackend`, `RadicalExecutionBackend`).
+  The existing two-step `backend = DragonVllmInferenceBackend(...); await backend.initialize()`
+  pattern still works unchanged. Docs, README, examples, and the tutorial
+  notebook updated to the new pattern.
+
+  - **`OrbitExecutionBackend`** — submits tasks to a remote HPC node through the
+  ORBIT broker/endpoint infrastructure (`radical.orbit`); the endpoint node
+  runs a RHAPSODY plugin with a local backend (e.g. Dragon) that actually
+  executes the work. Delegates to `RhapsodyClient` internally, inheriting
+  template compression, pipelined batching, and event-based wait/batch
+  notifications.
+- **`NoopExecutionBackend`** — tasks are marked `DONE` immediately without
+  executing anything; for benchmarking RHAPSODY's own submission/orchestration
+  overhead independent of any real backend.
+
+### Fixed
+
+- **Task completions silently dropped under load** — `submit_tasks()` used to
+  register each task into `_monitored_batches` only after building the *entire*
+  batch, so a fast task could complete and be polled by the monitor thread
+  before its own registration landed; the monitor loop then treated the
+  unmatched tuid as "already delivered as cancelled" and dropped the result
+  permanently. `build_task()` now registers each task immediately after Dragon
+  dispatch, and the monitor loop buffers (`_pending_tuids`) and retries any
+  tuid that arrives before registration instead of assuming cancellation.
+  `cancel_task()` now marks confirmed cancellations in `_cancelled_tuids` so
+  genuinely cancelled tuids are still discarded immediately.
+- **Dragon exit codes not surfacing as `FAILED`** — Dragon 0.14.1's
+  `process()`/`job()` tasks return a non-zero exit code as the task *result*
+  instead of raising, so a failed executable was silently reported `DONE`.
+  Non-zero `int`/`list[int]` results from process/job tasks are now normalized
+  to a raised `SystemExit` so RHAPSODY delivers `FAILED` as expected.
+- **`runinfo/` directory left behind after every run** — Dragon's `task_logs`
+  feature (needed so `capture_stdio=False` tasks get real stdout/stderr content
+  back via `get_stdout()`/`get_stderr()`) creates a `runinfo/<run-id>/` tree and
+  `manifest.jsonl` in the working directory. `shutdown()` now removes it via
+  `Batch.log_dir()` after `join()`/`destroy()` complete.
+- **CI silently reporting broken Dragon installs as "skipped"** — `make test-ci`
+  treated *any* `test-dragon-only` failure (dragon launcher genuinely missing,
+  or dragon present but broken) as "Dragon not available on this Python
+  version" and reported success either way. It now only skips when the
+  `dragon` launcher itself isn't on `PATH`; a real test failure now fails the
+  build.
+- **Missing `flask`/`gunicorn` dependency** — `dragon.workflows.batch` imports
+  `dragon.telemetry.telemetry` unconditionally, which requires `flask`/
+  `gunicorn` even when telemetry is never used; `dragonhpc`'s own package
+  metadata doesn't declare them. Added to the `dragon` extra in
+  `pyproject.toml`, and CI now installs via `pip install -e ".[dragon]"`
+  instead of a bare `pip install dragonhpc` so the extra actually takes effect.
+- Stale test assertion in `test_monitor_loop_get_called_after_poll` expecting
+  `get(block=False)`; the code correctly calls `get(block=True)` (poll() and
+  the DDict write aren't atomic) since an earlier fix — the test just never
+  caught up.
+
 ## [0.4.0] - 2026-06-11
 
 ### Added

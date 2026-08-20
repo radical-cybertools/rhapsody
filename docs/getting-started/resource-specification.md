@@ -13,7 +13,7 @@ This design keeps the task API thin and makes resource semantics explicit per ba
 |---------|-------------|-----|-----|-------|
 | `ConcurrentExecutionBackend` | not supported | `task_backend_specific_kwargs={"cwd": "..."}` | `task_backend_specific_kwargs={"env": {...}}` | `task_backend_specific_kwargs={"shell": True}` |
 | `DaskExecutionBackend` | `task_backend_specific_kwargs={"resources": {"GPU": 1}}` | `task_backend_specific_kwargs={"cwd": "..."}` | `task_backend_specific_kwargs={"env": {...}}` | `task_backend_specific_kwargs={"shell": True}` |
-| `DragonExecutionBackendV3` | `task_backend_specific_kwargs={"process_template": {"policy": ...}}` | `task_backend_specific_kwargs={"process_template": {"cwd": "..."}}` | `task_backend_specific_kwargs={"process_template": {"env": {...}}}` | not applicable |
+| `DragonExecutionBackend` | `task_backend_specific_kwargs={"process_template": {"policy": ...}}` | `task_backend_specific_kwargs={"process_template": {"cwd": "..."}}` | `task_backend_specific_kwargs={"process_template": {"env": {...}}}` | not applicable |
 
 ---
 
@@ -140,7 +140,7 @@ backend = await DaskExecutionBackend(cluster=cluster)
 
 ## Dragon Backend (V3)
 
-`DragonExecutionBackendV3` submits tasks to the Dragon runtime. All per-task resource
+`DragonExecutionBackend` submits tasks to the Dragon runtime. All per-task resource
 and placement settings flow through Dragon's [ProcessTemplate](https://dragonhpc.github.io/dragon/doc/_build/html/ref/native/dragon.native.process.html#dragon.native.process.ProcessTemplate).
 
 There is **no backend-level `working_directory`** in V3. Every process
@@ -152,7 +152,7 @@ Pass a `batch_kwargs` dict when constructing the backend to tune the underlying
 `dragon.workflows.batch.Batch` instance:
 
 ```python
-backend = await DragonExecutionBackendV3(batch_kwargs={
+backend = await DragonExecutionBackend(batch_kwargs={
     "num_nodes": 8,
     "results_ddict_mem": 4 * 1024**3,  # 4 GiB results DDict
     "scheduler_workers": 16,

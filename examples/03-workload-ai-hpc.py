@@ -1,13 +1,16 @@
 import asyncio
 import logging
 import multiprocessing as mp
+import os
 
 import rhapsody
 from rhapsody.api import AITask
 from rhapsody.api import ComputeTask
 from rhapsody.api import Session
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 from rhapsody.backends import DragonVllmInferenceBackend
+from rhapsody.backends.ai.config import HardwareConfig
+from rhapsody.backends.ai.config import ModelConfig
 
 rhapsody.enable_logging(level=logging.DEBUG)
 
@@ -17,21 +20,22 @@ logger = logging.getLogger(__name__)
 async def main():
     mp.set_start_method("dragon")
 
-    execution_backend = await DragonExecutionBackendV3()
+    execution_backend = await DragonExecutionBackend()
 
-    inference_backend = DragonVllmInferenceBackend(
-        config_file="config.yaml",
-        model_name="Qwen2.5-0.5B-Instruct",
-        num_nodes=1,
-        num_gpus=1,
-        tp_size=1,
-        port=8001,
-        offset=0,  # Change this to control the number of nodes each inference pipeline takes
+    inference_backend = await DragonVllmInferenceBackend(
+        model=ModelConfig(
+            tp_size=1,
+            vllm_log_level="debug",
+            gpu_memory_utilization=0.85,
+            model_name="Qwen/Qwen2.5-0.5B-Instruct",
+            hf_token=os.environ.get("HF_TOKEN", ""),
+        ),
+        hardware=HardwareConfig(
+            num_nodes=2,  # total number of nodes requested to be occupied by the engine
+            num_gpus=2,  # this corresponds to --gpus-per-node and not total gpus
+            node_offset=0,  # Change this to control the number of nodes each inference pipeline takes
+        ),
     )
-
-    # Initialize ALL services concurrently
-    logger.info("Initializing 1 service...")
-    await inference_backend.initialize()
 
     # Define multiple tasks with single or multiple prompts
     # Note: Explicit backend mapping by user
