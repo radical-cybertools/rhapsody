@@ -1,9 +1,18 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.0] - 2026-08-20
 
 ### Added
 
+- **`OrbitExecutionBackend`** — submits tasks to a remote HPC node through the
+  ORBIT broker/endpoint infrastructure (`radical.orbit`); the endpoint node
+  runs a RHAPSODY plugin with a local backend (e.g. Dragon) that actually
+  executes the work. Delegates to `RhapsodyClient` internally, inheriting
+  template compression, pipelined batching, and event-based wait/batch
+  notifications.
+- **`NoopExecutionBackend`** — tasks are marked `DONE` immediately without
+  executing anything; for benchmarking RHAPSODY's own submission/orchestration
+  overhead independent of any real backend.
 - **Dragon 0.14.1 public API migration completed** for `DragonExecutionBackend`
   — task metadata (`name`, `timeout`, `stdout`/`stderr`) now goes through
   `Batch.options()` rather than direct kwargs to `process()`/`job()`/`function()`,
@@ -24,19 +33,19 @@
   The existing two-step `backend = DragonVllmInferenceBackend(...); await backend.initialize()`
   pattern still works unchanged. Docs, README, examples, and the tutorial
   notebook updated to the new pattern.
-
-  - **`OrbitExecutionBackend`** — submits tasks to a remote HPC node through the
-  ORBIT broker/endpoint infrastructure (`radical.orbit`); the endpoint node
-  runs a RHAPSODY plugin with a local backend (e.g. Dragon) that actually
-  executes the work. Delegates to `RhapsodyClient` internally, inheriting
-  template compression, pipelined batching, and event-based wait/batch
-  notifications.
-- **`NoopExecutionBackend`** — tasks are marked `DONE` immediately without
-  executing anything; for benchmarking RHAPSODY's own submission/orchestration
-  overhead independent of any real backend.
+- **conda packaging** — added a conda-forge staged-recipes candidate
+  (`recipe/meta.yaml`), excluded from the `check-yaml` pre-commit hook since
+  conda recipes use Jinja templating that isn't plain YAML.
+- **ReadTheDocs configuration** (`.readthedocs.yaml`) — builds docs via
+  `mkdocs`, installing the `.[docs]` extra.
 
 ### Fixed
 
+- **`__version__` drifted from package metadata** — the 0.4.0 sdist shipped
+  `__version__ = "0.2.0"` while `pyproject.toml` said `0.4.0`. `__version__` is
+  now derived from the installed distribution's metadata
+  (`importlib.metadata.version("rhapsody-py")`), so `pyproject.toml` stays the
+  single source of truth and the two can't drift again.
 - **Task completions silently dropped under load** — `submit_tasks()` used to
   register each task into `_monitored_batches` only after building the *entire*
   batch, so a fast task could complete and be polled by the monitor thread
