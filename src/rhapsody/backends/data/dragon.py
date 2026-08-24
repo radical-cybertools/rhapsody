@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 from typing import Any
 
 from rhapsody.backends.data.base import DataBackend
@@ -19,6 +20,15 @@ except ImportError:  # pragma: no cover - environment without Dragon
 
 
 _PROBE_KEY = "__rhapsody_data_backend_liveness_probe__"
+
+
+def _get_logger() -> logging.Logger:
+    """Get logger for the dragon data backend module.
+
+    This function provides lazy logger evaluation, ensuring the logger is created after the user has
+    configured logging, not at module import time.
+    """
+    return logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -63,10 +73,14 @@ class DragonDataBackend(DataBackend):
     class always forces) -- pass it explicitly to override.
     """
 
-    def __init__(self, *, _wait_for_keys: bool = True, **ddict_kwargs: Any) -> None:
+    def __init__(
+        self, *, name: str = "dragon", _wait_for_keys: bool = True, **ddict_kwargs: Any
+    ) -> None:
         """Initialize a DragonDataBackend.
 
         Args:
+            name: Name this backend is registered under when attached to a
+                Session.
             _wait_for_keys: Must be True (the default) -- exists only so
                 tests can exercise the rejection path. Do not set this.
             **ddict_kwargs: Forwarded directly to `dragon.data.ddict.DDict`.
@@ -77,7 +91,8 @@ class DragonDataBackend(DataBackend):
             ValueError: If `_wait_for_keys` is not True, or `ddict_kwargs`
                 tries to set `wait_for_keys`.
         """
-        super().__init__()
+        super().__init__(name=name)
+        self.logger = _get_logger()
         if _DDict is None:
             raise ImportError(
                 "The 'dragon' package is required to use DragonDataBackend. "
@@ -110,19 +125,25 @@ class DragonDataBackend(DataBackend):
         # but has no effect: DDict.__init__ is already atomically
         # blocking-until-ready -- there is no separate "start" step to skip
         # waiting on.
+        self.logger.info("Starting DragonDataBackend (constructing DDict)...")
         try:
             self._ddict = await asyncio.to_thread(_DDict, **self._ddict_kwargs)
         except Exception as exc:
             self._ddict = None
+            self.logger.error("DragonDataBackend failed to construct DDict: %s", exc)
             raise DataBackendStartupError(
                 f"DragonDataBackend failed to construct DDict: {exc}"
             ) from exc
-        return [DragonEndpoint(descriptor=self._ddict.serialize())]
+        descriptor = self._ddict.serialize()
+        self.logger.info("DragonDataBackend ready at %s...", descriptor[:32])
+        return [DragonEndpoint(descriptor=descriptor)]
 
     async def _do_shutdown(self) -> None:
+        self.logger.info("Shutting down DragonDataBackend...")
         if self._ddict is not None:
             await asyncio.to_thread(self._ddict.destroy)
         self._ddict = None
+        self.logger.info("DragonDataBackend shutdown complete")
 
     async def _do_ready(self) -> bool:
         if self._ddict is None:

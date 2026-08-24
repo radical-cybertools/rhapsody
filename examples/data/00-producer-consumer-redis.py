@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 
 import rhapsody
 
@@ -65,15 +66,14 @@ def func2(descriptor):
 async def main():
     # RHAPSODY owns launching the Redis infrastructure; RADEX only ever
     # sees the resulting endpoint, never the launch mechanism.
-    data_backend = RedisDataBackend(
-        redis_server_path="redis-stable/src/redis-server" # Or Export Redis in the $PATH
+    data_backend = await RedisDataBackend(
+        redis_server_path="redis-stable/src/redis-server"  # or export redis-server on $PATH
     )
-    await data_backend.start()
-    descriptor = data_backend.endpoints[0].serialize()
-    print(f"RedisDataBackend ready at {descriptor}")
+    exec_backend = await ConcurrentExecutionBackend(ProcessPoolExecutor())
 
-    backend = await ConcurrentExecutionBackend(ProcessPoolExecutor())
-    session = Session([backend])
+    session = Session([exec_backend, data_backend])
+
+    descriptor = data_backend.endpoints[0].serialize()
 
     # Define tasks (UIDs auto-generated!)
     tasks = [
@@ -94,7 +94,7 @@ async def main():
 
     # Cleanup
     await data_backend.shutdown()
-    await backend.shutdown()
+    await exec_backend.shutdown()
 
 
 if __name__ == "__main__":

@@ -63,9 +63,7 @@ async def test_multi_node_concurrent_launch(_requires_redis_server):
 
 @pytest.mark.redis
 async def test_partial_failure_rolls_back_all_nodes(_requires_redis_server, monkeypatch):
-    backend = RedisDataBackend(
-        hosts=["localhost"] * 3, startup_timeout=1.0, poll_interval=0.05
-    )
+    backend = RedisDataBackend(hosts=["localhost"] * 3, startup_timeout=1.0, poll_interval=0.05)
     seen: dict[tuple[str, int], int] = {}
     orig_ping = RedisDataBackend._ping
 
@@ -91,6 +89,7 @@ async def test_terminate_then_kill_after_grace_period():
 
     class _StubProc:
         def __init__(self):
+            self.pid = 12345
             self.returncode = None
             self.terminate_called = False
             self.kill_called = False

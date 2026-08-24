@@ -63,13 +63,12 @@ def func2(descriptor):
 async def main():
     # RHAPSODY owns launching the Dragon DDict; RADEX only ever sees the
     # resulting endpoint, never the launch mechanism.
-    data_backend = DragonDataBackend(managers_per_node=1, n_nodes=1)
-    await data_backend.start()
-    descriptor = data_backend.endpoints[0].serialize()
-    print(f"DragonDataBackend ready at {descriptor[:32]}...")
+    data_backend = await DragonDataBackend(managers_per_node=1, n_nodes=1)
+    exec_backend = await DragonExecutionBackend()
 
-    backend = await DragonExecutionBackend()
-    session = Session([backend])
+    session = Session([exec_backend, data_backend])
+
+    descriptor = data_backend.endpoints[0].serialize()
 
     # Define tasks (UIDs auto-generated!)
     tasks = [
@@ -90,7 +89,7 @@ async def main():
 
     # Cleanup
     await data_backend.shutdown()
-    await backend.shutdown()
+    await exec_backend.shutdown()
 
 
 if __name__ == "__main__":

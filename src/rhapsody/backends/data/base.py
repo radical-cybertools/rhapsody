@@ -52,8 +52,8 @@ class Endpoint(abc.ABC):
 
     @abc.abstractmethod
     def serialize(self) -> str:
-        """Return a string a caller can pass through explicitly (env var,
-        kwarg, task arg) to reconnect a client elsewhere."""
+        """Return a string a caller can pass through explicitly (env var, kwarg, task arg) to
+        reconnect a client elsewhere."""
 
 
 class DataBackend(abc.ABC):
@@ -69,10 +69,15 @@ class DataBackend(abc.ABC):
     terminal-state guard correct without any state duplicated in subclasses.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, name: str | None = None) -> None:
+        self._name = name
         self._state: DataBackendState = DataBackendState.CREATED
         self._endpoints: list[Endpoint] = []
         self._lock = asyncio.Lock()
+
+    @property
+    def name(self) -> str:
+        return self._name or type(self).__name__
 
     @property
     def state(self) -> DataBackendState:
@@ -92,10 +97,14 @@ class DataBackend(abc.ABC):
             return False
         return await self._do_ready()
 
-    async def start(self, wait: bool = True) -> "DataBackend":
-        """Start the backend and return self, so both
-        `await backend.start()` and `backend = await RedisDataBackend(...).start()`
-        work."""
+    def __await__(self):
+        """Allow `await RedisDataBackend(...)` to start it and return self, matching BaseBackend's
+        `await ConcurrentExecutionBackend(...)` convention."""
+        return self.start().__await__()
+
+    async def start(self, wait: bool = True) -> DataBackend:
+        """Start the backend and return self, so both `await backend.start()` and `backend = await
+        RedisDataBackend(...).start()` work."""
         async with self._lock:
             if self._state in _TERMINAL_STATES:
                 raise DataBackendTerminatedError(
@@ -115,17 +124,14 @@ class DataBackend(abc.ABC):
                     # Already a DataBackendError, or a BaseException we must
                     # not mask (CancelledError, KeyboardInterrupt, SystemExit).
                     raise
-                raise DataBackendStartupError(
-                    f"{type(self).__name__} failed to start"
-                ) from exc
+                raise DataBackendStartupError(f"{type(self).__name__} failed to start") from exc
             else:
                 self._endpoints = list(endpoints)
                 self._state = DataBackendState.READY
                 return self
 
-    async def shutdown(self) -> "DataBackend":
-        """Tear down the backend and return self, for the same fluent usage
-        as start()."""
+    async def shutdown(self) -> DataBackend:
+        """Tear down the backend and return self, for the same fluent usage as start()."""
         async with self._lock:
             if self._state is DataBackendState.SHUTDOWN:
                 return self
@@ -138,13 +144,18 @@ class DataBackend(abc.ABC):
 
     @abc.abstractmethod
     async def _do_start(self, wait: bool) -> list[Endpoint]:
-        """Launch the backend and return its endpoint(s). Raise on failure
-        after cleaning up any partially-started state."""
+        """Launch the backend and return its endpoint(s).
+
+        Raise on failure after cleaning up any partially-started state.
+        """
 
     @abc.abstractmethod
     async def _do_shutdown(self) -> None:
-        """Tear down the backend. Must tolerate being called with empty or
-        partial internal state (never-started, or a failed start)."""
+        """Tear down the backend.
+
+        Must tolerate being called with empty or partial internal state (never-started, or a failed
+        start).
+        """
 
     @abc.abstractmethod
     async def _do_ready(self) -> bool:

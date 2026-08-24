@@ -1,7 +1,7 @@
 """Unit tests for the DataBackend/Endpoint lifecycle state machine.
 
-No real infrastructure is needed -- these exercise rhapsody.data.base's
-state machine via an in-file fake DataBackend subclass.
+No real infrastructure is needed -- these exercise rhapsody.data.base's state machine via an in-file
+fake DataBackend subclass.
 """
 
 import asyncio

@@ -1,9 +1,8 @@
 """Data infrastructure subsystem for Rhapsody.
 
-This module provides backends that launch and own the lifecycle of data
-infrastructure (a Redis server, a Dragon DDict) and hand back connection
-endpoints, mirroring how execution/inference backends launch and own
-compute/inference infrastructure.
+This module provides backends that launch and own the lifecycle of data infrastructure (a Redis
+server, a Dragon DDict) and hand back connection endpoints, mirroring how execution/inference
+backends launch and own compute/inference infrastructure.
 """
 
 from __future__ import annotations
