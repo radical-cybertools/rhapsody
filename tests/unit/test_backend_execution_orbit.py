@@ -893,3 +893,78 @@ async def test_cancel_all_drops_buffered_tasks():
 
     await backend.shutdown()
     backend._mock_rh.submit_tasks.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Pool mode (dispatcher-managed pools)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pool_mode_targets_broker_and_forwards_session_kwargs():
+    """With a pool and no endpoint, the broker participant (hosting the
+    dispatcher) is the target -- no endpoint auto-selection -- and session
+    kwargs ride into get_plugin so the backend can join a session by sid."""
+    backend = await _init_backend(
+        endpoint_name=None,
+        pool="insitu",
+        plugin_name="task_dispatcher",
+        session_kwargs={"sid": "session.abc"},
+    )
+
+    assert backend._endpoint_name == "broker"
+    backend._mock_rt.get_plugin.assert_called_once_with(
+        "broker",
+        "task_dispatcher",
+        backends=["dragon_v3"],
+        init_timeout=120.0,
+        sid="session.abc",
+    )
+
+
+@pytest.mark.asyncio
+async def test_pool_mode_stamps_tasks():
+    """Every submitted task carries the backend's pool; an explicit per-task
+    pool wins."""
+    backend = await _init_backend(
+        endpoint_name=None, pool="insitu", plugin_name="task_dispatcher", batch_window=0
+    )
+
+    await backend.submit_tasks(
+        [
+            {"uid": "t.001", "executable": "/bin/echo"},
+            {"uid": "t.002", "executable": "/bin/echo", "pool": "special"},
+        ]
+    )
+
+    submitted = backend._mock_rh.submit_tasks.call_args[0][0]
+    assert submitted[0]["pool"] == "insitu"
+    assert submitted[1]["pool"] == "special"
+
+
+@pytest.mark.asyncio
+async def test_pool_mode_compat_resolves_executing_endpoint():
+    """The cloudpickle python handshake compares against the pool's executing
+    endpoint (from the dispatcher's pool detail), not the dispatcher's host."""
+    import sys
+
+    backend = await _init_backend(
+        endpoint_name=None, pool="insitu", plugin_name="task_dispatcher", batch_window=0
+    )
+    backend._mock_rh.pool_detail = MagicMock(
+        return_value={"name": "insitu", "endpoint_name": "compute_ep"}
+    )
+
+    si = MagicMock()
+    mm = sys.version_info
+    si.host_role = MagicMock(return_value={"python_version": f"{mm.major}.{mm.minor}.0"})
+    si.close = MagicMock()
+    backend._mock_rt.get_plugin = MagicMock(return_value=si)
+
+    def fn():
+        return 42
+
+    await backend.submit_tasks([{"uid": "t.003", "function": fn}])
+
+    backend._mock_rt.get_plugin.assert_called_once_with("compute_ep", "sysinfo")
+    assert backend._endpoint_python_mm == (mm.major, mm.minor)
