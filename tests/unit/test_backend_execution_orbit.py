@@ -902,9 +902,9 @@ async def test_cancel_all_drops_buffered_tasks():
 
 @pytest.mark.asyncio
 async def test_pool_mode_targets_broker_and_forwards_session_kwargs():
-    """With a pool and no endpoint, the broker participant (hosting the
-    dispatcher) is the target -- no endpoint auto-selection -- and session
-    kwargs ride into get_plugin so the backend can join a session by sid."""
+    """With a pool and no endpoint, the broker participant (hosting the dispatcher) is the target --
+    no endpoint auto-selection -- and session kwargs ride into get_plugin so the backend can join a
+    session by sid."""
     backend = await _init_backend(
         endpoint_name=None,
         pool="insitu",
@@ -924,8 +924,7 @@ async def test_pool_mode_targets_broker_and_forwards_session_kwargs():
 
 @pytest.mark.asyncio
 async def test_pool_mode_stamps_tasks():
-    """Every submitted task carries the backend's pool; an explicit per-task
-    pool wins."""
+    """Every submitted task carries the backend's pool; an explicit per-task pool wins."""
     backend = await _init_backend(
         endpoint_name=None, pool="insitu", plugin_name="task_dispatcher", batch_window=0
     )
@@ -944,8 +943,8 @@ async def test_pool_mode_stamps_tasks():
 
 @pytest.mark.asyncio
 async def test_pool_mode_compat_resolves_executing_endpoint():
-    """The cloudpickle python handshake compares against the pool's executing
-    endpoint (from the dispatcher's pool detail), not the dispatcher's host."""
+    """The cloudpickle python handshake compares against the pool's executing endpoint (from the
+    dispatcher's pool detail), not the dispatcher's host."""
     import sys
 
     backend = await _init_backend(
