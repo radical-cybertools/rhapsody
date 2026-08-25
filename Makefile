@@ -52,11 +52,12 @@ test-unit-no-dragon:  ## Run unit tests excluding Dragon (uses regular pytest, f
 	@echo "Running non-Dragon unit tests with pytest..."
 	@$(PYTHON) -m pytest tests/unit/ \
 		--ignore=tests/unit/test_backend_execution_dragon.py \
+		--ignore=tests/unit/test_backend_data_dragon.py \
 		-xvs
 
 test-unit-dragon:  ## Run Dragon unit tests (requires 'dragon pytest', may hang other tests)
 	@echo "Running Dragon unit tests with dragon pytest..."
-	@dragon $(PYTHON) -m pytest tests/unit/test_backend_execution_dragon.py tests/unit/telemetry/test_adapters_dragon.py -xvs
+	@dragon $(PYTHON) -m pytest tests/unit/test_backend_execution_dragon.py tests/unit/test_backend_data_dragon.py tests/unit/telemetry/test_adapters_dragon.py -xvs
 
 test-integration:  ## Run all integration tests (non-Dragon + Dragon)
 test-integration: test-integration-no-dragon test-integration-dragon
@@ -76,12 +77,13 @@ test-regular:  ## Run all regular tests (excludes Dragon tests, uses pytest)
 	@echo "Running all regular tests (excluding Dragon)..."
 	@$(PYTHON) -m pytest tests/unit/ tests/integration/ \
 		--ignore=tests/unit/test_backend_execution_dragon.py \
+		--ignore=tests/unit/test_backend_data_dragon.py \
 		-xvs
 
 test-dragon-only:  ## Run Dragon tests only (requires 'dragon' launcher)
 	@echo "Running Dragon tests..."
 	@if command -v dragon >/dev/null 2>&1; then \
-		dragon $(PYTHON) -m pytest tests/unit/test_backend_execution_dragon.py -xvs; \
+		dragon $(PYTHON) -m pytest tests/unit/test_backend_execution_dragon.py tests/unit/test_backend_data_dragon.py -xvs; \
 	else \
 		echo "Dragon launcher not available. Install Dragon and run with 'dragon' command."; \
 		exit 1; \

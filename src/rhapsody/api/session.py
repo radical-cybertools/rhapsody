@@ -12,6 +12,7 @@ from rhapsody.api.errors import TaskExecutionError
 if TYPE_CHECKING:
     from rhapsody.api.task import BaseTask
     from rhapsody.backends.base import BaseBackend
+    from rhapsody.backends.data.base import DataBackend
     from rhapsody.telemetry.manager import TelemetryManager
 
 
@@ -110,14 +111,17 @@ class Session:
 
     def __init__(
         self,
-        backends: list[BaseBackend] | None = None,
+        backends: list[BaseBackend | DataBackend] | None = None,
         uid: str | None = None,
         work_dir: str | None = None,
     ):
         """Initialize a new session.
 
         Args:
-            backends: List of execution backends to use. If None, no backends are configured.
+            backends: List of backends to use -- task-executing backends
+                (ConcurrentExecutionBackend, DragonExecutionBackend, ...) and/or
+                DataBackend instances (RedisDataBackend, DragonDataBackend, ...).
+                If None, no backends are configured.
             uid: Optional unique identifier for the session.
             work_dir: working directory (default: cwd).
         """
@@ -130,22 +134,39 @@ class Session:
 
         # Register callbacks with all provided backends
         backends_list = backends or []
-        self.backends: dict[str, BaseBackend] = {}
+        self.backends: dict[str, BaseBackend | DataBackend] = {}
+        # Task-executing subset of self.backends, used for routing in
+        # submit_tasks() -- kept separate so routing stays O(1) per task
+        # regardless of how many DataBackend instances are also registered.
+        self._exec_backends: dict[str, BaseBackend] = {}
         for backend in backends_list:
             self.add_backend(backend)
 
-    def add_backend(self, backend: BaseBackend) -> None:
+    def add_backend(self, backend: BaseBackend | DataBackend) -> None:
         """Add a backend to the session and register callbacks.
 
         Args:
-            backend: The execution or inference backend to add.
+            backend: The execution/inference backend, or DataBackend, to add.
         """
+        self.backends[backend.name] = backend
+
+        if not hasattr(backend, "submit_tasks"):
+            # Infrastructure backend (e.g. DataBackend) -- no tasks, no
+            # callbacks, no task-state map, and no Session-assigned
+            # _work_dir: it resolves (and may already be using) its own
+            # work_dir before ever reaching a Session, so stamping a fresh
+            # rhapsody.session.<uid> directory here would just create an
+            # empty, unused one. Registered only for inclusion in
+            # Session.close()/telemetry.
+            logger.debug(f"Registered data backend '{backend.name}' with Session '{self.uid}'")
+            return
+
         backend._work_dir = os.path.join(self.work_dir, self.uid)
         os.makedirs(backend._work_dir, exist_ok=True)
+
+        self._exec_backends[backend.name] = backend
         backend.is_attached = True
         backend.attached_to.append(self.uid)
-
-        self.backends[backend.name] = backend
 
         # Register state manager callback
         backend.register_callback(self._state_manager.update_task)
@@ -178,8 +199,8 @@ class Session:
                 self._state_manager.bind_loop(asyncio.get_running_loop())
             except RuntimeError:
                 pass
-        if not self.backends:
-            raise RuntimeError("No backends configured in Session")
+        if not self._exec_backends:
+            raise RuntimeError("No task-executing backend configured in Session")
 
         # Group tasks by their explicit backend target
         tasks_by_backend: dict[str, list] = {}
@@ -204,16 +225,18 @@ class Session:
             # Routing decision
             target_name = task.get("backend")
             if not target_name:
-                # If no backend specified, use the first one as default
-                target_name = next(iter(self.backends))
+                # If no backend specified, use the first task-executing one as
+                # default (DataBackend instances registered in the same
+                # Session are never eligible here).
+                target_name = next(iter(self._exec_backends))
                 task["backend"] = target_name  # Ensure it's recorded
 
             # Emit TaskSubmitted AFTER routing so task["backend"] is always set.
             if self._telemetry is not None:
                 self._telemetry._on_task_submitted(task)
 
-            if target_name not in self.backends:
-                available = list(self.backends.keys())
+            if target_name not in self._exec_backends:
+                available = list(self._exec_backends.keys())
                 raise ValueError(
                     f"Backend '{target_name}' requested by task {uid} not found in Session. "
                     f"Available backends: {available}"
@@ -224,7 +247,7 @@ class Session:
         # Submit each group to its respective backend concurrently
         submission_tasks = []
         for name, backend_tasks in tasks_by_backend.items():
-            backend = self.backends[name]
+            backend = self._exec_backends[name]
             # Emit TaskQueued at the backend boundary (after routing, before execution)
             if self._telemetry is not None:
                 for task in backend_tasks:
