@@ -462,8 +462,7 @@ class OrbitExecutionBackend(BaseBackend):
                 # that is what the cloudpickle handshake compares against.
                 target = self._endpoint_name
                 if self._pool and hasattr(self._rh, "pool_detail"):
-                    target = self._rh.pool_detail(self._pool).get(
-                        "endpoint_name") or target
+                    target = self._rh.pool_detail(self._pool).get("endpoint_name") or target
                 # get_plugin() auto-registers an ephemeral session even
                 # though host_role() needs none — close the client so failed
                 # retries don't accumulate sessions on the endpoint.
