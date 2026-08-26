@@ -9,6 +9,7 @@ Different examples require different launchers depending on the backend they use
 | Backend | Launcher | Command |
 |---------|----------|---------|
 | `ConcurrentExecutionBackend` | Standard Python | `python example.py` |
+| `DaskExecutionBackend` | Standard Python (+ Dask cluster) | `python example.py` |
 | `DragonExecutionBackend` | Dragon runtime | `dragon example.py` |
 | `DragonVllmInferenceBackend` | Dragon runtime + GPU | `dragon example.py` |
 
@@ -91,6 +92,18 @@ Integrates RHAPSODY with [RADICAL AsyncFlow](https://github.com/radical-cybertoo
 
 ---
 
+### 05 — Dask Backend (Local Cluster)
+
+```bash
+python 05-dask-backend.py
+```
+
+Runs sync functions, async functions, and executables on `DaskExecutionBackend`, backed by an automatically-started local Dask cluster. Pass `cluster=` or `client=` to target Slurm, Kubernetes, or any other Dask-compatible deployment instead — see example 07 for the Slurm variant and a critical gotcha it demonstrates.
+
+**What you'll learn:** `DaskExecutionBackend`, sync/async function dispatch on the same code path, executable tasks, mixed task types in one submission.
+
+---
+
 ### 06 — Multi-Service AI-HPC Workflow (Dragon + vLLM)
 
 ```bash
@@ -102,3 +115,17 @@ Runs **two independent `DragonVllmInferenceBackend` services** at once (one per 
 **Requires:** GPU access (2 GPUs), vLLM installed (`dragonhpc[ai]`), and a locally downloaded model directory (`HF_HUB_OFFLINE=1` recommended — see the model download notes for this backend).
 
 **What you'll learn:** Running multiple inference services in one allocation, `use_service=True` HTTP endpoints, `get_endpoint()`, mixing direct (`AITask`) and service-style (`ComputeTask` + `aiohttp`) access to the same backend type.
+
+---
+
+### 07 — Dask Backend on Slurm (dask_jobqueue)
+
+```bash
+python 07-dask-backend-slrum-cluster.py
+```
+
+Runs `DaskExecutionBackend` against a real Slurm allocation via `dask_jobqueue.SLURMCluster`. Demonstrates the `cluster=`/`client=` ownership model and a critical gotcha: the cluster must be constructed with `asynchronous=True` and entered via `async with`, or the Dask `Client` built on top of it silently inherits a mismatched event loop — every `await` on a task result or on shutdown then breaks with confusing `TypeError`/`AttributeError` failures.
+
+**Requires:** `dask_jobqueue` installed and a Slurm scheduler reachable from this host (`sbatch` on `$PATH`). Update `queue`/`account`/`cores`/`memory`/`walltime` for your allocation.
+
+**What you'll learn:** `SLURMCluster(asynchronous=True)`, `cluster=` ownership semantics, running RHAPSODY against a real HPC batch scheduler.
