@@ -11,6 +11,19 @@ import pytest
 from rhapsody import ComputeTask
 
 
+async def _pickling_regression_target(n):
+    """Module-level async target used by test_wraps_closure_pickling_regression."""
+    return n
+
+
+def _create_task_that_closes_coro(coro, **kwargs):
+    """Stand-in for `asyncio.create_task` in tests that never let the scheduled completion coroutine
+    run — closes it immediately instead of leaking it, which otherwise trips a "coroutine was never
+    awaited" RuntimeWarning at GC time."""
+    coro.close()
+    return None
+
+
 def test_dask_backend_import():
     """Test that DaskExecutionBackend can be imported."""
     try:
@@ -44,6 +57,7 @@ def test_dask_backend_init():
         assert not backend._initialized
         assert backend._client is None
         assert backend.tasks == {}
+        assert backend._runtime == {}
 
         # Test initialization with resources
         resources = {"n_workers": 2, "threads_per_worker": 1}
@@ -184,12 +198,15 @@ async def test_dask_backend_task_submission_routing():
     """Test that tasks are routed to the correct submission methods."""
     try:
         from unittest.mock import AsyncMock
+        from unittest.mock import MagicMock
         from unittest.mock import patch
 
         from rhapsody.backends import DaskExecutionBackend
 
         backend = DaskExecutionBackend()
         backend._initialized = True
+        backend._client = MagicMock()
+        backend._client.status = "running"
 
         # Executable tasks route to _submit_executable (not FAILED)
         with patch.object(backend, "_submit_executable", new_callable=AsyncMock) as mock_exec:
@@ -197,25 +214,26 @@ async def test_dask_backend_task_submission_routing():
             await backend.submit_tasks([executable_task])
             mock_exec.assert_called_once()
 
-        # Sync function tasks route to _submit_sync_function (not FAILED)
-        with patch.object(backend, "_submit_sync_function", new_callable=AsyncMock) as mock_sync:
+        # Both sync and async function tasks route to _submit_function — Dask itself
+        # (not a RHAPSODY-side wrapper) distinguishes sync/async execution once the
+        # callable reaches a worker, so there is only one dispatch path here.
+        with patch.object(backend, "_submit_function", new_callable=AsyncMock) as mock_fn:
 
             def sync_fn():
                 return "sync"
 
             sync_task = ComputeTask(function=sync_fn, args=[], kwargs={})
             await backend.submit_tasks([sync_task])
-            mock_sync.assert_called_once()
+            mock_fn.assert_called_once()
 
-        # Async function tasks route to _submit_async_function
-        with patch.object(backend, "_submit_async_function", new_callable=AsyncMock) as mock_async:
+        with patch.object(backend, "_submit_function", new_callable=AsyncMock) as mock_fn:
 
             async def async_fn():
                 return "async"
 
             async_task = ComputeTask(function=async_fn, args=[], kwargs={})
             await backend.submit_tasks([async_task])
-            mock_async.assert_called_once()
+            mock_fn.assert_called_once()
 
     except ImportError:
         pytest.skip("Dask dependencies not available")
@@ -272,11 +290,13 @@ async def test_dask_backend_shutdown():
         backend = DaskExecutionBackend()
         backend._initialized = True
         backend.tasks = {"test": "task"}
+        backend._runtime = {"test": "runtime"}
 
         await backend.shutdown()
         assert backend._client is None
         assert not backend._initialized
         assert len(backend.tasks) == 0
+        assert len(backend._runtime) == 0
 
     except ImportError:
         pytest.skip("Dask dependencies not available")
@@ -330,6 +350,7 @@ async def test_dask_submit_executable_passes_capture_stdio(tmp_path):
         from unittest.mock import patch
 
         from rhapsody.backends import DaskExecutionBackend
+        from rhapsody.backends.execution.dask_parallel import _TaskRuntime
 
         backend = DaskExecutionBackend()
         backend._initialized = True
@@ -347,8 +368,9 @@ async def test_dask_submit_executable_passes_capture_stdio(tmp_path):
 
         task = ComputeTask(executable="/bin/echo", arguments=["hi"], capture_stdio=True)
         backend.tasks[task["uid"]] = task
+        backend._runtime[task["uid"]] = _TaskRuntime(uid=task["uid"], kind="executable")
 
-        with patch("asyncio.create_task"):
+        with patch("asyncio.create_task", side_effect=_create_task_that_closes_coro):
             await backend._submit_executable(task)
 
         assert captured.get("capture_stdio") is True
@@ -415,6 +437,7 @@ async def test_dask_submit_executable_cwd_from_bksp():
         from unittest.mock import patch
 
         from rhapsody.backends import DaskExecutionBackend
+        from rhapsody.backends.execution.dask_parallel import _TaskRuntime
 
         backend = DaskExecutionBackend()
         backend._initialized = True
@@ -436,8 +459,9 @@ async def test_dask_submit_executable_cwd_from_bksp():
             task_backend_specific_kwargs={"cwd": "/tmp"},
         )
         backend.tasks[task["uid"]] = task
+        backend._runtime[task["uid"]] = _TaskRuntime(uid=task["uid"], kind="executable")
 
-        with patch("asyncio.create_task"):
+        with patch("asyncio.create_task", side_effect=_create_task_that_closes_coro):
             await backend._submit_executable(task)
 
         assert captured.get("cwd") == "/tmp"
@@ -454,6 +478,7 @@ async def test_dask_submit_executable_no_cwd():
         from unittest.mock import patch
 
         from rhapsody.backends import DaskExecutionBackend
+        from rhapsody.backends.execution.dask_parallel import _TaskRuntime
 
         backend = DaskExecutionBackend()
         backend._initialized = True
@@ -470,8 +495,9 @@ async def test_dask_submit_executable_no_cwd():
 
         task = ComputeTask(executable="/bin/pwd")
         backend.tasks[task["uid"]] = task
+        backend._runtime[task["uid"]] = _TaskRuntime(uid=task["uid"], kind="executable")
 
-        with patch("asyncio.create_task"):
+        with patch("asyncio.create_task", side_effect=_create_task_that_closes_coro):
             await backend._submit_executable(task)
 
         assert captured.get("cwd") is None
@@ -493,6 +519,7 @@ async def test_dask_function_done_stdout_is_string():
         from unittest.mock import patch
 
         from rhapsody.backends import DaskExecutionBackend
+        from rhapsody.backends.execution.dask_parallel import _TaskRuntime
     except ImportError:
         pytest.skip("Dask not available")
 
@@ -503,11 +530,12 @@ async def test_dask_function_done_stdout_is_string():
 
     task = ComputeTask(function=lambda: 99, args=[])
     backend.tasks[task["uid"]] = {}
+    backend._runtime[task["uid"]] = _TaskRuntime(uid=task["uid"], kind="function")
 
     fut = asyncio.get_event_loop().create_future()
     with patch.object(backend, "_client") as mc:
         mc.submit.return_value = fut
-        asyncio.create_task(backend._submit_async_function(task))
+        asyncio.create_task(backend._submit_function(task))
         await asyncio.sleep(0)
         fut.set_result(99)
         await asyncio.sleep(0)
@@ -526,6 +554,7 @@ async def test_dask_function_failed_stdout_is_string():
         from unittest.mock import patch
 
         from rhapsody.backends import DaskExecutionBackend
+        from rhapsody.backends.execution.dask_parallel import _TaskRuntime
     except ImportError:
         pytest.skip("Dask not available")
 
@@ -536,11 +565,12 @@ async def test_dask_function_failed_stdout_is_string():
 
     task = ComputeTask(function=lambda: 1 / 0, args=[])
     backend.tasks[task["uid"]] = {}
+    backend._runtime[task["uid"]] = _TaskRuntime(uid=task["uid"], kind="function")
 
     fut = asyncio.get_event_loop().create_future()
     with patch.object(backend, "_client") as mc:
         mc.submit.return_value = fut
-        asyncio.create_task(backend._submit_async_function(task))
+        asyncio.create_task(backend._submit_function(task))
         await asyncio.sleep(0)
         fut.set_exception(ZeroDivisionError("div by zero"))
         await asyncio.sleep(0)
@@ -548,3 +578,279 @@ async def test_dask_function_failed_stdout_is_string():
     failed = [(t, s) for t, s in captured if s == "FAILED"]
     assert failed, "FAILED callback never fired"
     assert isinstance(failed[0][0].get("stdout"), str)
+
+
+# ---------------------------------------------------------------------------
+# Pickling regression — proves the old @wraps-closure pattern was the bug,
+# and that submitting the real callable directly is not.
+# ---------------------------------------------------------------------------
+
+
+def test_wraps_closure_pickling_regression():
+    """Regression test for the original `PicklingError`.
+
+    The deleted `_submit_async_function` wrapped every async task callable in a
+    local closure decorated with `@wraps(task["function"])`. `@wraps` copies the
+    original function's `__module__`/`__qualname__` onto the closure, so pickling
+    it by reference resolves to a *different* object living at that name and
+    raises `PicklingError: ... it's not the same object as ...` — this is the
+    exact shape of the original bug (`Can't pickle <function infer_batch_task
+    ...>: it's not the same object as __main__.infer_batch_task`).
+
+    Proves (a) the old wrapping pattern really does break pickling, and (b) the
+    new pattern — submitting the real callable directly, optionally bound via
+    `functools.partial` for kwargs — does not.
+    """
+    import pickle
+    from functools import partial
+    from functools import wraps
+
+    # Old (deleted) pattern: a closure decorated with @wraps(original).
+    @wraps(_pickling_regression_target)
+    async def async_wrapper():
+        return await _pickling_regression_target(1)
+
+    with pytest.raises(pickle.PicklingError, match="not the same object as"):
+        pickle.dumps(async_wrapper)
+
+    # New pattern: submit the real module-level function directly, or via partial
+    # to pre-bind kwargs — never through a renamed/re-wrapped closure.
+    restored_fn = pickle.loads(pickle.dumps(_pickling_regression_target))
+    assert restored_fn is _pickling_regression_target
+
+    bound = partial(_pickling_regression_target, 1)
+    restored_partial = pickle.loads(pickle.dumps(bound))
+    assert restored_partial.func is _pickling_regression_target
+    assert restored_partial.args == (1,)
+
+
+# ---------------------------------------------------------------------------
+# Client/cluster ownership and validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dask_external_sync_client_rejected():
+    """A caller-supplied Client that isn't asynchronous=True must be rejected at init."""
+    try:
+        from unittest.mock import MagicMock
+
+        from rhapsody.backends import DaskExecutionBackend
+    except ImportError:
+        pytest.skip("Dask dependencies not available")
+
+    sync_client = MagicMock()
+    sync_client.asynchronous = False
+
+    with pytest.raises(ValueError, match="asynchronous=True"):
+        await DaskExecutionBackend(client=sync_client)
+
+
+# ---------------------------------------------------------------------------
+# Callback handling
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dask_async_callback_registered_and_invoked():
+    """_invoke_callback awaits an async callback rather than firing-and-forgetting it."""
+    try:
+        from rhapsody.backends import DaskExecutionBackend
+    except ImportError:
+        pytest.skip("Dask dependencies not available")
+
+    backend = DaskExecutionBackend()
+    backend._initialized = True
+
+    calls = []
+
+    async def async_callback(task, state):
+        await asyncio.sleep(0)
+        calls.append((task["uid"], state))
+
+    backend.register_callback(async_callback)
+
+    task = ComputeTask(function=lambda: 1, args=[])
+    await backend._invoke_callback(task, "RUNNING")
+
+    assert calls == [(task["uid"], "RUNNING")]
+
+
+@pytest.mark.asyncio
+async def test_dask_callback_exception_does_not_break_task_completion():
+    """A raising callback must not crash `_on_done` or corrupt task state."""
+    try:
+        from rhapsody.backends import DaskExecutionBackend
+        from rhapsody.backends.execution.dask_parallel import _TaskRuntime
+    except ImportError:
+        pytest.skip("Dask dependencies not available")
+
+    backend = DaskExecutionBackend()
+    backend._initialized = True
+
+    def bad_callback(task, state):
+        raise RuntimeError("callback boom")
+
+    backend.register_callback(bad_callback)
+
+    task = ComputeTask(function=lambda: 42, args=[])
+    backend.tasks[task["uid"]] = task
+    backend._runtime[task["uid"]] = _TaskRuntime(uid=task["uid"], kind="function")
+
+    fut = asyncio.get_event_loop().create_future()
+    fut.set_result(42)
+
+    # Must not raise despite the callback raising on every invocation.
+    await backend._on_done(task, fut, "function")
+
+    assert task["return_value"] == 42
+    assert task["uid"] not in backend.tasks
+
+
+# ---------------------------------------------------------------------------
+# Data dependency hooks — documented no-ops
+# ---------------------------------------------------------------------------
+
+
+def test_dask_link_data_deps_are_safe_noops():
+    """link_explicit_data_deps / link_implicit_data_deps are documented no-ops."""
+    try:
+        from rhapsody.backends import DaskExecutionBackend
+    except ImportError:
+        pytest.skip("Dask dependencies not available")
+
+    backend = DaskExecutionBackend()
+
+    src = ComputeTask(function=lambda: 1, args=[])
+    dst = ComputeTask(function=lambda: 2, args=[])
+    src_before, dst_before = dict(src), dict(dst)
+
+    assert (
+        backend.link_explicit_data_deps(
+            src_task=src, dst_task=dst, file_name="x", file_path="/tmp/x"
+        )
+        is None
+    )
+    assert backend.link_implicit_data_deps(src, dst) is None
+
+    assert dict(src) == src_before
+    assert dict(dst) == dst_before
+    assert backend.tasks == {}
+
+
+# ---------------------------------------------------------------------------
+# Argument handling — no more silent mutation/filtering of the caller's task
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dask_args_kwargs_not_mutated_on_caller_task():
+    """submit_tasks must not rewrite the caller's task['args']/task['kwargs']."""
+    try:
+        from unittest.mock import MagicMock
+        from unittest.mock import patch
+
+        from rhapsody.backends import DaskExecutionBackend
+    except ImportError:
+        pytest.skip("Dask dependencies not available")
+
+    backend = DaskExecutionBackend()
+    backend._initialized = True
+    backend._client = MagicMock()
+    backend._client.status = "running"
+    backend._client.submit = MagicMock(return_value=MagicMock())
+
+    task = ComputeTask(function=lambda a, x=None: (a, x), args=(1, 2), kwargs={"x": 1})
+    args_before = task["args"]
+    kwargs_before = task["kwargs"]
+
+    with patch("asyncio.create_task", side_effect=_create_task_that_closes_coro):
+        await backend.submit_tasks([task])
+
+    assert task["args"] == args_before
+    assert task["kwargs"] == kwargs_before
+
+
+# ---------------------------------------------------------------------------
+# Resource pre-check — must use a live scheduler snapshot, not the stale cache
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_check_resources_satisfiable_uses_scheduler_identity():
+    """_check_resources_satisfiable must use scheduler.identity(), not the always- empty
+    scheduler_info() cache on an asynchronous client."""
+    try:
+        from unittest.mock import AsyncMock
+        from unittest.mock import MagicMock
+
+        from rhapsody.backends import DaskExecutionBackend
+    except ImportError:
+        pytest.skip("Dask dependencies not available")
+
+    backend = DaskExecutionBackend()
+    backend._initialized = True
+    backend._client = MagicMock()
+    backend._client.scheduler = MagicMock()
+    backend._client.scheduler.identity = AsyncMock(
+        return_value={"workers": {"w1": {"resources": {"GPU": 2}}}}
+    )
+
+    assert await backend._check_resources_satisfiable({"GPU": 1}) is True
+    assert await backend._check_resources_satisfiable({"GPU": 4}) is False
+    backend._client.scheduler.identity.assert_called_with(n_workers=-1)
+
+
+# ---------------------------------------------------------------------------
+# Dask key collision — proves distinct tasks never silently share a Future
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dask_duplicate_function_args_get_distinct_keys():
+    """Two tasks with the same function/args must get distinct Dask submission keys.
+
+    Regression test: `client.submit()` defaults to `pure=True` with no explicit `key`,
+    deriving the Dask key from `tokenize(func, kwargs, *args)`. Two RHAPSODY tasks
+    calling the same function with the same args used to tokenize to the identical
+    key, so the second `submit()` call would silently return the first task's
+    `Future` (`distributed.client.Client.submit`: `if key in self.futures: return
+    Future(key, self)`) instead of doing independent work. Passing `key=task["uid"]`
+    explicitly bypasses the tokenize path entirely.
+    """
+    try:
+        from unittest.mock import MagicMock
+        from unittest.mock import patch
+
+        from rhapsody.backends import DaskExecutionBackend
+    except ImportError:
+        pytest.skip("Dask dependencies not available")
+
+    backend = DaskExecutionBackend()
+    backend._initialized = True
+    backend._client = MagicMock()
+    backend._client.status = "running"
+
+    submitted_keys = []
+
+    def fake_submit(fn, *args, **kwargs):
+        submitted_keys.append(kwargs.get("key"))
+        return MagicMock()
+
+    backend._client.submit = fake_submit
+
+    def shared_fn(n):
+        return n
+
+    tasks = [
+        ComputeTask(function=shared_fn, args=(1,)),
+        ComputeTask(function=shared_fn, args=(1,)),
+    ]
+
+    with patch("asyncio.create_task", side_effect=_create_task_that_closes_coro):
+        await backend.submit_tasks(tasks)
+
+    assert len(submitted_keys) == 2
+    assert submitted_keys[0] != submitted_keys[1]
+    assert submitted_keys[0] == tasks[0]["uid"]
+    assert submitted_keys[1] == tasks[1]["uid"]

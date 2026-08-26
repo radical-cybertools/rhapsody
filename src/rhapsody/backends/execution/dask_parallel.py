@@ -2,16 +2,35 @@
 
 This module provides a backend that executes tasks on Dask clusters, supporting both local and
 distributed execution environments.
+
+Execution model
+----------------
+Dask workers already natively distinguish sync and async callables: a submitted callable that
+is a coroutine function runs directly on the worker's event loop, while a plain callable runs in
+the worker's thread pool (see ``dask._task_spec.Task.is_coro`` /
+``distributed.worker.Worker._maybe_deserialize_task``). Because of this, RHAPSODY submits
+``task["function"]`` to Dask exactly as the caller defined it (optionally wrapped in
+``functools.partial`` only to pre-bind keyword arguments) for *both* sync and async callables.
+No RHAPSODY-side closure/adapter is used to "convert" an async callable into something Dask can
+run — that used to be done via a `functools.wraps`-decorated local closure, which is exactly what
+caused pickling failures (the closure's `__qualname__`/`__module__` were copied from the original
+function, so pickling-by-reference resolved to a *different* object at that name and raised
+``PicklingError: ... it's not the same object as ...``). Submitting the real callable directly
+removes the synthetic function whose identity could ever mismatch.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
+import time
+from dataclasses import dataclass
 from functools import partial
-from functools import wraps
 from typing import Any
 from typing import Callable
+
+from rhapsody.api.errors import BackendError
 
 from ..base import BaseBackend
 from ..constants import BackendMainStates
@@ -80,12 +99,32 @@ def _run_executable(
         return result.stdout.decode(), result.stderr.decode(), result.returncode
 
 
+@dataclass
+class _TaskRuntime:
+    """Backend-private bookkeeping for a submitted task.
+
+    Deliberately kept separate from the RHAPSODY task dict (``DaskExecutionBackend.tasks``), which
+    is shared with and owned by the caller: nothing Dask/runtime-specific (the Dask ``Future``,
+    submission bookkeeping) should be written onto that shared object.
+    """
+
+    uid: str
+    kind: str  # "function" or "executable" — diagnostics only
+    future: Any | None = None  # dask.distributed.Future, set once client.submit() succeeds
+    submitted_at: float = 0.0
+
+
 class DaskExecutionBackend(BaseBackend):
     """A Dask execution backend for distributed task execution.
 
     Handles task submission, cancellation, and proper async event loop handling
     for distributed task execution using Dask. Supports async functions, sync
     functions, and executable tasks.
+
+    Client/cluster ownership: if the caller supplies ``client``, this backend never closes it
+    (``shutdown()`` leaves it open). If the caller supplies only ``cluster``, this backend creates
+    and owns a ``Client`` for it (closed on ``shutdown()``) but never touches the caller's cluster.
+    If neither is supplied, this backend creates and owns both.
 
     Usage:
         backend = await DaskExecutionBackend(resources)
@@ -107,8 +146,11 @@ class DaskExecutionBackend(BaseBackend):
             resources: Dictionary of resource requirements for tasks. Contains
                 configuration parameters for the Dask client initialization.
             name: Name of the backend.
-            cluster: Optional preconfigured Dask Cluster object.
-            client: Optional preconfigured Dask Client object.
+            cluster: Optional preconfigured Dask Cluster object. Not closed by
+                shutdown() — the caller retains ownership.
+            client: Optional preconfigured Dask Client object, which must have been
+                created with asynchronous=True. Not closed by shutdown() — the
+                caller retains ownership.
         """
 
         if dask is None:
@@ -117,12 +159,15 @@ class DaskExecutionBackend(BaseBackend):
         super().__init__(name=name)
 
         self.logger = _get_logger()
-        self.tasks = {}
+        self.tasks: dict[str, dict[str, Any]] = {}
+        self._runtime: dict[str, _TaskRuntime] = {}
         self._client = None
         self._callback_func: Callable = lambda t, s: None
         self._resources = resources or {}
         self._cluster_provided = cluster
         self._client_provided = client
+        # Ownership: only close resources this backend created itself.
+        self._owns_client = client is None
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
 
@@ -169,12 +214,20 @@ class DaskExecutionBackend(BaseBackend):
         """Initialize the Dask client and set up worker environments.
 
         Raises:
+            ValueError: If an externally-provided client is not asynchronous.
             Exception: If Dask client initialization fails.
         """
         try:
-            if self._client_provided:
+            if self._client_provided is not None:
+                if not getattr(self._client_provided, "asynchronous", False):
+                    raise ValueError(
+                        "DaskExecutionBackend requires an externally-provided Client to be "
+                        "created with asynchronous=True (e.g. Client(..., asynchronous=True)). "
+                        f"Got a client with asynchronous="
+                        f"{getattr(self._client_provided, 'asynchronous', None)!r}."
+                    )
                 self._client = self._client_provided
-            elif self._cluster_provided:
+            elif self._cluster_provided is not None:
                 self._client = await dask.Client(
                     self._cluster_provided, asynchronous=True, **self._resources
                 )
@@ -192,7 +245,7 @@ class DaskExecutionBackend(BaseBackend):
 
         Args:
             func: Function to be called when task states change. Should accept
-                task and state parameters.
+                task and state parameters. May be sync or async.
         """
         self._callback_func = func
 
@@ -211,24 +264,28 @@ class DaskExecutionBackend(BaseBackend):
             uid (str): The UID of the task to cancel.
 
         Returns:
-            bool: True if the task was found and cancellation was attempted,
-            False otherwise.
+            bool: True if the task was found (still tracked, with a submitted Dask
+            future) and cancellation was attempted, False for an unknown uid, a task
+            that hasn't been submitted to Dask yet, or one that already reached a
+            terminal state (and was purged from tracking).
         """
         self._ensure_initialized()
-        if uid in self.tasks:
-            task = self.tasks[uid]
-            future = task.get("future")
-            if future:
-                await future.cancel()
-                return True
-        return False
+        runtime = self._runtime.get(uid)
+        if runtime is None or runtime.future is None:
+            return False
+        try:
+            await runtime.future.cancel()
+        except Exception:
+            self.logger.exception(f"Error cancelling task '{uid}'")
+            return False
+        return True
 
     async def submit_tasks(self, tasks: list[dict[str, Any]]) -> None:
         """Submit tasks to the Dask cluster.
 
         Dispatches each task to the appropriate submission method based on its type:
-        executable tasks run via subprocess, async functions via an async wrapper,
-        and sync functions are submitted directly to Dask workers.
+        executable tasks run via subprocess, function tasks (sync or async) are
+        submitted directly to Dask workers.
 
         Args:
             tasks: List of task dictionaries containing:
@@ -240,10 +297,18 @@ class DaskExecutionBackend(BaseBackend):
                 - arguments: CLI arguments for executable tasks
                 - task_backend_specific_kwargs: Passed directly to client.submit()
 
-        Note:
-            Future objects are filtered out from args as they are not picklable.
+        Raises:
+            BackendError: If the Dask client is not in a usable state (the whole
+                backend is unavailable — this is not attributable to any one task).
+            ValueError: If a task specifies neither 'function' nor 'executable'.
         """
         self._ensure_initialized()
+
+        if self._client is None or self._client.status != "running":
+            raise BackendError(
+                self.name,
+                f"Dask client is not usable (status={getattr(self._client, 'status', None)!r})",
+            )
 
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
@@ -252,66 +317,56 @@ class DaskExecutionBackend(BaseBackend):
         for task in tasks:
             is_func_task = bool(task.get("function"))
             is_exec_task = bool(task.get("executable"))
+            if not is_func_task and not is_exec_task:
+                raise ValueError("Task must specify either 'function' or 'executable'")
 
-            self.tasks[task["uid"]] = task
+            uid = task["uid"]
+            self.tasks[uid] = task
+            self._runtime[uid] = _TaskRuntime(
+                uid=uid,
+                kind="executable" if is_exec_task else "function",
+                submitted_at=time.monotonic(),
+            )
 
-            # Filter out future objects as they are not picklable for Dask workers
-            filtered_args = [
-                arg for arg in task.get("args", ()) if not isinstance(arg, asyncio.Future)
-            ]
-            task["args"] = tuple(filtered_args)
+            if is_exec_task:
+                await self._submit_executable(task)
+            else:
+                await self._submit_function(task)
 
-            try:
-                if is_exec_task:
-                    await self._submit_executable(task)
-                elif is_func_task and asyncio.iscoroutinefunction(task["function"]):
-                    await self._submit_async_function(task)
-                elif is_func_task:
-                    await self._submit_sync_function(task)
-                else:
-                    raise ValueError("Task must specify either 'function' or 'executable'")
-            except Exception as e:
-                task["exception"] = e
-                task["stdout"] = ""
-                task["stderr"] = str(e)
-                self._callback_func(task, "FAILED")
+    async def _submit_and_track(
+        self,
+        task: dict[str, Any],
+        fn: Callable,
+        args: tuple,
+        *,
+        kind: str,
+        fn_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        """Submit ``fn(*args, **fn_kwargs)`` to Dask and schedule its completion handler.
 
-    async def _submit_to_dask(self, task: dict[str, Any], fn: Callable, *args) -> None:
-        """Submit function to Dask and register completion callback.
-
-        Submits the wrapped function to Dask client and registers a callback
-        to handle task completion or failure.
+        This is the single low-level submission primitive shared by function and
+        executable tasks. ``fn``/``args``/``fn_kwargs`` are the user-visible callable
+        and its arguments; Dask submission options (resources, key, retries, ...) come
+        only from ``task["task_backend_specific_kwargs"]``, kept strictly separate so a
+        user's own function kwarg can never collide with a Dask-reserved submit() kwarg.
 
         Args:
-            task: Task dictionary containing task metadata and configuration.
-            fn: The async function to submit to Dask.
-            *args: Arguments to pass to the function.
+            task: The RHAPSODY task dictionary (mutated in place with result/state fields).
+            fn: The callable to submit (never a synthetic wrapper — see module docstring).
+            args: Positional arguments to submit alongside ``fn``.
+            kind: "function" or "executable" — controls result-shape handling in `_on_done`.
+            fn_kwargs: Keyword arguments to submit alongside ``fn`` (executable path only;
+                function-task kwargs are pre-bound via `functools.partial` by the caller).
         """
+        uid = task["uid"]
+        submit_kwargs = dict(task.get("task_backend_specific_kwargs", {}))
+        if kind == "executable":
+            submit_kwargs = {
+                k: v for k, v in submit_kwargs.items() if k not in ("cwd", "shell", "env")
+            }
 
-        async def on_done(f):
-            task_uid = task["uid"]
-            try:
-                self._callback_func(task, "RUNNING")
-                result = await f
-                task["return_value"] = result
-                task["stdout"] = ""
-                task["stderr"] = ""
-                self._callback_func(task, "DONE")
-            except dask.client.FutureCancelledError:
-                self._callback_func(task, "CANCELED")
-            except Exception as e:
-                task["exception"] = e
-                task["stdout"] = ""
-                task["stderr"] = str(e)
-                self._callback_func(task, "FAILED")
-            finally:
-                # Clean up the future reference once task is complete
-                if task_uid in self.tasks:
-                    del self.tasks[task_uid]
-
-        backend_kwargs = dict(task.get("task_backend_specific_kwargs", {}))
-        dask_resources = backend_kwargs.get("resources", {})
-        if dask_resources and not self._check_resources_satisfiable(dask_resources):
+        dask_resources = submit_kwargs.get("resources", {})
+        if dask_resources and not await self._check_resources_satisfiable(dask_resources):
             task["exception"] = RuntimeError(
                 f"No worker can satisfy resources {dask_resources}. "
                 f"Workers must be started with matching --resources flags "
@@ -320,46 +375,108 @@ class DaskExecutionBackend(BaseBackend):
             task["stdout"] = ""
             task["stderr"] = str(task["exception"])
             task["exit_code"] = 1
-            self._callback_func(task, "FAILED")
+            await self._invoke_callback(task, "FAILED")
+            self._purge(uid)
             return
 
-        dask_future = self._client.submit(fn, *args, **backend_kwargs)
+        # Use the RHAPSODY uid as the Dask key unless the caller explicitly set one.
+        # Without this, client.submit()'s default (tokenize(func, kwargs, *args) under
+        # pure=True) can make two distinct tasks that call the same function with the
+        # same arguments collide onto the same Dask key, silently sharing one Future.
+        submit_kwargs.setdefault("key", uid)
 
-        # Store the future for potential cancellation
-        self.tasks[task["uid"]]["future"] = dask_future
+        try:
+            dask_future = self._client.submit(fn, *args, **(fn_kwargs or {}), **submit_kwargs)
+        except Exception as e:
+            task["exception"] = e
+            task["stdout"] = ""
+            task["stderr"] = str(e)
+            await self._invoke_callback(task, "FAILED")
+            self._purge(uid)
+            return
 
-        # Schedule the callback to run when future completes
-        asyncio.create_task(on_done(dask_future))
+        self._runtime[uid].future = dask_future
+        asyncio.create_task(self._on_done(task, dask_future, kind))
 
-    async def _submit_async_function(self, task: dict[str, Any]) -> None:
-        """Submit async function to Dask.
+    async def _on_done(self, task: dict[str, Any], f: Any, kind: str) -> None:
+        """Shared completion handler for both function and executable Dask futures."""
+        uid = task["uid"]
+        try:
+            await self._invoke_callback(task, "RUNNING")
+            if kind == "executable":
+                stdout, stderr, returncode = await f
+                task["stdout"] = stdout
+                task["stderr"] = stderr
+                task["exit_code"] = returncode
+                state = "DONE" if returncode == 0 else "FAILED"
+            else:
+                result = await f
+                task["return_value"] = result
+                task["stdout"] = ""
+                task["stderr"] = ""
+                state = "DONE"
+            await self._invoke_callback(task, state)
+        except dask.client.FutureCancelledError:
+            await self._invoke_callback(task, "CANCELED")
+        except Exception as e:
+            task["exception"] = e
+            task["stdout"] = ""
+            task["stderr"] = str(e)
+            await self._invoke_callback(task, "FAILED")
+        finally:
+            self._purge(uid)
 
-        Creates an async wrapper that preserves the original function name
-        for better visibility in the Dask dashboard.
+    async def _invoke_callback(self, task: dict[str, Any], state: str) -> None:
+        """Invoke the registered callback, tolerating both sync and async callables.
 
-        Args:
-            task: Task dictionary containing the async function and its parameters.
+        A callback failure is caught and logged here so it can never corrupt task state or interrupt
+        the completion handler that called it.
         """
+        try:
+            result = self._callback_func(task, state)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            self.logger.exception(
+                f"Callback raised while handling state '{state}' for task '{task.get('uid')}'"
+            )
 
-        # Preserve the real task name in dask dashboard
-        @wraps(task["function"])
-        async def async_wrapper():
-            return await task["function"](*task["args"], **task["kwargs"])
+    def _purge(self, uid: str) -> None:
+        """Drop the backend-internal record for a task that has reached a terminal state.
 
-        await self._submit_to_dask(task, async_wrapper)
+        Safe to call once the terminal-state callback has already been invoked for this
+        uid: results live on the original task dict, which the caller retains
+        independently of this backend's own bookkeeping, and the callback has already
+        resolved any waiter before this runs. After this, `cancel_task(uid)` returns
+        False and `uid not in self.tasks`.
+        """
+        self.tasks.pop(uid, None)
+        self._runtime.pop(uid, None)
 
-    async def _submit_sync_function(self, task: dict[str, Any]) -> None:
-        """Submit a sync (non-coroutine) function to Dask.
+    async def _submit_function(self, task: dict[str, Any]) -> None:
+        """Submit a Python callable (sync or async) directly to Dask.
 
-        Dask workers run sync functions natively — no async wrapper needed.
+        Dask's own worker executor detects whether the submitted callable is a
+        coroutine function and runs it on the worker's event loop if so, or in the
+        worker's thread pool otherwise — no RHAPSODY-side adapter is needed for
+        either case (see module docstring). The callable is submitted exactly as the
+        caller defined it, optionally pre-bound via `functools.partial` for kwargs;
+        it is never renamed or re-wrapped, so it can never claim an identity that
+        doesn't match what pickling finds at that name.
 
         Args:
-            task: Task dictionary containing the sync function and its parameters.
+            task: Task dictionary containing the function and its parameters.
         """
         fn = task["function"]
-        if task.get("kwargs"):
-            fn = partial(fn, **task["kwargs"])
-        await self._submit_to_dask(task, fn, *task["args"])
+        kwargs = task.get("kwargs") or {}
+        if kwargs:
+            # Bound via partial (not passed as client.submit(**kwargs)) because
+            # client.submit reserves kwarg names like "resources"/"retries"/"key" for
+            # its own submission options; a user function kwarg with the same name
+            # must never collide with those.
+            fn = partial(fn, **kwargs)
+        args = tuple(task.get("args") or ())
+        await self._submit_and_track(task, fn, args, kind="function")
 
     async def _submit_executable(self, task: dict[str, Any]) -> None:
         """Submit an executable task to run via subprocess inside a Dask worker.
@@ -368,59 +485,27 @@ class DaskExecutionBackend(BaseBackend):
             task: Task dictionary containing executable path, arguments, and metadata.
         """
         bksp = task.get("task_backend_specific_kwargs", {})
-        backend_kwargs = {k: v for k, v in bksp.items() if k not in ("cwd", "shell", "env")}
-        dask_resources = backend_kwargs.get("resources", {})
-        if dask_resources and not self._check_resources_satisfiable(dask_resources):
-            msg = (
-                f"No worker can satisfy resources {dask_resources}. "
-                f"Workers must be started with matching --resources flags "
-                f'(e.g. dask worker <scheduler> --resources "GPU=1").'
-            )
-            task["stderr"] = msg
-            task["stdout"] = ""
-            task["exit_code"] = 1
-            self._callback_func(task, "FAILED")
-            return
-
-        dask_future = self._client.submit(
-            _run_executable,
-            task["executable"],
-            task.get("arguments", []),
-            cwd=bksp.get("cwd"),
-            env=bksp.get("env"),
-            shell=bksp.get("shell", False),
-            capture_stdio=task.get("capture_stdio", False),
-            output_dir=self._work_dir,
-            uid=task["uid"],
-            **backend_kwargs,
+        fn_kwargs = {
+            "cwd": bksp.get("cwd"),
+            "env": bksp.get("env"),
+            "shell": bksp.get("shell", False),
+            "capture_stdio": task.get("capture_stdio", False),
+            "output_dir": self._work_dir,
+            "uid": task["uid"],
+        }
+        args = (task["executable"], task.get("arguments", []))
+        await self._submit_and_track(
+            task, _run_executable, args, kind="executable", fn_kwargs=fn_kwargs
         )
-        self.tasks[task["uid"]]["future"] = dask_future
 
-        async def on_done(f):
-            task_uid = task["uid"]
-            try:
-                self._callback_func(task, "RUNNING")
-                stdout, stderr, returncode = await f
-                task["stdout"] = stdout
-                task["stderr"] = stderr
-                task["exit_code"] = returncode
-                state = "DONE" if returncode == 0 else "FAILED"
-                self._callback_func(task, state)
-            except dask.client.FutureCancelledError:
-                self._callback_func(task, "CANCELED")
-            except Exception as e:
-                task["exception"] = e
-                task["stdout"] = ""
-                task["stderr"] = str(e)
-                self._callback_func(task, "FAILED")
-            finally:
-                if task_uid in self.tasks:
-                    del self.tasks[task_uid]
-
-        asyncio.create_task(on_done(dask_future))
-
-    def _check_resources_satisfiable(self, resources: dict) -> bool:
+    async def _check_resources_satisfiable(self, resources: dict) -> bool:
         """Return True if at least one connected worker can satisfy all resource constraints.
+
+        Uses `client.scheduler.identity()` rather than `client.scheduler_info()`: for an
+        asynchronous Client, `scheduler_info()` returns a cached snapshot captured once
+        at connect time with an always-empty "workers" mapping (see its own docstring,
+        which recommends this exact alternative), so it can never see workers that
+        joined afterward or their resource advertisements.
 
         Args:
             resources: Dict of resource requirements (e.g. {"GPU": 1}).
@@ -428,7 +513,8 @@ class DaskExecutionBackend(BaseBackend):
         Returns:
             True if a qualifying worker exists, False otherwise.
         """
-        workers = self._client.scheduler_info().get("workers", {})
+        info = await self._client.scheduler.identity(n_workers=-1)
+        workers = info.get("workers", {})
         return any(
             all(w.get("resources", {}).get(k, 0) >= v for k, v in resources.items())
             for w in workers.values()
@@ -457,7 +543,16 @@ class DaskExecutionBackend(BaseBackend):
         file_name: str | None = None,
         file_path: str | None = None,
     ) -> None:
-        """Handle explicit data dependencies between tasks.
+        """Intentional no-op: Dask has no file-staging directive analogous to this hook.
+
+        RHAPSODY's other backends that implement this (e.g. RADICAL-Pilot) use
+        backend-native staging/transfer directives executed before a task runs. Dask
+        has no equivalent at the flat `submit_tasks(list)` batch-submission level used
+        here; Dask's native dependency mechanism is instead passing one task's Future
+        as an argument to another `client.submit()` call, which requires a task-graph
+        API this module doesn't currently expose. Should RHAPSODY grow an explicit
+        dependency-graph API, this backend should wire dependencies that way rather
+        than via file staging.
 
         Args:
             src_task: The source task that produces the dependency.
@@ -468,7 +563,7 @@ class DaskExecutionBackend(BaseBackend):
         pass
 
     def link_implicit_data_deps(self, src_task: dict[str, Any], dst_task: dict[str, Any]) -> None:
-        """Handle implicit data dependencies for a task.
+        """Intentional no-op — see `link_explicit_data_deps` for rationale.
 
         Args:
             src_task: The source task that produces data.
@@ -487,6 +582,10 @@ class DaskExecutionBackend(BaseBackend):
     async def task_state_cb(self, task: dict, state: str) -> None:
         """Callback function invoked when a task's state changes.
 
+        Intentional no-op: state notification is delivered through the callback
+        registered via `register_callback` (invoked from `_on_done`/`_invoke_callback`),
+        matching the convention used by every sibling backend.
+
         Args:
             task: Dictionary containing task information and metadata.
             state: The new state of the task.
@@ -494,7 +593,11 @@ class DaskExecutionBackend(BaseBackend):
         pass
 
     async def build_task(self, task: dict) -> None:
-        """Build or prepare a task for execution.
+        """Intentional no-op: Dask has no separate "build description, then submit" phase.
+
+        Task construction happens inline during `submit_tasks`/`_submit_function`/
+        `_submit_executable` — there is no intermediate native task-description object
+        to build ahead of time the way e.g. RADICAL-Pilot's `TaskDescription` requires.
 
         Args:
             task: Dictionary containing task definition, parameters, and metadata
@@ -505,8 +608,9 @@ class DaskExecutionBackend(BaseBackend):
     async def shutdown(self) -> None:
         """Shutdown the Dask client and clean up resources.
 
-        Closes the Dask client connection, clears task storage, and handles any cleanup exceptions
-        gracefully.
+        Cancels all outstanding tasks unconditionally. Closes the Dask client only if this backend
+        created it (see class docstring on ownership); an externally provided client/cluster is left
+        open for the caller to manage.
         """
         # Set backend state to SHUTDOWN
         self._backend_state = BackendMainStates.SHUTDOWN
@@ -514,12 +618,16 @@ class DaskExecutionBackend(BaseBackend):
 
         if self._client is not None:
             try:
-                # Cancel all running tasks first
+                # Cancel all running tasks first, regardless of ownership.
                 await self.cancel_all_tasks()
 
-                # Close the client
-                await self._client.close()
-                self.logger.info("Dask client shutdown complete")
+                if self._owns_client:
+                    await self._client.close()
+                    self.logger.info("Dask client shutdown complete")
+                else:
+                    self.logger.info(
+                        "Externally-provided Dask client left open (not owned by this backend)"
+                    )
             except Exception as e:
                 self.logger.exception(f"Error during shutdown: {str(e)}")
             finally:
@@ -528,6 +636,7 @@ class DaskExecutionBackend(BaseBackend):
 
         # Always clean up state regardless of client presence
         self.tasks.clear()
+        self._runtime.clear()
         self._initialized = False
 
     def _ensure_initialized(self):
