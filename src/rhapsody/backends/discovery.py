@@ -73,6 +73,11 @@ class BackendRegistry:
         if "dragon" in cls._backends:
             cls._backends.setdefault("dragon_v3", cls._backends["dragon"])
 
+        # Alias "concurrent:processpool" to concurrent backend with a process
+        # pool instead of default thread pool
+        if "concurrent" in cls._backends:
+            cls._backends["concurrent:process_pool"] = backend_class
+
         cls._initialized = True
 
     @classmethod
@@ -185,6 +190,11 @@ def get_backend(backend_name: str, *args: Any, **kwargs: Any) -> BaseBackend:
         backend = get_backend('radical_pilot')
     """
     backend_class = BackendRegistry.get_backend_class(backend_name)
+
+    from concurrent.futures import ProcessPoolExecutor
+    if(backend_name == "concurrent:process_pool"):
+        return backend_class(ProcessPoolExecutor(), *args, **kwargs)
+    
     return backend_class(*args, **kwargs)
 
 
