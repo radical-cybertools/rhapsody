@@ -192,9 +192,10 @@ def get_backend(backend_name: str, *args: Any, **kwargs: Any) -> BaseBackend:
     backend_class = BackendRegistry.get_backend_class(backend_name)
 
     from concurrent.futures import ProcessPoolExecutor
+
     if backend_name == "concurrent:process_pool":
         return backend_class(ProcessPoolExecutor(), *args, **kwargs)
-    
+
     return backend_class(*args, **kwargs)
 
 
