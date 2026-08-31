@@ -3327,6 +3327,10 @@ class DragonExecutionBackendV3(BaseBackend):
             stdout_path = task_info.get("stdout_path")
             stderr_path = task_info.get("stderr_path")
             if raised:
+                # surface the remote traceback in the endpoint log -- the
+                # consumer side only ever sees the exception message
+                self.logger.error(
+                    f"task {uid} failed: {result}\n{tb or '(no traceback captured)'}")
                 task_desc["exception"] = result
                 task_desc["stderr"] = stderr_path if stderr_path else (tb if tb else str(result))
                 task_desc["stdout"] = stdout_path or stdout or ""
