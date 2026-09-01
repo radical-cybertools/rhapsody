@@ -670,7 +670,12 @@ class OrbitExecutionBackend(BaseBackend):
         if not buffered:
             await asyncio.to_thread(self._rh.cancel_task, uid)
 
-        task = self._tasks[uid]
+        # the task may have completed under the in-flight cancel -- its
+        # terminal callback then already fired via the remote notification
+        # and it left `_tasks`; nothing remains to cancel
+        task = self._tasks.get(uid)
+        if task is None:
+            return False
         task["state"] = "CANCELED"
         self._fire_callback(task, "CANCELED")
         return True
