@@ -779,7 +779,8 @@ async def test_dask_args_kwargs_not_mutated_on_caller_task():
 @pytest.mark.asyncio
 async def test_check_resources_satisfiable_uses_scheduler_identity():
     """_check_resources_satisfiable must use scheduler.identity(), not the always- empty
-    scheduler_info() cache on an asynchronous client."""
+    scheduler_info() cache on an asynchronous client. Called with no n_workers= kwarg
+    since older `distributed` releases don't accept that parameter at all."""
     try:
         from unittest.mock import AsyncMock
         from unittest.mock import MagicMock
@@ -798,7 +799,7 @@ async def test_check_resources_satisfiable_uses_scheduler_identity():
 
     assert await backend._check_resources_satisfiable({"GPU": 1}) is True
     assert await backend._check_resources_satisfiable({"GPU": 4}) is False
-    backend._client.scheduler.identity.assert_called_with(n_workers=-1)
+    backend._client.scheduler.identity.assert_called_with()
 
 
 # ---------------------------------------------------------------------------

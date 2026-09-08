@@ -507,13 +507,19 @@ class DaskExecutionBackend(BaseBackend):
         which recommends this exact alternative), so it can never see workers that
         joined afterward or their resource advertisements.
 
+        No `n_workers=` kwarg is passed: newer `distributed` defaults it to -1 (all
+        workers) on the scheduler side, but older `distributed` releases (still within
+        this project's `dask[distributed]>=2023.0.0` support range) don't accept that
+        parameter at all and raise `TypeError` if it's passed. Omitting it returns all
+        workers on every supported version.
+
         Args:
             resources: Dict of resource requirements (e.g. {"GPU": 1}).
 
         Returns:
             True if a qualifying worker exists, False otherwise.
         """
-        info = await self._client.scheduler.identity(n_workers=-1)
+        info = await self._client.scheduler.identity()
         workers = info.get("workers", {})
         return any(
             all(w.get("resources", {}).get(k, 0) >= v for k, v in resources.items())

@@ -20,8 +20,10 @@
   an asynchronous client always returns a cached snapshot with an empty `workers`
   mapping (see that method's own docstring). Every resource-constrained task
   failed regardless of whether a matching worker actually existed. Fixed to use
-  `await client.scheduler.identity(n_workers=-1)`, Dask's own documented
-  alternative for a live per-worker view.
+  `await client.scheduler.identity()`, Dask's own documented alternative for a
+  live per-worker view (called with no `n_workers=` kwarg — that parameter is
+  absent on older `distributed` releases still within this project's
+  `dask[distributed]>=2023.0.0` support range and raises `TypeError` there).
 - **`DaskExecutionBackend` could silently share one Dask `Future` across two
   distinct tasks** — `client.submit()` defaults to `pure=True` with no explicit
   `key`, deriving the Dask key from `tokenize(func, kwargs, *args)`. Two RHAPSODY
