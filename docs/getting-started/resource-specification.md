@@ -131,10 +131,21 @@ pass it via `cluster=` or `client=` — the task code is unchanged:
 from dask_jobqueue import SLURMCluster
 from rhapsody.backends import DaskExecutionBackend
 
-cluster = SLURMCluster(cores=4, memory="8GB", walltime="01:00:00")
-cluster.scale(jobs=4)
-backend = await DaskExecutionBackend(cluster=cluster)
+async with SLURMCluster(
+    cores=4, memory="8GB", walltime="01:00:00", asynchronous=True
+) as cluster:
+    await cluster.scale(jobs=4)
+    backend = await DaskExecutionBackend(cluster=cluster)
 ```
+
+!!! warning "asynchronous=True is required"
+    Construct `SLURMCluster` (and other non-`LocalCluster` cluster managers) with
+    `asynchronous=True` and enter it via `async with`, as above — otherwise it runs
+    its own background-thread event loop, the `Client` built around it inherits the
+    mismatched loop, and task results / shutdown fail with confusing
+    `TypeError`/`AttributeError` errors. See
+    [Cluster injection](advanced-usage.md#cluster-injection) for details and
+    `examples/07-dask-backend-slrum-cluster.py` for a full working example.
 
 ---
 
