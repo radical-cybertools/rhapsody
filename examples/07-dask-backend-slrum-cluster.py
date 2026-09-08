@@ -32,7 +32,7 @@ async def main():
     # tested on purdue anvil
     async with SLURMCluster(
         queue="wholenode",
-        account="dmrxxx", # user must provide this
+        account="dmrxxx",  # user must provide this
         cores=16,  # cores per Slurm job (worker)
         memory="16GB",
         walltime="00:30:00",

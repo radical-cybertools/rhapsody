@@ -1,5 +1,74 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **`DaskExecutionBackend` PicklingError on async function tasks** — `submit_tasks`
+  wrapped every async callable in a local closure decorated with
+  `@functools.wraps(task["function"])` before submitting it. `@wraps` copies the
+  original function's `__module__`/`__qualname__` onto the closure, so pickling it
+  by reference resolved to a *different* object living at that name and raised
+  `PicklingError: Can't pickle <function ...>: it's not the same object as
+  module.name`. Dask workers already natively detect `iscoroutinefunction()` on a
+  submitted callable and run it on the worker's own event loop (no thread pool) —
+  sync and async callables are now both submitted directly (optionally through
+  `functools.partial` to pre-bind kwargs), eliminating the wrapper entirely rather
+  than patching around it.
+- **`DaskExecutionBackend._check_resources_satisfiable()` could never detect a
+  satisfiable resource request** — it called `Client.scheduler_info()`, which for
+  an asynchronous client always returns a cached snapshot with an empty `workers`
+  mapping (see that method's own docstring). Every resource-constrained task
+  failed regardless of whether a matching worker actually existed. Fixed to use
+  `await client.scheduler.identity(n_workers=-1)`, Dask's own documented
+  alternative for a live per-worker view.
+- **`DaskExecutionBackend` could silently share one Dask `Future` across two
+  distinct tasks** — `client.submit()` defaults to `pure=True` with no explicit
+  `key`, deriving the Dask key from `tokenize(func, kwargs, *args)`. Two RHAPSODY
+  tasks calling the same function with the same arguments tokenized to the
+  identical key, so the second `submit()` silently returned the first task's
+  `Future` instead of doing independent work. Fixed by always passing
+  `key=task["uid"]` (unless the caller already set one via
+  `task_backend_specific_kwargs`).
+- **`DaskExecutionBackend.shutdown()` always closed the Dask `Client`**, even one
+  the caller supplied via `client=`/`cluster=` — the constructor already tracked
+  `_client_provided`/`_cluster_provided` but never consulted them at shutdown.
+  Ownership is now tracked explicitly (`_owns_client`) and `shutdown()` only
+  closes a client this backend created itself.
+
+### Changed
+
+- **`DaskExecutionBackend`** no longer mutates the caller's task dict for
+  submission bookkeeping: `task["args"]` is no longer rewritten, and
+  `asyncio.Future` arguments are no longer silently filtered out of `args`
+  (nothing in RHAPSODY's task contract puts one there; a genuinely unpicklable
+  argument now surfaces as a real, attributable submission failure on that task
+  instead of silently shifting positional args). The Dask `Future` handle moved
+  off the shared task dict into a private per-task runtime record.
+- **`DaskExecutionBackend.submit_tasks()`** now raises `ValueError` immediately for
+  a task specifying neither `function` nor `executable`, instead of recording it
+  as a per-task `FAILED` callback — this is a caller programming error, not a
+  runtime submission failure. Also raises `BackendError` if the Dask client
+  itself is unusable (e.g. scheduler connection lost), rather than attributing a
+  whole-backend outage to whichever task happened to be submitting at the time.
+- **`DaskExecutionBackend`** now requires an externally-supplied `client=` to have
+  been constructed with `asynchronous=True`; raises `ValueError` at init time
+  otherwise instead of failing confusingly later.
+- Registered callbacks on `DaskExecutionBackend` may now be sync or async
+  callables; a raising callback is caught and logged instead of corrupting task
+  completion state.
+
+### Added
+
+- `examples/07-dask-backend-slrum-cluster.py` — `DaskExecutionBackend` against a
+  real Slurm allocation via `dask_jobqueue.SLURMCluster`, including the
+  `asynchronous=True`/`async with` construction required for non-`LocalCluster`
+  cluster managers driven from async code (see `docs/getting-started/advanced-usage.md#dask-distributed-backend`).
+  Documented in `examples/README.md`.
+- Regression tests for all four fixes above, plus client/cluster
+  ownership-on-shutdown tests, async-callback and callback-isolation tests, and a
+  test proving the deleted `@wraps`-closure pattern really did break pickling.
+
 ## [0.5.0] - 2026-08-20
 
 ### Added
