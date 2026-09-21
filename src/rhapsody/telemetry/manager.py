@@ -15,6 +15,7 @@ import dataclasses
 import json
 import logging
 import time
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -176,9 +177,15 @@ class TelemetryManager:
         # correct parent span context in the dispatch loop.
         self._task_contexts: dict[str, Any] = {}
 
-        # Token returned by context.attach() when the session span is activated in start().
-        # Stored so it can be properly detached in stop().
+        # Token returned by context.attach() when the session span is activated in start(),
+        # plus a weakref to the asyncio task that performed the attach. ContextVar tokens
+        # can only be reset from the contextvars.Context they were created in (i.e. the
+        # same task), so stop() skips the detach when it runs in a different task — OTel
+        # would otherwise log a spurious "Failed to detach context" ValueError at
+        # shutdown. A weakref avoids pinning the starting task's frame for the whole
+        # session lifetime.
         self._session_ctx_token: Any = None
+        self._session_ctx_task: weakref.ref | None = None
 
         # Caller-supplied OTel extension points wired into RHAPSODY's internal providers
         # at start() time alongside SpanBuffer / InMemoryMetricReader.
@@ -251,6 +258,8 @@ class TelemetryManager:
         self._session_ctx_token = otel_context.attach(
             trace_mod.set_span_in_context(self._session_span)
         )
+        _task = asyncio.current_task()
+        self._session_ctx_task = weakref.ref(_task) if _task is not None else None
 
         self._running = True
         self._dispatch_task = asyncio.create_task(self._dispatch_loop(), name="telemetry-dispatch")
@@ -322,8 +331,17 @@ class TelemetryManager:
         from opentelemetry import context as otel_context
 
         if self._session_ctx_token is not None:
-            otel_context.detach(self._session_ctx_token)
+            # Detach only when stop() runs in the task that attached the token in
+            # start(); a token reset from any other task raises ValueError inside
+            # otel_context.detach(), which OTel catches and logs as an ERROR.
+            # Skipping is safe: the attach only ever affected the starting task's
+            # context, and the tracer provider shuts down right below. The weakref
+            # resolves to None once the starting task is gone — skip then too.
+            _attached_task = self._session_ctx_task() if self._session_ctx_task else None
+            if _attached_task is not None and asyncio.current_task() is _attached_task:
+                otel_context.detach(self._session_ctx_token)
             self._session_ctx_token = None
+            self._session_ctx_task = None
 
         if self._meter_provider:
             self._meter_provider.shutdown()
