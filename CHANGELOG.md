@@ -16,7 +16,7 @@
   `HardwareConfig`, `BatchingConfig`, `GuardrailsConfig`, `DynamicWorkerConfig`
   in the new `rhapsody.backends.ai.config`), re-exported as-is from
   `dragon.ai.inference`. **Breaking change** for existing callers still passing
-  `config_file="config.yaml"` — see `docs/integrations.md` for the new
+  `config_file="config.yaml"` — see `docs/ai/index.md` for the new
   constructor shape.
 - `DragonVllmInferenceBackend` now supports `await DragonVllmInferenceBackend(...)`
   as a single step, consistent with every other backend (`DragonExecutionBackend`,
@@ -34,6 +34,34 @@
 - **`NoopExecutionBackend`** — tasks are marked `DONE` immediately without
   executing anything; for benchmarking RHAPSODY's own submission/orchestration
   overhead independent of any real backend.
+- **New `rhapsody.backends.data` package** — `RedisDataBackend`/`DragonDataBackend`
+  launch and own the lifecycle of data infrastructure (a `redis-server` process, a
+  Dragon `DDict`) and hand back a connection endpoint, mirroring how execution
+  backends launch and own compute infrastructure. Deliberately has **zero
+  `radex` coupling** and **no client-construction methods** — callers build
+  whichever client they want (RADEX's typed clients, or a native one like
+  `redis-py`/`dragon.data.ddict.DDict.attach()`) from the endpoint themselves.
+  - Shared `DataBackend`/`Endpoint` ABCs with an explicit lifecycle state
+    machine (`CREATED → STARTING → {READY, FAILED}`, `{CREATED,READY,FAILED} →
+    SHUTDOWN`), idempotent `start()`/`shutdown()`, and `await RedisDataBackend(...)`/
+    `await DragonDataBackend(...)` as a single step, consistent with every
+    execution backend.
+  - `Session` now accepts `DataBackend` instances in the same list/`add_backend()`
+    call as execution backends — internally dispatched by capability
+    (`hasattr(backend, "submit_tasks")`) so a `DataBackend` gets lifecycle/`work_dir`
+    bookkeeping and is included in `session.close()`, but is never eligible as a
+    task's destination and adds no per-task routing overhead.
+  - New docs: **AI**, **Data**, and **Execution** top-level sections
+    (`docs/ai/index.md`, `docs/data-backends/{index,redis,dragon}.md`,
+    `docs/execution/index.md`) — `AI`/`Execution` are the former
+    `docs/integrations.md` content, relocated to their own top-level nav
+    entries; `Data` is new, covering the data-backend package end to end
+    (lifecycle, configuration options, multi-node/HPC Redis via `cmd=`, and
+    using a native client instead of RADEX's).
+  - New examples under `examples/data/`: paired Redis/Dragon producer/consumer
+    scripts, once using RADEX's typed clients and once using plain
+    `redis-py`/native `dragon.data.ddict.DDict` directly against the same
+    endpoint — demonstrating the backend is usable by any client.
 
 ### Fixed
 
@@ -73,6 +101,18 @@
   `get(block=False)`; the code correctly calls `get(block=True)` (poll() and
   the DDict write aren't atomic) since an earlier fix — the test just never
   caught up.
+- **`RedisDataBackend`'s `stdout=PIPE` never drained** — only `stderr` was ever
+  read, and only once, after the process had already exited; `stdout` was
+  never read at all. On a long-running node this fills the OS pipe buffer
+  (~64KB) and blocks `redis-server` on `write()` forever. Each node's
+  stdout/stderr is now redirected straight to its own log file
+  (`{work_dir}/redis.node{index}.log`) instead of a pipe, which both fixes
+  the hang and gives failure diagnostics a real file to tail.
+- **`RedisDataBackend`'s `env=` replaced the subprocess environment instead of
+  extending it** — passing any `env=` dropped `PATH` and everything else,
+  breaking resolution of the bare `redis-server` executable name even though
+  `shutil.which()` had just found it moments earlier using the parent's
+  `PATH`. `env=` now merges with (rather than replaces) `os.environ`.
 
 ## [0.4.0] - 2026-06-11
 
