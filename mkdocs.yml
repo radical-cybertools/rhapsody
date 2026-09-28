@@ -123,6 +123,11 @@ nav:
       - Quick Start: telemetry/quickstart.md
       - Integrations & Extensions: telemetry/integrations.md
       - FAQ: telemetry/faq.md
+  - Data Backends:
+      - Overview: data-backends/index.md
+      - Redis Data Backend: data-backends/redis.md
+      - Dragon Data Backend: data-backends/dragon.md
+      - Plugins: data-backends/plugins.md
   - HPC Machines:
       - Overview: hpc-machines/index.md
       - NCSA Delta: hpc-machines/ncsa-delta.md

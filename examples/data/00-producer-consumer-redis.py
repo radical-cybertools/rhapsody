@@ -1,10 +1,16 @@
+"""Same producer/consumer exchange as 00-producer-consumer-redis.py, but
+consumed with plain redis-py instead of RADEX's typed client -- proving
+RedisDataBackend's endpoint is usable by ANY Redis client, not just RADEX's.
+
+Requires: pip install redis
+"""
+
 import asyncio
 import logging
 import os
+from concurrent.futures import ProcessPoolExecutor
 
 import rhapsody
-
-from concurrent.futures import ProcessPoolExecutor
 
 from rhapsody.api import ComputeTask
 from rhapsody.api import Session
@@ -14,64 +20,60 @@ from rhapsody.backends.data import RedisDataBackend
 rhapsody.enable_logging(level=logging.INFO)
 
 
-# NOTE: task functions below are each fully self-contained. A task may be
-# invoked in a completely separate process/node with no knowledge of this
-# module or anything else defined here -- every import and every bit of
-# setup a task needs must live inside that task's own function body, never
-# factored into a shared helper or relying on driver-scope state. The only
-# input a task gets is whatever is explicitly passed as an argument
-# (`descriptor`, here) -- RedisDataBackend hands that back from `.start()`,
-# it never constructs a client itself.
-
-
-# func1 (producer) and func2 (consumer) are submitted together, with no
-# ordering guarantee between them -- func2 uses wait_for_*, not get_*, so
-# it correctly blocks until func1's data actually lands instead of racing
-# it.
+# NOTE: task functions below are each fully self-contained -- see
+# 00-producer-consumer-redis.py for the full rationale. The only difference
+# from that file is the client library: plain redis-py here instead of
+# radex.clients.core.RedisClient.
 
 
 def func1(descriptor):
-    import os
+    import pickle
 
     import numpy as np
+    import redis
 
-    from radex.clients.core import RedisClient
-    from radex.handles.handles import OutgoingHandle
-
-    os.environ["RADEX_STORE"] = descriptor
-    os.environ["RADEX_STORE_OPTS"] = "Standalone"
-    client = RedisClient()
+    host, port = descriptor.split(":")
+    client = redis.Redis(host=host, port=int(port))
 
     samples = np.arange(10, dtype=np.float64) ** 2  # [0, 1, 4, 9, ..., 81]
-    client.put_tensor(OutgoingHandle("samples"), samples)
-    client.put_scalar(OutgoingHandle("sample-count"), len(samples))
+    client.set("samples", pickle.dumps(samples))
+    client.set("sample-count", len(samples))
     return len(samples)
 
 
 def func2(descriptor):
-    import os
+    import pickle
+    import time
 
-    from radex.clients.core import RedisClient
-    from radex.handles.handles import IncomingHandle
+    import redis
 
-    os.environ["RADEX_STORE"] = descriptor
-    os.environ["RADEX_STORE_OPTS"] = "Standalone"
-    client = RedisClient()
+    host, port = descriptor.split(":")
+    client = redis.Redis(host=host, port=int(port))
 
-    samples = client.wait_for_tensor(IncomingHandle("samples"), 10)
-    count = client.wait_for_scalar(IncomingHandle("sample-count"), 10)
-    return {"count": int(count), "sum": float(samples.sum()), "mean": float(samples.mean())}
+    # redis-py has no wait_for_*/blocking-get primitive (that's a RADEX
+    # client feature, see 00-producer-consumer-redis.py) -- a plain client
+    # has to poll for key existence itself.
+    deadline = time.monotonic() + 10
+    while not (client.exists("samples") and client.exists("sample-count")):
+        if time.monotonic() > deadline:
+            raise TimeoutError("timed out waiting for producer")
+        time.sleep(0.05)
+
+    samples = pickle.loads(client.get("samples"))
+    count = int(client.get("sample-count"))
+    return {"count": count, "sum": float(samples.sum()), "mean": float(samples.mean())}
 
 
 async def main():
-    # RHAPSODY owns launching the Redis infrastructure; RADEX only ever
-    # sees the resulting endpoint, never the launch mechanism.
-    data_backend = await RedisDataBackend(
-        redis_server_path="redis-stable/src/redis-server"  # or export redis-server on $PATH
-    )
+    session = Session()
     exec_backend = await ConcurrentExecutionBackend(ProcessPoolExecutor())
 
-    session = Session([exec_backend, data_backend])
+    # RHAPSODY owns launching the Redis infrastructure; the consumer/producer
+    # below never know that -- they only ever see the host:port endpoint.
+    data_backend = await RedisDataBackend(work_dir=os.path.join(session.work_dir, session.uid))
+
+    session.add_backend(exec_backend)
+    session.add_backend(data_backend)
 
     descriptor = data_backend.endpoints[0].serialize()
 
@@ -92,9 +94,8 @@ async def main():
         print(f"Task {task.uid} in {task.state} state.")
         print(f"Output: {task.return_value}")
 
-    # Cleanup
-    await data_backend.shutdown()
-    await exec_backend.shutdown()
+    # Cleanup -- shuts down both backends
+    await session.close()
 
 
 if __name__ == "__main__":

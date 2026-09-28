@@ -1,7 +1,10 @@
-"""Dragon counterpart of 00-workload-native-api.py.
+"""Same producer/consumer exchange as 01-producer-consumer-dragon.py, but
+consumed with the native dragon.data.ddict.DDict client instead of RADEX's
+typed client -- proving DragonDataBackend's endpoint is usable by ANY
+Dragon DDict client, not just RADEX's.
 
 Run with:
-    dragon -s -- python3 00-workload-native-api-dragon.py
+    dragon -s -- python3 03-producer-consumer-dragon-native.py
 """
 
 import asyncio
@@ -17,56 +20,54 @@ from rhapsody.backends.data import DragonDataBackend
 rhapsody.enable_logging(level=logging.INFO)
 
 
-# NOTE: task functions below are each fully self-contained. A task may be
-# invoked in a completely separate process/node with no knowledge of this
-# module or anything else defined here -- every import and every bit of
-# setup a task needs must live inside that task's own function body, never
-# factored into a shared helper or relying on driver-scope state. The only
-# input a task gets is whatever is explicitly passed as an argument
-# (`descriptor`, here) -- DragonDataBackend hands that back from
-# `.start()`, it never constructs a client itself. Unlike Redis, the
-# Dragon client takes the descriptor directly as a constructor argument --
-# no environment variables involved.
-
-
-# func1 (producer) and func2 (consumer) are submitted together, with no
-# ordering guarantee between them -- func2 uses wait_for_*, not get_*, so
-# it correctly blocks until func1's data actually lands instead of racing
-# it.
+# NOTE: task functions below are each fully self-contained -- see
+# 01-producer-consumer-dragon.py for the full rationale. The only
+# difference from that file is the client library: the native
+# dragon.data.ddict.DDict.attach() here instead of
+# radex.clients.core.DragonClient.
 
 
 def func1(descriptor):
     import numpy as np
+    from dragon.data.ddict import DDict
 
-    from radex.clients.core import DragonClient
-    from radex.handles.handles import OutgoingHandle
-
-    client = DragonClient(descriptor=descriptor, timeout=5)
-
-    samples = np.arange(10, dtype=np.float64) ** 2  # [0, 1, 4, 9, ..., 81]
-    client.put_tensor(OutgoingHandle("samples"), samples)
-    client.put_scalar(OutgoingHandle("sample-count"), len(samples))
-    return len(samples)
+    client = DDict.attach(descriptor, timeout=10)
+    try:
+        samples = np.arange(10, dtype=np.float64) ** 2  # [0, 1, 4, 9, ..., 81]
+        client["samples"] = samples
+        client["sample-count"] = len(samples)
+        return len(samples)
+    finally:
+        client.detach()
 
 
 def func2(descriptor):
-    from radex.clients.core import DragonClient
-    from radex.handles.handles import IncomingHandle
+    from dragon.data.ddict import DDict
 
-    client = DragonClient(descriptor=descriptor, timeout=5)
-
-    samples = client.wait_for_tensor(IncomingHandle("samples"), 10)
-    count = client.wait_for_scalar(IncomingHandle("sample-count"), 10)
-    return {"count": int(count), "sum": float(samples.sum()), "mean": float(samples.mean())}
+    client = DDict.attach(descriptor, timeout=10)
+    try:
+        # DragonDataBackend always constructs its DDict with
+        # wait_for_keys=True, so __getitem__ already blocks until the key
+        # exists (or the attach timeout elapses) -- no manual poll loop
+        # needed here, unlike the redis-py case in
+        # 02-producer-consumer-redis-native.py.
+        samples = client["samples"]
+        count = client["sample-count"]
+        return {"count": int(count), "sum": float(samples.sum()), "mean": float(samples.mean())}
+    finally:
+        client.detach()
 
 
 async def main():
-    # RHAPSODY owns launching the Dragon DDict; RADEX only ever sees the
-    # resulting endpoint, never the launch mechanism.
-    data_backend = await DragonDataBackend(managers_per_node=1, n_nodes=1)
+    session = Session()
     exec_backend = await DragonExecutionBackend()
 
-    session = Session([exec_backend, data_backend])
+    # RHAPSODY owns launching the Dragon DDict; the consumer/producer below
+    # never know that -- they only ever see the serialized descriptor.
+    data_backend = await DragonDataBackend(managers_per_node=1, n_nodes=1)
+
+    session.add_backend(exec_backend)
+    session.add_backend(data_backend)
 
     descriptor = data_backend.endpoints[0].serialize()
 
@@ -87,9 +88,8 @@ async def main():
         print(f"Task {task.uid} in {task.state} state.")
         print(f"Output: {task.return_value}")
 
-    # Cleanup
-    await data_backend.shutdown()
-    await exec_backend.shutdown()
+    # Cleanup -- shuts down both backends
+    await session.close()
 
 
 if __name__ == "__main__":
