@@ -14,6 +14,7 @@ extend-ignore-identifiers-re = [
 # Add specific words that should not be corrected
 # rhapsody = "rhapsody"
 HPE = "HPE"
+arange = "arange"  # numpy.arange, not a typo of "arrange"
 
 [files]
 extend-exclude = [

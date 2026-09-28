@@ -51,7 +51,7 @@ dragon-config add --ofi-runtime-lib=/opt/cray/libfabric/1.22.0/lib64
 
 ### 5. Download the model
 
-`DragonVllmInferenceBackend` no longer reads a YAML config file — model settings are passed directly as a `ModelConfig` object (see the [Integrations guide](../integrations.md#dragon-vllm-inference-backend)). Perlmutter's `$HOME`/`$PSCRATCH` filesystems don't support the `flock()` calls the HuggingFace Hub client uses while downloading, so download to local disk first and copy the snapshot over rather than downloading directly to scratch:
+`DragonVllmInferenceBackend` no longer reads a YAML config file — model settings are passed directly as a `ModelConfig` object (see the [AI guide](../ai/index.md#dragon-vllm-inference-backend)). Perlmutter's `$HOME`/`$PSCRATCH` filesystems don't support the `flock()` calls the HuggingFace Hub client uses while downloading, so download to local disk first and copy the snapshot over rather than downloading directly to scratch:
 
 ```bash
 # Download to node-local /tmp on the login node (flock works there)

@@ -1,7 +1,6 @@
-"""Same producer/consumer exchange as 01-producer-consumer-dragon.py, but
-consumed with the native dragon.data.ddict.DDict client instead of RADEX's
-typed client -- proving DragonDataBackend's endpoint is usable by ANY
-Dragon DDict client, not just RADEX's.
+"""Same producer/consumer exchange as 01-producer-consumer-dragon.py, but consumed with the native
+dragon.data.ddict.DDict client instead of RADEX's typed client -- proving DragonDataBackend's
+endpoint is usable by ANY Dragon DDict client, not just RADEX's.
 
 Run with:
     dragon -s -- python3 03-producer-consumer-dragon-native.py

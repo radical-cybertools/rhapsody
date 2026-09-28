@@ -72,9 +72,7 @@ async def main():
     # tied to the session's own directory so redis-server's log file lands
     # next to whatever else the session writes (export redis-server on
     # $PATH, or pass redis_server_path=/path/to/redis-server explicitly).
-    data_backend = await RedisDataBackend(
-        work_dir=os.path.join(session.work_dir, session.uid)
-    )
+    data_backend = await RedisDataBackend(work_dir=os.path.join(session.work_dir, session.uid))
 
     session.add_backend(exec_backend)
     session.add_backend(data_backend)

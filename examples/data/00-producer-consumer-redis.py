@@ -1,6 +1,6 @@
-"""Same producer/consumer exchange as 00-producer-consumer-redis.py, but
-consumed with plain redis-py instead of RADEX's typed client -- proving
-RedisDataBackend's endpoint is usable by ANY Redis client, not just RADEX's.
+"""Same producer/consumer exchange as 00-producer-consumer-redis.py, but consumed with plain redis-
+py instead of RADEX's typed client -- proving RedisDataBackend's endpoint is usable by ANY Redis
+client, not just RADEX's.
 
 Requires: pip install redis
 """
