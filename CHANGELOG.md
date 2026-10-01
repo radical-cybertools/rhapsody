@@ -70,6 +70,27 @@
 - Regression tests for all four fixes above, plus client/cluster
   ownership-on-shutdown tests, async-callback and callback-isolation tests, and a
   test proving the deleted `@wraps`-closure pattern really did break pickling.
+- **New `rhapsody.backends.data` package**, introducing two data backends:
+  - **`RedisDataBackend`** — launches and owns one or more independent
+    `redis-server` processes and hands back a `host:port` endpoint per node.
+  - **`DragonDataBackend`** — constructs and owns a Dragon `DDict` and hands
+    back its serialized descriptor.
+  - Both follow a shared `DataBackend`/`Endpoint` lifecycle (state machine
+    `CREATED → STARTING → {READY, FAILED}`, `{CREATED,READY,FAILED} →
+    SHUTDOWN`; idempotent `start()`/`shutdown()`; `await RedisDataBackend(...)`/
+    `await DragonDataBackend(...)` as a single step, consistent with every
+    execution backend), and neither constructs a client itself — callers build
+    whichever client they want (RADEX's typed clients, or a native one like
+    `redis-py`/`dragon.data.ddict.DDict.attach()`) from the endpoint.
+  - `Session` now accepts `DataBackend` instances in the same list/`add_backend()`
+    call as execution backends, for shared lifecycle/`work_dir` bookkeeping and
+    inclusion in `session.close()`.
+  - New docs: **AI**, **Data**, and **Execution** top-level sections
+    (`docs/ai/index.md`, `docs/data-backends/{index,redis,dragon}.md`,
+    `docs/execution/index.md`).
+  - New examples under `examples/data/`: paired Redis/Dragon producer/consumer
+    scripts, once using RADEX's typed clients and once using plain
+    `redis-py`/native `dragon.data.ddict.DDict`.
 
 ## [0.5.0] - 2026-08-20
 
@@ -96,7 +117,7 @@
   `HardwareConfig`, `BatchingConfig`, `GuardrailsConfig`, `DynamicWorkerConfig`
   in the new `rhapsody.backends.ai.config`), re-exported as-is from
   `dragon.ai.inference`. **Breaking change** for existing callers still passing
-  `config_file="config.yaml"` — see `docs/integrations.md` for the new
+  `config_file="config.yaml"` — see `docs/ai/index.md` for the new
   constructor shape.
 - `DragonVllmInferenceBackend` now supports `await DragonVllmInferenceBackend(...)`
   as a single step, consistent with every other backend (`DragonExecutionBackend`,

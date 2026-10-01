@@ -131,7 +131,8 @@ markers = [
     "slow: marks tests as slow-running",
     "radical_pilot: marks tests that use RADICAL-Pilot backend",
     "performance: marks tests as performance benchmarks",
-    "result_contract: marks tests that verify the task callback contract — required fields, types, and state transitions — across all backends"
+    "result_contract: marks tests that verify the task callback contract — required fields, types, and state transitions — across all backends",
+    "redis: marks tests that require a real redis-server binary on PATH"
 ]
 
 [tool.ruff]
