@@ -37,18 +37,6 @@
   `_client_provided`/`_cluster_provided` but never consulted them at shutdown.
   Ownership is now tracked explicitly (`_owns_client`) and `shutdown()` only
   closes a client this backend created itself.
-- **`RedisDataBackend`'s `stdout=PIPE` never drained** — only `stderr` was ever
-  read, and only once, after the process had already exited; `stdout` was
-  never read at all. On a long-running node this fills the OS pipe buffer
-  (~64KB) and blocks `redis-server` on `write()` forever. Each node's
-  stdout/stderr is now redirected straight to its own log file
-  (`{work_dir}/redis.node{index}.log`) instead of a pipe, which both fixes
-  the hang and gives failure diagnostics a real file to tail.
-- **`RedisDataBackend`'s `env=` replaced the subprocess environment instead of
-  extending it** — passing any `env=` dropped `PATH` and everything else,
-  breaking resolution of the bare `redis-server` executable name even though
-  `shutil.which()` had just found it moments earlier using the parent's
-  `PATH`. `env=` now merges with (rather than replaces) `os.environ`.
 
 ### Changed
 
@@ -82,34 +70,27 @@
 - Regression tests for all four fixes above, plus client/cluster
   ownership-on-shutdown tests, async-callback and callback-isolation tests, and a
   test proving the deleted `@wraps`-closure pattern really did break pickling.
-- **New `rhapsody.backends.data` package** — `RedisDataBackend`/`DragonDataBackend`
-  launch and own the lifecycle of data infrastructure (a `redis-server` process, a
-  Dragon `DDict`) and hand back a connection endpoint, mirroring how execution
-  backends launch and own compute infrastructure. Deliberately has **zero
-  `radex` coupling** and **no client-construction methods** — callers build
-  whichever client they want (RADEX's typed clients, or a native one like
-  `redis-py`/`dragon.data.ddict.DDict.attach()`) from the endpoint themselves.
-  - Shared `DataBackend`/`Endpoint` ABCs with an explicit lifecycle state
-    machine (`CREATED → STARTING → {READY, FAILED}`, `{CREATED,READY,FAILED} →
-    SHUTDOWN`), idempotent `start()`/`shutdown()`, and `await RedisDataBackend(...)`/
+- **New `rhapsody.backends.data` package**, introducing two data backends:
+  - **`RedisDataBackend`** — launches and owns one or more independent
+    `redis-server` processes and hands back a `host:port` endpoint per node.
+  - **`DragonDataBackend`** — constructs and owns a Dragon `DDict` and hands
+    back its serialized descriptor.
+  - Both follow a shared `DataBackend`/`Endpoint` lifecycle (state machine
+    `CREATED → STARTING → {READY, FAILED}`, `{CREATED,READY,FAILED} →
+    SHUTDOWN`; idempotent `start()`/`shutdown()`; `await RedisDataBackend(...)`/
     `await DragonDataBackend(...)` as a single step, consistent with every
-    execution backend.
+    execution backend), and neither constructs a client itself — callers build
+    whichever client they want (RADEX's typed clients, or a native one like
+    `redis-py`/`dragon.data.ddict.DDict.attach()`) from the endpoint.
   - `Session` now accepts `DataBackend` instances in the same list/`add_backend()`
-    call as execution backends — internally dispatched by capability
-    (`hasattr(backend, "submit_tasks")`) so a `DataBackend` gets lifecycle/`work_dir`
-    bookkeeping and is included in `session.close()`, but is never eligible as a
-    task's destination and adds no per-task routing overhead.
+    call as execution backends, for shared lifecycle/`work_dir` bookkeeping and
+    inclusion in `session.close()`.
   - New docs: **AI**, **Data**, and **Execution** top-level sections
     (`docs/ai/index.md`, `docs/data-backends/{index,redis,dragon}.md`,
-    `docs/execution/index.md`) — `AI`/`Execution` are the former
-    `docs/integrations.md` content, relocated to their own top-level nav
-    entries; `Data` is new, covering the data-backend package end to end
-    (lifecycle, configuration options, multi-node/HPC Redis via `cmd=`, and
-    using a native client instead of RADEX's).
+    `docs/execution/index.md`).
   - New examples under `examples/data/`: paired Redis/Dragon producer/consumer
     scripts, once using RADEX's typed clients and once using plain
-    `redis-py`/native `dragon.data.ddict.DDict` directly against the same
-    endpoint — demonstrating the backend is usable by any client.
+    `redis-py`/native `dragon.data.ddict.DDict`.
 
 ## [0.5.0] - 2026-08-20
 
