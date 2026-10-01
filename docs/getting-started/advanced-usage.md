@@ -147,7 +147,7 @@ so they have their own event loop and do not share the session's loop.
 |---|---|---|---|
 | `ConcurrentExecutionBackend` (default) | `ThreadPoolExecutor` | called directly | run via `asyncio.run` |
 | `ConcurrentExecutionBackend` | `ProcessPoolExecutor` | called directly | run via `asyncio.run` |
-| `DaskExecutionBackend` | Dask workers | submitted natively | wrapped transparently |
+| `DaskExecutionBackend` | Dask workers | submitted natively | submitted natively — Dask runs coroutine functions on the worker's own event loop |
 | `OrbitExecutionBackend` | remote ORBIT endpoint | shipped via `cloudpickle` | shipped via `cloudpickle` |
 
 !!! note "ProcessPoolExecutor requires cloudpickle"
@@ -658,7 +658,8 @@ from rhapsody.backends import DaskExecutionBackend
 def compute_square(n):
     return n * n
 
-# Async function — wrapped transparently, name visible in Dask dashboard
+# Async function — submitted directly; Dask runs it natively on the worker's
+# own event loop, no RHAPSODY-side wrapper involved
 async def fetch_data(n):
     await asyncio.sleep(0.01)
     return n * 2
@@ -691,15 +692,19 @@ The task submission code is unchanged:
 # SLURM (requires dask-jobqueue)
 from dask_jobqueue import SLURMCluster
 
-cluster = SLURMCluster(cores=4, memory="8GB", walltime="01:00:00")
-cluster.scale(jobs=4)
-backend = await DaskExecutionBackend(cluster=cluster)
+async with SLURMCluster(
+    cores=4, memory="8GB", walltime="01:00:00", asynchronous=True
+) as cluster:
+    await cluster.scale(jobs=4)
+    backend = await DaskExecutionBackend(cluster=cluster)
+    ...
 
 # Kubernetes (requires dask-kubernetes)
 from dask_kubernetes.operator import KubeCluster
 
-cluster = KubeCluster(name="rhapsody-workers", n_workers=8)
-backend = await DaskExecutionBackend(cluster=cluster)
+async with KubeCluster(name="rhapsody-workers", n_workers=8, asynchronous=True) as cluster:
+    backend = await DaskExecutionBackend(cluster=cluster)
+    ...
 
 # Pre-existing Client
 from dask.distributed import Client
@@ -709,6 +714,17 @@ backend = await DaskExecutionBackend(client=client)
 
 !!! tip "Default cluster"
     If `cluster` and `client` are both omitted, Rhapsody creates a `LocalCluster` using the `resources` dict (e.g. `{"n_workers": 4}`).
+
+!!! warning "Cluster objects must be constructed with asynchronous=True"
+    `SLURMCluster`, `KubeCluster`, and other non-`LocalCluster` cluster managers
+    spin up their own background-thread event loop unless built with
+    `asynchronous=True` (and entered via `async with`, as above). The `Client`
+    `DaskExecutionBackend` creates around a `cluster=` you pass in inherits that
+    cluster's loop — if it's the wrong one, every `await` on a task result or on
+    `shutdown()` silently falls back to blocking-sync mode and fails with
+    confusing `TypeError`/`AttributeError` errors. See
+    [`examples/07-dask-backend-slrum-cluster.py`](https://github.com/radical-cybertools/rhapsody/blob/main/examples/07-dask-backend-slrum-cluster.py)
+    for a complete, working example.
 
 ### GPU and CPU resource scheduling
 

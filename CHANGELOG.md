@@ -2,38 +2,86 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`DaskExecutionBackend` PicklingError on async function tasks** — `submit_tasks`
+  wrapped every async callable in a local closure decorated with
+  `@functools.wraps(task["function"])` before submitting it. `@wraps` copies the
+  original function's `__module__`/`__qualname__` onto the closure, so pickling it
+  by reference resolved to a *different* object living at that name and raised
+  `PicklingError: Can't pickle <function ...>: it's not the same object as
+  module.name`. Dask workers already natively detect `iscoroutinefunction()` on a
+  submitted callable and run it on the worker's own event loop (no thread pool) —
+  sync and async callables are now both submitted directly (optionally through
+  `functools.partial` to pre-bind kwargs), eliminating the wrapper entirely rather
+  than patching around it.
+- **`DaskExecutionBackend._check_resources_satisfiable()` could never detect a
+  satisfiable resource request** — it called `Client.scheduler_info()`, which for
+  an asynchronous client always returns a cached snapshot with an empty `workers`
+  mapping (see that method's own docstring). Every resource-constrained task
+  failed regardless of whether a matching worker actually existed. Fixed to use
+  `await client.scheduler.identity()`, Dask's own documented alternative for a
+  live per-worker view (called with no `n_workers=` kwarg — that parameter is
+  absent on older `distributed` releases still within this project's
+  `dask[distributed]>=2023.0.0` support range and raises `TypeError` there).
+- **`DaskExecutionBackend` could silently share one Dask `Future` across two
+  distinct tasks** — `client.submit()` defaults to `pure=True` with no explicit
+  `key`, deriving the Dask key from `tokenize(func, kwargs, *args)`. Two RHAPSODY
+  tasks calling the same function with the same arguments tokenized to the
+  identical key, so the second `submit()` silently returned the first task's
+  `Future` instead of doing independent work. Fixed by always passing
+  `key=task["uid"]` (unless the caller already set one via
+  `task_backend_specific_kwargs`).
+- **`DaskExecutionBackend.shutdown()` always closed the Dask `Client`**, even one
+  the caller supplied via `client=`/`cluster=` — the constructor already tracked
+  `_client_provided`/`_cluster_provided` but never consulted them at shutdown.
+  Ownership is now tracked explicitly (`_owns_client`) and `shutdown()` only
+  closes a client this backend created itself.
+- **`RedisDataBackend`'s `stdout=PIPE` never drained** — only `stderr` was ever
+  read, and only once, after the process had already exited; `stdout` was
+  never read at all. On a long-running node this fills the OS pipe buffer
+  (~64KB) and blocks `redis-server` on `write()` forever. Each node's
+  stdout/stderr is now redirected straight to its own log file
+  (`{work_dir}/redis.node{index}.log`) instead of a pipe, which both fixes
+  the hang and gives failure diagnostics a real file to tail.
+- **`RedisDataBackend`'s `env=` replaced the subprocess environment instead of
+  extending it** — passing any `env=` dropped `PATH` and everything else,
+  breaking resolution of the bare `redis-server` executable name even though
+  `shutil.which()` had just found it moments earlier using the parent's
+  `PATH`. `env=` now merges with (rather than replaces) `os.environ`.
+
+### Changed
+
+- **`DaskExecutionBackend`** no longer mutates the caller's task dict for
+  submission bookkeeping: `task["args"]` is no longer rewritten, and
+  `asyncio.Future` arguments are no longer silently filtered out of `args`
+  (nothing in RHAPSODY's task contract puts one there; a genuinely unpicklable
+  argument now surfaces as a real, attributable submission failure on that task
+  instead of silently shifting positional args). The Dask `Future` handle moved
+  off the shared task dict into a private per-task runtime record.
+- **`DaskExecutionBackend.submit_tasks()`** now raises `ValueError` immediately for
+  a task specifying neither `function` nor `executable`, instead of recording it
+  as a per-task `FAILED` callback — this is a caller programming error, not a
+  runtime submission failure. Also raises `BackendError` if the Dask client
+  itself is unusable (e.g. scheduler connection lost), rather than attributing a
+  whole-backend outage to whichever task happened to be submitting at the time.
+- **`DaskExecutionBackend`** now requires an externally-supplied `client=` to have
+  been constructed with `asynchronous=True`; raises `ValueError` at init time
+  otherwise instead of failing confusingly later.
+- Registered callbacks on `DaskExecutionBackend` may now be sync or async
+  callables; a raising callback is caught and logged instead of corrupting task
+  completion state.
+
 ### Added
 
-- **Dragon 0.14.1 public API migration completed** for `DragonExecutionBackend`
-  — task metadata (`name`, `timeout`, `stdout`/`stderr`) now goes through
-  `Batch.options()` rather than direct kwargs to `process()`/`job()`/`function()`,
-  matching the 0.14.1 API. `V1`/`V2` backends and the `BatchError`/`Policy`
-  imports they required are removed; `DragonExecutionBackendV3` is kept only as
-  a deprecated alias.
-- **`DragonVllmInferenceBackend` migrated to `dragon.ai.inference`** — moved from
-  `rhapsody.backends.inference` to `rhapsody.backends.ai`, and from a YAML
-  `config_file=` argument to typed config objects (`ModelConfig`,
-  `HardwareConfig`, `BatchingConfig`, `GuardrailsConfig`, `DynamicWorkerConfig`
-  in the new `rhapsody.backends.ai.config`), re-exported as-is from
-  `dragon.ai.inference`. **Breaking change** for existing callers still passing
-  `config_file="config.yaml"` — see `docs/ai/index.md` for the new
-  constructor shape.
-- `DragonVllmInferenceBackend` now supports `await DragonVllmInferenceBackend(...)`
-  as a single step, consistent with every other backend (`DragonExecutionBackend`,
-  `ConcurrentExecutionBackend`, `DaskExecutionBackend`, `RadicalExecutionBackend`).
-  The existing two-step `backend = DragonVllmInferenceBackend(...); await backend.initialize()`
-  pattern still works unchanged. Docs, README, examples, and the tutorial
-  notebook updated to the new pattern.
-
-  - **`OrbitExecutionBackend`** — submits tasks to a remote HPC node through the
-  ORBIT broker/endpoint infrastructure (`radical.orbit`); the endpoint node
-  runs a RHAPSODY plugin with a local backend (e.g. Dragon) that actually
-  executes the work. Delegates to `RhapsodyClient` internally, inheriting
-  template compression, pipelined batching, and event-based wait/batch
-  notifications.
-- **`NoopExecutionBackend`** — tasks are marked `DONE` immediately without
-  executing anything; for benchmarking RHAPSODY's own submission/orchestration
-  overhead independent of any real backend.
+- `examples/07-dask-backend-slrum-cluster.py` — `DaskExecutionBackend` against a
+  real Slurm allocation via `dask_jobqueue.SLURMCluster`, including the
+  `asynchronous=True`/`async with` construction required for non-`LocalCluster`
+  cluster managers driven from async code (see `docs/getting-started/advanced-usage.md#dask-distributed-backend`).
+  Documented in `examples/README.md`.
+- Regression tests for all four fixes above, plus client/cluster
+  ownership-on-shutdown tests, async-callback and callback-isolation tests, and a
+  test proving the deleted `@wraps`-closure pattern really did break pickling.
 - **New `rhapsody.backends.data` package** — `RedisDataBackend`/`DragonDataBackend`
   launch and own the lifecycle of data infrastructure (a `redis-server` process, a
   Dragon `DDict`) and hand back a connection endpoint, mirroring how execution
@@ -63,8 +111,52 @@
     `redis-py`/native `dragon.data.ddict.DDict` directly against the same
     endpoint — demonstrating the backend is usable by any client.
 
+## [0.5.0] - 2026-08-20
+
+### Added
+
+- **`OrbitExecutionBackend`** — submits tasks to a remote HPC node through the
+  ORBIT broker/endpoint infrastructure (`radical.orbit`); the endpoint node
+  runs a RHAPSODY plugin with a local backend (e.g. Dragon) that actually
+  executes the work. Delegates to `RhapsodyClient` internally, inheriting
+  template compression, pipelined batching, and event-based wait/batch
+  notifications.
+- **`NoopExecutionBackend`** — tasks are marked `DONE` immediately without
+  executing anything; for benchmarking RHAPSODY's own submission/orchestration
+  overhead independent of any real backend.
+- **Dragon 0.14.1 public API migration completed** for `DragonExecutionBackend`
+  — task metadata (`name`, `timeout`, `stdout`/`stderr`) now goes through
+  `Batch.options()` rather than direct kwargs to `process()`/`job()`/`function()`,
+  matching the 0.14.1 API. `V1`/`V2` backends and the `BatchError`/`Policy`
+  imports they required are removed; `DragonExecutionBackendV3` is kept only as
+  a deprecated alias.
+- **`DragonVllmInferenceBackend` migrated to `dragon.ai.inference`** — moved from
+  `rhapsody.backends.inference` to `rhapsody.backends.ai`, and from a YAML
+  `config_file=` argument to typed config objects (`ModelConfig`,
+  `HardwareConfig`, `BatchingConfig`, `GuardrailsConfig`, `DynamicWorkerConfig`
+  in the new `rhapsody.backends.ai.config`), re-exported as-is from
+  `dragon.ai.inference`. **Breaking change** for existing callers still passing
+  `config_file="config.yaml"` — see `docs/ai/index.md` for the new
+  constructor shape.
+- `DragonVllmInferenceBackend` now supports `await DragonVllmInferenceBackend(...)`
+  as a single step, consistent with every other backend (`DragonExecutionBackend`,
+  `ConcurrentExecutionBackend`, `DaskExecutionBackend`, `RadicalExecutionBackend`).
+  The existing two-step `backend = DragonVllmInferenceBackend(...); await backend.initialize()`
+  pattern still works unchanged. Docs, README, examples, and the tutorial
+  notebook updated to the new pattern.
+- **conda packaging** — added a conda-forge staged-recipes candidate
+  (`recipe/meta.yaml`), excluded from the `check-yaml` pre-commit hook since
+  conda recipes use Jinja templating that isn't plain YAML.
+- **ReadTheDocs configuration** (`.readthedocs.yaml`) — builds docs via
+  `mkdocs`, installing the `.[docs]` extra.
+
 ### Fixed
 
+- **`__version__` drifted from package metadata** — the 0.4.0 sdist shipped
+  `__version__ = "0.2.0"` while `pyproject.toml` said `0.4.0`. `__version__` is
+  now derived from the installed distribution's metadata
+  (`importlib.metadata.version("rhapsody-py")`), so `pyproject.toml` stays the
+  single source of truth and the two can't drift again.
 - **Task completions silently dropped under load** — `submit_tasks()` used to
   register each task into `_monitored_batches` only after building the *entire*
   batch, so a fast task could complete and be polled by the monitor thread
@@ -101,18 +193,6 @@
   `get(block=False)`; the code correctly calls `get(block=True)` (poll() and
   the DDict write aren't atomic) since an earlier fix — the test just never
   caught up.
-- **`RedisDataBackend`'s `stdout=PIPE` never drained** — only `stderr` was ever
-  read, and only once, after the process had already exited; `stdout` was
-  never read at all. On a long-running node this fills the OS pipe buffer
-  (~64KB) and blocks `redis-server` on `write()` forever. Each node's
-  stdout/stderr is now redirected straight to its own log file
-  (`{work_dir}/redis.node{index}.log`) instead of a pipe, which both fixes
-  the hang and gives failure diagnostics a real file to tail.
-- **`RedisDataBackend`'s `env=` replaced the subprocess environment instead of
-  extending it** — passing any `env=` dropped `PATH` and everything else,
-  breaking resolution of the bare `redis-server` executable name even though
-  `shutil.which()` had just found it moments earlier using the parent's
-  `PATH`. `env=` now merges with (rather than replaces) `os.environ`.
 
 ## [0.4.0] - 2026-06-11
 
