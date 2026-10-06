@@ -15,6 +15,8 @@ from .base import DataBackendState
 from .base import DataBackendStateError
 from .base import DataBackendTerminatedError
 from .base import Endpoint
+from .orbit import OrbitDataBackend
+from .orbit import OrbitEndpoint
 from .redis import RedisDataBackend
 from .redis import RedisEndpoint
 
@@ -27,6 +29,8 @@ __all__ = [
     "DataBackendStateError",
     "DataBackendTerminatedError",
     "Endpoint",
+    "OrbitDataBackend",
+    "OrbitEndpoint",
     "RedisDataBackend",
     "RedisEndpoint",
 ]
