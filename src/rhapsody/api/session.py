@@ -328,7 +328,18 @@ class Session:
             Use it for optional advanced operations: ``subscribe()``, ``summary()``,
             ``task_spans()``, ``read_metrics()``, ``read_traces()``.
             Or retrieve it later via :meth:`get_telemetry`.
+
+        Raises:
+            ImportError: If opentelemetry-sdk (the ``[telemetry]`` extra) is not installed.
         """
+        try:
+            import opentelemetry.sdk  # noqa: F401
+        except ImportError as exc:
+            raise ImportError(
+                "Session.start_telemetry() requires opentelemetry-sdk: "
+                "pip install 'rhapsody-py[telemetry]'"
+            ) from exc
+
         from rhapsody.telemetry.manager import TelemetryManager  # deferred import
 
         self._resource_poll_interval = resource_poll_interval
