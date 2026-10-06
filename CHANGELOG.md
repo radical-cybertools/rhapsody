@@ -62,6 +62,16 @@
 
 ### Added
 
+- **`OrbitDataBackend`** — the data-infrastructure counterpart of
+  `OrbitExecutionBackend`: starts a data backend (`redis`, `dragon`, ...) inside
+  the remote rhapsody session of an `OrbitExecutionBackend`, so the store runs on
+  the endpoint next to (and for Dragon in the same runtime as) the session's
+  tasks; `endpoints` returns the remote descriptors. Only the lifecycle crosses
+  ORBIT; local data backends are unchanged. Needs the radical.orbit
+  `data_start`/`data_endpoints`/`data_shutdown` routes.
+- **`DataBackendRegistry` / `get_data_backend(name, ...)`** — data backends by
+  name (`redis`, `dragon`), discovered from `rhapsody.backends.data` plus the
+  `rhapsody.data_backends` entry-point group for external packages.
 - `examples/07-dask-backend-slrum-cluster.py` — `DaskExecutionBackend` against a
   real Slurm allocation via `dask_jobqueue.SLURMCluster`, including the
   `asynchronous=True`/`async with` construction required for non-`LocalCluster`
