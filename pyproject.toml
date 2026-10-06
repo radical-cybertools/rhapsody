@@ -43,7 +43,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # Telemetry
-telemetry = ["opentelemetry-sdk>=1.20.0", "nvidia-ml-py"]
+telemetry = ["opentelemetry-sdk>=1.20.0", "nvidia-ml-py", "psutil>=5.9.0"]
 
 # Backend-specific dependencies
 dask = ["dask[distributed]>=2023.0.0"]

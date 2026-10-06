@@ -280,14 +280,20 @@ To get CPU/memory for a specific GPU node, join `per_gpu` events to the `per_nod
 
 ### Adapter coverage matrix
 
-| Metric | `resource_scope` | Concurrent | Dask | Dragon |
-|---|---|:---:|:---:|:---:|
-| `cpu_percent` | `per_node` only | ✅ | ✅ | ✅ |
-| `memory_percent` | `per_node` only | ✅ | ✅ | ✅ |
-| `gpu_percent` (aggregate) | `per_node` | ✅ if NVIDIA present | ❌ | ✅ |
-| `gpu_percent` + `gpu_id` | `per_gpu` | ✅ if NVIDIA present | ❌ | ✅ |
-| `disk_read/write_bytes` | `per_node` only | ✅ (delta) | ✅ (delta, first poll = null) | ✅ (delta) |
-| `net_sent/recv_bytes` | `per_node` only | ✅ (delta) | ❌ | ✅ (delta) |
+| Metric | `resource_scope` | Concurrent | Dask | Dragon | Flux |
+|---|---|:---:|:---:|:---:|:---:|
+| `cpu_percent` | `per_node` only | ✅ | ✅ | ✅ | ✅ |
+| `memory_percent` | `per_node` only | ✅ | ✅ | ✅ | ✅ |
+| `gpu_percent` (aggregate) | `per_node` | ✅ if NVIDIA present | ❌ | ✅ | ✅ if NVIDIA present |
+| `gpu_percent` + `gpu_id` | `per_gpu` | ✅ if NVIDIA present | ❌ | ✅ | ✅ if NVIDIA present |
+| `disk_read/write_bytes` | `per_node` only | ✅ (delta) | ✅ (delta, first poll = null) | ✅ (delta) | ✅ (delta) |
+| `net_sent/recv_bytes` | `per_node` only | ✅ (delta) | ❌ | ✅ (delta) | ✅ (delta) |
+
+Flux events carry the broker rank in `attributes["flux_rank"]`.  The flux adapter
+starts one sampler per broker rank via `flux exec -r all`, outside the flux
+scheduler, so telemetry reserves no cores.  Partitioned flux backends hosted
+behind a `RemoteBackendProxy` get one adapter per partition, with `backend` set
+to the partition name.
 
 ---
 

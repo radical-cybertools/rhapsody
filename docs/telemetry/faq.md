@@ -31,7 +31,7 @@ pip install 'rhapsody-py[telemetry]'
 `nvidia-ml-py` requires the NVIDIA kernel driver to be loaded on the node where RHAPSODY runs. If the driver is present but not active, `pynvml.nvmlInit()` raises an exception. RHAPSODY logs this as a `WARNING` once at startup — check your logs:
 
 ```
-WARNING  rhapsody.telemetry.adapters.concurrent — nvidia-ml-py initialization failed on myhost — GPU metrics disabled: ...
+WARNING  rhapsody.telemetry.node_sampler — pynvml initialization failed on myhost — GPU metrics disabled: ...
 ```
 
 Common causes and fixes:
@@ -63,6 +63,7 @@ Not all RHAPSODY backends collect GPU utilization:
 | **Concurrent** | ✅ NVIDIA only | nvidia-ml-py (install required) |
 | **Dragon** | ✅ NVIDIA, AMD, Intel | Dragon's built-in GPU collector |
 | **Dask** | ❌ | `scheduler_info()` does not expose GPU metrics |
+| **Flux** | ✅ NVIDIA only | nvidia-ml-py on each broker node |
 
 If you are using the Dask backend, GPU utilization will always be `null` — this is by design. Switch to the Concurrent or Dragon backend for GPU observability or use Dask Dashboard url (appears once the program starts) to visualize resource metrics in realtime.
 
@@ -116,7 +117,7 @@ Do not rely on `event.gpu_id is None` — while currently equivalent, `resource_
 Telemetry is designed to be low-overhead:
 
 - The event bus is an `asyncio.Queue` with `put_nowait` — O(1), non-blocking from any context.
-- Resource polling runs in a **daemon thread** (Concurrent) or a separate **Dragon worker process** (Dragon), so it never competes with the asyncio event loop.
+- Resource polling runs in a **daemon thread** (Concurrent), a separate **Dragon worker process** (Dragon) or a sampler per broker started with `flux exec` (Flux), so it never competes with the asyncio event loop.
 - Default poll interval is 5 seconds. For dashboards, 1–2 seconds is fine. Sub-second polling is not recommended in production.
 - The JSONL file is line-buffered — no fsync per event.
 
