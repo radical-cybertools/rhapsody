@@ -43,6 +43,7 @@ class SpawnedHost:
     address: str
     sockdir: str
     terminal_states: tuple
+    telemetry_info: dict | None = None
 
 
 def spawn_backend_host(
@@ -106,6 +107,7 @@ def spawn_backend_host(
         if ready.get("op") != OP_READY:
             raise RuntimeError(f"expected READY from child, got {ready!r}")
         terminal_states = tuple(ready.get("terminal_states", ("DONE", "FAILED", "CANCELED")))
+        telemetry_info = ready.get("telemetry_info")
     except Exception:
         try:
             proc.terminate()
@@ -122,6 +124,7 @@ def spawn_backend_host(
         address=address,
         sockdir=sockdir,
         terminal_states=terminal_states,
+        telemetry_info=telemetry_info,
     )
 
 

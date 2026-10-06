@@ -436,7 +436,34 @@ class TelemetryManager:
         Silently skips backends with no adapter (LocalExecutionBackend, NoopExecutionBackend,
         unknown types). Safe to call before or after start(); if already running the adapter is
         started immediately.
+
+        A backend's ``telemetry_info()`` takes precedence over the type checks; this is how
+        backends hosted behind a ``RemoteBackendProxy`` get an adapter.
         """
+        info = None
+        try:
+            if hasattr(backend, "telemetry_info"):
+                info = backend.telemetry_info()
+        except Exception:
+            logger.warning("telemetry_info() failed for backend %s", backend_name, exc_info=True)
+
+        if info and info.get("kind") == "flux":
+            try:
+                from rhapsody.telemetry.adapters.flux import FluxTelemetryAdapter
+
+                adapter = FluxTelemetryAdapter(
+                    session_id=session_id,
+                    backend_name=backend_name,
+                    uri=info["uri"],
+                    interval=interval,
+                )
+                self.register_adapter(adapter)
+                if self._running:
+                    adapter.start()
+            except Exception:
+                logger.warning("Could not attach FluxTelemetryAdapter", exc_info=True)
+            return
+
         try:
             from rhapsody.backends.execution.concurrent import ConcurrentExecutionBackend
             from rhapsody.telemetry.adapters.concurrent import ConcurrentTelemetryAdapter

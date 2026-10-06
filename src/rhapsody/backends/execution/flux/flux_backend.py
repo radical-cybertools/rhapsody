@@ -167,6 +167,15 @@ class FluxExecutionBackend(BaseBackend):
                 raise
         return self
 
+    def telemetry_info(self) -> dict | None:
+        """Return the instance URI for :class:`FluxTelemetryAdapter`.
+
+        For a partition launch this is the ssh-reachable ``r_uri``.
+        """
+        if not self._uri:
+            return None
+        return {"kind": "flux", "uri": self._uri}
+
     def get_task_states_map(self):
         """Return the state mapper for this backend."""
         return StateMapper(backend=self)

@@ -101,7 +101,13 @@ async def _run() -> int:
         # READY: tells the driver the child is up and what its terminal states
         # are.  Sending ``terminal_states`` here is the minimal subset of the
         # state-map handshake; full StateMapper registration is D4.
-        _safe_send({"op": OP_READY, "terminal_states": list(terminal_states)})
+        # ``telemetry_info`` lets the driver attach a resource adapter for
+        # the hosted backend (see BaseBackend.telemetry_info).
+        _safe_send({
+            "op": OP_READY,
+            "terminal_states": list(terminal_states),
+            "telemetry_info": backend.telemetry_info(),
+        })
 
         # Command reader thread: blocking recv on conn, dispatch to the loop.
         def _reader() -> None:

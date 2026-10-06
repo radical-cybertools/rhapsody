@@ -188,6 +188,10 @@ class RemoteBackendProxy(BaseBackend):
     async def state(self) -> str:
         return self._backend_state.value
 
+    def telemetry_info(self) -> dict | None:
+        # Reported by the hosted backend in READY.
+        return self._host.telemetry_info if self._host else None
+
     def get_task_states_map(self):
         # Session reads only ``.terminal_states`` (verified fact 6).
         return TerminalStatesShim(self._terminal_states)

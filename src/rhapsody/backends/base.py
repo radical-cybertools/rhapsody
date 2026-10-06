@@ -165,6 +165,20 @@ class BaseBackend(ABC):
         """
         raise NotImplementedError("Not implemented in the base backend")
 
+    def telemetry_info(self) -> dict | None:
+        """Return what a telemetry adapter needs to sample this backend's resources.
+
+        Default: ``None`` — the telemetry manager picks an adapter by backend
+        type.  Backends whose resources are reachable independently of the
+        backend object (e.g. a flux instance via its URI) override this; the
+        dict is plain data so :class:`RemoteBackendProxy` can forward it from
+        a child process.
+
+        Returns:
+            ``{"kind": <adapter kind>, ...}`` or ``None``.
+        """
+        return None
+
     @classmethod
     def build_launch_prefix(cls, partition: dict | None) -> list[str]:
         """Return the argv prefix that wraps ``python -m

@@ -143,6 +143,17 @@ async def test_session_terminal_states_picked_up_from_proxy():
         await proxy.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_proxy_forwards_telemetry_info():
+    """READY carries the hosted backend's ``telemetry_info`` (None for concurrent)."""
+    proxy = await RemoteBackendProxy(name="p0", backend="concurrent")
+    try:
+        assert proxy._host.telemetry_info is None
+        assert proxy.telemetry_info() is None
+    finally:
+        await proxy.shutdown()
+
+
 # ---------------------------------------------------------------------------
 # Phase 2 — Dragon launch-prefix construction (no Dragon runtime needed:
 # ``build_launch_prefix`` is a pure classmethod on the backend class).
