@@ -186,3 +186,27 @@ def test_flux_backend_resources_validation():
 
     with pytest.raises(NotImplementedError, match="unsupported resources keys"):
         FluxExecutionBackend(resources={"gpus": 4})
+
+
+@pytest.mark.asyncio
+async def test_flux_callbacks_delivered_on_loop(mock_flux_module):
+    """Journal-thread events reach the callback on the event loop thread."""
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    backend = FluxExecutionBackend(uri="local:///x")
+    backend._loop = asyncio.get_running_loop()
+    seen = []
+    backend.register_callback(lambda t, s: seen.append((s, threading.current_thread())))
+    backend.tasks["t1"] = {"uid": "t1"}
+
+    event = SimpleNamespace(name="finish", context={"status": 0}, jobid=1)
+    thread = threading.Thread(target=backend._flux_event_cb, args=("t1", event))
+    thread.start()
+    thread.join()
+    await asyncio.sleep(0.05)
+
+    assert seen == [("DONE", threading.main_thread())]

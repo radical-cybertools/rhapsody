@@ -91,6 +91,7 @@ class FluxExecutionBackend(BaseBackend):
 
         self.tasks: dict[str, dict] = {}
         self._callback_func: callable = lambda t, s: None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
@@ -141,6 +142,7 @@ class FluxExecutionBackend(BaseBackend):
     async def _async_init(self):
         """Initialize the Flux connection asynchronously."""
         if not self._initialized:
+            self._loop = asyncio.get_running_loop()
             try:
                 self.logger.debug("Registering backend states...")
                 StateMapper.register_backend_states_with_defaults(backend=self)
@@ -233,6 +235,22 @@ class FluxExecutionBackend(BaseBackend):
                 task["resource_usage"] = usage
         except Exception:  # noqa: BLE001
             self.logger.debug("sysmon read failed for %s", task.get("uid"), exc_info=True)
+        self._fire(task, state)
+
+    def _fire(self, task: dict, state: str) -> None:
+        """Deliver a state change from a flux thread on the event loop.
+
+        Session's task state manager must run on the loop: a future resolved
+        from another thread does not wake the loop, so ``wait_tasks`` would
+        only return at its timeout.
+        """
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._invoke_callback, task, state)
+        else:
+            self._invoke_callback(task, state)
+
+    def _invoke_callback(self, task: dict, state: str) -> None:
         try:
             self._callback_func(task, state)
         except Exception as e:
@@ -275,10 +293,7 @@ class FluxExecutionBackend(BaseBackend):
             task["exit_code"] = 1
 
         if state:
-            try:
-                self._callback_func(task, state)
-            except Exception as e:
-                self.logger.exception("Error in task callback for %s: %s", task_uid, e)
+            self._fire(task, state)
 
     async def submit_tasks(self, tasks: list[dict[str, Any]]) -> None:
         """Submit tasks to Flux."""
