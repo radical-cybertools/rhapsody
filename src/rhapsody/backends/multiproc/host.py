@@ -59,11 +59,12 @@ async def _run() -> int:
         return 2
     backend_name = cfg["backend"]
     resources = cfg.get("resources") or {}
+    kwargs = cfg.get("kwargs") or {}
 
     backend = None
     try:
         # Construct + init the real backend (verified facts 7, 9).
-        backend = get_backend(backend_name, resources=resources)
+        backend = get_backend(backend_name, resources=resources, **kwargs)
         backend = await backend           # backends are awaitable for init
 
         # Terminal states are needed by both sides — driver to know when to

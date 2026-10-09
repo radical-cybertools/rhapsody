@@ -50,6 +50,7 @@ class RemoteBackendProxy(BaseBackend):
             resources={"partition": {...}},   # optional; RM contract dict
             extra_env={"SLURM_NODELIST": "..."},
             launch_prefix=None,       # e.g. ["dragon"] for Phase 3
+            backend_kwargs=None,      # extra constructor kwargs for the backend
         )
         Session(backends=[proxy, ...])
     """
@@ -61,10 +62,12 @@ class RemoteBackendProxy(BaseBackend):
         resources: dict | None = None,
         extra_env: dict | None = None,
         launch_prefix: list[str] | None = None,
+        backend_kwargs: dict | None = None,
     ):
         super().__init__(name=name)
         self._backend_name = backend
         self._resources = resources or {}
+        self._backend_kwargs = dict(backend_kwargs or {})
         # ``None`` (not ``[]``/``{}``) means "derive from the backend class +
         # partition spec at init time".  Explicit values override.
         self._extra_env_override: dict | None = extra_env
@@ -120,6 +123,7 @@ class RemoteBackendProxy(BaseBackend):
             self._resources,
             self._extra_env,
             self._launch_prefix,
+            self._backend_kwargs,
         )
         self._terminal_states = self._host.terminal_states
 

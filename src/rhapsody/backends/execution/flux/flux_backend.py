@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from rhapsody.backends.base import BaseBackend
@@ -16,7 +18,9 @@ from rhapsody.backends.constants import BackendMainStates
 from rhapsody.backends.constants import StateMapper
 from rhapsody.backends.constants import TasksMainStates
 
+from . import flux_sysmon
 from .flux_helper import FluxHelper
+from .flux_module import FluxModule
 from .flux_module import spec_from_dict
 from .flux_service import FluxService
 
@@ -32,6 +36,8 @@ class FluxExecutionBackend(BaseBackend):
         launcher: str | None = None,
         name: str = "flux",
         resources: dict | None = None,
+        sysmon: bool = False,
+        sdexec: bool | str | None = None,
     ):
         """Initialize the Flux execution backend.
 
@@ -50,6 +56,15 @@ class FluxExecutionBackend(BaseBackend):
                 launcher; the backend connects to it through the
                 ssh-reachable URI (the instance's rank-0 broker runs on the
                 partition's first node, not necessarily this host).
+            sysmon: Enable flux's ``sysmon`` shell plugin for every task and
+                record its summary as ``task["resource_usage"]`` (peak
+                memory and CPU load; see :mod:`.flux_sysmon`).  The values
+                are per job only when the instance runs jobs via sdexec;
+                ``resource_usage["scope"]`` is ``"job"`` then, else
+                ``"shell"`` (the broker's shared cgroup).
+            sdexec: Passed to :class:`FluxService` when this backend starts
+                its own instance.  Default (``None``): ``"auto"`` when
+                *sysmon* is set, else ``False``.
         """
         super().__init__(name=name)
 
@@ -65,6 +80,11 @@ class FluxExecutionBackend(BaseBackend):
                 f"FluxExecutionBackend: unsupported resources keys: {list(self._resources)}"
             )
         self._partition: dict = partition or {}
+        self._sysmon = sysmon
+        self._sdexec = sdexec if sdexec is not None else ("auto" if sysmon else False)
+        self._sysmon_scope = "shell"
+        self._sysmon_pool: ThreadPoolExecutor | None = None
+        self._sysmon_local = threading.local()
 
         self._flux_service: FluxService | None = None
         self._flux_helper: FluxHelper | None = None
@@ -140,7 +160,7 @@ class FluxExecutionBackend(BaseBackend):
                         "No FLUX_URI provided, starting a new FluxService (launcher: %s)",
                         launcher or "none",
                     )
-                    self._flux_service = FluxService(launcher=launcher)
+                    self._flux_service = FluxService(launcher=launcher, sdexec=self._sdexec)
                     # Use asyncio.to_thread to avoid blocking the event loop
                     success = await asyncio.to_thread(self._flux_service.start, 60.0)
                     if not success:
@@ -157,6 +177,9 @@ class FluxExecutionBackend(BaseBackend):
                 self._flux_helper = FluxHelper(uri=self._uri, log=self.logger)
                 self._flux_helper.register_cb(self._flux_event_cb)
                 await asyncio.to_thread(self._flux_helper.start)
+
+                if self._sysmon:
+                    await asyncio.to_thread(self._init_sysmon)
 
                 self._initialized = True
                 self.logger.info("Flux execution backend started successfully")
@@ -175,6 +198,45 @@ class FluxExecutionBackend(BaseBackend):
         if not self._uri:
             return None
         return {"kind": "flux", "uri": self._uri}
+
+    def _init_sysmon(self) -> None:
+        """Record whether sysmon values are per job and start the reader pool."""
+        try:
+            config = self._flux_helper._handle.rpc("config.get").get()
+            service = (config.get("exec") or {}).get("service", "rexec")
+        except Exception:  # noqa: BLE001
+            self.logger.debug("could not read instance config", exc_info=True)
+            service = "rexec"
+        self._sysmon_scope = "job" if service == "sdexec" else "shell"
+        if self._sysmon_scope == "shell":
+            self.logger.warning(
+                "%s: flux instance runs jobs via %s, not sdexec — sysmon values "
+                "describe the broker's shared cgroup, not the job "
+                "(flux-framework/flux-core#7835)",
+                self.name,
+                service,
+            )
+        self._sysmon_pool = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix=f"rhapsody-flux-sysmon-{self.name}"
+        )
+
+    def _complete_with_sysmon(self, task: dict, state: str, jobid: Any) -> None:
+        """Attach the sysmon summary to *task*, then fire the state callback."""
+        try:
+            handle = getattr(self._sysmon_local, "handle", None)
+            if handle is None:
+                handle = FluxModule().core.Flux(self._uri)
+                self._sysmon_local.handle = handle
+            entries = flux_sysmon.read_entries(FluxModule().job, handle, jobid, timeout=2.0)
+            usage = flux_sysmon.summarize(entries, self._sysmon_scope)
+            if usage is not None:
+                task["resource_usage"] = usage
+        except Exception:  # noqa: BLE001
+            self.logger.debug("sysmon read failed for %s", task.get("uid"), exc_info=True)
+        try:
+            self._callback_func(task, state)
+        except Exception as e:
+            self.logger.exception("Error in task callback for %s: %s", task.get("uid"), e)
 
     def get_task_states_map(self):
         """Return the state mapper for this backend."""
@@ -203,6 +265,11 @@ class FluxExecutionBackend(BaseBackend):
                 state = TasksMainStates.DONE.value
             else:
                 state = TasksMainStates.FAILED.value
+            if self._sysmon_pool is not None:
+                # Reading the output eventlog is an RPC — keep it off the
+                # journal thread.
+                self._sysmon_pool.submit(self._complete_with_sysmon, task, state, event.jobid)
+                return
         elif event_name == "exception":
             state = TasksMainStates.FAILED.value
             task["exit_code"] = 1
@@ -230,6 +297,7 @@ class FluxExecutionBackend(BaseBackend):
                 "timeout": task.get("timeout", 0.0),
                 "environment": task.get("environment"),
                 "sandbox": task.get("sandbox"),
+                "sysmon": self._sysmon,
             }
             # Handle resource requests. Rhapsody uses dicts like:
             # cpu_reqs: {"cpu_processes": X, "cpu_threads": Y}
@@ -268,6 +336,11 @@ class FluxExecutionBackend(BaseBackend):
     async def shutdown(self) -> None:
         """Shutdown the Flux backend and service."""
         self._backend_state = BackendMainStates.SHUTDOWN
+
+        if self._sysmon_pool is not None:
+            # Let pending sysmon reads fire their completion callbacks.
+            await asyncio.to_thread(self._sysmon_pool.shutdown, True)
+            self._sysmon_pool = None
 
         if self._flux_helper:
             await asyncio.to_thread(self._flux_helper.stop)

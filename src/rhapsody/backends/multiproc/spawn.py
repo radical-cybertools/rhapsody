@@ -51,6 +51,7 @@ def spawn_backend_host(
     resources: dict | None = None,
     extra_env: dict | None = None,
     launch_prefix: list[str] | None = None,
+    backend_kwargs: dict | None = None,
 ) -> SpawnedHost:
     """Spawn a backend-host child and complete the CONFIG/READY handshake.
 
@@ -65,6 +66,8 @@ def spawn_backend_host(
             ``env`` from the RM contract goes here.
         launch_prefix: Argv prefix to wrap the python invocation (e.g.
             ``["dragon"]`` for Phase 3); defaults to no prefix.
+        backend_kwargs: Extra keyword arguments for the child backend's
+            constructor (e.g. ``{"sysmon": True}`` for flux).  Must pickle.
 
     Returns:
         :class:`SpawnedHost` carrying the live ``proc``, ``listener``, ``conn``,
@@ -102,6 +105,7 @@ def spawn_backend_host(
             "op": OP_CONFIG,
             "backend": backend_name,
             "resources": resources or {},
+            "kwargs": backend_kwargs or {},
         })
         ready = recv_msg(conn)
         if ready.get("op") != OP_READY:

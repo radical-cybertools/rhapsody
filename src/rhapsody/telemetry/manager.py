@@ -833,7 +833,7 @@ class TelemetryManager:
                     task_id=task_id,
                     event_time=ended,
                     duration_seconds=duration,
-                    attributes=attrs,
+                    attributes={**attrs, **_resource_usage_attributes(task)},
                 )
             )
 
@@ -866,7 +866,7 @@ class TelemetryManager:
                     event_time=ended,
                     duration_seconds=duration,
                     error_type=error_type,
-                    attributes=attrs,
+                    attributes={**attrs, **_resource_usage_attributes(task)},
                 )
             )
 
@@ -1186,6 +1186,9 @@ class TelemetryManager:
             span.set_attribute("task_type", task_type)
             if event.attributes.get("incomplete_lifecycle"):
                 span.set_attribute("incomplete_lifecycle", True)
+            for key in _RESOURCE_USAGE_KEYS:
+                if key in event.attributes:
+                    span.set_attribute(key, event.attributes[key])
             span.set_status(trace_mod.StatusCode.OK)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
@@ -1213,6 +1216,9 @@ class TelemetryManager:
             span.set_attribute("task_type", task_type)
             if event.attributes.get("incomplete_lifecycle"):
                 span.set_attribute("incomplete_lifecycle", True)
+            for key in _RESOURCE_USAGE_KEYS:
+                if key in event.attributes:
+                    span.set_attribute(key, event.attributes[key])
             span.set_status(trace_mod.StatusCode.ERROR, error_type)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
@@ -1238,6 +1244,9 @@ class TelemetryManager:
             span.set_attribute("task_type", task_type)
             if event.attributes.get("incomplete_lifecycle"):
                 span.set_attribute("incomplete_lifecycle", True)
+            for key in _RESOURCE_USAGE_KEYS:
+                if key in event.attributes:
+                    span.set_attribute(key, event.attributes[key])
             span.set_status(trace_mod.StatusCode.ERROR)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
@@ -1364,6 +1373,28 @@ def _sum_metric(metrics_data: Any, name: str) -> float:
                     for dp in metric.data.data_points:
                         total += dp.value
     return total
+
+
+_RESOURCE_USAGE_KEYS = ("memory_peak_bytes", "cpu_loadavg", "resource_usage_scope")
+
+
+def _resource_usage_attributes(task: dict) -> dict:
+    """Flatten a backend-reported ``task["resource_usage"]`` into event attributes.
+
+    Set by backends that measure per-task usage (flux with ``sysmon=True``).
+    ``resource_usage_scope`` is ``"job"`` when the values cover the task only and
+    ``"shell"`` when they cover a cgroup shared with other work.
+    """
+    usage = task.get("resource_usage")
+    if not isinstance(usage, dict):
+        return {}
+    attrs = {}
+    for key in ("memory_peak_bytes", "cpu_loadavg"):
+        if usage.get(key) is not None:
+            attrs[key] = usage[key]
+    if attrs and usage.get("scope"):
+        attrs["resource_usage_scope"] = usage["scope"]
+    return attrs
 
 
 def _task_executable(task: dict) -> str:

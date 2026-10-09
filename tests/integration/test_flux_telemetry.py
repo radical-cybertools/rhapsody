@@ -132,3 +132,75 @@ async def test_flux_partitions_behind_proxy_telemetry():
 
     assert _ranks(events, "p0") == {0, 1}
     assert _ranks(events, "p1") == {0, 1}
+
+
+def _usage_ok(task, min_bytes):
+    usage = task.get("resource_usage")
+    assert usage is not None, task
+    assert usage["scope"] in ("job", "shell")
+    assert usage["memory_peak_bytes"] >= min_bytes
+    if usage["scope"] == "job":
+        # Per-job cgroup: the 200 MiB task plus interpreter overhead, not the host.
+        assert usage["memory_peak_bytes"] < 1024**3
+    return usage
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("skip_if_no_flux", "fake_srun")
+async def test_flux_sysmon_resource_usage():
+    """sysmon=True: tasks carry resource_usage, end events carry its attributes."""
+    import sys
+
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    backend = await FluxExecutionBackend(name="fsys", sysmon=True)
+    events = []
+    async with Session(backends=[backend]) as session:
+        telemetry = await session.start_telemetry()
+        telemetry.subscribe(events.append)
+        task = ComputeTask(
+            executable=sys.executable,
+            arguments=["-c", "b = bytearray(200 * 2**20)"],
+            backend="fsys",
+        )
+        await session.submit_tasks([task])
+        await session.wait_tasks([task], timeout=60)
+        assert task["state"] == "DONE"
+
+    usage = _usage_ok(task, 200 * 2**20)
+    assert usage["scope"] == ("job" if backend._flux_service.sdexec else "shell")
+    (done,) = [e for e in events if e.event_type == "TaskCompleted" and e.task_id == task["uid"]]
+    assert done.attributes["memory_peak_bytes"] == usage["memory_peak_bytes"]
+    assert done.attributes["resource_usage_scope"] == usage["scope"]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("skip_if_no_flux", "skip_if_no_ssh_to_self", "fake_srun")
+async def test_flux_sysmon_behind_proxy():
+    """backend_kwargs reach the proxied flux backend; resource_usage reaches the driver."""
+    import sys
+
+    from rhapsody.backends.multiproc import RemoteBackendProxy
+
+    proxy = await RemoteBackendProxy(
+        name="psys",
+        backend="flux",
+        resources={"partition": _partition(2)},
+        backend_kwargs={"sysmon": True},
+    )
+    try:
+        async with Session(backends=[proxy]) as session:
+            task = ComputeTask(
+                executable=sys.executable,
+                arguments=["-c", "b = bytearray(200 * 2**20)"],
+                backend="psys",
+            )
+            await session.submit_tasks([task])
+            await session.wait_tasks([task], timeout=60)
+            assert task["state"] == "DONE"
+    finally:
+        await proxy.shutdown()
+
+    _usage_ok(task, 200 * 2**20)
