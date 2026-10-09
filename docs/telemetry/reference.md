@@ -278,22 +278,51 @@ One poll cycle on a 4-GPU node emits 5 ResourceUpdate events:
 
 To get CPU/memory for a specific GPU node, join `per_gpu` events to the `per_node` event on `(session_id, node_id)` within the same poll window.
 
-### Adapter coverage matrix
+### Backend comparison
 
-| Metric | `resource_scope` | Concurrent | Dask | Dragon | Flux |
-|---|---|:---:|:---:|:---:|:---:|
-| `cpu_percent` | `per_node` only | ✅ | ✅ | ✅ | ✅ |
-| `memory_percent` | `per_node` only | ✅ | ✅ | ✅ | ✅ |
-| `gpu_percent` (aggregate) | `per_node` | ✅ if NVIDIA present | ❌ | ✅ | ✅ if NVIDIA present |
-| `gpu_percent` + `gpu_id` | `per_gpu` | ✅ if NVIDIA present | ❌ | ✅ | ✅ if NVIDIA present |
-| `disk_read/write_bytes` | `per_node` only | ✅ (delta) | ✅ (delta, first poll = null) | ✅ (delta) | ✅ (delta) |
-| `net_sent/recv_bytes` | `per_node` only | ✅ (delta) | ❌ | ✅ (delta) | ✅ (delta) |
+What each execution backend reports.  Task lifecycle events and spans
+(`TaskCreated` … `TaskCompleted`/`TaskFailed`/`TaskCanceled`) come from the
+session and are the same for every backend; the table covers resource
+metrics.
 
-Flux events carry the broker rank in `attributes["flux_rank"]`.  The flux adapter
-starts one sampler per broker rank via `flux exec -r all`, outside the flux
-scheduler, so telemetry reserves no cores.  Partitioned flux backends hosted
-behind a `RemoteBackendProxy` get one adapter per partition, with `backend` set
-to the partition name.
+| | Concurrent | Dask | Dragon | Flux |
+|---|:---:|:---:|:---:|:---:|
+| **Node metrics** (`ResourceUpdate`, `per_node`) | | | | |
+| `cpu_percent` | ✅ | ✅ | ✅ | ✅ |
+| `memory_percent` | ✅ | ✅ | ✅ | ✅ |
+| `gpu_percent` (max over devices) | ✅ NVIDIA | ❌ | ✅ NVIDIA, AMD, Intel | ✅ NVIDIA |
+| `disk_read/write_bytes` (delta) | ✅ | ✅ first poll null | ✅ | ✅ |
+| `net_sent/recv_bytes` (delta) | ✅ | ❌ | ✅ | ✅ |
+| **GPU metrics** (`ResourceUpdate`, `per_gpu`) | | | | |
+| `gpu_percent` + `gpu_id` | ✅ NVIDIA | ❌ | ✅ NVIDIA, AMD, Intel | ✅ NVIDIA |
+| **Per-task usage** (`TaskCompleted` / `TaskFailed` attributes and span) | | | | |
+| `memory_peak_bytes` | ❌ | ❌ | ❌ | ✅ with `sysmon=True` |
+| `cpu_loadavg` (average busy cores) | ❌ | ❌ | ❌ | ✅ with `sysmon=True` |
+| `resource_usage_scope` | — | — | — | `job` or `shell`, see below |
+| **Collection** | | | | |
+| Source | psutil + pynvml thread | `scheduler_info()` | Dragon worker per node: psutil + Dragon GPU collectors | `flux exec -r all` sampler per broker: psutil + pynvml |
+| Nodes covered | driver node | Dask workers | all Dragon nodes | all brokers of each instance or partition |
+| `node_id` | hostname | worker host | hostname | hostname, plus `attributes["flux_rank"]` |
+| Partitions behind `RemoteBackendProxy` | ❌ | ❌ | ❌ | ✅ one adapter per partition, `backend` = partition name |
+
+Notes:
+
+- GPU metrics need `nvidia-ml-py` (installed by the `[telemetry]` extra) and
+  an NVIDIA driver; Dragon uses its own collectors instead.
+- The flux sampler runs under the brokers, outside the flux scheduler, so
+  telemetry reserves no cores.
+- Per-task usage comes from flux's `sysmon` shell plugin
+  (`FluxExecutionBackend(sysmon=True)`; for a proxied partition pass
+  `backend_kwargs={"sysmon": True}`).  The task also carries the full
+  summary, including per-rank values, as `task["resource_usage"]`.
+  Multi-node tasks report sums over their nodes.
+- `resource_usage_scope="job"` means the values cover the task alone: the
+  flux instance launches jobs via systemd (`exec.service = "sdexec"`).
+  With `"shell"` they cover the broker's cgroup, which is shared with other
+  work on the node ([flux-core#7835](https://github.com/flux-framework/flux-core/issues/7835)).
+  When `sysmon=True`, a flux instance started by RHAPSODY uses sdexec if a
+  user systemd bus is reachable and `flux start` supports `--conf`, and
+  falls back to `shell` scope otherwise.
 
 ---
 
