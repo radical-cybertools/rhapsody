@@ -104,3 +104,23 @@ async def test_flux_backend_cancel():
 
     finally:
         await backend.shutdown()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("skip_if_no_flux")
+async def test_flux_session_wait_returns_promptly():
+    """Session.wait_tasks returns when the task finishes, not at the timeout."""
+    import time
+
+    from rhapsody import ComputeTask
+    from rhapsody import Session
+
+    backend = await FluxExecutionBackend(name="fprompt")
+    async with Session(backends=[backend]) as session:
+        task = ComputeTask(executable="/bin/true", backend="fprompt")
+        await session.submit_tasks([task])
+        t0 = time.monotonic()
+        await session.wait_tasks([task], timeout=60)
+        assert task["state"] == "DONE"
+        assert time.monotonic() - t0 < 15
