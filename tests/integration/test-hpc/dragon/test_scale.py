@@ -62,16 +62,16 @@ def _scale_skip():
 
 @pytest.fixture(scope="module")
 async def scale_backend():
-    """DragonExecutionBackendV3 with enlarged results DDict for scale tests."""
+    """DragonExecutionBackend with enlarged results DDict for scale tests."""
     from dragon.native.machine import System
 
-    from rhapsody.backends import DragonExecutionBackendV3
+    from rhapsody.backends import DragonExecutionBackend
 
     num_nodes = len(list(System().nodes))
     ddict_gb = int(os.environ.get("RHAPSODY_DDICT_MEM_GB", 4))
     ddict_mem = ddict_gb * num_nodes * (1024**3)
 
-    backend = await DragonExecutionBackendV3(
+    backend = await DragonExecutionBackend(
         batch_kwargs={
             "results_ddict_mem": ddict_mem,
             "scheduler_workers": num_nodes * 4,

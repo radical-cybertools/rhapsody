@@ -162,9 +162,9 @@ class _FakeNode:
 
 def test_dragon_launch_prefix_unpartitioned():
     """No partition: bare ``dragon`` launcher with a port triplet, no hostlist."""
-    from rhapsody.backends.execution.dragon import DragonExecutionBackendV3
+    from rhapsody.backends.execution.dragon import DragonExecutionBackend
 
-    prefix = DragonExecutionBackendV3.build_launch_prefix(None)
+    prefix = DragonExecutionBackend.build_launch_prefix(None)
     assert prefix[0] == "dragon"
     assert "--port" in prefix and "--overlay-port" in prefix and "--frontend-port" in prefix
     assert "--hostlist" not in prefix and "-N" not in prefix
@@ -172,11 +172,11 @@ def test_dragon_launch_prefix_unpartitioned():
 
 def test_dragon_launch_prefix_partitioned_and_disjoint_ports():
     """Partition spec constrains the launcher; consecutive builds get disjoint ports."""
-    from rhapsody.backends.execution.dragon import DragonExecutionBackendV3
+    from rhapsody.backends.execution.dragon import DragonExecutionBackend
 
     spec = {"nodelist": [_FakeNode("n0"), _FakeNode("n1")], "env": {}}
-    p0 = DragonExecutionBackendV3.build_launch_prefix(spec)
-    p1 = DragonExecutionBackendV3.build_launch_prefix(spec)
+    p0 = DragonExecutionBackend.build_launch_prefix(spec)
+    p1 = DragonExecutionBackend.build_launch_prefix(spec)
 
     for prefix in (p0, p1):
         assert prefix[0] == "dragon"

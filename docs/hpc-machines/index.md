@@ -6,7 +6,7 @@ This section provides machine-specific setup guides and verified examples for ru
 
 **`ConcurrentExecutionBackend (designed for debug and tests single node only)`** works out of the box on every machine listed here — no machine-specific configuration is required. Install RHAPSODY and run.
 
-**`DragonExecutionBackendV3 (designed for large scale multi-node)`** requires machine-specific setup: each HPC system has its own software stack, MPI library, interconnect, and job launcher. The exact steps — module loading, virtual environment creation, transport configuration, and launch command — differ per machine and are documented in each section below.
+**`DragonExecutionBackend (designed for large scale multi-node)`** requires machine-specific setup: each HPC system has its own software stack, MPI library, interconnect, and job launcher. The exact steps — module loading, virtual environment creation, transport configuration, and launch command — differ per machine and are documented in each section below.
 
 Each guide covers environment setup, module loading, job allocation, and working examples.
 

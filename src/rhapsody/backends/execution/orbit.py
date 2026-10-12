@@ -72,6 +72,22 @@ class OrbitExecutionBackend(BaseBackend):
                        (default ``["dragon_v3"]``).
         name:          Backend name for Rhapsody registration
                        (default ``"orbit"``).
+        pool:          Name of a dispatcher-managed pool to run tasks in.
+                       Setting it targets a task-dispatcher-style plugin
+                       instead of a per-endpoint rhapsody session: every
+                       submitted task is stamped ``pool=<name>`` (a task
+                       already carrying one keeps it), endpoint
+                       auto-selection is skipped in favour of the broker
+                       participant hosting the dispatcher, and the
+                       python-version handshake for cloudpickled tasks
+                       resolves against the pool's *executing* endpoint
+                       rather than the submission target.  Combine with
+                       ``plugin_name="task_dispatcher"``.
+        session_kwargs: Extra keyword arguments for the remote session
+                       registration (``get_plugin``) -- e.g. ``sid`` to
+                       join an existing dispatcher session whose pools
+                       this backend should see, or ``pools`` to declare
+                       them.
         batch_window:  Seconds to collect tasks before flushing
                        (default 0.25).  Set to 0 to disable batching.
         batch_limit:   Max tasks per batch — triggers an immediate flush
@@ -96,6 +112,8 @@ class OrbitExecutionBackend(BaseBackend):
         name: str = "orbit",
         participant_name: str | None = None,
         plugin_name: str = _PLUGIN_NAME,
+        pool: str | None = None,
+        session_kwargs: dict | None = None,
         batch_window: float | None = None,
         batch_limit: int = 1024,
         start_timeout: float = 30.0,
@@ -113,6 +131,8 @@ class OrbitExecutionBackend(BaseBackend):
         self._participant_name = participant_name
         self._endpoint_name = endpoint_name
         self._plugin_name = plugin_name
+        self._pool = pool
+        self._session_kwargs = dict(session_kwargs or {})
         self._remote_backends = backends or ["dragon_v3"]
         self._start_timeout = start_timeout
         self._init_timeout = init_timeout
@@ -353,6 +373,12 @@ class OrbitExecutionBackend(BaseBackend):
                 )
             self._broker_url = rt.broker_url
 
+            # pool mode: the dispatcher lives on the broker participant, so
+            # there is no endpoint to select -- the pool's pilots pick the
+            # executing endpoints, not this backend
+            if self._pool and not self._endpoint_name:
+                self._endpoint_name = "broker"
+
             # find a suitable endpoint from the (local) topology snapshot
             if not self._endpoint_name:
                 for eid, info in rt.topology().items():
@@ -382,6 +408,7 @@ class OrbitExecutionBackend(BaseBackend):
                 self._plugin_name,
                 backends=self._remote_backends,
                 init_timeout=self._init_timeout,
+                **self._session_kwargs,
             )
         except Exception:
             # Don't leak the runtime's daemon threads / WebSocket on a failed
@@ -430,10 +457,16 @@ class OrbitExecutionBackend(BaseBackend):
             info = None
 
             def _lookup():
+                # Pool mode: the submission target (the dispatcher's host)
+                # does not execute anything — the pool's endpoint does, so
+                # that is what the cloudpickle handshake compares against.
+                target = self._endpoint_name
+                if self._pool and hasattr(self._rh, "pool_detail"):
+                    target = self._rh.pool_detail(self._pool).get("endpoint_name") or target
                 # get_plugin() auto-registers an ephemeral session even
                 # though host_role() needs none — close the client so failed
                 # retries don't accumulate sessions on the endpoint.
-                si = self._runtime.get_plugin(self._endpoint_name, "sysinfo")
+                si = self._runtime.get_plugin(target, "sysinfo")
                 try:
                     return si.host_role()
                 finally:
@@ -505,6 +538,10 @@ class OrbitExecutionBackend(BaseBackend):
         prof = self._prof
         for task in tasks:
             task.setdefault("uid", f"task.{uuid.uuid4().hex[:8]}")
+            # pool mode: route every task into this backend's pool; a task
+            # that already names one keeps it
+            if self._pool:
+                task.setdefault("pool", self._pool)
             self._tasks[task["uid"]] = task
             if prof:
                 prof.prof("task_submit", uid=task["uid"])
