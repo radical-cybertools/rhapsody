@@ -694,20 +694,6 @@ def test_v3_deliver_batch_prefers_traceback_over_str_exc(backend_v3):
     assert task_desc["stderr"] == tb
 
 
-def test_v3_cancelled_task_skips_callback(backend_v3):
-    """_deliver_batch is a no-op for UIDs in _cancelled_tasks."""
-    uid = "task.unit-cancelled"
-    task_desc = {"uid": uid}
-    backend_v3._task_registry[uid] = {"uid": uid, "description": task_desc}
-    backend_v3._cancelled_tasks.add(uid)
-
-    backend_v3._deliver_batch([(uid, 99, None, False, None, None)])
-
-    backend_v3._callback_func.assert_not_called()
-    assert "return_value" not in task_desc
-    assert uid not in backend_v3._cancelled_tasks
-
-
 def test_v3_fence_delegates_to_batch(backend_v3):
     """backend.fence() calls batch.fence() exactly once."""
     backend_v3.fence()
@@ -898,7 +884,6 @@ async def test_v3_cancel_task_dragon_returns_false_no_callback(backend_v3):
 
     assert result is False
     backend_v3._callback_func.assert_not_called()
-    assert uid not in backend_v3._cancelled_tasks
 
 
 @pytest.mark.asyncio

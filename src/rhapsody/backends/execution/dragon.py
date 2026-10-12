@@ -3161,7 +3161,6 @@ class DragonExecutionBackendV3(BaseBackend):
         self._task_registry: dict[str, Any] = {}
         self._task_states = TaskStateMapperV3()
         self._initialized = False
-        self._cancelled_tasks: set[str] = set()
         self._monitored_batches = {}
         self._batch_monitor_thread = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -3325,9 +3324,6 @@ class DragonExecutionBackendV3(BaseBackend):
         for uid, result, tb, raised, stdout, stderr in completions:
             task_info = self._task_registry.pop(uid, None)
             if not task_info:
-                continue
-            if uid in self._cancelled_tasks:
-                self._cancelled_tasks.discard(uid)
                 continue
             task_desc = task_info["description"]
             stdout_path = task_info.get("stdout_path")
