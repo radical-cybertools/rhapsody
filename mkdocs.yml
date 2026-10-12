@@ -114,9 +114,15 @@ nav:
       - Advanced Usage: getting-started/advanced-usage.md
       - Resource Specification: getting-started/resource-specification.md
       - Configuration: getting-started/configuration.md
-      - Integrations: integrations.md
       - Contributing: contributing.md
       - Issues (GitHub): https://github.com/radical-cybertools/rhapsody/issues
+  - AI-HPC: ai/index.md
+  - Execution: execution/index.md
+  - Data:
+      - Overview: data-backends/index.md
+      - Redis Data Backend: data-backends/redis.md
+      - Dragon Data Backend: data-backends/dragon.md
+      - Plugins: data-backends/plugins.md
   - Telemetry:
       - Overview: telemetry/index.md
       - Events & Metrics Reference: telemetry/reference.md

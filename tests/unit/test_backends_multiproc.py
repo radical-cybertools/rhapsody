@@ -21,9 +21,7 @@ from rhapsody import ComputeTask
 from rhapsody import Session
 from rhapsody.backends.multiproc import RemoteBackendProxy
 
-_REPO_SRC = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "src")
-)
+_REPO_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +43,7 @@ def _propagate_pythonpath(monkeypatch):
 # Phase 1 — proxy round-trip against a single proxied partition.
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_proxy_command_roundtrip():
     """An executable task echoes through the proxy and returns stdout/exit_code."""
@@ -52,7 +51,9 @@ async def test_proxy_command_roundtrip():
     try:
         async with Session(backends=[proxy]) as session:
             task = ComputeTask(
-                executable="/bin/echo", arguments=["hello"], backend="p0",
+                executable="/bin/echo",
+                arguments=["hello"],
+                backend="p0",
             )
             await session.submit_tasks([task])
             await session.wait_tasks([task], timeout=20)
@@ -71,7 +72,9 @@ async def test_proxy_function_roundtrip():
     try:
         async with Session(backends=[proxy]) as session:
             task = ComputeTask(
-                function=(lambda x, y: x * y), args=(6, 7), backend="p0",
+                function=(lambda x, y: x * y),
+                args=(6, 7),
+                backend="p0",
             )
             await session.submit_tasks([task])
             await session.wait_tasks([task], timeout=20)
@@ -94,6 +97,7 @@ async def test_proxy_clean_shutdown_is_idempotent():
 # ---------------------------------------------------------------------------
 # Phase 2 — multiple proxied partitions + cross-partition dependency.
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_two_partitions_with_cross_dependency():
@@ -158,9 +162,9 @@ class _FakeNode:
 
 def test_dragon_launch_prefix_unpartitioned():
     """No partition: bare ``dragon`` launcher with a port triplet, no hostlist."""
-    from rhapsody.backends.execution.dragon import DragonExecutionBackendV3
+    from rhapsody.backends.execution.dragon import DragonExecutionBackend
 
-    prefix = DragonExecutionBackendV3.build_launch_prefix(None)
+    prefix = DragonExecutionBackend.build_launch_prefix(None)
     assert prefix[0] == "dragon"
     assert "--port" in prefix and "--overlay-port" in prefix and "--frontend-port" in prefix
     assert "--hostlist" not in prefix and "-N" not in prefix
@@ -168,11 +172,11 @@ def test_dragon_launch_prefix_unpartitioned():
 
 def test_dragon_launch_prefix_partitioned_and_disjoint_ports():
     """Partition spec constrains the launcher; consecutive builds get disjoint ports."""
-    from rhapsody.backends.execution.dragon import DragonExecutionBackendV3
+    from rhapsody.backends.execution.dragon import DragonExecutionBackend
 
     spec = {"nodelist": [_FakeNode("n0"), _FakeNode("n1")], "env": {}}
-    p0 = DragonExecutionBackendV3.build_launch_prefix(spec)
-    p1 = DragonExecutionBackendV3.build_launch_prefix(spec)
+    p0 = DragonExecutionBackend.build_launch_prefix(spec)
+    p1 = DragonExecutionBackend.build_launch_prefix(spec)
 
     for prefix in (p0, p1):
         assert prefix[0] == "dragon"

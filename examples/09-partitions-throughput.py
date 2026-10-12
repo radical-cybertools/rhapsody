@@ -29,10 +29,9 @@ TESTING NOTES — Perlmutter (transient; remove this section before merge)
 
 Repos / stack this example was written against (2026-07-20):
 
-- rhapsody: branch ``feature/partitions-orbit`` (Dragon V3 backend,
-  registry name ``dragon_v3``; the 0.14.1 migration was retracted 2026-07-22
-  — do NOT use dragonhpc 0.14.1 pre-releases) with the partition consumer
-  hooks: ``resources={"partition": spec}`` + ``build_launch_prefix``.
+- rhapsody: branch ``feature/partitions-orbit`` (Dragon backend on the
+  dragonhpc 0.14.1 Batch API, registry name ``dragon``) with the partition
+  consumer hooks: ``resources={"partition": spec}`` + ``build_launch_prefix``.
 - rhapsody_rm: repo checked out next to rhapsody (``../rhapsody_rm``); the
   partition contract is ``../rhapsody_rm/CONTRACT.md``.  Producer API used
   here: ``RMConfig(requested_nodes=4)``,
@@ -41,8 +40,8 @@ Repos / stack this example was written against (2026-07-20):
   ``{"nodelist": [Node...], "env": {...}}``.  rhapsody only duck-types
   ``Node`` (``.name``, ``.index``, ``.cores``, ``.gpus``) — do not import
   rhapsody_rm inside rhapsody.
-- dragonhpc == 0.14.0 (the pinned release; the V3 backend targets its Batch
-  API); the ``dragon`` CLI must be on PATH.  The launch prefix built by the backend
+- dragonhpc == 0.14.1 (the pinned release; the backend targets its public
+  Batch API); the ``dragon`` CLI must be on PATH.  The launch prefix built by the backend
   offsets the default ports (7575/6565/6566) per instance so co-resident
   front-ends on the head node don't clash.
 - Flux: ``flux`` CLI + its Python bindings must be available *inside the
@@ -55,13 +54,13 @@ Suggested setup on Perlmutter:
     salloc -N 4 -C cpu -q interactive -t 00:30:00 -A <account>
     module load python                      # or your python env
     python -m venv ve && source ve/bin/activate
-    pip install dragonhpc==0.14.0 cloudpickle
+    pip install dragonhpc==0.14.1 flask gunicorn cloudpickle
     # rhapsody + rhapsody_rm from source (no editable installs):
     export PYTHONPATH=$HOME/radical/rhapsody/src:$HOME/radical/rhapsody_rm/src
 
 Run (from the head node of the allocation, cwd on a shared FS):
 
-    python examples/07-partitions-throughput.py [--n-tasks N]
+    python examples/09-partitions-throughput.py [--n-tasks N]
 
 Known constraints / things to verify on the machine:
 
@@ -183,7 +182,7 @@ async def run_dragon(spec: dict, n_tasks: int) -> dict:
     """Host a dragon backend on the partition via proxy, measure tasks/s."""
     proxy = await RemoteBackendProxy(
         name="p_dragon",
-        backend="dragon_v3",
+        backend="dragon",
         resources={"partition": spec},
     )
     print(f"p_dragon: proxy up on {_hostlist(spec)}")

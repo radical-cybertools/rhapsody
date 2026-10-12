@@ -14,7 +14,7 @@ jupyter notebook
 
 ### With Dragon Backend (dragon-resource-placement.ipynb, rhapsody-tutorial.ipynb)
 
-Tutorials that use `DragonExecutionBackendV3` require the Dragon runtime. You **must** launch the notebook server using `dragon-jupyter`:
+Tutorials that use `DragonExecutionBackend` require the Dragon runtime. You **must** launch the notebook server using `dragon-jupyter`:
 
 ```bash
 dragon-jupyter

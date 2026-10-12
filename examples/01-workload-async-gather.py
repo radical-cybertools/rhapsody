@@ -6,7 +6,7 @@ import multiprocessing as mp
 import rhapsody
 from rhapsody.api import ComputeTask
 from rhapsody.api import Session
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
 rhapsody.enable_logging(level=logging.DEBUG)
 
@@ -17,7 +17,7 @@ def func_task():
 
 async def main():
     # Initialize session with Concurrent backend
-    backend = await DragonExecutionBackendV3()
+    backend = await DragonExecutionBackend()
     session = Session(backends=[backend])
 
     print("--- Submitting Tasks ---")
