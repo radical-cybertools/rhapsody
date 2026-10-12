@@ -133,7 +133,6 @@ class DragonExecutionBackend(BaseBackend):
         self._task_registry: dict[str, Any] = {}
         self._task_states = TaskStateMapper()
         self._initialized = False
-        self._cancelled_tasks: set[str] = set()
         self._monitored_batches = {}
         # Tuids polled before registration landed; retried each sweep. tuid -> first-seen time.
         self._pending_tuids: dict[str, float] = {}
@@ -292,9 +291,6 @@ class DragonExecutionBackend(BaseBackend):
         for uid, result, tb, raised, stdout, stderr in completions:
             task_info = self._task_registry.pop(uid, None)
             if not task_info:
-                continue
-            if uid in self._cancelled_tasks:
-                self._cancelled_tasks.discard(uid)
                 continue
             task_desc = task_info["description"]
             if raised:

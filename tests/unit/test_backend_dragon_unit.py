@@ -19,7 +19,6 @@ def bare_backend():
     backend = object.__new__(DragonExecutionBackend)
     backend.logger = logging.getLogger("test.dragon.unit")
     backend._task_registry = {}
-    backend._cancelled_tasks = set()
 
     delivered = []
     backend._callback_func = lambda task, state: delivered.append((dict(task), state))
