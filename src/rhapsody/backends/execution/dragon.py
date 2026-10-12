@@ -3327,6 +3327,10 @@ class DragonExecutionBackendV3(BaseBackend):
             stdout_path = task_info.get("stdout_path")
             stderr_path = task_info.get("stderr_path")
             if raised:
+                # surface the remote traceback in the endpoint log -- the
+                # consumer side only ever sees the exception message
+                self.logger.error(
+                    f"task {uid} failed: {result}\n{tb or '(no traceback captured)'}")
                 task_desc["exception"] = result
                 task_desc["stderr"] = stderr_path if stderr_path else (tb if tb else str(result))
                 task_desc["stdout"] = stdout_path or stdout or ""
@@ -3569,7 +3573,13 @@ class DragonExecutionBackendV3(BaseBackend):
 
     async def cancel_task(self, uid: str) -> bool:
         if uid not in self._task_registry:
-            raise ValueError(f"Task {uid} not found")
+            # Idempotent, like the concurrent backend: a cancel can race a
+            # task that already finished or was never dispatched (ROSE
+            # cancels its losing candidate branch this way).  Raising here
+            # breaks the caller's teardown and turns a clean branch-cancel
+            # into a DependencyFailureError downstream.
+            self.logger.debug(f"cancel_task: {uid} not tracked (already done?)")
+            return False
 
         batch_task = self._task_registry[uid]["batch_task"]
         loop = asyncio.get_running_loop()

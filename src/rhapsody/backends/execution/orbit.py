@@ -94,6 +94,7 @@ class OrbitExecutionBackend(BaseBackend):
         endpoint_name: str | None = None,
         backends: list[str] | None = None,
         name: str = "orbit",
+        participant_name: str | None = None,
         plugin_name: str = _PLUGIN_NAME,
         batch_window: float | None = None,
         batch_limit: int = 1024,
@@ -109,6 +110,7 @@ class OrbitExecutionBackend(BaseBackend):
 
         self.logger = logging.getLogger(__name__)
         self._broker_url = broker_url
+        self._participant_name = participant_name
         self._endpoint_name = endpoint_name
         self._plugin_name = plugin_name
         self._remote_backends = backends or ["dragon_v3"]
@@ -325,12 +327,19 @@ class OrbitExecutionBackend(BaseBackend):
         """
         import uuid
 
-        # A unique name suffix avoids the broker's name-in-use rejection when
-        # several rhapsody clients connect (or one restarts within the
-        # liveness grace window).
+        # The broker shows every runtime as a participant, so an anonymous
+        # `rhapsody.<uuid>` reads as noise in a topology view.  A caller
+        # which knows what this backend is *for* can say so via
+        # ``participant_name`` -- uniqueness is then the caller's contract.
+        # Without one, a unique suffix avoids the broker's name-in-use
+        # rejection when several rhapsody clients connect (or one restarts
+        # within the liveness grace window).
         rt = EndpointRuntime(
             broker_url=self._broker_url,
-            name=f"rhapsody.{uuid.uuid4().hex[:8]}",
+            name=self._participant_name or f"rhapsody.{uuid.uuid4().hex[:8]}",
+            # the advertised role defaults to 'consumer', which says nothing.
+            # This participant is the workflow engine's hand-off into ORBIT.
+            role="engine",
         )
         try:
             rt.start(wait=True, timeout=self._start_timeout)
