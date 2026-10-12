@@ -158,7 +158,6 @@ class DragonExecutionBackend(BaseBackend):
         self._task_registry: dict[str, Any] = {}
         self._task_states = TaskStateMapper()
         self._initialized = False
-        self._cancelled_tasks: set[str] = set()
         self._monitored_batches = {}
         # Tuids polled before registration landed; retried each sweep. tuid -> first-seen time.
         self._pending_tuids: dict[str, float] = {}
@@ -362,11 +361,11 @@ class DragonExecutionBackend(BaseBackend):
             task_info = self._task_registry.pop(uid, None)
             if not task_info:
                 continue
-            if uid in self._cancelled_tasks:
-                self._cancelled_tasks.discard(uid)
-                continue
             task_desc = task_info["description"]
             if raised:
+                # surface the remote traceback in the endpoint log -- the
+                # consumer side only ever sees the exception message
+                self.logger.error(f"task {uid} failed: {result}\n{tb or '(no traceback captured)'}")
                 task_desc["exception"] = result
                 task_desc["stderr"] = stderr if stderr else (tb if tb else str(result))
                 task_desc["stdout"] = stdout
@@ -567,7 +566,13 @@ class DragonExecutionBackend(BaseBackend):
 
     async def cancel_task(self, uid: str) -> bool:
         if uid not in self._task_registry:
-            raise ValueError(f"Task {uid} not found")
+            # Idempotent, like the concurrent backend: a cancel can race a
+            # task that already finished or was never dispatched (ROSE
+            # cancels its losing candidate branch this way).  Raising here
+            # breaks the caller's teardown and turns a clean branch-cancel
+            # into a DependencyFailureError downstream.
+            self.logger.debug(f"cancel_task: {uid} not tracked (already done?)")
+            return False
 
         batch_task = self._task_registry[uid]["batch_task"]
         loop = asyncio.get_running_loop()
