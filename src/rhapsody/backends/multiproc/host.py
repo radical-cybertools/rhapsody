@@ -64,7 +64,7 @@ async def _run() -> int:
     try:
         # Construct + init the real backend (verified facts 7, 9).
         backend = get_backend(backend_name, resources=resources)
-        backend = await backend           # backends are awaitable for init
+        backend = await backend  # backends are awaitable for init
 
         # Terminal states are needed by both sides — driver to know when to
         # resolve futures, child to know whether to send STATE vs COMPLETE.
@@ -87,12 +87,14 @@ async def _run() -> int:
         def _callback(task: dict, state: str) -> None:
             uid = task.get("uid")
             if state in terminal_states:
-                _safe_send({
-                    "op": OP_COMPLETE,
-                    "uid": uid,
-                    "state": state,
-                    "envelope": inline_envelope(task),
-                })
+                _safe_send(
+                    {
+                        "op": OP_COMPLETE,
+                        "uid": uid,
+                        "state": state,
+                        "envelope": inline_envelope(task),
+                    }
+                )
             else:
                 _safe_send({"op": OP_STATE, "uid": uid, "state": state})
 
@@ -129,8 +131,7 @@ async def _run() -> int:
                 else:
                     logger.warning("host: unknown op %r", op)
 
-        threading.Thread(target=_reader, name="rhapsody-mp-host-reader",
-                         daemon=True).start()
+        threading.Thread(target=_reader, name="rhapsody-mp-host-reader", daemon=True).start()
 
         # Run until the driver tells us to shut down (or the connection drops).
         await stop_event.wait()

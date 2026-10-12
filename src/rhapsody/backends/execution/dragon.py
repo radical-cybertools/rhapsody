@@ -3204,17 +3204,23 @@ class DragonExecutionBackendV3(BaseBackend):
         offset = cls._allocate_port_offset()
         cmd: list = [
             "dragon",
-            "--port",          str(7575 + offset),
-            "--overlay-port",  str(6565 + offset),
-            "--frontend-port", str(6566 + offset),
+            "--port",
+            str(7575 + offset),
+            "--overlay-port",
+            str(6565 + offset),
+            "--frontend-port",
+            str(6566 + offset),
         ]
         if partition and partition.get("nodelist"):
             nodes = partition["nodelist"]
             hosts = ",".join(n.name for n in nodes)
             cmd += [
-                "-N", str(len(nodes)),
-                "--wlm", "slurm",
-                "--hostlist", hosts,
+                "-N",
+                str(len(nodes)),
+                "--wlm",
+                "slurm",
+                "--hostlist",
+                hosts,
             ]
         return cmd
 
@@ -3329,8 +3335,7 @@ class DragonExecutionBackendV3(BaseBackend):
             if raised:
                 # surface the remote traceback in the endpoint log -- the
                 # consumer side only ever sees the exception message
-                self.logger.error(
-                    f"task {uid} failed: {result}\n{tb or '(no traceback captured)'}")
+                self.logger.error(f"task {uid} failed: {result}\n{tb or '(no traceback captured)'}")
                 task_desc["exception"] = result
                 task_desc["stderr"] = stderr_path if stderr_path else (tb if tb else str(result))
                 task_desc["stdout"] = stdout_path or stdout or ""

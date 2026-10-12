@@ -21,9 +21,7 @@ from rhapsody import ComputeTask
 from rhapsody import Session
 from rhapsody.backends.multiproc import RemoteBackendProxy
 
-_REPO_SRC = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "..", "src")
-)
+_REPO_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +43,7 @@ def _propagate_pythonpath(monkeypatch):
 # Phase 1 — proxy round-trip against a single proxied partition.
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_proxy_command_roundtrip():
     """An executable task echoes through the proxy and returns stdout/exit_code."""
@@ -52,7 +51,9 @@ async def test_proxy_command_roundtrip():
     try:
         async with Session(backends=[proxy]) as session:
             task = ComputeTask(
-                executable="/bin/echo", arguments=["hello"], backend="p0",
+                executable="/bin/echo",
+                arguments=["hello"],
+                backend="p0",
             )
             await session.submit_tasks([task])
             await session.wait_tasks([task], timeout=20)
@@ -71,7 +72,9 @@ async def test_proxy_function_roundtrip():
     try:
         async with Session(backends=[proxy]) as session:
             task = ComputeTask(
-                function=(lambda x, y: x * y), args=(6, 7), backend="p0",
+                function=(lambda x, y: x * y),
+                args=(6, 7),
+                backend="p0",
             )
             await session.submit_tasks([task])
             await session.wait_tasks([task], timeout=20)
@@ -94,6 +97,7 @@ async def test_proxy_clean_shutdown_is_idempotent():
 # ---------------------------------------------------------------------------
 # Phase 2 — multiple proxied partitions + cross-partition dependency.
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_two_partitions_with_cross_dependency():
