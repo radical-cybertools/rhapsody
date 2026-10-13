@@ -24,6 +24,7 @@ from .api import TaskValidationError
 from .backends import BackendRegistry
 from .backends import discover_backends
 from .backends import get_backend
+from .backends import get_data_backend
 from .logger import enable_logging
 
 try:
@@ -34,6 +35,7 @@ except PackageNotFoundError:  # uninstalled source tree
 __all__ = [
     "__version__",
     "get_backend",
+    "get_data_backend",
     "discover_backends",
     "BackendRegistry",
     "enable_logging",

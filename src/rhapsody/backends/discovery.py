@@ -7,6 +7,7 @@ dynamically.
 from __future__ import annotations
 
 import importlib
+import logging
 import re
 from typing import Any
 
@@ -207,3 +208,104 @@ def discover_backends() -> dict[str, bool]:
             available_backends[name] = False
 
     return available_backends
+
+
+class DataBackendRegistry:
+    """Registry for data-infrastructure backends (`DataBackend` subclasses).
+
+    Built-in data backends are discovered from the `__all__` exports of
+    `rhapsody.backends.data` (`RedisDataBackend` -> `redis`, `DragonDataBackend` -> `dragon`).
+    External packages add their own via the `rhapsody.data_backends` entry-point group; a
+    built-in name wins over an entry point of the same name.
+    """
+
+    ENTRY_POINT_GROUP = "rhapsody.data_backends"
+
+    _backends: dict[str, Any] = {}
+    _initialized: bool = False
+
+    @classmethod
+    def _discover_backends(cls) -> None:
+        if cls._initialized:
+            return
+
+        try:
+            data_module = importlib.import_module("rhapsody.backends.data")
+        except ImportError:
+            data_module = None
+
+        for class_name in getattr(data_module, "__all__", []):
+            if not class_name.endswith("DataBackend") or class_name == "DataBackend":
+                continue
+            backend_class = getattr(data_module, class_name, None)
+            # `_registrable = False` marks wrappers (OrbitDataBackend) that are
+            # not a store type a session can build by name.
+            if backend_class is None or not getattr(backend_class, "_registrable", True):
+                continue
+            name = BackendRegistry._derive_backend_name(class_name[: -len("DataBackend")])
+            cls._backends.setdefault(name, backend_class)
+
+        try:
+            from importlib.metadata import entry_points
+
+            for ep in entry_points(group=cls.ENTRY_POINT_GROUP):
+                cls._backends.setdefault(ep.name, ep)
+        except Exception:  # noqa: BLE001 - broken metadata must not break discovery
+            logging.getLogger(__name__).warning(
+                "Could not read '%s' entry points", cls.ENTRY_POINT_GROUP, exc_info=True
+            )
+
+        cls._initialized = True
+
+    @classmethod
+    def get_backend_class(cls, backend_name: str) -> type:
+        """Get data backend class by name.
+
+        Raises:
+            ValueError: If the name is not registered.
+            ImportError: If a registered import path cannot be imported.
+        """
+        cls._discover_backends()
+
+        if backend_name not in cls._backends:
+            available = list(cls._backends.keys())
+            raise ValueError(f"Data backend '{backend_name}' not found. Available: {available}")
+
+        backend_value = cls._backends[backend_name]
+        if not isinstance(backend_value, type):
+            try:
+                if isinstance(backend_value, str):
+                    module_path, class_name = backend_value.rsplit(".", 1)
+                    backend_value = getattr(importlib.import_module(module_path), class_name)
+                else:  # importlib.metadata.EntryPoint
+                    backend_value = backend_value.load()
+            except (ImportError, AttributeError, ValueError) as e:
+                raise ImportError(
+                    f"Failed to import data backend '{backend_name}' "
+                    f"from '{cls._backends[backend_name]}': {e}"
+                ) from e
+            cls._backends[backend_name] = backend_value
+
+        return backend_value
+
+    @classmethod
+    def list_backends(cls) -> list[str]:
+        """List all registered data backend names."""
+        cls._discover_backends()
+        return list(cls._backends.keys())
+
+    @classmethod
+    def register_backend(cls, name: str, backend_class: type | str) -> None:
+        """Register a data backend class or import path under `name`."""
+        cls._backends[name] = backend_class
+
+
+def get_data_backend(backend_name: str, *args: Any, **kwargs: Any) -> Any:
+    """Factory for data backend instances (not started).
+
+    Example:
+        backend = get_data_backend('redis', hosts=['localhost'])
+        await backend.start()
+    """
+    backend_class = DataBackendRegistry.get_backend_class(backend_name)
+    return backend_class(*args, **kwargs)
