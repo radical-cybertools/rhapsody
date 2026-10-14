@@ -21,7 +21,7 @@ salloc --nodes=2 --ntasks-per-node=8 --gpus-per-node=8 --partition=GPU --time=01
 Bridges-2 provides system Python via modules. Load it first:
 
 ```bash
-module load python/3.11.5
+module load python/<version>
 python3 -m venv ~/ve/rhapsody
 source ~/ve/rhapsody/bin/activate
 ```
@@ -135,7 +135,8 @@ dragon -w ssh --network-config slurm.yaml -t tcp 01-workload-async-gather.py
 ### Why SSH launcher instead of SLURM launcher
 
 Dragon supports two multi-node launchers: `slurm` (native SLURM integration,
-used on Delta and Perlmutter) and `ssh` (SSH-based, generic). Bridges-2 does
+used on Perlmutter) and `ssh` (SSH-based, generic — also used on Delta and
+Anvil). Bridges-2 does
 not expose the PMI/PMIx hooks that Dragon's SLURM launcher depends on, so
 `-w ssh` is required. The `--network-config` flag bridges the gap by giving
 Dragon the node list that it would otherwise obtain from the scheduler.
@@ -144,7 +145,8 @@ Dragon the node list that it would otherwise obtain from the scheduler.
 
 Bridges-2 does not have Cray libfabric or a compatible OFI provider. Use
 `-t tcp` to select Dragon's TCP transport. Performance will be lower than on
-Cray libfabric systems (Delta, Perlmutter), but correctness is unaffected.
+systems with a faster native transport (Delta and Perlmutter's Cray
+libfabric, Anvil's HSTA), but correctness is unaffected.
 
 ### Re-using `slurm.yaml` across runs
 
