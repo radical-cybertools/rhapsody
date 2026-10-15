@@ -62,6 +62,16 @@
 
 ### Added
 
+- **Data-linking capability flags on `BaseBackend`** —
+  `supports_implicit_data_linking` and `supports_explicit_data_linking` (both
+  `False` by default; `True` on `RadicalExecutionBackend`) declare which data-linking
+  hooks a backend implements. Workflow engines such as AsyncFlow call
+  `link_implicit_data_deps` / `link_explicit_data_deps` only on backends that declare
+  the matching capability. Backends declaring explicit linking must return a
+  data-dependency descriptor containing at least `"target"`. Previously AsyncFlow
+  called the hooks on every backend and expected a descriptor that only RADICAL-Pilot
+  returned, so any explicit `OutputFile` → `InputFile` dependency shut the engine down
+  on all other backends.
 - `examples/07-dask-backend-slrum-cluster.py` — `DaskExecutionBackend` against a
   real Slurm allocation via `dask_jobqueue.SLURMCluster`, including the
   `asynchronous=True`/`async with` construction required for non-`LocalCluster`
