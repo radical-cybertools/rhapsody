@@ -257,3 +257,75 @@ def test_backend_registry_backend_path_parsing():
         assert hasattr(backend_class, "__abstractmethods__")
     finally:
         registry._backends = original_backends
+
+
+def test_data_backend_registry_builtins():
+    from rhapsody.backends import DataBackendRegistry
+    from rhapsody.backends.data import RedisDataBackend
+
+    names = DataBackendRegistry.list_backends()
+    assert "redis" in names
+    assert "orbit" not in names
+    assert DataBackendRegistry.get_backend_class("redis") is RedisDataBackend
+
+
+def test_get_data_backend_factory():
+    from rhapsody import get_data_backend
+    from rhapsody.backends.data import RedisDataBackend
+
+    backend = get_data_backend("redis", name="r1", hosts=["localhost"])
+    assert isinstance(backend, RedisDataBackend)
+    assert backend.name == "r1"
+
+
+def test_data_backend_registry_unknown():
+    from rhapsody.backends import DataBackendRegistry
+
+    with pytest.raises(ValueError, match="not found"):
+        DataBackendRegistry.get_backend_class("no_such_store")
+
+
+def test_data_backend_registry_register_import_path():
+    from rhapsody.backends import DataBackendRegistry
+    from rhapsody.backends.data import RedisDataBackend
+
+    DataBackendRegistry.register_backend(
+        "redis_alias", "rhapsody.backends.data.redis.RedisDataBackend"
+    )
+    try:
+        assert DataBackendRegistry.get_backend_class("redis_alias") is RedisDataBackend
+    finally:
+        DataBackendRegistry._backends.pop("redis_alias", None)
+
+
+def test_data_backend_registry_entry_points_load_lazily():
+    from unittest.mock import MagicMock
+    from unittest.mock import patch
+
+    from rhapsody.backends import DataBackendRegistry
+
+    class _Store:
+        pass
+
+    ep = MagicMock()
+    ep.name = "ext_store"
+    ep.load.return_value = _Store
+    saved = (dict(DataBackendRegistry._backends), DataBackendRegistry._initialized)
+    DataBackendRegistry._backends, DataBackendRegistry._initialized = {}, False
+    try:
+        with patch("importlib.metadata.entry_points", return_value=[ep]):
+            assert "ext_store" in DataBackendRegistry.list_backends()
+        ep.load.assert_not_called()
+        assert DataBackendRegistry.get_backend_class("ext_store") is _Store
+    finally:
+        DataBackendRegistry._backends, DataBackendRegistry._initialized = saved
+
+
+def test_data_backend_registry_skips_unregistrable():
+    from rhapsody.backends import DataBackendRegistry
+    from rhapsody.backends.data import OrbitDataBackend
+
+    assert OrbitDataBackend._registrable is False
+    assert OrbitDataBackend not in [
+        DataBackendRegistry.get_backend_class(n) for n in DataBackendRegistry.list_backends()
+    ]
