@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] 2026-10-19
+
 ### Fixed
 
 - **`DaskExecutionBackend` PicklingError on async function tasks** — `submit_tasks`
