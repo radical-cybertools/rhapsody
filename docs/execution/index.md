@@ -156,6 +156,10 @@ backend = await DragonExecutionBackend()
 flow = await WorkflowEngine.create(backend=backend)
 ```
 
+### Data-Linking Capabilities
+
+Each backend declares whether it moves data between tasks through two independent class attributes on `BaseBackend`, both `False` by default: `supports_implicit_data_linking` (the backend implements `link_implicit_data_deps`) and `supports_explicit_data_linking` (the backend implements `link_explicit_data_deps` and returns a data-dependency descriptor containing at least `"target"`, the file's name or path at the destination). Callers invoke a hook only on backends that declare the matching capability. `RadicalExecutionBackend` declares both because its tasks run in separate sandboxes; the other backends share a filesystem between tasks and declare neither, so custom backends should set a capability to `True` only when they implement the matching hook.
+
 ### Performance Considerations
 
 !!! tip "Scaling Guidelines"

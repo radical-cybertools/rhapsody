@@ -1,8 +1,8 @@
-# NERSC Perlmutter
+# NERSC Perlmutter — AI-HPC
 
 [Perlmutter](https://docs.nersc.gov/systems/perlmutter/architecture/) is a Cray EX supercomputer at the National Energy Research Scientific Computing Center (NERSC), DOE. It features both GPU and CPU partitions, with GPU nodes equipped with 4x NVIDIA A100 40GB GPUs each. It runs a Cray PE software stack with Cray MPICH and Cray libfabric for high-speed interconnect.
 
-This guide covers running RHAPSODY's AI inference workloads using the `DragonVllmInferenceBackend` on Perlmutter's GPU partition.
+This guide covers running RHAPSODY's AI inference workloads using the `DragonVllmInferenceBackend` on Perlmutter's GPU partition. For large-scale, multi-node task execution via `DragonExecutionBackend`, see [Scalable Execution](perlmutter-scalable.md).
 
 ## Environment Setup
 
@@ -41,9 +41,9 @@ export HF_HOME=$SCRATCH/cache/huggingface
 Dragon needs to be pointed to the Cray libfabric library for inter-node communication:
 
 ```bash
-dragon-config add --ofi-build-lib=/opt/cray/libfabric/1.22.0/lib64
-dragon-config add --ofi-include=/opt/cray/libfabric/1.22.0/include
-dragon-config add --ofi-runtime-lib=/opt/cray/libfabric/1.22.0/lib64
+dragon-config add --ofi-build-lib=/opt/cray/libfabric/<version>/lib64
+dragon-config add --ofi-include=/opt/cray/libfabric/<version>/include
+dragon-config add --ofi-runtime-lib=/opt/cray/libfabric/<version>/lib64
 ```
 
 !!! warning

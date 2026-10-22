@@ -15,7 +15,6 @@ theme:
     - content.code.copy
     - content.code.select
     - navigation.path
-    - navigation.sections
     - navigation.tabs
     - navigation.top
     - navigation.tracking
@@ -132,7 +131,10 @@ nav:
   - HPC Machines:
       - Overview: hpc-machines/index.md
       - NCSA Delta: hpc-machines/ncsa-delta.md
-      - NERSC Perlmutter: hpc-machines/perlmutter.md
+      - NERSC Perlmutter:
+          - hpc-machines/perlmutter-index.md
+          - Scalable Execution: hpc-machines/perlmutter-scalable.md
+          - AI-HPC: hpc-machines/perlmutter-ai-hpc.md
       - PSC Bridges-2: hpc-machines/bridges2.md
       - Purdue Anvil: hpc-machines/anvil.md
   - Project:
