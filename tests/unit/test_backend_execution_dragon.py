@@ -695,6 +695,26 @@ def test_deliver_batch_prefers_traceback_over_str_exc(backend_dragon):
     assert task_desc["stderr"] == tb
 
 
+def test_deliver_batch_nonzero_exit_raises_task_execution_error(backend_dragon):
+    """A normalized non-zero exit (SystemExit) is delivered as TaskExecutionError with stderr."""
+    from rhapsody.api.errors import TaskExecutionError
+
+    uid = "task.unit-exit"
+    task_desc = {"uid": uid}
+    backend_dragon._task_registry[uid] = {"uid": uid, "description": task_desc}
+    stderr = "Traceback (most recent call last):\nValueError: root cause\n"
+
+    backend_dragon._deliver_batch([(uid, SystemExit([1, 0]), None, True, "", stderr)])
+
+    exc = task_desc["exception"]
+    assert isinstance(exc, TaskExecutionError)
+    assert exc.exit_code == [1, 0]
+    assert "ValueError: root cause" in str(exc)
+    assert task_desc["exit_code"] == [1, 0]
+    assert task_desc["stderr"] == stderr
+    backend_dragon._callback_func.assert_called_once_with(task_desc, "FAILED")
+
+
 def test_cancelled_task_skips_callback(backend_dragon):
     """_deliver_batch is a no-op for UIDs in _cancelled_tasks."""
     uid = "task.unit-cancelled"

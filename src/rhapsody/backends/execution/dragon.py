@@ -8,6 +8,8 @@ from typing import Any
 from typing import Callable
 from typing import Optional
 
+from rhapsody.api.errors import TaskExecutionError
+
 from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
@@ -298,6 +300,12 @@ class DragonExecutionBackend(BaseBackend):
                 continue
             task_desc = task_info["description"]
             if raised:
+                if isinstance(result, SystemExit):
+                    # Non-zero exit code (normalized in _monitor_loop): report it like
+                    # the other backends, with stderr in the message, instead of a
+                    # SystemExit that would exit the caller when re-raised.
+                    task_desc["exit_code"] = result.code
+                    result = TaskExecutionError(uid, stderr or str(result.code), result.code)
                 task_desc["exception"] = result
                 task_desc["stderr"] = stderr if stderr else (tb if tb else str(result))
                 task_desc["stdout"] = stdout
