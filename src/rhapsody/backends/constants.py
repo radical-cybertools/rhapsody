@@ -383,7 +383,7 @@ class StateMapper:
         Example:
             ::
 
-                mapper = StateMapper('dragon_v3')
+                mapper = StateMapper('dragon')
                 main_state = mapper.to_main_state('COMPLETED')  # TasksMainStates.DONE
         """
         try:

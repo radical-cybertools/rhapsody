@@ -15,6 +15,7 @@ extend-ignore-identifiers-re = [
 # rhapsody = "rhapsody"
 HPE = "HPE"
 leafs = "leafs"
+arange = "arange"  # numpy.arange, not a typo of "arrange"
 
 [files]
 extend-exclude = [
