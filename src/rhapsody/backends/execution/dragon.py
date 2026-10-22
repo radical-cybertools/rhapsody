@@ -8,8 +8,6 @@ from typing import Any
 from typing import Callable
 from typing import Optional
 
-from rhapsody.api.errors import TaskExecutionError
-
 from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
@@ -247,21 +245,6 @@ class DragonExecutionBackend(BaseBackend):
                         result, raised, tb = exc, True, batch_task.traceback
 
                     task_reg = self._task_registry.get(uid)
-                    is_native_function = (
-                        task_reg.get("is_native_function", False) if task_reg else False
-                    )
-                    if not is_native_function:
-                        # Dragon returns exit codes as int/list[int] for process/job tasks.
-                        # Normalize non-zero to raised=True so Rhapsody delivers FAILED.
-                        if isinstance(result, int) and result != 0:
-                            result = SystemExit(result)
-                            raised = True
-                        elif isinstance(result, list) and any(
-                            c != 0 for c in result if isinstance(c, int)
-                        ):
-                            result = SystemExit(result)
-                            raised = True
-
                     capture_stdio = (
                         task_reg.get("description", {}).get("capture_stdio") if task_reg else False
                     )
@@ -300,12 +283,6 @@ class DragonExecutionBackend(BaseBackend):
                 continue
             task_desc = task_info["description"]
             if raised:
-                if isinstance(result, SystemExit):
-                    # Non-zero exit code (normalized in _monitor_loop): report it like
-                    # the other backends, with stderr in the message, instead of a
-                    # SystemExit that would exit the caller when re-raised.
-                    task_desc["exit_code"] = result.code
-                    result = TaskExecutionError(uid, stderr or str(result.code), result.code)
                 task_desc["exception"] = result
                 task_desc["stderr"] = stderr if stderr else (tb if tb else str(result))
                 task_desc["stdout"] = stdout
@@ -314,7 +291,17 @@ class DragonExecutionBackend(BaseBackend):
                 task_desc["return_value"] = result
                 task_desc["stdout"] = stdout
                 task_desc["stderr"] = stderr
-                self._callback_func(task_desc, "DONE")
+                state = "DONE"
+                if not task_info.get("is_native_function", True):
+                    # Process/job tasks return exit code(s) as int/list[int]. Report the
+                    # first non-zero one like the other backends; the session then raises
+                    # TaskExecutionError(uid, stderr, exit_code) for FAILED tasks.
+                    codes = result if isinstance(result, list) else [result]
+                    exit_code = next((c for c in codes if isinstance(c, int) and c != 0), 0)
+                    task_desc["exit_code"] = exit_code
+                    if exit_code != 0:
+                        state = "FAILED"
+                self._callback_func(task_desc, state)
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
         """Submit tasks to the backend.
