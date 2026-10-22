@@ -15,11 +15,11 @@ salloc --nodes=2 --exclusive --account=<your_account> --partition=cpu --tasks-pe
 Anvil provides a system Python through the Cray PE. Use it with `--system-site-packages` so that Cray-optimized libraries (libfabric, PMIx, `mpi4py`, etc.) are inherited inside the venv — no need to rebuild `mpi4py` manually:
 
 ```bash
-/opt/cray/pe/python/3.11.7/bin/python3 -m venv --system-site-packages rhapsody_env
+/opt/cray/pe/python/<version>/bin/python3 -m venv --system-site-packages rhapsody_env
 ```
 
 !!! note
-    Any Python version available under `/opt/cray/pe/python/` can be used. Replace `3.11.7` with the version installed on your allocation.
+    Any Python version available under `/opt/cray/pe/python/` can be used. Replace `<version>` with the version installed on your allocation.
 
 ### 3. Load the Cray MPICH ABI module
 
@@ -47,23 +47,48 @@ pip install "rhapsody-py[dragon]"
 This step is required for Dragon to use Cray's high-speed libfabric instead of the default transport:
 
 ```bash
-dragon-config add --ofi-runtime-lib=/opt/cray/libfabric/1.22.0/lib64
+dragon-config add --ofi-runtime-lib=/opt/cray/libfabric/<version>/lib64
 ```
 
 !!! warning
     Skipping this step will result in Dragon falling back to a slower transport and significantly reduced multi-node performance. Always run it once after creating a new environment.
 
-### Run
+### 7. Generate the Dragon network configuration from SLURM
+
+Generate a network configuration YAML from the SLURM-assigned node list. Run
+this **inside your active SLURM allocation**:
 
 ```bash
-dragon <script.py>
+dragon-network-config --output-to-yaml
+```
+
+This reads `$SLURM_NODELIST` and writes a `slurm.yaml` file in the current
+directory describing the network topology Dragon will use.
+
+!!! note
+    `dragon-network-config` must be run inside a SLURM allocation (after `salloc`
+    or inside an `sbatch` script) so that `$SLURM_NODELIST` is populated. Running
+    it on the login node produces an empty or single-node configuration.
+
+!!! warning
+    Re-run `dragon-network-config --output-to-yaml` each time you request a new
+    allocation — SLURM assigns a different set of nodes and the previous
+    `slurm.yaml` will reference stale hostnames.
+
+### Run
+
+Pass the generated config to the `dragon` launcher with `-w ssh`, `--network-config`, and `-t hsta` for Anvil's high-speed interconnect:
+
+```bash
+dragon-network-config --output-to-yaml
+dragon -w ssh --network-config slurm.yaml -t hsta <script.py>
 ```
 
 ---
 
 ## Example
 
-This example runs 32 MPI jobs concurrently using RHAPSODY's `Session` API with `DragonExecutionBackendV3`. Each job gets a random number of ranks (between 2 and 32), all scheduled across the 2 allocated nodes. Worker count is determined automatically by Dragon from the allocation.
+This example runs 32 MPI jobs concurrently using RHAPSODY's `Session` API with `DragonExecutionBackend`. Each job gets a random number of ranks (between 2 and 32), all scheduled across the 2 allocated nodes. Worker count is determined automatically by Dragon from the allocation.
 
 ```python title="rhapsody-mpi.py"
 import asyncio
@@ -73,7 +98,7 @@ import time
 
 import rhapsody
 from rhapsody.api import ComputeTask, Session
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
 rhapsody.enable_logging(level=logging.DEBUG)
 
@@ -100,7 +125,7 @@ async def main():
     sleepsecs = 2
     maxranks = 32
 
-    backend = await DragonExecutionBackendV3()
+    backend = await DragonExecutionBackend()
     session = Session(backends=[backend])
 
     print("--- Submitting Tasks ---")
@@ -131,7 +156,8 @@ if __name__ == "__main__":
 Run with:
 
 ```bash
-dragon rhapsody-mpi.py
+dragon-network-config --output-to-yaml
+dragon -w ssh --network-config slurm.yaml -t hsta rhapsody-mpi.py
 ```
 
 ---

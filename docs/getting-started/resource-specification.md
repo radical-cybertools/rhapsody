@@ -13,7 +13,7 @@ This design keeps the task API thin and makes resource semantics explicit per ba
 |---------|-------------|-----|-----|-------|
 | `ConcurrentExecutionBackend` | not supported | `task_backend_specific_kwargs={"cwd": "..."}` | `task_backend_specific_kwargs={"env": {...}}` | `task_backend_specific_kwargs={"shell": True}` |
 | `DaskExecutionBackend` | `task_backend_specific_kwargs={"resources": {"GPU": 1}}` | `task_backend_specific_kwargs={"cwd": "..."}` | `task_backend_specific_kwargs={"env": {...}}` | `task_backend_specific_kwargs={"shell": True}` |
-| `DragonExecutionBackendV3` | `task_backend_specific_kwargs={"process_template": {"policy": ...}}` | `task_backend_specific_kwargs={"process_template": {"cwd": "..."}}` | `task_backend_specific_kwargs={"process_template": {"env": {...}}}` | not applicable |
+| `DragonExecutionBackend` | `task_backend_specific_kwargs={"process_template": {"policy": ...}}` | `task_backend_specific_kwargs={"process_template": {"cwd": "..."}}` | `task_backend_specific_kwargs={"process_template": {"env": {...}}}` | not applicable |
 
 ---
 
@@ -131,16 +131,27 @@ pass it via `cluster=` or `client=` — the task code is unchanged:
 from dask_jobqueue import SLURMCluster
 from rhapsody.backends import DaskExecutionBackend
 
-cluster = SLURMCluster(cores=4, memory="8GB", walltime="01:00:00")
-cluster.scale(jobs=4)
-backend = await DaskExecutionBackend(cluster=cluster)
+async with SLURMCluster(
+    cores=4, memory="8GB", walltime="01:00:00", asynchronous=True
+) as cluster:
+    await cluster.scale(jobs=4)
+    backend = await DaskExecutionBackend(cluster=cluster)
 ```
+
+!!! warning "asynchronous=True is required"
+    Construct `SLURMCluster` (and other non-`LocalCluster` cluster managers) with
+    `asynchronous=True` and enter it via `async with`, as above — otherwise it runs
+    its own background-thread event loop, the `Client` built around it inherits the
+    mismatched loop, and task results / shutdown fail with confusing
+    `TypeError`/`AttributeError` errors. See
+    [Cluster injection](advanced-usage.md#cluster-injection) for details and
+    `examples/07-dask-backend-slrum-cluster.py` for a full working example.
 
 ---
 
 ## Dragon Backend (V3)
 
-`DragonExecutionBackendV3` submits tasks to the Dragon runtime. All per-task resource
+`DragonExecutionBackend` submits tasks to the Dragon runtime. All per-task resource
 and placement settings flow through Dragon's [ProcessTemplate](https://dragonhpc.github.io/dragon/doc/_build/html/ref/native/dragon.native.process.html#dragon.native.process.ProcessTemplate).
 
 There is **no backend-level `working_directory`** in V3. Every process
@@ -152,7 +163,7 @@ Pass a `batch_kwargs` dict when constructing the backend to tune the underlying
 `dragon.workflows.batch.Batch` instance:
 
 ```python
-backend = await DragonExecutionBackendV3(batch_kwargs={
+backend = await DragonExecutionBackend(batch_kwargs={
     "num_nodes": 8,
     "results_ddict_mem": 4 * 1024**3,  # 4 GiB results DDict
     "scheduler_workers": 16,
