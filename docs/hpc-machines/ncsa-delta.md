@@ -15,7 +15,7 @@ salloc --nodes=2 --exclusive --account=<your_account> --partition=cpu --tasks-pe
 Delta provides a system Python through the Cray PE. Use it with `--system-site-packages` so that Cray-optimized libraries (libfabric, PMIx, `mpi4py`, etc.) are inherited inside the venv — no need to rebuild `mpi4py` manually:
 
 ```bash
-/opt/cray/pe/python/3.11.7/bin/python3 -m venv --system-site-packages ~/ve/rhapsody-cray
+/opt/cray/pe/python/<version>/bin/python3 -m venv --system-site-packages ~/ve/rhapsody-cray
 ```
 
 ### 3. Load the Cray MPICH ABI module
@@ -44,23 +44,50 @@ pip install "rhapsody-py[dragon]"
 This step is required for Dragon to use Cray's high-speed libfabric instead of the default transport:
 
 ```bash
-dragon-config add --ofi-runtime-lib=/opt/cray/libfabric/1.22.0/lib64
+dragon-config add --ofi-build-lib=/opt/cray/libfabric/<version>/lib64
+dragon-config add --ofi-include=/opt/cray/libfabric/<version>/include
+dragon-config add --ofi-runtime-lib=/opt/cray/libfabric/<version>/lib64
 ```
 
 !!! warning
     Skipping this step will result in Dragon falling back to a slower transport. Always run it before launching jobs on Delta.
 
-### Run
+### 7. Generate the Dragon network configuration from SLURM
+
+Generate a network configuration YAML from the SLURM-assigned node list. Run
+this **inside your active SLURM allocation**:
 
 ```bash
-dragon <script.py>
+dragon-network-config --output-to-yaml
+```
+
+This reads `$SLURM_NODELIST` and writes a `slurm.yaml` file in the current
+directory describing the network topology Dragon will use.
+
+!!! note
+    `dragon-network-config` must be run inside a SLURM allocation (after `salloc`
+    or inside an `sbatch` script) so that `$SLURM_NODELIST` is populated. Running
+    it on the login node produces an empty or single-node configuration.
+
+!!! warning
+    Re-run `dragon-network-config --output-to-yaml` each time you request a new
+    allocation — SLURM assigns a different set of nodes and the previous
+    `slurm.yaml` will reference stale hostnames.
+
+### Run
+
+Pass the generated config to the `dragon` launcher with `-w ssh` and `--network-config`:
+
+```bash
+dragon-network-config --output-to-yaml
+dragon -w ssh --network-config slurm.yaml <script.py>
 ```
 
 ---
 
 ## Example
 
-This example runs 32 MPI jobs concurrently using RHAPSODY's `Session` API with the `DragonExecutionBackendV3`. Each job gets a random number of ranks (between 2 and 32), all scheduled across the 2 allocated nodes. Worker count is determined automatically by Dragon from the allocation.
+This example runs 32 MPI jobs concurrently using RHAPSODY's `Session` API with the `DragonExecutionBackend`. Each job gets a random number of ranks (between 2 and 32), all scheduled across the 2 allocated nodes. Worker count is determined automatically by Dragon from the allocation.
 
 ```python title="mpi-rhapsody.py"
 import asyncio
@@ -70,7 +97,7 @@ import time
 
 import rhapsody
 from rhapsody.api import ComputeTask, Session
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
 rhapsody.enable_logging(level=logging.DEBUG)
 
@@ -97,7 +124,7 @@ async def main():
     sleepsecs = 2
     maxranks = 32
 
-    backend = await DragonExecutionBackendV3()
+    backend = await DragonExecutionBackend()
     session = Session(backends=[backend])
 
     print("--- Submitting Tasks ---")
@@ -128,7 +155,8 @@ if __name__ == "__main__":
 Run with:
 
 ```bash
-dragon mpi-rhapsody.py
+dragon-network-config --output-to-yaml
+dragon -w ssh --network-config slurm.yaml mpi-rhapsody.py
 ```
 
 !!! success "Output"
@@ -140,7 +168,7 @@ dragon mpi-rhapsody.py
     2026-03-25 23:07:36,938 | DEBUG    | [api_setup] | got handshake
     2026-03-25 23:07:36,938 | INFO     | [api_setup] | debug entry hooked
     2026-03-25 23:07:36,942 | DEBUG    | [dragon.native.queue] | Created queue {self!r}
-    2026-03-25 23:07:37,648 | INFO     | [rhapsody.backends.execution.dragon] | DragonExecutionBackendV3: 128 workers, 2 managers
+    2026-03-25 23:07:37,648 | INFO     | [rhapsody.backends.execution.dragon] | DragonExecutionBackend: 128 workers, 2 managers
     2026-03-25 23:07:37,648 | DEBUG    | [rhapsody.backends.execution.dragon] | Starting Dragon backend V3 async initialization...
     2026-03-25 23:07:37,648 | DEBUG    | [rhapsody.backends.execution.dragon] | Registering backend states...
     2026-03-25 23:07:37,649 | DEBUG    | [rhapsody.backends.execution.dragon] | Registering task states...

@@ -26,7 +26,8 @@ def compute_square_sync(n):
 
 
 async def compute_square_async(n):
-    """Async function — wrapped transparently, name visible in Dask dashboard."""
+    """Async function — submitted directly; Dask runs it natively on the worker's own event loop, no
+    RHAPSODY-side wrapper involved."""
     import asyncio
 
     await asyncio.sleep(0.1)

@@ -83,9 +83,9 @@ fast-forward the event timeline without losing the visual transitions.
 
 ## When placement isn't available
 
-Some backends — including `DragonExecutionBackendV3` — don't report
+Some backends — including `DragonExecutionBackend` — don't report
 per-task placement on `TaskStarted` yet. The viewer falls back to a
 stable per-task hash so the visualization stays coherent and
-reproducible across reloads. Once placement is exposed (Dragon V2
-already does; V3 lands later), the viewer automatically uses the real
+reproducible across reloads. Once placement is exposed (Dragon's Batch
+API does not report it yet), the viewer automatically uses the real
 coordinates.
