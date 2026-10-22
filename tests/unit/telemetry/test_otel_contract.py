@@ -123,7 +123,7 @@ def _make_dragon_adapter(session_id: str = "contract-session") -> Any:
 
     return DragonTelemetryAdapter(
         session_id=session_id,
-        backend_name="dragon_v3",
+        backend_name="dragon",
         interval=1.0,
     )
 
