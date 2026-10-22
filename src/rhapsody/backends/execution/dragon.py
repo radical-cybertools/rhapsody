@@ -292,7 +292,7 @@ class DragonExecutionBackend(BaseBackend):
                 task_desc["stdout"] = stdout
                 task_desc["stderr"] = stderr
                 state = "DONE"
-                if not task_info.get("is_native_function", True):
+                if not task_info.get("is_native_function", False):
                     # Process/job tasks return exit code(s) as int/list[int]. Report the
                     # first non-zero one like the other backends; the session then raises
                     # TaskExecutionError(uid, stderr, exit_code) for FAILED tasks.

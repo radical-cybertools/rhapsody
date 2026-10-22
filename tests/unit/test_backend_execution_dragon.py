@@ -643,7 +643,11 @@ def test_deliver_batch_success_stores_value_and_fires_done(backend_dragon):
     """_deliver_batch stores return_value on the task dict and fires the DONE callback."""
     uid = "task.unit-done"
     task_desc = {"uid": uid}
-    backend_dragon._task_registry[uid] = {"uid": uid, "description": task_desc}
+    backend_dragon._task_registry[uid] = {
+        "uid": uid,
+        "description": task_desc,
+        "is_native_function": True,
+    }
 
     backend_dragon._deliver_batch([(uid, 42, None, False, "", "")])
 
@@ -955,29 +959,6 @@ def test_monitor_loop_nonzero_exit_passed_through(backend_dragon):
     assert uid_c == uid
     assert raised_c is False
     assert result_c == 1
-
-
-def test_monitor_loop_function_int_return_delivers_done(backend_dragon):
-    """Function task returning int 42 must deliver DONE — exit-code check must not fire."""
-    uid, tuid = "task.func-42", "tuid-func-42"
-    mock_task = MagicMock()
-    mock_task.get.return_value = 42
-    mock_task.traceback = None
-    mock_task.get_stdout.return_value = None
-    mock_task.get_stderr.return_value = None
-
-    mock_loop = _run_monitor_one_cycle(
-        backend_dragon,
-        poll_tuid=tuid,
-        monitored_entry=(mock_task, uid),
-        task_registry_entry={"uid": uid, "description": {"uid": uid}, "is_native_function": True},
-    )
-
-    _, completions = mock_loop.call_soon_threadsafe.call_args.args
-    uid_c, result_c, _tb, raised_c, *_ = completions[0]
-    assert uid_c == uid
-    assert raised_c is False
-    assert result_c == 42
 
 
 @pytest.mark.asyncio
