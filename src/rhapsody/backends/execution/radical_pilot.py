@@ -65,6 +65,9 @@ def service_ready_callback(future: asyncio.Future, task: Any, state: str) -> Non
 class RadicalExecutionBackend(BaseBackend):
     """Radical Pilot-based execution backend for large-scale HPC task execution.
 
+    Tasks run in separate sandboxes, so this backend links data between them:
+    implicitly (sandbox symlinks via ``pre_exec``) and explicitly (``input_staging``).
+
     The RadicalExecutionBackend manages computing resources and task execution
     using the Radical Pilot framework. It interfaces with various resource
     management systems (SLURM, FLUX, etc.) on diverse HPC machines, providing
@@ -126,6 +129,9 @@ class RadicalExecutionBackend(BaseBackend):
             }
             backend = await RadicalExecutionBackend(resources, raptor_config)
     """
+
+    supports_implicit_data_linking = True
+    supports_explicit_data_linking = True
 
     @typeguard.typechecked
     def __init__(

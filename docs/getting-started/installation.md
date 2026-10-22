@@ -35,6 +35,7 @@ You can also install specific backend supports individually:
 - **Dragon**: `pip install "rhapsody-py[dragon]"`
 - **Orbit**: `pip install "rhapsody-py[orbit]"` (requires Python >= 3.10)
 - **Dragon AI (vLLM) Inference**: `pip install "rhapsody-py[ai]"`
+- **Data Backends (Redis / Dragon)**: no extra install for `RedisDataBackend` (just a `redis-server` binary on `PATH`); `DragonDataBackend` uses the `[dragon]` extra above. See [Data Backends](../data-backends/index.md).
 
 ## Verification
 
