@@ -56,7 +56,7 @@ ComputeTask(
 ```
 
 !!! tip "Preconfigured Clusters"
-    If both `cluster` and `client` are omitted, Rhapsody creates a new `LocalCluster` using the provided `resources`. Pass `cluster=` to use SLURM, Kubernetes, or any other Dask cluster type.
+    If both `cluster` and `client` are omitted, Rhapsody creates a new `LocalCluster` using the provided `resources`. Pass `cluster=` to use SLURM, Kubernetes, or any other Dask cluster type — construct it with `asynchronous=True` (entered via `async with`); see [Cluster injection](advanced-usage.md#cluster-injection) for why this matters and a full example.
 
 ### Dragon Backend
 High-performance execution using the Dragon runtime.
