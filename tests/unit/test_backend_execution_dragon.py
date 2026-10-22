@@ -951,7 +951,7 @@ def test_monitor_loop_nonzero_exit_passed_through(backend_dragon):
         backend_dragon,
         poll_tuid=tuid,
         monitored_entry=(mock_task, uid),
-        task_registry_entry={"uid": uid, "description": {"uid": uid}, "is_native_function": False},
+        task_registry_entry={"uid": uid, "description": {"uid": uid}},
     )
 
     _, completions = mock_loop.call_soon_threadsafe.call_args.args

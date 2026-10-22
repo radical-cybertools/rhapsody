@@ -2,16 +2,18 @@
 
 ## [Unreleased]
 
-### Changed
+### Fixed
 
 - **Dragon process/job exit codes reported like the other backends** — a
   non-zero exit code from a `process()`/`job()` task (executables, and functions
   run via `process_template`/`process_templates`) no longer becomes a
   `SystemExit` in `task["exception"]`, which exited the caller when the task was
-  awaited. `task["exit_code"]` is now set (first non-zero code of a job, `0` on
-  success), and awaiting a failed task raises `TaskExecutionError(uid, stderr,
-  exit_code)` with the task's stderr (for templated functions, the rank's
-  traceback), as documented and as the concurrent and dask backends do.
+  awaited. `task["exit_code"]` is now set (`0` on success; for a job, a non-zero
+  code from Dragon's per-rank list, whose order is not guaranteed — all codes
+  stay in `task["return_value"]`), and awaiting a failed task raises
+  `TaskExecutionError(uid, stderr, exit_code)` with the task's stderr (for
+  templated functions, the rank's traceback), as documented and as the
+  concurrent and dask backends do.
   `task["exception"]` stays `None` for these failures.
 
 ## [0.6.0] 2026-10-19
