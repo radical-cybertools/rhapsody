@@ -51,6 +51,9 @@ class EnsembleExecutionBackend(BaseBackend):
         client_only: bool = False,
         node_id: str = "global",
         hosts: list[str] | None = None,
+        flush_interval: float = 0.05,
+        buffer_size: int = 100000,
+        req_res: bool = True
     ):
         """Initialize the Ensemble Launcher execution backend.
 
@@ -75,6 +78,9 @@ class EnsembleExecutionBackend(BaseBackend):
             node_id: Scheduler node ID for the ClusterClient to connect to.
                 "global" (default) connects to the global master node.
             hosts: List of hosts to launch the backend on.
+            flush_interval: task and result buffer flush interval period. Bounds the latency.
+            buffer_size: task and result buffer size. Set this to 0 for low latency.
+            req_res: Ensures the delivery of tasks and results
         """
         super().__init__(name=name)
 
@@ -102,6 +108,11 @@ class EnsembleExecutionBackend(BaseBackend):
             cluster=True,
             checkpoint_dir=checkpoint_dir or os.path.join(os.getcwd(), f"ckpt_{uuid.uuid4()}"),
             mpi_config=MPIConfig(flavor=mpi_flavour) if mpi_config is None else mpi_config,
+            task_buffer_size=buffer_size,
+            task_flush_interval=flush_interval,
+            result_buffer_size=buffer_size,
+            result_flush_interval=flush_interval,
+            req_res=req_res,
         )
         cpus = cpus or list(range(os.cpu_count() or 1))
         ngpus = len(gpus) if gpus is not None else 0
