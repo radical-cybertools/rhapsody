@@ -2,7 +2,7 @@
 """Two Dragon partitions on an 8-node SLURM allocation — placement-test.
 
 Splits an 8-node allocation into two disjoint 4-node partitions via
-rhapsody_rm, launches one dragon_v3 child per partition (each Dragon runtime
+rhapsody_rm, launches one dragon child per partition (each Dragon runtime
 constrained to its partition's hosts via ``dragon --hostlist``), and submits
 one function task per node — each task pinned to a specific node via Dragon's
 ``Policy(host_name=...)``.  Each task returns ``{partition, expected_host,
@@ -26,17 +26,17 @@ PLACEMENT MODEL
 
 RUN
 ===
-    PYTHONPATH=src python examples/06-partitions.py
+    PYTHONPATH=src python examples/08-partitions.py
 
 Notes:
 - The two RemoteBackendProxy children are spawned by the driver process; the
   Dragon launcher prefix (``dragon -N 4 --wlm slurm --hostlist <p?-hosts>
   --port ... --overlay-port ... --frontend-port ...``) is constructed by
-  ``DragonExecutionBackendV3.build_launch_prefix(partition)`` — no Dragon-CLI
+  ``DragonExecutionBackend.build_launch_prefix(partition)`` — no Dragon-CLI
   knowledge at the call site.  The AF_UNIX control socket lives on the
   driver's host (the allocation's head node), where both Dragon head
   processes also run, so cross-node IPC is not needed.
-- The partition spec is passed to dragon_v3 via ``resources={"partition":
+- The partition spec is passed to dragon via ``resources={"partition":
   spec}``.  The backend honours it (informationally + for ``num_nodes``
   defaulting); the actual node constraint is enforced by the launcher's
   ``--hostlist`` per ``build_launch_prefix``.
@@ -92,7 +92,7 @@ async def main() -> None:
             f"partition {name}: {_hostlist_str(spec['nodelist'])} (env keys: {sorted(spec['env'])})"
         )
 
-    # --- 2. Spawn one dragon_v3 child per partition ------------------------
+    # --- 2. Spawn one dragon child per partition ------------------------
     # The proxy derives the launcher prefix (dragon --hostlist ... --port ...)
     # and the child env from the partition spec via the backend class's
     # ``build_launch_prefix`` hook — no Dragon-CLI knowledge at the call site.
@@ -100,7 +100,7 @@ async def main() -> None:
     for name in PARTITIONS:
         proxies[name] = await RemoteBackendProxy(
             name=name,
-            backend="dragon_v3",
+            backend="dragon",
             resources={"partition": specs[name]},
         )
         print(f"proxy[{name}] ready")

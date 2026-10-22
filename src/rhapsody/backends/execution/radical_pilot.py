@@ -66,6 +66,9 @@ def service_ready_callback(future: asyncio.Future, task: Any, state: str) -> Non
 class RadicalExecutionBackend(BaseBackend):
     """Radical Pilot-based execution backend for large-scale HPC task execution.
 
+    Tasks run in separate sandboxes, so this backend links data between them:
+    implicitly (sandbox symlinks via ``pre_exec``) and explicitly (``input_staging``).
+
     The RadicalExecutionBackend manages computing resources and task execution
     using the Radical Pilot framework. It interfaces with various resource
     management systems (SLURM, FLUX, etc.) on diverse HPC machines, providing
@@ -127,6 +130,9 @@ class RadicalExecutionBackend(BaseBackend):
             }
             backend = await RadicalExecutionBackend(resources, raptor_config)
     """
+
+    supports_implicit_data_linking = True
+    supports_explicit_data_linking = True
 
     @typeguard.typechecked
     def __init__(
@@ -466,7 +472,7 @@ class RadicalExecutionBackend(BaseBackend):
 
             try:
                 if rp_task.mode == rp.TASK_SERVICE and state == rp.AGENT_EXECUTING:
-                    service_callback = service_ready_callback
+                    service_callback = service_ready_callback  # noqa: F841
 
                 # Get the original Task object
                 original_task = self.tasks.get(rp_task.uid)
@@ -496,7 +502,7 @@ class RadicalExecutionBackend(BaseBackend):
                     original_task["exception"] = rp_task_dict["exception"]
 
                 # Call the registered callback with the original Task object
-                func(original_task, state, service_callback=service_callback)
+                func(original_task, state)
             except Exception:
                 self.logger.exception(
                     f"Backend callback failed for task {getattr(rp_task, 'uid', None)} "

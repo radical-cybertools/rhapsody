@@ -19,11 +19,11 @@ RHAPSODY is a high-performance runtime system designed for orchestrating complex
 ```python
 import asyncio
 from rhapsody import Session, ComputeTask
-from rhapsody.backends import DragonExecutionBackendV3
+from rhapsody.backends import DragonExecutionBackend
 
 async def main():
     # 1. Initialize session with a backend
-    backend = await DragonExecutionBackendV3()
+    backend = await DragonExecutionBackend()
     async with Session(backends=[backend]) as session:
 
         # 2. Define a task

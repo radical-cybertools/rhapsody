@@ -100,13 +100,16 @@ def spawn_backend_host(
         raise
 
     try:
-        conn = listener.accept()           # blocks until child connects
-        send_msg(conn, {
-            "op": OP_CONFIG,
-            "backend": backend_name,
-            "resources": resources or {},
-            "kwargs": backend_kwargs or {},
-        })
+        conn = listener.accept()  # blocks until child connects
+        send_msg(
+            conn,
+            {
+                "op": OP_CONFIG,
+                "backend": backend_name,
+                "resources": resources or {},
+                "kwargs": backend_kwargs or {},
+            },
+        )
         ready = recv_msg(conn)
         if ready.get("op") != OP_READY:
             raise RuntimeError(f"expected READY from child, got {ready!r}")

@@ -83,7 +83,7 @@ class RemoteBackendProxy(BaseBackend):
         self._initialized = False
         self._backend_state = BackendMainStates.INITIALIZED
 
-        self._pending: dict[str, dict] = {}     # uid -> driver-side task object
+        self._pending: dict[str, dict] = {}  # uid -> driver-side task object
         self._terminal_states: tuple = ("DONE", "FAILED", "CANCELED")
         self._host: SpawnedHost | None = None
         self._reader_thread: threading.Thread | None = None
@@ -187,6 +187,7 @@ class RemoteBackendProxy(BaseBackend):
             self._reader_thread.join(timeout=2)
 
         from .spawn import _cleanup_sockdir
+
         _cleanup_sockdir(self._host.sockdir)
 
     async def state(self) -> str:
@@ -261,14 +262,12 @@ class RemoteBackendProxy(BaseBackend):
                 try:
                     merge_envelope_into_task(task, envelope)
                 except Exception as exc:
-                    logger.exception("proxy[%s] merge failed for %s: %s",
-                                     self.name, uid, exc)
+                    logger.exception("proxy[%s] merge failed for %s: %s", self.name, uid, exc)
                     task["state"] = state
                 task["state"] = state  # ensure state set even if envelope omitted it
                 self._dispatch_callback(task, state)
             elif op == "ERROR":
-                logger.error("proxy[%s] child reported ERROR: %s",
-                             self.name, msg.get("detail"))
+                logger.error("proxy[%s] child reported ERROR: %s", self.name, msg.get("detail"))
             else:
                 logger.warning("proxy[%s] unknown op: %r", self.name, op)
 

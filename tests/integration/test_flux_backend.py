@@ -26,7 +26,11 @@ async def test_flux_backend_submit_and_callback():
 
     def _callback(task: dict, state: str) -> None:
         states.append(state)
-        if state in (TasksMainStates.DONE.value, TasksMainStates.FAILED.value, TasksMainStates.CANCELED.value):
+        if state in (
+            TasksMainStates.DONE.value,
+            TasksMainStates.FAILED.value,
+            TasksMainStates.CANCELED.value,
+        ):
             # Safe to set event to continue
             # If we call set from a different thread, we should use call_soon_threadsafe
             # But here _callback might be called from an event loop thread or not.
@@ -41,7 +45,7 @@ async def test_flux_backend_submit_and_callback():
         "uid": "int_test_task_1",
         "executable": "/bin/echo",
         "arguments": ["hello world"],
-        "timeout": 10.0
+        "timeout": 10.0,
     }
 
     try:
@@ -78,7 +82,7 @@ async def test_flux_backend_cancel():
         "uid": "int_test_task_2",
         "executable": "/bin/sleep",
         "arguments": ["60"],
-        "timeout": 70.0
+        "timeout": 70.0,
     }
 
     try:

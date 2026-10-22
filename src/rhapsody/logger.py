@@ -50,7 +50,7 @@ def enable_logging(
             import logging
             import rhapsody
             rhapsody.enable_logging(logging.DEBUG)
-            backend = await rhapsody.get_backend("dragon_v3")
+            backend = await rhapsody.get_backend("dragon")
     """
     if format_string is None:
         format_string = "%(asctime)s | %(levelname)-8s | [%(name)s] | %(message)s"

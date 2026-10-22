@@ -30,7 +30,21 @@ class BaseBackend(ABC):
             or workflow engine.
         attached_to: Ordered list of session/engine UIDs this backend has been
             attached to (most recent last).
+        supports_implicit_data_linking: Class attribute. True if the backend
+            implements `link_implicit_data_deps`. Workflow engines such as
+            AsyncFlow only call that hook on backends that declare it.
+        supports_explicit_data_linking: Class attribute. True if the backend
+            implements `link_explicit_data_deps` and returns a data-dependency
+            descriptor from it. Workflow engines such as AsyncFlow only call
+            that hook on backends that declare it.
     """
+
+    # Data-linking capabilities. Backends that share a filesystem (or move no
+    # files) leave these False: there is nothing to link, and callers skip the
+    # hooks entirely. The two are independent: a backend may support one kind
+    # of linking without the other.
+    supports_implicit_data_linking: bool = False
+    supports_explicit_data_linking: bool = False
 
     def __init__(self, name: str | None = None):
         """Initialize the backend."""
@@ -127,6 +141,8 @@ class BaseBackend(ABC):
         data produced by the source task, with the dependency being inferred
         automatically.
 
+        Only called on backends that set `supports_implicit_data_linking = True`.
+
         Args:
             src_task: The source task that produces data.
             dst_task: The destination task that depends on the source task's output.
@@ -139,17 +155,26 @@ class BaseBackend(ABC):
         dst_task: dict[str, Any] | None = None,
         file_name: str | None = None,
         file_path: str | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """Link explicit data dependencies between tasks or files.
 
         Creates explicit dependency relationships based on specified file names
         or paths, allowing for more precise control over task execution order.
+
+        Only called on backends that set `supports_explicit_data_linking = True`.
 
         Args:
             src_task: The source task that produces the dependency.
             dst_task: The destination task that depends on the source.
             file_name: Name of the file that represents the dependency.
             file_path: Full path to the file that represents the dependency.
+
+        Returns:
+            Backends declaring `supports_explicit_data_linking` must return a
+            data-dependency descriptor containing at least ``"target"``: the
+            file's name or path at the destination. Callers such as AsyncFlow
+            use it to avoid staging the same file twice. Backends may add their
+            own keys (e.g. RADICAL-Pilot's ``"source"`` and ``"action"``).
         """
         pass
 
