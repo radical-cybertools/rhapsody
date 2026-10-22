@@ -24,7 +24,7 @@ All telemetry originates as **frozen Python dataclasses** (`BaseEvent` subclasse
 | `event_time` | `float` | Wall-clock time the event occurred (`time.time()`) |
 | `emit_time` | `float` | Wall-clock time of queue insertion (`time.time()`) |
 | `session_id` | `str` | Owning session identifier |
-| `backend` | `str` | Backend name (e.g. `"dragon_v3"`, `"dask"`, `"concurrent"`) |
+| `backend` | `str` | Backend name (e.g. `"dragon"`, `"dask"`, `"concurrent"`) |
 | `task_id` | `str \| None` | Task UID — `None` for session-level events |
 | `node_id` | `str \| None` | Hostname or worker address — `None` when not applicable |
 | `attributes` | `dict` | Optional metadata (see per-event notes below) |
@@ -418,7 +418,7 @@ task span
 ├── parent:  session span
 ├── attributes:
 │     session_id = "session.0001"
-│     backend    = "dragon_v3"
+│     backend    = "dragon"
 │     task_id    = "task.0042"
 │     executable = "/usr/bin/python"
 │     task_type  = "compute"
