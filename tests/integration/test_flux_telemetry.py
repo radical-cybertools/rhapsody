@@ -149,7 +149,7 @@ def _usage_ok(task, min_bytes):
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("skip_if_no_flux", "fake_srun")
 async def test_flux_sysmon_resource_usage():
-    """sysmon=True: tasks carry resource_usage, end events carry its attributes."""
+    """Sysmon=True: tasks carry resource_usage, end events carry its attributes."""
     import sys
 
     from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
