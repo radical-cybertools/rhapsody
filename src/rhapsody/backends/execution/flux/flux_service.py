@@ -146,12 +146,14 @@ class FluxService:
 
     # --------------------------------------------------------------------------
     #
-    def _reader(self, stream: Any) -> None:
+    def _reader(self, stream: Any, proc: subprocess.Popen) -> None:
         """Read *stream* line-by-line and forward each line to :meth:`_on_line`."""
         try:
             for raw in stream:
                 line = raw.decode(errors="replace").rstrip("\n")
                 logger.debug("%s: flux io: %s", self._uid, line)
+                if proc is not self._proc:
+                    continue  # output of a replaced process (sdexec → rexec relaunch)
                 self._on_line(line)
         except Exception:  # noqa: BLE001, S110
             pass
@@ -214,6 +216,9 @@ class FluxService:
 
         if self._launch(True, timeout):
             return True
+        if not self._sdexec_failed:
+            # Startup timeout or exit: not an sdexec problem, a rexec retry won't help.
+            return False
         if self._sdexec_mode is True:
             self.stop()
             raise RuntimeError(f"{self._uid}: flux instance cannot run jobs under sdexec")
@@ -284,7 +289,7 @@ class FluxService:
 
         # Read both streams in daemon threads so we never block
         for stream in (self._proc.stdout, self._proc.stderr):
-            t = threading.Thread(target=self._reader, args=(stream,), daemon=True)
+            t = threading.Thread(target=self._reader, args=(stream, self._proc), daemon=True)
             t.start()
 
         # Also watch for the process dying unexpectedly

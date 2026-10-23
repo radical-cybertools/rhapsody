@@ -210,3 +210,43 @@ async def test_flux_callbacks_delivered_on_loop(mock_flux_module):
     await asyncio.sleep(0.05)
 
     assert seen == [("DONE", threading.main_thread())]
+
+
+@pytest.mark.asyncio
+async def test_flux_exception_then_finish_fires_once(mock_flux_module):
+    """A flux exception (e.g. timeout) is followed by finish; only one terminal callback."""
+    from types import SimpleNamespace
+
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    backend = FluxExecutionBackend(uri="local:///x")
+    seen = []
+    backend.register_callback(lambda t, s: seen.append(s))
+    backend.tasks["t1"] = {"uid": "t1"}
+
+    backend._flux_event_cb("t1", SimpleNamespace(name="exception", context={}, jobid=1))
+    backend._flux_event_cb("t1", SimpleNamespace(name="finish", context={"status": 9}, jobid=1))
+
+    assert seen == ["FAILED"]
+    assert backend.tasks["t1"]["exit_code"] == 1
+
+
+@pytest.mark.asyncio
+async def test_flux_finish_after_sysmon_pool_shutdown_still_delivered(mock_flux_module):
+    """A finish racing shutdown() of the sysmon pool is delivered without usage."""
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    backend = FluxExecutionBackend(uri="local:///x")
+    seen = []
+    backend.register_callback(lambda t, s: seen.append(s))
+    backend.tasks["t1"] = {"uid": "t1"}
+    backend._sysmon_pool = ThreadPoolExecutor(max_workers=1)
+    backend._sysmon_pool.shutdown()
+
+    backend._flux_event_cb("t1", SimpleNamespace(name="finish", context={"status": 0}, jobid=1))
+
+    assert seen == ["DONE"]
+    assert "resource_usage" not in backend.tasks["t1"]

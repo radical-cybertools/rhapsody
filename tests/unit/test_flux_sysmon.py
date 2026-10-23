@@ -207,6 +207,7 @@ def test_service_auto_falls_back_to_rexec(mock_flux_module):
 
     def fake_launch(sdexec, timeout):
         calls.append(sdexec)
+        fs._sdexec_failed = sdexec  # the sdexec smoke job fails
         return not sdexec
 
     with (
@@ -234,8 +235,13 @@ def test_service_required_sdexec_raises(mock_flux_module):
     from rhapsody.backends.execution.flux.flux_service import FluxService
 
     fs = FluxService(sdexec=True)
+
+    def fake_launch(sdexec, timeout):
+        fs._sdexec_failed = True
+        return False
+
     with (
-        patch.object(fs, "_launch", return_value=False),
+        patch.object(fs, "_launch", side_effect=fake_launch),
         patch.object(fs, "stop"),
         pytest.raises(RuntimeError, match="sdexec"),
     ):
@@ -284,9 +290,9 @@ def test_backend_sdexec_default_follows_sysmon(mock_flux_module):
 def test_backend_sysmon_scope(mock_flux_module, service, scope):
     from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
 
+    flux_mock, _ = mock_flux_module
     b = FluxExecutionBackend(uri="local:///x", sysmon=True)
-    b._flux_helper = MagicMock()
-    b._flux_helper._handle.rpc.return_value.get.return_value = {"exec": {"service": service}}
+    flux_mock.Flux.return_value.rpc.return_value.get.return_value = {"exec": {"service": service}}
     b._init_sysmon()
     try:
         assert b._sysmon_scope == scope
@@ -297,9 +303,9 @@ def test_backend_sysmon_scope(mock_flux_module, service, scope):
 def test_backend_finish_attaches_usage_before_callback(mock_flux_module):
     from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
 
+    flux_mock, _ = mock_flux_module
     b = FluxExecutionBackend(uri="local:///x", sysmon=True)
-    b._flux_helper = MagicMock()
-    b._flux_helper._handle.rpc.return_value.get.return_value = {"exec": {"service": "sdexec"}}
+    flux_mock.Flux.return_value.rpc.return_value.get.return_value = {"exec": {"service": "sdexec"}}
     b._init_sysmon()
     seen = []
     b.register_callback(lambda t, s: seen.append((s, dict(t))))
@@ -350,3 +356,27 @@ def test_host_passes_backend_kwargs(monkeypatch):
     monkeypatch.setattr(spawn, "Listener", MagicMock(return_value=listener))
     spawn.spawn_backend_host("flux", backend_kwargs={"sysmon": True})
     assert sent[0]["kwargs"] == {"sysmon": True}
+
+
+def test_service_auto_timeout_does_not_fall_back(mock_flux_module):
+    """A startup timeout is not an sdexec failure: no rexec relaunch."""
+    from rhapsody.backends.execution.flux.flux_service import FluxService
+
+    fs = FluxService(sdexec="auto")
+    with (
+        patch.object(fs, "_sdexec_possible", return_value=True),
+        patch.object(fs, "_launch", return_value=False) as launch,
+        patch.object(fs, "stop"),
+    ):
+        assert not fs.start(timeout=1.0)
+    launch.assert_called_once_with(True, 1.0)
+
+
+def test_service_ignores_output_of_replaced_process(mock_flux_module):
+    """A failure marker read from an old process must not affect the relaunch."""
+    from rhapsody.backends.execution.flux.flux_service import FluxService
+
+    fs = FluxService()
+    fs._proc = object()
+    fs._reader([b"RHAPSODY_FLUX_SDEXEC_FAILED\n"], object())
+    assert not fs._sdexec_failed

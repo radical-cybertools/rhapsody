@@ -215,8 +215,9 @@ def main(argv: list[str] | None = None) -> int:
         print("psutil not available — node sampler exits", file=sys.stderr)
         return 1
 
-    # Emit one sample immediately so resource coverage starts at t=0.
-    while True:
+    # The first sample comes one interval after the cpu_percent warm-up in
+    # NodeSampler(); an immediate sample would cover a near-zero window.
+    while not stop.wait(args.interval):
         try:
             node, gpus = sampler.sample()
             line = {
@@ -231,8 +232,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         except Exception as exc:
             print(f"sample failed: {exc}", file=sys.stderr)
-        if stop.wait(args.interval):
-            return 0
+    return 0
 
 
 if __name__ == "__main__":

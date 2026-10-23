@@ -1186,9 +1186,7 @@ class TelemetryManager:
             span.set_attribute("task_type", task_type)
             if event.attributes.get("incomplete_lifecycle"):
                 span.set_attribute("incomplete_lifecycle", True)
-            for key in _RESOURCE_USAGE_KEYS:
-                if key in event.attributes:
-                    span.set_attribute(key, event.attributes[key])
+            _set_resource_usage(span, event.attributes)
             span.set_status(trace_mod.StatusCode.OK)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
@@ -1216,9 +1214,7 @@ class TelemetryManager:
             span.set_attribute("task_type", task_type)
             if event.attributes.get("incomplete_lifecycle"):
                 span.set_attribute("incomplete_lifecycle", True)
-            for key in _RESOURCE_USAGE_KEYS:
-                if key in event.attributes:
-                    span.set_attribute(key, event.attributes[key])
+            _set_resource_usage(span, event.attributes)
             span.set_status(trace_mod.StatusCode.ERROR, error_type)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
@@ -1244,9 +1240,7 @@ class TelemetryManager:
             span.set_attribute("task_type", task_type)
             if event.attributes.get("incomplete_lifecycle"):
                 span.set_attribute("incomplete_lifecycle", True)
-            for key in _RESOURCE_USAGE_KEYS:
-                if key in event.attributes:
-                    span.set_attribute(key, event.attributes[key])
+            _set_resource_usage(span, event.attributes)
             span.set_status(trace_mod.StatusCode.ERROR)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
@@ -1376,6 +1370,13 @@ def _sum_metric(metrics_data: Any, name: str) -> float:
 
 
 _RESOURCE_USAGE_KEYS = ("memory_peak_bytes", "cpu_loadavg", "resource_usage_scope")
+
+
+def _set_resource_usage(span: Any, attributes: dict) -> None:
+    """Copy the per-task resource usage attributes onto a terminal task span."""
+    for key in _RESOURCE_USAGE_KEYS:
+        if key in attributes:
+            span.set_attribute(key, attributes[key])
 
 
 def _resource_usage_attributes(task: dict) -> dict:

@@ -85,6 +85,8 @@ class FluxExecutionBackend(BaseBackend):
         self._sysmon_scope = "shell"
         self._sysmon_pool: ThreadPoolExecutor | None = None
         self._sysmon_local = threading.local()
+        # Tasks that already got a terminal callback (exception, then finish).
+        self._finished: set[str] = set()
 
         self._flux_service: FluxService | None = None
         self._flux_helper: FluxHelper | None = None
@@ -204,7 +206,8 @@ class FluxExecutionBackend(BaseBackend):
     def _init_sysmon(self) -> None:
         """Record whether sysmon values are per job and start the reader pool."""
         try:
-            config = self._flux_helper._handle.rpc("config.get").get()
+            # Own handle: FluxHelper guards its handle with a lock the journal thread uses.
+            config = FluxModule().core.Flux(self._uri).rpc("config.get").get()
             service = (config.get("exec") or {}).get("service", "rexec")
         except Exception:  # noqa: BLE001
             self.logger.debug("could not read instance config", exc_info=True)
@@ -265,7 +268,7 @@ class FluxExecutionBackend(BaseBackend):
 
         Maps Flux journal events to Rhapsody task states and invokes callbacks.
         """
-        if task_uid not in self.tasks:
+        if task_uid not in self.tasks or task_uid in self._finished:
             return
         task = self.tasks[task_uid]
         event_name = event.name
@@ -283,14 +286,20 @@ class FluxExecutionBackend(BaseBackend):
                 state = TasksMainStates.DONE.value
             else:
                 state = TasksMainStates.FAILED.value
-            if self._sysmon_pool is not None:
+            self._finished.add(task_uid)
+            pool = self._sysmon_pool
+            if pool is not None:
                 # Reading the output eventlog is an RPC — keep it off the
                 # journal thread.
-                self._sysmon_pool.submit(self._complete_with_sysmon, task, state, event.jobid)
-                return
+                try:
+                    pool.submit(self._complete_with_sysmon, task, state, event.jobid)
+                    return
+                except RuntimeError:
+                    pass  # pool shut down meanwhile: deliver without resource usage
         elif event_name == "exception":
             state = TasksMainStates.FAILED.value
             task["exit_code"] = 1
+            self._finished.add(task_uid)
 
         if state:
             self._fire(task, state)
