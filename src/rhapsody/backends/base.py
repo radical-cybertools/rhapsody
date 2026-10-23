@@ -212,14 +212,8 @@ class BaseBackend(ABC):
 
     def _probe_local_resources(self) -> tuple[int, int]:
         """Return ``(cores, gpus)`` of the local node; 0 where a probe is unavailable."""
-        cores = 0
+        cores = os.cpu_count() or 0
         gpus = 0
-        try:
-            import psutil  # type: ignore[import-not-found]
-
-            cores = psutil.cpu_count(logical=True) or 0
-        except Exception:
-            logger.debug("psutil core probe failed", exc_info=True)
         try:
             import pynvml  # type: ignore[import-not-found]
 

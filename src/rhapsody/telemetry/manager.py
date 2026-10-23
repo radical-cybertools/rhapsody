@@ -11,7 +11,6 @@ in opentelemetry at startup unless telemetry is explicitly enabled.
 from __future__ import annotations
 
 import asyncio
-import copy
 import dataclasses
 import json
 import logging
@@ -770,10 +769,13 @@ class TelemetryManager:
             # Optional placement info — populated by backends that know it.
             # Schema: {node_id: str, cores: int, gpu_ids: list[int]}.
             # When future placement APIs land they should write the same key.
-            placement = task.get("placement") if isinstance(task, dict) else None
+            placement = task.get("placement")
             node_id_for_event = None
             if isinstance(placement, dict):
-                attrs["placement"] = copy.deepcopy(placement)  # events are snapshots
+                # Snapshot without deepcopy: a placement may hold uncopyable objects.
+                attrs["placement"] = {
+                    k: list(v) if isinstance(v, list) else v for k, v in placement.items()
+                }
                 node_id_for_event = placement.get("node_id")
             self.emit(
                 make_event(
