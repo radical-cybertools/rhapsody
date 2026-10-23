@@ -148,7 +148,7 @@ class FluxTelemetryAdapter(TelemetryAdapter):
         except Exception:
             logger.debug("Ignoring malformed flux sampler line: %r", line, exc_info=True)
             return
-        if self._loop and self._loop.is_running():
+        if self._running and self._loop and self._loop.is_running():
             for event in events:
                 self._loop.call_soon_threadsafe(self._manager.emit, event)
 

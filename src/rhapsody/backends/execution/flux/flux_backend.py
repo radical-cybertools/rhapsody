@@ -87,6 +87,7 @@ class FluxExecutionBackend(BaseBackend):
         self._sysmon_local = threading.local()
         # Tasks that already got a terminal callback (exception, then finish).
         self._finished: set[str] = set()
+        self._finished_lock = threading.Lock()  # journal thread vs cancel_task
 
         self._flux_service: FluxService | None = None
         self._flux_helper: FluxHelper | None = None
@@ -263,6 +264,14 @@ class FluxExecutionBackend(BaseBackend):
         """Return the state mapper for this backend."""
         return StateMapper(backend=self)
 
+    def _mark_finished(self, uid: str) -> bool:
+        """Record *uid* as terminal; False if it already was (one terminal state per task)."""
+        with self._finished_lock:
+            if uid in self._finished:
+                return False
+            self._finished.add(uid)
+            return True
+
     def _flux_event_cb(self, task_uid: str, event: Any) -> None:
         """Handle events coming from the Flux journal.
 
@@ -286,7 +295,8 @@ class FluxExecutionBackend(BaseBackend):
                 state = TasksMainStates.DONE.value
             else:
                 state = TasksMainStates.FAILED.value
-            self._finished.add(task_uid)
+            if not self._mark_finished(task_uid):
+                return
             pool = self._sysmon_pool
             if pool is not None:
                 # Reading the output eventlog is an RPC — keep it off the
@@ -300,8 +310,9 @@ class FluxExecutionBackend(BaseBackend):
             if getattr(event, "context", {}).get("severity", 0) != 0:
                 return  # non-fatal: the job keeps running
             state = TasksMainStates.FAILED.value
+            if not self._mark_finished(task_uid):
+                return
             task["exit_code"] = 1
-            self._finished.add(task_uid)
 
         if state:
             self._fire(task, state)
@@ -314,6 +325,8 @@ class FluxExecutionBackend(BaseBackend):
         specs = []
         for task in tasks:
             self.tasks[task["uid"]] = task
+            with self._finished_lock:
+                self._finished.discard(task["uid"])  # a resubmitted uid starts over
             # Map canonical task dictionary values to the kwargs expected by spec_from_dict
             td = {
                 "uid": task["uid"],
@@ -350,17 +363,17 @@ class FluxExecutionBackend(BaseBackend):
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a task by its UID."""
         if uid in self.tasks and self._flux_helper:
-            if uid in self._finished:
-                return False
             # Mark terminal first: the cancel's exception event must not report FAILED.
-            self._finished.add(uid)
+            if not self._mark_finished(uid):
+                return False
             try:
                 await asyncio.to_thread(self._flux_helper.cancel, uid)
                 task = self.tasks[uid]
                 self._callback_func(task, TasksMainStates.CANCELED.value)
                 return True
             except Exception as e:
-                self._finished.discard(uid)
+                with self._finished_lock:
+                    self._finished.discard(uid)
                 self.logger.error("Failed to cancel flux task %s: %s", uid, e)
         return False
 

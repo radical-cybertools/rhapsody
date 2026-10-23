@@ -2,6 +2,7 @@
 
 import inspect
 import sys
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -291,3 +292,25 @@ async def test_flux_cancel_then_exception_reports_canceled_only(mock_flux_module
     )
 
     assert seen == ["CANCELED"]
+
+
+@pytest.mark.asyncio
+async def test_flux_resubmitted_uid_gets_events_again(mock_flux_module):
+    """Resubmitting a finished uid clears its terminal mark."""
+    from types import SimpleNamespace
+
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    backend = FluxExecutionBackend(uri="local:///x")
+    backend._flux_helper = MagicMock()
+    seen = []
+    backend.register_callback(lambda t, s: seen.append(s))
+    task = {"uid": "t1", "executable": "/bin/true"}
+    backend.tasks["t1"] = task
+    backend._flux_event_cb("t1", SimpleNamespace(name="finish", context={"status": 0}, jobid=1))
+
+    with patch("rhapsody.backends.execution.flux.flux_backend.asyncio.to_thread", new=AsyncMock()):
+        await backend.submit_tasks([task])
+    backend._flux_event_cb("t1", SimpleNamespace(name="finish", context={"status": 0}, jobid=2))
+
+    assert seen.count("DONE") == 2

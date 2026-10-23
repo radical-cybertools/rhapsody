@@ -101,7 +101,7 @@ class FluxService:
         launcher: str | None = None,
         sdexec: bool | str = False,
     ) -> None:
-        if sdexec not in (True, False, "auto"):
+        if not (isinstance(sdexec, bool) or sdexec == "auto"):
             raise ValueError(f"sdexec must be True, False or 'auto', got {sdexec!r}")
         self._uid: str = uid or str(uuid.uuid4())
         self._launcher: str = launcher or ""

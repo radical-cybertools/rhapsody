@@ -160,6 +160,8 @@ def test_service_rejects_bad_sdexec(mock_flux_module):
 
     with pytest.raises(ValueError, match="sdexec"):
         FluxService(sdexec="yes")
+    with pytest.raises(ValueError, match="sdexec"):
+        FluxService(sdexec=1)
 
 
 def test_service_sdexec_command_and_env(mock_flux_module, monkeypatch):

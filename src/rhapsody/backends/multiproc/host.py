@@ -106,11 +106,15 @@ async def _run() -> int:
         # state-map handshake; full StateMapper registration is D4.
         # ``telemetry_info`` lets the driver attach a resource adapter for
         # the hosted backend (see BaseBackend.telemetry_info).
+        try:
+            telemetry_info = backend.telemetry_info()
+        except Exception:  # optional hook: never fail the handshake over it
+            telemetry_info = None
         _safe_send(
             {
                 "op": OP_READY,
                 "terminal_states": list(terminal_states),
-                "telemetry_info": backend.telemetry_info(),
+                "telemetry_info": telemetry_info,
             }
         )
 
