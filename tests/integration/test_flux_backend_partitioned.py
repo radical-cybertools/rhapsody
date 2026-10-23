@@ -119,9 +119,9 @@ async def test_flux_backend_partitioned_local(tmp_path, monkeypatch):
 async def test_flux_backend_two_partitions_local(tmp_path, monkeypatch):
     """Two co-resident 2-'node' partitions, each its own Flux instance.
 
-    The multi-partition topology of examples/07: two partition-launched
-    Flux instances live side by side on the same host, each constrained
-    to its partition size, with tasks flowing through both concurrently.
+    The multi-partition topology of examples/07: two partition-launched Flux instances live side by
+    side on the same host, each constrained to its partition size, with tasks flowing through both
+    concurrently.
     """
     from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
 

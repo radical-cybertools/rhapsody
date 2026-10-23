@@ -188,9 +188,8 @@ class FluxHelper:
     ) -> None:
         """Route a job event to all registered callbacks.
 
-        Events that arrive before the job ID is known (race between the journal
-        thread and the submit thread) are buffered and flushed once the ID
-        mapping is established.
+        Events that arrive before the job ID is known (race between the journal thread and the
+        submit thread) are buffered and flushed once the ID mapping is established.
         """
         with self._elock:
             # If triggered by the submit thread, check if there is anything to do

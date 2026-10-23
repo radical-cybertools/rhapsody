@@ -58,7 +58,9 @@ PARTITIONS = ("p0", "p1")
 
 
 def report(partition: str, expected_host: str) -> dict:
-    """Task body.  Returns what the worker actually sees at runtime — the
+    """Task body.
+
+    Returns what the worker actually sees at runtime — the
     driver compares ``expected_host`` (the policy target) against
     ``actual_host`` (what the OS reports) to confirm Dragon honored placement.
     """

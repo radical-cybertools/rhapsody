@@ -140,8 +140,8 @@ class RemoteBackendProxy(BaseBackend):
 
     # ----------------------------------------------------------- BaseBackend
     async def submit_tasks(self, tasks: list[dict]) -> None:
-        """Track tasks by uid (we need the *driver-side* objects for merge-back)
-        then send a SUBMIT batch to the child."""
+        """Track tasks by uid (we need the *driver-side* objects for merge-back) then send a SUBMIT
+        batch to the child."""
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
         for task in tasks:
