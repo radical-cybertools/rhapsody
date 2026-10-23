@@ -380,3 +380,27 @@ def test_service_ignores_output_of_replaced_process(mock_flux_module):
     fs._proc = object()
     fs._reader([b"RHAPSODY_FLUX_SDEXEC_FAILED\n"], object())
     assert not fs._sdexec_failed
+
+
+def test_service_wait_proc_lets_readers_finish_first(mock_flux_module):
+    """_settled is set only after the readers handled the last output lines."""
+    import threading
+    import time as _time
+
+    from rhapsody.backends.execution.flux.flux_service import FluxService
+
+    fs = FluxService()
+    proc = MagicMock()
+    proc.wait.return_value = 1
+    fs._proc = proc
+
+    def slow_reader():
+        _time.sleep(0.2)
+        fs._on_line("RHAPSODY_FLUX_SDEXEC_FAILED")
+
+    reader = threading.Thread(target=slow_reader)
+    reader.start()
+    fs._wait_proc(proc, [reader])
+
+    assert fs._settled.is_set()
+    assert fs._sdexec_failed

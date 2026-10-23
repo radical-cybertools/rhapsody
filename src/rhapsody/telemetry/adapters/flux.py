@@ -122,7 +122,10 @@ class FluxTelemetryAdapter(TelemetryAdapter):
         except subprocess.TimeoutExpired:
             logger.warning("flux node samplers on %s did not stop — killing", self._uri)
             proc.kill()
-            proc.wait()
+            try:
+                proc.wait(timeout=self._stop_timeout)
+            except subprocess.TimeoutExpired:
+                logger.warning("flux node samplers on %s did not exit after kill", self._uri)
 
     # ------------------------------------------------------------------
     # Internal

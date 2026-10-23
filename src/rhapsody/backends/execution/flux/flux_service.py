@@ -288,12 +288,14 @@ class FluxService:
         )
 
         # Read both streams in daemon threads so we never block
+        readers = []
         for stream in (self._proc.stdout, self._proc.stderr):
             t = threading.Thread(target=self._reader, args=(stream, self._proc), daemon=True)
             t.start()
+            readers.append(t)
 
         # Also watch for the process dying unexpectedly
-        threading.Thread(target=self._wait_proc, args=(self._proc,), daemon=True).start()
+        threading.Thread(target=self._wait_proc, args=(self._proc, readers), daemon=True).start()
 
         if timeout is None:
             return self.ready()
@@ -302,10 +304,14 @@ class FluxService:
 
     # --------------------------------------------------------------------------
     #
-    def _wait_proc(self, proc: subprocess.Popen) -> None:
+    def _wait_proc(self, proc: subprocess.Popen, readers: list[threading.Thread]) -> None:
         """Wait for the subprocess to exit and log the result."""
         rc = proc.wait()
         logger.info("%s: flux instance exited (rc=%s)", self._uid, rc)
+        # Let the readers handle the last lines (e.g. the sdexec failure marker)
+        # before start() looks at the outcome.
+        for t in readers:
+            t.join(timeout=5)
         if proc is self._proc:
             self._settled.set()
 

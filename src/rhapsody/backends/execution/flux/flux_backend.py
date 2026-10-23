@@ -297,6 +297,8 @@ class FluxExecutionBackend(BaseBackend):
                 except RuntimeError:
                     pass  # pool shut down meanwhile: deliver without resource usage
         elif event_name == "exception":
+            if getattr(event, "context", {}).get("severity", 0) != 0:
+                return  # non-fatal: the job keeps running
             state = TasksMainStates.FAILED.value
             task["exit_code"] = 1
             self._finished.add(task_uid)
@@ -348,12 +350,17 @@ class FluxExecutionBackend(BaseBackend):
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a task by its UID."""
         if uid in self.tasks and self._flux_helper:
+            if uid in self._finished:
+                return False
+            # Mark terminal first: the cancel's exception event must not report FAILED.
+            self._finished.add(uid)
             try:
                 await asyncio.to_thread(self._flux_helper.cancel, uid)
                 task = self.tasks[uid]
                 self._callback_func(task, TasksMainStates.CANCELED.value)
                 return True
             except Exception as e:
+                self._finished.discard(uid)
                 self.logger.error("Failed to cancel flux task %s: %s", uid, e)
         return False
 

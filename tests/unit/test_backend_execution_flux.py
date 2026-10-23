@@ -250,3 +250,44 @@ async def test_flux_finish_after_sysmon_pool_shutdown_still_delivered(mock_flux_
 
     assert seen == ["DONE"]
     assert "resource_usage" not in backend.tasks["t1"]
+
+
+@pytest.mark.asyncio
+async def test_flux_nonfatal_exception_is_not_terminal(mock_flux_module):
+    """A severity > 0 exception leaves the job running; finish decides the state."""
+    from types import SimpleNamespace
+
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    backend = FluxExecutionBackend(uri="local:///x")
+    seen = []
+    backend.register_callback(lambda t, s: seen.append(s))
+    backend.tasks["t1"] = {"uid": "t1"}
+
+    backend._flux_event_cb(
+        "t1", SimpleNamespace(name="exception", context={"severity": 1}, jobid=1)
+    )
+    backend._flux_event_cb("t1", SimpleNamespace(name="finish", context={"status": 0}, jobid=1))
+
+    assert seen == ["DONE"]
+
+
+@pytest.mark.asyncio
+async def test_flux_cancel_then_exception_reports_canceled_only(mock_flux_module):
+    """The exception event caused by a cancel must not add a FAILED after CANCELED."""
+    from types import SimpleNamespace
+
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    backend = FluxExecutionBackend(uri="local:///x")
+    backend._flux_helper = MagicMock()
+    seen = []
+    backend.register_callback(lambda t, s: seen.append(s))
+    backend.tasks["t1"] = {"uid": "t1"}
+
+    assert await backend.cancel_task("t1")
+    backend._flux_event_cb(
+        "t1", SimpleNamespace(name="exception", context={"severity": 0}, jobid=1)
+    )
+
+    assert seen == ["CANCELED"]
