@@ -274,8 +274,8 @@ async def test_flux_nonfatal_exception_is_not_terminal(mock_flux_module):
 
 
 @pytest.mark.asyncio
-async def test_flux_cancel_then_exception_reports_canceled_only(mock_flux_module):
-    """The exception event caused by a cancel must not add a FAILED after CANCELED."""
+async def test_flux_cancel_reported_by_journal(mock_flux_module):
+    """cancel_task only requests the cancel; the journal's cancel exception reports CANCELED."""
     from types import SimpleNamespace
 
     from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
@@ -287,9 +287,11 @@ async def test_flux_cancel_then_exception_reports_canceled_only(mock_flux_module
     backend.tasks["t1"] = {"uid": "t1"}
 
     assert await backend.cancel_task("t1")
+    assert seen == []
     backend._flux_event_cb(
-        "t1", SimpleNamespace(name="exception", context={"severity": 0}, jobid=1)
+        "t1", SimpleNamespace(name="exception", context={"type": "cancel", "severity": 0}, jobid=1)
     )
+    backend._flux_event_cb("t1", SimpleNamespace(name="finish", context={"status": 15}, jobid=1))
 
     assert seen == ["CANCELED"]
 
@@ -318,24 +320,20 @@ async def test_flux_resubmitted_uid_gets_events_again(mock_flux_module):
 
 
 @pytest.mark.asyncio
-async def test_flux_finish_during_failed_cancel_is_delivered(mock_flux_module):
-    """A finish arriving while a cancel is in flight is delivered if the cancel fails."""
+async def test_flux_job_finishing_before_cancel_reports_its_state(mock_flux_module):
+    """A job that finishes before the cancel takes effect reports DONE, not CANCELED."""
     from types import SimpleNamespace
 
     from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
 
     backend = FluxExecutionBackend(uri="local:///x")
+    backend._flux_helper = MagicMock()
     seen = []
     backend.register_callback(lambda t, s: seen.append(s))
     backend.tasks["t1"] = {"uid": "t1"}
 
-    def cancel_after_finish(uid):
-        # the job finishes while the cancel RPC is in flight, then the cancel fails
-        backend._flux_event_cb(uid, SimpleNamespace(name="finish", context={"status": 0}, jobid=1))
-        raise RuntimeError("job is inactive")
+    assert await backend.cancel_task("t1")
+    backend._flux_event_cb("t1", SimpleNamespace(name="finish", context={"status": 0}, jobid=1))
 
-    backend._flux_helper = MagicMock()
-    backend._flux_helper.cancel.side_effect = cancel_after_finish
-
-    assert not await backend.cancel_task("t1")
     assert seen == ["DONE"]
+    assert not await backend.cancel_task("t1")  # already terminal

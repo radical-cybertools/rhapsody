@@ -31,6 +31,7 @@ from .wire import OP_COMPLETE
 from .wire import OP_SHUTDOWN
 from .wire import OP_STATE
 from .wire import OP_SUBMIT
+from .wire import OPTIONAL_RESULT_FIELDS
 from .wire import TerminalStatesShim
 from .wire import merge_envelope_into_task
 from .wire import recv_msg
@@ -146,6 +147,9 @@ class RemoteBackendProxy(BaseBackend):
             self._backend_state = BackendMainStates.RUNNING
         for task in tasks:
             self._pending[task["uid"]] = task
+            # A resubmitted task must not keep a previous run's optional results.
+            for key in OPTIONAL_RESULT_FIELDS:
+                task.pop(key, None)
         send_msg(self._host.conn, {"op": OP_SUBMIT, "tasks": list(tasks)})
 
     async def cancel_task(self, uid: str) -> bool:

@@ -1368,7 +1368,8 @@ def _sum_metric(metrics_data: Any, name: str) -> float:
     return total
 
 
-_RESOURCE_USAGE_KEYS = ("memory_peak_bytes", "cpu_loadavg", "resource_usage_scope")
+_MEASURED_USAGE_KEYS = ("memory_peak_bytes", "cpu_loadavg")
+_RESOURCE_USAGE_KEYS = (*_MEASURED_USAGE_KEYS, "resource_usage_scope")
 
 
 def _set_resource_usage(span: Any, attributes: dict) -> None:
@@ -1389,7 +1390,7 @@ def _resource_usage_attributes(task: dict) -> dict:
     if not isinstance(usage, dict):
         return {}
     attrs = {}
-    for key in ("memory_peak_bytes", "cpu_loadavg"):
+    for key in _MEASURED_USAGE_KEYS:
         if usage.get(key) is not None:
             attrs[key] = usage[key]
     if attrs and usage.get("scope"):

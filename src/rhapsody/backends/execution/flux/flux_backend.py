@@ -87,9 +87,7 @@ class FluxExecutionBackend(BaseBackend):
         self._sysmon_local = threading.local()
         # Tasks that already got a terminal callback (exception, then finish).
         self._finished: set[str] = set()
-        self._finished_lock = threading.Lock()  # journal thread vs cancel_task
-        # Tasks with a cancel in flight -> journal events deferred until it resolves.
-        self._cancelling: dict[str, list[Any]] = {}
+        self._finished_lock = threading.Lock()  # journal thread vs submit_tasks
 
         self._flux_service: FluxService | None = None
         self._flux_helper: FluxHelper | None = None
@@ -279,10 +277,6 @@ class FluxExecutionBackend(BaseBackend):
 
         Maps Flux journal events to Rhapsody task states and invokes callbacks.
         """
-        with self._finished_lock:
-            if task_uid in self._cancelling:
-                self._cancelling[task_uid].append(event)
-                return
         if task_uid not in self.tasks or task_uid in self._finished:
             return
         task = self.tasks[task_uid]
@@ -313,12 +307,18 @@ class FluxExecutionBackend(BaseBackend):
                 except RuntimeError:
                     pass  # pool shut down meanwhile: deliver without resource usage
         elif event_name == "exception":
-            if getattr(event, "context", {}).get("severity", 0) != 0:
+            context = getattr(event, "context", {})
+            if context.get("severity", 0) != 0:
                 return  # non-fatal: the job keeps running
-            state = TasksMainStates.FAILED.value
             if not self._mark_finished(task_uid):
                 return
-            task["exit_code"] = 1
+            if context.get("type") == "cancel":
+                # The journal is the source of truth for cancels: a job that
+                # finished before the cancel took effect reports its real state.
+                state = TasksMainStates.CANCELED.value
+            else:
+                state = TasksMainStates.FAILED.value
+                task["exit_code"] = 1
 
         if state:
             self._fire(task, state)
@@ -369,28 +369,14 @@ class FluxExecutionBackend(BaseBackend):
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a task by its UID."""
-        if uid in self.tasks and self._flux_helper:
-            # Defer journal events while the cancel is in flight: on success the
-            # cancel's exception event must not report FAILED; on failure (e.g. the
-            # job finished meanwhile) the deferred events still deliver its state.
-            with self._finished_lock:
-                if uid in self._finished or uid in self._cancelling:
-                    return False
-                self._cancelling[uid] = []
+        if uid in self.tasks and self._flux_helper and uid not in self._finished:
+            # Only request the cancel: the journal's cancel exception reports
+            # CANCELED (see _flux_event_cb).
             try:
                 await asyncio.to_thread(self._flux_helper.cancel, uid)
+                return True
             except Exception as e:
-                with self._finished_lock:
-                    deferred = self._cancelling.pop(uid, [])
                 self.logger.error("Failed to cancel flux task %s: %s", uid, e)
-                for event in deferred:
-                    self._flux_event_cb(uid, event)
-                return False
-            with self._finished_lock:
-                self._cancelling.pop(uid, None)
-                self._finished.add(uid)
-            self._callback_func(self.tasks[uid], TasksMainStates.CANCELED.value)
-            return True
         return False
 
     async def shutdown(self) -> None:
