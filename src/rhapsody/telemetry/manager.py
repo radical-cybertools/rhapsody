@@ -765,6 +765,18 @@ class TelemetryManager:
             # Record the wall-clock time we first see RUNNING so we can compute
             # duration in DONE/FAILED.
             self._task_start_times[task_id] = now_wall
+            attrs: dict = {"executable": executable, "task_type": task_type}
+            # Optional placement info — populated by backends that know it.
+            # Schema: {node_id: str, cores: int, gpu_ids: list[int]}.
+            # When future placement APIs land they should write the same key.
+            placement = task.get("placement")
+            node_id_for_event = None
+            if isinstance(placement, dict):
+                # Snapshot without deepcopy: a placement may hold uncopyable objects.
+                attrs["placement"] = {
+                    k: list(v) if isinstance(v, list) else v for k, v in placement.items()
+                }
+                node_id_for_event = placement.get("node_id")
             self.emit(
                 make_event(
                     TaskStarted,
@@ -772,10 +784,8 @@ class TelemetryManager:
                     backend=backend,
                     task_id=task_id,
                     event_time=now_wall,
-                    attributes={
-                        "executable": executable,
-                        "task_type": task_type,
-                    },
+                    node_id=node_id_for_event,
+                    attributes=attrs,
                 )
             )
 
@@ -784,7 +794,7 @@ class TelemetryManager:
             ended = now_wall
             if running_ts is not None:
                 duration = max(ended - running_ts, 0.0)
-                attrs: dict = {"executable": executable, "task_type": task_type}
+                attrs = {"executable": executable, "task_type": task_type}
             else:
                 # NOTE: RUNNING was never seen for this task (backend did not emit
                 # a RUNNING callback, or the task completed before telemetry started).

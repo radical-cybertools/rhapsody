@@ -149,6 +149,24 @@ class DragonExecutionBackend(BaseBackend):
             f"{self.batch.num_managers} managers"
         )
 
+    def topology(self) -> list[dict[str, Any]]:
+        """Node layout from Dragon's ``Batch.topology()``: one entry per pool node.
+
+        Cores are the pool's workers per node. Batch reports no GPU count, so GPUs come from a probe
+        of the local node (assumes homogeneous nodes).
+        """
+        try:
+            batch_topology = self.batch.topology()
+        except Exception:
+            self.logger.debug("Batch.topology() failed", exc_info=True)
+            return []
+        _, gpus = self._probe_local_resources()
+        nodes = []
+        for hosts, workers in zip(batch_topology.pool_hostnames, batch_topology.workers_per_pool):
+            cores = workers // len(hosts) if hosts else 0
+            nodes.extend({"id": host, "cores": cores, "gpus": gpus} for host in hosts)
+        return nodes
+
     def __await__(self):
         return self._async_init().__await__()
 
