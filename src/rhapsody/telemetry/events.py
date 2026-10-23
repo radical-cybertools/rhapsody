@@ -166,7 +166,7 @@ class TaskCanceled(BaseEvent):
 
 @dataclass(frozen=True)
 class ResourceLayout(BaseEvent):
-    """Emitted once per session, describing the resource topology.
+    """Emitted once per execution backend, describing its resource topology.
 
     Consumed by external viewers to size their node-grid to the actual cluster
     shape. Carries a ``nodes`` list of ``{id, cores, gpus}`` dicts. The list

@@ -853,7 +853,9 @@
     resetTaskState();
     viewState = 'idle';  // a previous replay may have ended 'completed'
     setStatus(`replaying ${events.length} events`);
-    firstEventTime = null;
+    // Anchor the clock at the first event, as the pump does (t0 below);
+    // ResourceLayout is applied first but is usually not the first event.
+    firstEventTime = events[0].event_time;
     simTime  = 0;
     animTime = 0;
     // Apply ResourceLayout immediately so the node grid is right from frame 0.
