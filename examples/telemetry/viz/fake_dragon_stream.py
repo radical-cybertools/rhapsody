@@ -184,12 +184,14 @@ def generate(
     # In-flight tasks waiting to be completed (heap-of-end-times).
     import heapq
 
-    in_flight: list[tuple[float, dict]] = []
+    # (end_time, seq, task): seq breaks end-time ties so dicts are never compared.
+    in_flight: list[tuple[float, int, dict]] = []
 
     def _drain_until(t_target: float) -> None:
         """Emit TaskCompleted events for tasks finishing before t_target."""
+        nonlocal now
         while in_flight and in_flight[0][0] <= t_target:
-            end_t, task = heapq.heappop(in_flight)
+            end_t, _, task = heapq.heappop(in_flight)
             n = task["_node"]
             free_cores[n] += task["_cores"]
             for g in task["_gpus"]:
@@ -214,6 +216,8 @@ def generate(
                 live=live,
                 dt=max(0.0, end_t - now) if live else 0.0,
             )
+            if live:
+                now = max(now, end_t)
 
     next_task_t = now
     for i in range(tasks):
@@ -309,6 +313,7 @@ def generate(
             in_flight,
             (
                 t_start + duration,
+                i,
                 {
                     "uid": uid,
                     "exec": exec_name,
@@ -323,7 +328,7 @@ def generate(
 
     # Drain remaining tasks.
     while in_flight:
-        end_t, task = heapq.heappop(in_flight)
+        end_t, _, task = heapq.heappop(in_flight)
         n = task["_node"]
         free_cores[n] += task["_cores"]
         for g in task["_gpus"]:

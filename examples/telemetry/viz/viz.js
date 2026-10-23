@@ -851,6 +851,7 @@
     if (!events.length) { setStatus('empty file'); return; }
     const gen = ++replayGen;
     resetTaskState();
+    viewState = 'idle';  // a previous replay may have ended 'completed'
     setStatus(`replaying ${events.length} events`);
     firstEventTime = null;
     simTime  = 0;

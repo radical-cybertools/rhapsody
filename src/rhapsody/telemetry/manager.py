@@ -772,7 +772,7 @@ class TelemetryManager:
             placement = task.get("placement") if isinstance(task, dict) else None
             node_id_for_event = None
             if isinstance(placement, dict):
-                attrs["placement"] = placement
+                attrs["placement"] = dict(placement)  # events are immutable snapshots
                 node_id_for_event = placement.get("node_id")
             self.emit(
                 make_event(

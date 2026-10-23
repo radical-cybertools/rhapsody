@@ -375,7 +375,7 @@ class Session:
 
         await self._telemetry.start()
 
-        for backend in self.backends.values():
+        for backend in self._exec_backends.values():
             self._emit_resource_layout(backend)
 
         return self._telemetry

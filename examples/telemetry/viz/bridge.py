@@ -398,10 +398,12 @@ class LiveVizBridge:
                         bridge._unregister_client(q)
                         return
                 try:
-                    while not bridge._stopped.is_set():
+                    while True:
                         try:
                             line = q.get(timeout=15.0)
                         except queue.Empty:
+                            if bridge._stopped.is_set():
+                                return
                             # SSE comment frame as heartbeat — keeps
                             # intermediate proxies from killing the conn.
                             try:
