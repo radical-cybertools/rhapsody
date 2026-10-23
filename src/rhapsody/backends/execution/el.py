@@ -53,7 +53,7 @@ class EnsembleExecutionBackend(BaseBackend):
         hosts: list[str] | None = None,
         flush_interval: float = 0.05,
         buffer_size: int = 100000,
-        req_res: bool = True
+        req_res: bool = True,
     ):
         """Initialize the Ensemble Launcher execution backend.
 
@@ -253,8 +253,7 @@ class EnsembleExecutionBackend(BaseBackend):
     async def shutdown(self) -> None:
         """Shut down the backend, tearing down the client and launcher.
 
-        Clears all tracked tasks and resets initialization state. Safe to
-        call multiple times.
+        Clears all tracked tasks and resets initialization state. Safe to call multiple times.
         """
         self._backend_state = BackendMainStates.SHUTDOWN
         self.logger.debug(f"Backend state set to: {self._backend_state.value}")
@@ -325,7 +324,7 @@ class EnsembleExecutionBackend(BaseBackend):
             An ``ELTask`` or ``AsyncELTask`` configured for submission.
         """
         backend_kwargs = task.get("task_backend_specific_kwargs", {})
-        nnodes = max(backend_kwargs.get("nnodes", 1),1)
+        nnodes = max(backend_kwargs.get("nnodes", 1), 1)
         ppn = backend_kwargs.get("ranks", 1) // nnodes
         ngpus_per_process = backend_kwargs.get("gpus_per_rank", 0)
         env = backend_kwargs.get("env", {})
@@ -349,7 +348,7 @@ class EnsembleExecutionBackend(BaseBackend):
         is_executable = task.get("executable", None) is not None
         if is_executable:
             ## When ELTask.executable is str, it ignore args and kwargs.
-            exec = task["executable"] + " " + " ".join([str(x) for x in task.get("arguments",[])])
+            exec = task["executable"] + " " + " ".join([str(x) for x in task.get("arguments", [])])
         else:
             exec = func
 

@@ -30,8 +30,8 @@ try:
     from .el import EnsembleExecutionBackend  # noqa: F401
 
     __all__.append("EnsembleExecutionBackend")
-    from .orbit import OrbitExecutionBackend  # noqa: F401
     from .dragon import DragonExecutionBackend  # noqa: F401
+    from .orbit import OrbitExecutionBackend  # noqa: F401
 
     __all__.append("DragonExecutionBackend")
 
