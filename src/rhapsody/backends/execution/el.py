@@ -123,6 +123,8 @@ class EnsembleExecutionBackend(BaseBackend):
         self._el: EnsembleLauncher | None = None
         self._client: ClusterClient | None = None
         self.tasks: dict = {}
+        self.flush_interval = flush_interval
+        self.buffer_size = buffer_size
 
     def __await__(self):
         """Make EnsembleExecutionBackend awaitable."""
@@ -180,6 +182,8 @@ class EnsembleExecutionBackend(BaseBackend):
         self._client = ClusterClient(
             self._launcher_config.checkpoint_dir,
             node_id=self._node_id,
+            task_buffer_size=self.buffer_size,
+            task_flush_interval=self.flush_interval,
         )
         await asyncio.to_thread(self._client.start)
 
