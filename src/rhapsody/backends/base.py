@@ -192,9 +192,8 @@ class BaseBackend(ABC):
 
     @classmethod
     def build_launch_prefix(cls, partition: dict | None) -> list[str]:
-        """Return the argv prefix that wraps ``python -m
-        rhapsody.backends.multiproc.host`` when this backend is hosted in a
-        child process by :class:`RemoteBackendProxy`.
+        """Return the argv prefix that wraps ``python -m rhapsody.backends.multiproc.host`` when
+        this backend is hosted in a child process by :class:`RemoteBackendProxy`.
 
         Default: no prefix (the child is launched as a plain Python process).
         Backends with their own runtime launcher (Dragon, Flux, …) override

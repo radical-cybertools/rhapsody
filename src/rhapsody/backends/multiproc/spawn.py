@@ -34,8 +34,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SpawnedHost:
-    """Bundle returned by :func:`spawn_backend_host` — everything the proxy
-    needs for both runtime use and teardown."""
+    """Bundle returned by :func:`spawn_backend_host` — everything the proxy needs for both runtime
+    use and teardown."""
 
     proc: subprocess.Popen
     listener: Listener

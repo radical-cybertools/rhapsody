@@ -133,8 +133,8 @@ async def test_two_partitions_with_cross_dependency():
 
 @pytest.mark.asyncio
 async def test_session_terminal_states_picked_up_from_proxy():
-    """``Session.add_backend`` reads ``terminal_states`` from the proxy shim;
-    if it didn't, the proxied task's future would never resolve."""
+    """``Session.add_backend`` reads ``terminal_states`` from the proxy shim; if it didn't, the
+    proxied task's future would never resolve."""
     proxy = await RemoteBackendProxy(name="p0", backend="concurrent")
     try:
         async with Session(backends=[proxy]) as session:

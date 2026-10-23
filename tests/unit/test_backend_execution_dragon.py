@@ -605,7 +605,7 @@ def _partition(n_nodes):
 
 
 def test_constructor_partition_derives_num_nodes():
-    """resources={"partition": spec} is accepted and sets num_nodes from the nodelist."""
+    """Resources={"partition": spec} is accepted and sets num_nodes from the nodelist."""
     from rhapsody.backends.execution.dragon import DragonExecutionBackend
 
     mock_batch = MagicMock()
@@ -639,7 +639,7 @@ def test_constructor_partition_keeps_explicit_num_nodes():
 
 
 def test_constructor_rejects_unknown_resources():
-    """resources keys other than partition raise NotImplementedError."""
+    """Resources keys other than partition raise NotImplementedError."""
     from rhapsody.backends.execution.dragon import DragonExecutionBackend
 
     with patch("rhapsody.backends.execution.dragon.Batch", return_value=MagicMock()):

@@ -1,8 +1,7 @@
 """Flux execution helpers for Rhapsody.
 
-This sub-package provides the FluxHelper, FluxService, and FluxModule classes
-together with jobspec factory functions, encapsulating all interaction with the
-Flux resource-manager Python bindings.
+This sub-package provides the FluxHelper, FluxService, and FluxModule classes together with jobspec
+factory functions, encapsulating all interaction with the Flux resource-manager Python bindings.
 """
 
 from .flux_backend import FluxExecutionBackend

@@ -1,7 +1,7 @@
 """Flux execution backend for Rhapsody.
 
-This module provides the FluxExecutionBackend which connects to a Flux
-resource manager instance to execute tasks.
+This module provides the FluxExecutionBackend which connects to a Flux resource manager instance to
+execute tasks.
 """
 
 from __future__ import annotations
