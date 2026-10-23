@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from rhapsody.backends.base import BaseBackend
@@ -16,7 +18,9 @@ from rhapsody.backends.constants import BackendMainStates
 from rhapsody.backends.constants import StateMapper
 from rhapsody.backends.constants import TasksMainStates
 
+from . import flux_sysmon
 from .flux_helper import FluxHelper
+from .flux_module import FluxModule
 from .flux_module import spec_from_dict
 from .flux_service import FluxService
 
@@ -32,6 +36,8 @@ class FluxExecutionBackend(BaseBackend):
         launcher: str | None = None,
         name: str = "flux",
         resources: dict | None = None,
+        sysmon: bool = False,
+        sdexec: bool | str | None = None,
     ):
         """Initialize the Flux execution backend.
 
@@ -50,6 +56,15 @@ class FluxExecutionBackend(BaseBackend):
                 launcher; the backend connects to it through the
                 ssh-reachable URI (the instance's rank-0 broker runs on the
                 partition's first node, not necessarily this host).
+            sysmon: Enable flux's ``sysmon`` shell plugin for every task and
+                record its summary as ``task["resource_usage"]`` (peak
+                memory and CPU load; see :mod:`.flux_sysmon`).  The values
+                are per job only when the instance runs jobs via sdexec;
+                ``resource_usage["scope"]`` is ``"job"`` then, else
+                ``"shell"`` (the broker's shared cgroup).
+            sdexec: Passed to :class:`FluxService` when this backend starts
+                its own instance.  Default (``None``): ``"auto"`` when
+                *sysmon* is set, else ``False``.
         """
         super().__init__(name=name)
 
@@ -65,6 +80,14 @@ class FluxExecutionBackend(BaseBackend):
                 f"FluxExecutionBackend: unsupported resources keys: {list(self._resources)}"
             )
         self._partition: dict = partition or {}
+        self._sysmon = sysmon
+        self._sdexec = sdexec if sdexec is not None else ("auto" if sysmon else False)
+        self._sysmon_scope = "shell"
+        self._sysmon_pool: ThreadPoolExecutor | None = None
+        self._sysmon_local = threading.local()
+        # Tasks that already got a terminal callback (exception, then finish).
+        self._finished: set[str] = set()
+        self._finished_lock = threading.Lock()  # journal thread vs submit_tasks
 
         self._flux_service: FluxService | None = None
         self._flux_helper: FluxHelper | None = None
@@ -142,7 +165,7 @@ class FluxExecutionBackend(BaseBackend):
                         "No FLUX_URI provided, starting a new FluxService (launcher: %s)",
                         launcher or "none",
                     )
-                    self._flux_service = FluxService(launcher=launcher)
+                    self._flux_service = FluxService(launcher=launcher, sdexec=self._sdexec)
                     # Use asyncio.to_thread to avoid blocking the event loop
                     success = await asyncio.to_thread(self._flux_service.start, 60.0)
                     if not success:
@@ -160,6 +183,9 @@ class FluxExecutionBackend(BaseBackend):
                 self._flux_helper.register_cb(self._flux_event_cb)
                 await asyncio.to_thread(self._flux_helper.start)
 
+                if self._sysmon:
+                    await asyncio.to_thread(self._init_sysmon)
+
                 self._initialized = True
                 self.logger.info("Flux execution backend started successfully")
 
@@ -168,6 +194,52 @@ class FluxExecutionBackend(BaseBackend):
                 self._initialized = False
                 raise
         return self
+
+    def telemetry_info(self) -> dict | None:
+        """Return the instance URI for :class:`FluxTelemetryAdapter`.
+
+        For a partition launch this is the ssh-reachable ``r_uri``.
+        """
+        if not self._uri:
+            return None
+        return {"kind": "flux", "uri": self._uri}
+
+    def _init_sysmon(self) -> None:
+        """Record whether sysmon values are per job and start the reader pool."""
+        try:
+            # Own handle: FluxHelper guards its handle with a lock the journal thread uses.
+            config = FluxModule().core.Flux(self._uri).rpc("config.get").get()
+            service = (config.get("exec") or {}).get("service", "rexec")
+        except Exception:  # noqa: BLE001
+            self.logger.debug("could not read instance config", exc_info=True)
+            service = "rexec"
+        self._sysmon_scope = "job" if service == "sdexec" else "shell"
+        if self._sysmon_scope == "shell":
+            self.logger.warning(
+                "%s: flux instance runs jobs via %s, not sdexec — sysmon values "
+                "describe the broker's shared cgroup, not the job "
+                "(flux-framework/flux-core#7835)",
+                self.name,
+                service,
+            )
+        self._sysmon_pool = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix=f"rhapsody-flux-sysmon-{self.name}"
+        )
+
+    def _complete_with_sysmon(self, task: dict, state: str, jobid: Any) -> None:
+        """Attach the sysmon summary to *task*, then fire the state callback."""
+        try:
+            handle = getattr(self._sysmon_local, "handle", None)
+            if handle is None:
+                handle = FluxModule().core.Flux(self._uri)
+                self._sysmon_local.handle = handle
+            entries = flux_sysmon.read_entries(FluxModule().job, handle, jobid, timeout=2.0)
+            usage = flux_sysmon.summarize(entries, self._sysmon_scope)
+            if usage is not None:
+                task["resource_usage"] = usage
+        except Exception:  # noqa: BLE001
+            self.logger.debug("sysmon read failed for %s", task.get("uid"), exc_info=True)
+        self._fire(task, state)
 
     def _fire(self, task: dict, state: str) -> None:
         """Deliver a state change from a flux thread on the event loop.
@@ -192,12 +264,20 @@ class FluxExecutionBackend(BaseBackend):
         """Return the state mapper for this backend."""
         return StateMapper(backend=self)
 
+    def _mark_finished(self, uid: str) -> bool:
+        """Record *uid* as terminal; False if it already was (one terminal state per task)."""
+        with self._finished_lock:
+            if uid in self._finished:
+                return False
+            self._finished.add(uid)
+            return True
+
     def _flux_event_cb(self, task_uid: str, event: Any) -> None:
         """Handle events coming from the Flux journal.
 
         Maps Flux journal events to Rhapsody task states and invokes callbacks.
         """
-        if task_uid not in self.tasks:
+        if task_uid not in self.tasks or task_uid in self._finished:
             return
         task = self.tasks[task_uid]
         event_name = event.name
@@ -215,9 +295,30 @@ class FluxExecutionBackend(BaseBackend):
                 state = TasksMainStates.DONE.value
             else:
                 state = TasksMainStates.FAILED.value
+            if not self._mark_finished(task_uid):
+                return
+            pool = self._sysmon_pool
+            if pool is not None:
+                # Reading the output eventlog is an RPC — keep it off the
+                # journal thread.
+                try:
+                    pool.submit(self._complete_with_sysmon, task, state, event.jobid)
+                    return
+                except RuntimeError:
+                    pass  # pool shut down meanwhile: deliver without resource usage
         elif event_name == "exception":
-            state = TasksMainStates.FAILED.value
-            task["exit_code"] = 1
+            context = getattr(event, "context", {})
+            if context.get("severity", 0) != 0:
+                return  # non-fatal: the job keeps running
+            if not self._mark_finished(task_uid):
+                return
+            if context.get("type") == "cancel":
+                # The journal is the source of truth for cancels: a job that
+                # finished before the cancel took effect reports its real state.
+                state = TasksMainStates.CANCELED.value
+            else:
+                state = TasksMainStates.FAILED.value
+                task["exit_code"] = 1
 
         if state:
             self._fire(task, state)
@@ -230,6 +331,9 @@ class FluxExecutionBackend(BaseBackend):
         specs = []
         for task in tasks:
             self.tasks[task["uid"]] = task
+            with self._finished_lock:
+                self._finished.discard(task["uid"])  # a resubmitted uid starts over
+            task.pop("resource_usage", None)
             # Map canonical task dictionary values to the kwargs expected by spec_from_dict
             td = {
                 "uid": task["uid"],
@@ -239,6 +343,7 @@ class FluxExecutionBackend(BaseBackend):
                 "timeout": task.get("timeout", 0.0),
                 "environment": task.get("environment"),
                 "sandbox": task.get("sandbox"),
+                "sysmon": self._sysmon,
             }
             # Handle resource requests. Rhapsody uses dicts like:
             # cpu_reqs: {"cpu_processes": X, "cpu_threads": Y}
@@ -264,11 +369,11 @@ class FluxExecutionBackend(BaseBackend):
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a task by its UID."""
-        if uid in self.tasks and self._flux_helper:
+        if uid in self.tasks and self._flux_helper and uid not in self._finished:
+            # Only request the cancel: the journal's cancel exception reports
+            # CANCELED (see _flux_event_cb).
             try:
                 await asyncio.to_thread(self._flux_helper.cancel, uid)
-                task = self.tasks[uid]
-                self._callback_func(task, TasksMainStates.CANCELED.value)
                 return True
             except Exception as e:
                 self.logger.error("Failed to cancel flux task %s: %s", uid, e)
@@ -277,6 +382,11 @@ class FluxExecutionBackend(BaseBackend):
     async def shutdown(self) -> None:
         """Shutdown the Flux backend and service."""
         self._backend_state = BackendMainStates.SHUTDOWN
+
+        if self._sysmon_pool is not None:
+            # Let pending sysmon reads fire their completion callbacks.
+            await asyncio.to_thread(self._sysmon_pool.shutdown, True)
+            self._sysmon_pool = None
 
         if self._flux_helper:
             await asyncio.to_thread(self._flux_helper.stop)

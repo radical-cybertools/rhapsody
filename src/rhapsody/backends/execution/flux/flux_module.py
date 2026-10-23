@@ -191,6 +191,8 @@ def spec_from_dict(td: dict) -> Any:
     * ``stdin``, ``stdout``, ``stderr``: I/O redirection paths.
     * ``use_mpi``: when ``True`` (default) and ``ranks > 1``, sets
       ``exit-on-error = 1`` so that all ranks exit if one fails.
+    * ``sysmon``: when ``True``, enables the ``sysmon`` shell plugin, which
+      logs each shell's peak memory and CPU load at job exit.
 
     Args:
         td: Task description dictionary.
@@ -265,6 +267,9 @@ def spec_from_dict(td: dict) -> Any:
             spec.setattr_shell_option("exit-on-error", 1)
         else:
             spec.setattr_shell_option("exit-timeout", "none")
+
+    if td.get("sysmon"):
+        spec.setattr_shell_option("sysmon", {})
 
     if td.get("stdin"):
         spec.stdin = td["stdin"]

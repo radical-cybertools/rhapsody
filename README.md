@@ -17,6 +17,7 @@ A unified runtime for executing **AI and HPC workloads** on supercomputing infra
 - **Async-First Design**: Native asyncio integration for efficient task orchestration
 - **Integratable Design**: RHAPSODY is designed to be integratable with existing workflows and tools such as [AsyncFlow](https://github.com/radical-cybertools/radical.asyncflow) and [LangGraph/FlowGentic](https://github.com/stride-research/flowgentic).
 - **Scale-Ready**: Scale your workload and workflows to thousands of tasks and nodes.
+- **Telemetry**: Task lifecycle events and spans for every backend, plus per-node resource metrics for Concurrent, Dask, Dragon and Flux — see the [backend comparison](https://radical-cybertools.github.io/rhapsody/telemetry/reference/#backend-comparison).
 
 ## Quick Example: AI-HPC Workflow
 

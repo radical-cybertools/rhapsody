@@ -177,6 +177,48 @@ class TestSpans:
         assert spans[0].status.status_code == StatusCode.ERROR
         assert spans[0].status.description == "ValueError"
 
+    @pytest.mark.parametrize(
+        ("state", "event_type"), [("DONE", "TaskCompleted"), ("FAILED", "TaskFailed")]
+    )
+    async def test_resource_usage_on_events_and_spans(self, manager, state, event_type):
+        """A backend-set ``task["resource_usage"]`` reaches end events and spans."""
+        received = []
+        manager.subscribe(received.append)
+        task = {
+            "uid": "t1",
+            "backend": "flux",
+            "executable": "/bin/true",
+            "resource_usage": {
+                "memory_peak_bytes": 1024,
+                "cpu_loadavg": 0.5,
+                "scope": "job",
+                "per_rank": {0: {}},
+            },
+        }
+        manager._on_task_state_change(task, "RUNNING")
+        manager._on_task_state_change(task, state)
+        await asyncio.sleep(0.1)
+
+        (end,) = [e for e in received if e.event_type == event_type]
+        assert end.attributes["memory_peak_bytes"] == 1024
+        assert end.attributes["cpu_loadavg"] == 0.5
+        assert end.attributes["resource_usage_scope"] == "job"
+        assert "per_rank" not in end.attributes
+
+        (span,) = [s for s in manager.read_traces() if s.name == "task"]
+        assert span.attributes["memory_peak_bytes"] == 1024
+        assert span.attributes["resource_usage_scope"] == "job"
+
+    async def test_no_resource_usage_attributes_without_usage(self, manager):
+        received = []
+        manager.subscribe(received.append)
+        task = {"uid": "t1", "backend": "concurrent", "executable": "/bin/true"}
+        manager._on_task_state_change(task, "RUNNING")
+        manager._on_task_state_change(task, "DONE")
+        await asyncio.sleep(0.1)
+        (end,) = [e for e in received if e.event_type == "TaskCompleted"]
+        assert "memory_peak_bytes" not in end.attributes
+
     async def test_session_span(self, manager):
         await manager.stop()
         session_spans = [s for s in manager.read_traces() if s.name == "session"]

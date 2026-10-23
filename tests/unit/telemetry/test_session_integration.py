@@ -34,6 +34,16 @@ class TestStartTelemetry:
         assert session._state_manager._telemetry_observer == telemetry._on_task_state_change
         await session.close()
 
+    async def test_missing_otel_raises_clear_import_error(self, backend, monkeypatch):
+        """Without opentelemetry-sdk, start_telemetry() names the extra to install."""
+        import sys
+
+        monkeypatch.setitem(sys.modules, "opentelemetry.sdk", None)
+        session = Session(backends=[backend])
+        with pytest.raises(ImportError, match=r"rhapsody-py\[telemetry\]"):
+            await session.start_telemetry()
+        assert session._telemetry is None
+
     async def test_no_otel_import_before_start_telemetry(self, backend):
         """Session creation must not import opentelemetry before start_telemetry() is called."""
         import sys

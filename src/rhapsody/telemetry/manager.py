@@ -436,7 +436,34 @@ class TelemetryManager:
         Silently skips backends with no adapter (LocalExecutionBackend, NoopExecutionBackend,
         unknown types). Safe to call before or after start(); if already running the adapter is
         started immediately.
+
+        A backend's ``telemetry_info()`` takes precedence over the type checks; this is how
+        backends hosted behind a ``RemoteBackendProxy`` get an adapter.
         """
+        info = None
+        try:
+            if hasattr(backend, "telemetry_info"):
+                info = backend.telemetry_info()
+        except Exception:
+            logger.warning("telemetry_info() failed for backend %s", backend_name, exc_info=True)
+
+        if info and info.get("kind") == "flux":
+            try:
+                from rhapsody.telemetry.adapters.flux import FluxTelemetryAdapter
+
+                adapter = FluxTelemetryAdapter(
+                    session_id=session_id,
+                    backend_name=backend_name,
+                    uri=info["uri"],
+                    interval=interval,
+                )
+                self.register_adapter(adapter)
+                if self._running:
+                    adapter.start()
+            except Exception:
+                logger.warning("Could not attach FluxTelemetryAdapter", exc_info=True)
+            return
+
         try:
             from rhapsody.backends.execution.concurrent import ConcurrentExecutionBackend
             from rhapsody.telemetry.adapters.concurrent import ConcurrentTelemetryAdapter
@@ -806,7 +833,7 @@ class TelemetryManager:
                     task_id=task_id,
                     event_time=ended,
                     duration_seconds=duration,
-                    attributes=attrs,
+                    attributes={**attrs, **_resource_usage_attributes(task)},
                 )
             )
 
@@ -839,7 +866,7 @@ class TelemetryManager:
                     event_time=ended,
                     duration_seconds=duration,
                     error_type=error_type,
-                    attributes=attrs,
+                    attributes={**attrs, **_resource_usage_attributes(task)},
                 )
             )
 
@@ -1159,6 +1186,7 @@ class TelemetryManager:
             span.set_attribute("task_type", task_type)
             if event.attributes.get("incomplete_lifecycle"):
                 span.set_attribute("incomplete_lifecycle", True)
+            _set_resource_usage(span, event.attributes)
             span.set_status(trace_mod.StatusCode.OK)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
@@ -1186,6 +1214,7 @@ class TelemetryManager:
             span.set_attribute("task_type", task_type)
             if event.attributes.get("incomplete_lifecycle"):
                 span.set_attribute("incomplete_lifecycle", True)
+            _set_resource_usage(span, event.attributes)
             span.set_status(trace_mod.StatusCode.ERROR, error_type)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
@@ -1337,6 +1366,36 @@ def _sum_metric(metrics_data: Any, name: str) -> float:
                     for dp in metric.data.data_points:
                         total += dp.value
     return total
+
+
+_MEASURED_USAGE_KEYS = ("memory_peak_bytes", "cpu_loadavg")
+_RESOURCE_USAGE_KEYS = (*_MEASURED_USAGE_KEYS, "resource_usage_scope")
+
+
+def _set_resource_usage(span: Any, attributes: dict) -> None:
+    """Copy the per-task resource usage attributes onto a terminal task span."""
+    for key in _RESOURCE_USAGE_KEYS:
+        if key in attributes:
+            span.set_attribute(key, attributes[key])
+
+
+def _resource_usage_attributes(task: dict) -> dict:
+    """Flatten a backend-reported ``task["resource_usage"]`` into event attributes.
+
+    Set by backends that measure per-task usage (flux with ``sysmon=True``).
+    ``resource_usage_scope`` is ``"job"`` when the values cover the task only and
+    ``"shell"`` when they cover a cgroup shared with other work.
+    """
+    usage = task.get("resource_usage")
+    if not isinstance(usage, dict):
+        return {}
+    attrs = {}
+    for key in _MEASURED_USAGE_KEYS:
+        if usage.get(key) is not None:
+            attrs[key] = usage[key]
+    if attrs and usage.get("scope"):
+        attrs["resource_usage_scope"] = usage["scope"]
+    return attrs
 
 
 def _task_executable(task: dict) -> str:

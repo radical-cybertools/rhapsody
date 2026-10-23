@@ -8,7 +8,7 @@ Telemetry is enabled with a single method call on the session. No external colle
 pip install 'rhapsody-py[telemetry]'
 ```
 
-This pulls in `opentelemetry-sdk`. All other telemetry dependencies (`psutil`, `pynvml`) are optional and enabled when present.
+This pulls in `opentelemetry-sdk`, `psutil` and `nvidia-ml-py`. `session.start_telemetry()` raises `ImportError` when `opentelemetry-sdk` is missing. GPU metrics are skipped when no NVIDIA driver is present.
 
 ---
 
@@ -228,5 +228,5 @@ Once `await session.start_telemetry()` is called, RHAPSODY hooks into the task s
 | Task lifecycle events | ✅ | All state transitions are captured via the session's observer slot |
 | Session start / end | ✅ | Emitted in `start()` / `stop()` |
 | Node CPU & memory | ✅ | Polled by the backend adapter on the `resource_poll_interval` |
-| Disk & network I/O | ✅ on Concurrent + Dragon | Not exposed by Dask's `scheduler_info()` for network |
-| Per-GPU utilization | ✅ if `pynvml` installed (Concurrent) or Dragon runtime active | `resource_scope="per_gpu"` events with `gpu_id=N` |
+| Disk & network I/O | ✅ on Concurrent, Dragon and Flux | Not exposed by Dask's `scheduler_info()` for network |
+| Per-GPU utilization | ✅ if `pynvml` installed (Concurrent, Flux) or Dragon runtime active | `resource_scope="per_gpu"` events with `gpu_id=N` |

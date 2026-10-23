@@ -31,6 +31,7 @@ from .wire import OP_COMPLETE
 from .wire import OP_SHUTDOWN
 from .wire import OP_STATE
 from .wire import OP_SUBMIT
+from .wire import OPTIONAL_RESULT_FIELDS
 from .wire import TerminalStatesShim
 from .wire import merge_envelope_into_task
 from .wire import recv_msg
@@ -50,6 +51,7 @@ class RemoteBackendProxy(BaseBackend):
             resources={"partition": {...}},   # optional; RM contract dict
             extra_env={"SLURM_NODELIST": "..."},
             launch_prefix=None,       # e.g. ["dragon"] for Phase 3
+            backend_kwargs=None,      # extra constructor kwargs for the backend
         )
         Session(backends=[proxy, ...])
     """
@@ -61,10 +63,12 @@ class RemoteBackendProxy(BaseBackend):
         resources: dict | None = None,
         extra_env: dict | None = None,
         launch_prefix: list[str] | None = None,
+        backend_kwargs: dict | None = None,
     ):
         super().__init__(name=name)
         self._backend_name = backend
         self._resources = resources or {}
+        self._backend_kwargs = dict(backend_kwargs or {})
         # ``None`` (not ``[]``/``{}``) means "derive from the backend class +
         # partition spec at init time".  Explicit values override.
         self._extra_env_override: dict | None = extra_env
@@ -120,6 +124,7 @@ class RemoteBackendProxy(BaseBackend):
             self._resources,
             self._extra_env,
             self._launch_prefix,
+            self._backend_kwargs,
         )
         self._terminal_states = self._host.terminal_states
 
@@ -142,6 +147,9 @@ class RemoteBackendProxy(BaseBackend):
             self._backend_state = BackendMainStates.RUNNING
         for task in tasks:
             self._pending[task["uid"]] = task
+            # A resubmitted task must not keep a previous run's optional results.
+            for key in OPTIONAL_RESULT_FIELDS:
+                task.pop(key, None)
         send_msg(self._host.conn, {"op": OP_SUBMIT, "tasks": list(tasks)})
 
     async def cancel_task(self, uid: str) -> bool:
@@ -188,6 +196,10 @@ class RemoteBackendProxy(BaseBackend):
 
     async def state(self) -> str:
         return self._backend_state.value
+
+    def telemetry_info(self) -> dict | None:
+        # Reported by the hosted backend in READY.
+        return self._host.telemetry_info if self._host else None
 
     def get_task_states_map(self):
         # Session reads only ``.terminal_states`` (verified fact 6).

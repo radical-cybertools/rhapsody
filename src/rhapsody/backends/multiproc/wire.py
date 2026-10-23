@@ -51,6 +51,10 @@ RESULT_FIELDS = (
     "exception",
 )
 
+# Result fields copied only when the backend set them, so tasks of backends
+# that never produce them do not gain a ``None`` key.
+OPTIONAL_RESULT_FIELDS = ("resource_usage",)
+
 
 def send_msg(conn, msg: dict) -> None:
     """Serialize ``msg`` with cloudpickle and send over ``conn``.
@@ -75,6 +79,7 @@ def inline_envelope(task: dict) -> dict:
     backend-internal keys (e.g. concurrent's ``"future"``) that don't pickle.
     """
     payload = {k: task.get(k) for k in RESULT_FIELDS}
+    payload.update({k: task[k] for k in OPTIONAL_RESULT_FIELDS if k in task})
     return {"kind": "inline", "payload": payload}
 
 
