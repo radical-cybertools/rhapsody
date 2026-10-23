@@ -305,7 +305,7 @@ async def test_flux_resubmitted_uid_gets_events_again(mock_flux_module):
     backend._flux_helper = MagicMock()
     seen = []
     backend.register_callback(lambda t, s: seen.append(s))
-    task = {"uid": "t1", "executable": "/bin/true"}
+    task = {"uid": "t1", "executable": "/bin/true", "resource_usage": {"memory_peak_bytes": 1}}
     backend.tasks["t1"] = task
     backend._flux_event_cb("t1", SimpleNamespace(name="finish", context={"status": 0}, jobid=1))
 
@@ -314,3 +314,28 @@ async def test_flux_resubmitted_uid_gets_events_again(mock_flux_module):
     backend._flux_event_cb("t1", SimpleNamespace(name="finish", context={"status": 0}, jobid=2))
 
     assert seen.count("DONE") == 2
+    assert "resource_usage" not in task  # stale usage of the first run is dropped
+
+
+@pytest.mark.asyncio
+async def test_flux_finish_during_failed_cancel_is_delivered(mock_flux_module):
+    """A finish arriving while a cancel is in flight is delivered if the cancel fails."""
+    from types import SimpleNamespace
+
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    backend = FluxExecutionBackend(uri="local:///x")
+    seen = []
+    backend.register_callback(lambda t, s: seen.append(s))
+    backend.tasks["t1"] = {"uid": "t1"}
+
+    def cancel_after_finish(uid):
+        # the job finishes while the cancel RPC is in flight, then the cancel fails
+        backend._flux_event_cb(uid, SimpleNamespace(name="finish", context={"status": 0}, jobid=1))
+        raise RuntimeError("job is inactive")
+
+    backend._flux_helper = MagicMock()
+    backend._flux_helper.cancel.side_effect = cancel_after_finish
+
+    assert not await backend.cancel_task("t1")
+    assert seen == ["DONE"]

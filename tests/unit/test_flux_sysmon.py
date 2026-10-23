@@ -360,18 +360,36 @@ def test_host_passes_backend_kwargs(monkeypatch):
     assert sent[0]["kwargs"] == {"sysmon": True}
 
 
-def test_service_auto_timeout_does_not_fall_back(mock_flux_module):
-    """A startup timeout is not an sdexec failure: no rexec relaunch."""
+def test_service_auto_falls_back_when_smoke_job_hangs(mock_flux_module):
+    """A hung sdexec smoke job prints no marker; 'auto' still retries with rexec."""
     from rhapsody.backends.execution.flux.flux_service import FluxService
 
     fs = FluxService(sdexec="auto")
+    calls = []
+
+    def fake_launch(sdexec, timeout):
+        calls.append(sdexec)
+        return not sdexec  # sdexec attempt times out, no failure marker
+
     with (
         patch.object(fs, "_sdexec_possible", return_value=True),
-        patch.object(fs, "_launch", return_value=False) as launch,
+        patch.object(fs, "_launch", side_effect=fake_launch),
+        patch.object(fs, "stop"),
+    ):
+        assert fs.start(timeout=1.0)
+    assert calls == [True, False]
+
+
+def test_service_required_sdexec_timeout_returns_false(mock_flux_module):
+    """Sdexec=True raises only on a reported sdexec failure; a timeout returns False."""
+    from rhapsody.backends.execution.flux.flux_service import FluxService
+
+    fs = FluxService(sdexec=True)
+    with (
+        patch.object(fs, "_launch", return_value=False),
         patch.object(fs, "stop"),
     ):
         assert not fs.start(timeout=1.0)
-    launch.assert_called_once_with(True, 1.0)
 
 
 def test_service_ignores_output_of_replaced_process(mock_flux_module):

@@ -216,12 +216,13 @@ class FluxService:
 
         if self._launch(True, timeout):
             return True
-        if not self._sdexec_failed:
-            # Startup timeout or exit: not an sdexec problem, a rexec retry won't help.
-            return False
         if self._sdexec_mode is True:
             self.stop()
-            raise RuntimeError(f"{self._uid}: flux instance cannot run jobs under sdexec")
+            if self._sdexec_failed:
+                raise RuntimeError(f"{self._uid}: flux instance cannot run jobs under sdexec")
+            return False
+        # "auto": the smoke job failed, hung, or the start was slow — rexec is the
+        # safe retry (a hung sdexec job never prints the failure marker).
         logger.warning(
             "%s: flux instance cannot run jobs under sdexec — restarting with rexec "
             "(sysmon values will cover the broker's cgroup, not the job's)",
