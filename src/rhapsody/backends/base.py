@@ -198,10 +198,8 @@ class BaseBackend(ABC):
         actual cluster shape instead of hardcoding it.
 
         Returns:
-            A list of node descriptors. Each entry is a dict with keys:
-              - ``id``    (str): node identifier
-              - ``cores`` (int): CPU cores on this node
-              - ``gpus``  (int): GPUs on this node
+            A list of node descriptors, each a dict with ``id`` (str, node identifier),
+            ``cores`` (int, CPU cores on the node) and ``gpus`` (int, GPUs on the node).
 
         Default implementation returns an empty list. Backends that know their
         layout should override; the telemetry layer treats ``[]`` as "topology

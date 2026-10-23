@@ -89,8 +89,8 @@ def _stream_existing(path: str):
 def _serialize(event: Any) -> str:
     """Serialize a BaseEvent dataclass (or a plain dict) to one JSON line.
 
-    Matches the format the JSONL checkpoint writer uses, so the browser
-    has a single code path for live and replay.
+    Matches the format the JSONL checkpoint writer uses, so the browser has a single code path for
+    live and replay.
     """
     if isinstance(event, dict):
         d = dict(event)
@@ -164,7 +164,10 @@ class LiveVizBridge:
     # ---- public API ------------------------------------------------------
 
     def emit(self, event: Any) -> None:
-        """Subscriber callback.  Thread-safe and non-blocking."""
+        """Subscriber callback.
+
+        Thread-safe and non-blocking.
+        """
         try:
             line = _serialize(event)
         except Exception:
@@ -204,12 +207,13 @@ class LiveVizBridge:
                     pass
 
     def start(self) -> None:
-        """Start the HTTP server on a daemon thread.  Idempotent."""
+        """Start the HTTP server on a daemon thread.
+
+        Idempotent.
+        """
         if self._server is not None:
             return
-        self._server = ThreadingHTTPServer(
-            (self.host, self.port), self._make_handler()
-        )
+        self._server = ThreadingHTTPServer((self.host, self.port), self._make_handler())
         self._thread = threading.Thread(
             target=self._server.serve_forever,
             name="viz-bridge",
@@ -273,9 +277,7 @@ class LiveVizBridge:
         class Handler(BaseHTTPRequestHandler):
             # Quieter logs — one line per request.
             def log_message(self, format, *args):  # noqa: A002 — base class API
-                sys.stderr.write(
-                    f"[bridge] {self.address_string()} - {format % args}\n"
-                )
+                sys.stderr.write(f"[bridge] {self.address_string()} - {format % args}\n")
 
             # ---- /static
             def _serve_static(self, rel_path: str) -> None:
@@ -292,8 +294,8 @@ class LiveVizBridge:
                 ext = candidate.suffix.lower()
                 ctype = {
                     ".html": "text/html; charset=utf-8",
-                    ".js":   "application/javascript; charset=utf-8",
-                    ".css":  "text/css; charset=utf-8",
+                    ".js": "application/javascript; charset=utf-8",
+                    ".css": "text/css; charset=utf-8",
                     ".json": "application/json",
                 }.get(ext, "application/octet-stream")
                 data = candidate.read_bytes()
@@ -325,11 +327,7 @@ class LiveVizBridge:
                             et = float(json.loads(raw).get("event_time") or 0.0)
                         except Exception:
                             et = None
-                        if (
-                            speed != float("inf")
-                            and prev_time is not None
-                            and et is not None
-                        ):
+                        if speed != float("inf") and prev_time is not None and et is not None:
                             gap = max(0.0, (et - prev_time) / max(speed, 1e-9))
                             if gap > 0:
                                 time.sleep(gap)
@@ -432,13 +430,13 @@ class LiveVizBridge:
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(
-        description="SSE bridge for the rhapsody live-viz (replay mode)"
-    )
+    p = argparse.ArgumentParser(description="SSE bridge for the rhapsody live-viz (replay mode)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument(
-        "--open", dest="open_browser", action="store_true",
+        "--open",
+        dest="open_browser",
+        action="store_true",
         help="open the viewer in the default browser at startup",
     )
     p.add_argument(

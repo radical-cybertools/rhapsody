@@ -95,9 +95,13 @@ if __name__ == "__main__":
         description=(__doc__ or "in-process live viz demo").split("\n", 1)[0]
     )
     p.add_argument("--tasks", type=int, default=24)
-    p.add_argument("--port",  type=int, default=8765)
-    p.add_argument("--open",  dest="open_browser", action="store_true",
-                   help="open the viewer in the default browser at startup")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument(
+        "--open",
+        dest="open_browser",
+        action="store_true",
+        help="open the viewer in the default browser at startup",
+    )
     args = p.parse_args()
     try:
         asyncio.run(main(args.tasks, args.port, args.open_browser))

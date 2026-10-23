@@ -919,7 +919,7 @@ class TestResourceLayout:
 
 class TestTaskPlacementPropagation:
     async def test_placement_in_task_dict_forwarded_to_started_event(self, manager):
-        """task['placement'] (set by a backend) must surface on TaskStarted.attributes."""
+        """Task['placement'] (set by a backend) must surface on TaskStarted.attributes."""
         received = []
         manager.subscribe(received.append)
         task = {

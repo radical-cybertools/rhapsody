@@ -19,7 +19,7 @@ import urllib.request
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-GEN  = REPO / "examples" / "telemetry" / "viz" / "fake_dragon_stream.py"
+GEN = REPO / "examples" / "telemetry" / "viz" / "fake_dragon_stream.py"
 BRIDGE = REPO / "examples" / "telemetry" / "viz" / "bridge.py"
 
 # Allow `from bridge import LiveVizBridge` for in-process tests without
@@ -97,10 +97,7 @@ def test_bridge_replay_streams_every_line(tmp_path):
     )
     try:
         assert _wait_listening(port), "bridge did not start listening"
-        url = (
-            f"http://127.0.0.1:{port}/replay?"
-            f"file={sample}&speed=inf"
-        )
+        url = f"http://127.0.0.1:{port}/replay?file={sample}&speed=inf"
         with urllib.request.urlopen(url, timeout=4.0) as resp:
             body = resp.read().decode("utf-8")
         data_lines = [l for l in body.splitlines() if l.startswith("data: ")]
@@ -109,7 +106,7 @@ def test_bridge_replay_streams_every_line(tmp_path):
         )
         # Each data line should be a valid JSON event
         for d in data_lines[:5]:
-            parsed = json.loads(d[len("data: "):])
+            parsed = json.loads(d[len("data: ") :])
             assert "event_type" in parsed
     finally:
         proc.terminate()
@@ -146,7 +143,7 @@ def test_live_bridge_streams_subscriber_events():
                         break
                     s = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                     if s.startswith("data: "):
-                        received.append(s[len("data: "):])
+                        received.append(s[len("data: ") :])
                 conn.close()
             finally:
                 reader_done.set()
@@ -157,12 +154,14 @@ def test_live_bridge_streams_subscriber_events():
         time.sleep(0.3)
 
         for i in range(3):
-            bridge.emit({
-                "event_type": "TaskStarted",
-                "task_id": f"t{i}",
-                "event_time": time.time(),
-                "attributes": {"placement": {"node_id": "n0", "core_ids": [i]}},
-            })
+            bridge.emit(
+                {
+                    "event_type": "TaskStarted",
+                    "task_id": f"t{i}",
+                    "event_time": time.time(),
+                    "attributes": {"placement": {"node_id": "n0", "core_ids": [i]}},
+                }
+            )
 
         assert reader_done.wait(timeout=3.0), "reader did not finish in time"
         assert len(received) == 3, f"expected 3 SSE data lines, got {len(received)}"
@@ -176,10 +175,9 @@ def test_live_bridge_streams_subscriber_events():
 def test_live_bridge_replays_backlog_to_late_joiner():
     """Events emitted BEFORE a client connects must be replayed on connect.
 
-    Covers the common race where the demo emits SessionStarted / ResourceLayout
-    / TaskStarted events while the browser is still loading viz.js. Without
-    the backlog, those events go to zero subscribers and the viewer renders
-    nothing.
+    Covers the common race where the demo emits SessionStarted / ResourceLayout / TaskStarted events
+    while the browser is still loading viz.js. Without the backlog, those events go to zero
+    subscribers and the viewer renders nothing.
     """
     from bridge import LiveVizBridge  # type: ignore[import-not-found]
 
@@ -190,15 +188,19 @@ def test_live_bridge_replays_backlog_to_late_joiner():
         assert _wait_listening(port)
 
         # Emit two "metadata" events BEFORE any client is connected.
-        bridge.emit({
-            "event_type": "SessionStarted",
-            "event_time": time.time(),
-        })
-        bridge.emit({
-            "event_type": "ResourceLayout",
-            "event_time": time.time(),
-            "attributes": {"nodes": [{"id": "n0", "cores": 8, "gpus": 0}]},
-        })
+        bridge.emit(
+            {
+                "event_type": "SessionStarted",
+                "event_time": time.time(),
+            }
+        )
+        bridge.emit(
+            {
+                "event_type": "ResourceLayout",
+                "event_time": time.time(),
+                "attributes": {"nodes": [{"id": "n0", "cores": 8, "gpus": 0}]},
+            }
+        )
 
         received: list[str] = []
         reader_done = threading.Event()
@@ -215,7 +217,7 @@ def test_live_bridge_replays_backlog_to_late_joiner():
                         break
                     s = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                     if s.startswith("data: "):
-                        received.append(s[len("data: "):])
+                        received.append(s[len("data: ") :])
                 conn.close()
             finally:
                 reader_done.set()
@@ -237,10 +239,9 @@ def test_live_bridge_replays_backlog_to_late_joiner():
 def test_live_bridge_backlog_excludes_completed_tasks():
     """A task that has completed before client connect must not be replayed.
 
-    Replaying a finished task to a late joiner only shows its tile falling
-    out of frame with no preceding flight — meaningless. So the backlog
-    keeps session-scope events and *active* task events only; terminal
-    events drop the task's whole history.
+    Replaying a finished task to a late joiner only shows its tile falling out of frame with no
+    preceding flight — meaningless. So the backlog keeps session-scope events and *active* task
+    events only; terminal events drop the task's whole history.
     """
     from bridge import LiveVizBridge  # type: ignore[import-not-found]
 
@@ -252,11 +253,13 @@ def test_live_bridge_backlog_excludes_completed_tasks():
 
         # Session bootstrap.
         bridge.emit({"event_type": "SessionStarted", "event_time": 1.0})
-        bridge.emit({
-            "event_type": "ResourceLayout",
-            "event_time": 1.0,
-            "attributes": {"nodes": [{"id": "n0", "cores": 4, "gpus": 0}]},
-        })
+        bridge.emit(
+            {
+                "event_type": "ResourceLayout",
+                "event_time": 1.0,
+                "attributes": {"nodes": [{"id": "n0", "cores": 4, "gpus": 0}]},
+            }
+        )
 
         # A task that runs to completion BEFORE the client connects.
         for et in ("TaskCreated", "TaskSubmitted", "TaskStarted", "TaskCompleted"):
@@ -283,7 +286,7 @@ def test_live_bridge_backlog_excludes_completed_tasks():
                     s = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                     if s.startswith("data: "):
                         try:
-                            received.append(json.loads(s[len("data: "):]))
+                            received.append(json.loads(s[len("data: ") :]))
                         except Exception:
                             pass
                 conn.close()
@@ -308,9 +311,8 @@ def test_live_bridge_backlog_excludes_completed_tasks():
 
 
 def test_live_bridge_sends_shutdown_event_on_stop():
-    """bridge.stop() must signal every connected /live client so the
-    viewer can drop its state back to the "pending" placeholder
-    instead of leaving a stale slot grid on screen."""
+    """bridge.stop() must signal every connected /live client so the viewer can drop its state back
+    to the "pending" placeholder instead of leaving a stale slot grid on screen."""
     from bridge import LiveVizBridge  # type: ignore[import-not-found]
 
     port = _free_port()
@@ -318,7 +320,7 @@ def test_live_bridge_sends_shutdown_event_on_stop():
     bridge.start()
 
     saw_shutdown_with_data = threading.Event()
-    connected   = threading.Event()
+    connected = threading.Event()
     error: list[str] = []
 
     def reader():

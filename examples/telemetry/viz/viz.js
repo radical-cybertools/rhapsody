@@ -145,20 +145,20 @@
     // Recompute slot positions on every node.
     const NODE_GAP_ = NODE_GAP;
     for (let i = 0; i < nodes.length; i++) {
-      const nd = nodes[i];
+      const nodeBox = nodes[i];
       const col = i % nodeCols;
       const row = Math.floor(i / nodeCols);
-      nd.x = M + col * (nodeW + NODE_GAP_);
-      nd.y = NODES_Y + row * (nodeH + NODE_GAP_);
-      nd.w = nodeW; nd.h = nodeH;
+      nodeBox.x = M + col * (nodeW + NODE_GAP_);
+      nodeBox.y = NODES_Y + row * (nodeH + NODE_GAP_);
+      nodeBox.w = nodeW; nodeBox.h = nodeH;
 
       // Compute slot positions.
       const gpuRowW = gpusPerNode * gpuSize + (gpusPerNode - 1) * 6;
-      const gpuX0   = nd.x + (nd.w - gpuRowW) / 2;
-      const gpuY    = nd.y + headerH;
-      nd.gpu = [];
+      const gpuX0   = nodeBox.x + (nodeBox.w - gpuRowW) / 2;
+      const gpuY    = nodeBox.y + headerH;
+      nodeBox.gpu = [];
       for (let g = 0; g < gpusPerNode; g++) {
-        nd.gpu.push({
+        nodeBox.gpu.push({
           type: 'gpu', id: g,
           x: gpuX0 + g * (gpuSize + 6), y: gpuY,
           w: gpuSize, h: gpuSize,
@@ -167,13 +167,13 @@
       }
 
       const coreRowW = coreCols * coreSize + (coreCols - 1) * cPad;
-      const cpuX0 = nd.x + (nd.w - coreRowW) / 2;
+      const cpuX0 = nodeBox.x + (nodeBox.w - coreRowW) / 2;
       const cpuY  = gpuY + (gpusPerNode > 0 ? gpuSize + 10 : 0);
-      nd.cpu = [];
+      nodeBox.cpu = [];
       for (let c = 0; c < coresPerNode; c++) {
         const cc = c % coreCols;
         const cr = Math.floor(c / coreCols);
-        nd.cpu.push({
+        nodeBox.cpu.push({
           type: 'cpu', id: c,
           x: cpuX0 + cc * (coreSize + cPad),
           y: cpuY  + cr * (coreSize + cPad),
@@ -260,9 +260,9 @@
 
   // Per-node free-slot tracking.  Synthetic placement falls back here.
   function pickFreeSlot(nodeIdx, kind, hint) {
-    const nd = nodes[nodeIdx];
-    if (!nd) return null;
-    const pool = kind === 'gpu' ? nd.gpu : nd.cpu;
+    const nodeBox = nodes[nodeIdx];
+    if (!nodeBox) return null;
+    const pool = kind === 'gpu' ? nodeBox.gpu : nodeBox.cpu;
     if (hint != null && hint >= 0 && hint < pool.length && !pool[hint].busy) return pool[hint];
     for (const s of pool) if (!s.busy) return s;
     return null;
@@ -433,8 +433,8 @@
         let needGpu = ngpu;
         let safety = nodes.length;
         while ((needCpu > 0 || needGpu > 0) && safety-- > 0) {
-          const nd = nodes[scan];
-          if (nd) {
+          const nodeBox = nodes[scan];
+          if (nodeBox) {
             while (needGpu > 0) {
               const hintGpu = (placement && placement.gpu_ids && placement.gpu_ids[ngpu - needGpu]);
               const s = pickFreeSlot(scan, 'gpu', hintGpu);
@@ -506,9 +506,9 @@
     // and flip the global state so the time counter freezes and the
     // panel labels switch to "completed".  Topology stays intact.
     viewState = 'completed';
-    for (const nd of nodes) {
-      for (const s of nd.gpu) snapSlotIdle(s);
-      for (const s of nd.cpu) snapSlotIdle(s);
+    for (const nodeBox of nodes) {
+      for (const s of nodeBox.gpu) snapSlotIdle(s);
+      for (const s of nodeBox.cpu) snapSlotIdle(s);
     }
   }
 
@@ -530,9 +530,9 @@
     animTime += dtRaw;
     simTime  += dtSim;
     // Advance each slot's phase machine.
-    for (const nd of nodes) {
-      for (const s of nd.gpu) advanceSlotPhase(s);
-      for (const s of nd.cpu) advanceSlotPhase(s);
+    for (const nodeBox of nodes) {
+      for (const s of nodeBox.gpu) advanceSlotPhase(s);
+      for (const s of nodeBox.cpu) advanceSlotPhase(s);
     }
     // Tasks: GC very-old terminal ones to keep the map bounded.
     if (tasks.size > 5000) {
@@ -696,10 +696,10 @@
       return;
     }
     for (let i = 0; i < nodes.length; i++) {
-      const nd = nodes[i];
-      panel(nd.x, nd.y, nd.w, nd.h, COLORS.frame_border, nd.uid, COLORS.frame_label);
-      for (const s of nd.gpu) drawSlot(s);
-      for (const s of nd.cpu) drawSlot(s);
+      const nodeBox = nodes[i];
+      panel(nodeBox.x, nodeBox.y, nodeBox.w, nodeBox.h, COLORS.frame_border, nodeBox.uid, COLORS.frame_label);
+      for (const s of nodeBox.gpu) drawSlot(s);
+      for (const s of nodeBox.cpu) drawSlot(s);
     }
   }
 
