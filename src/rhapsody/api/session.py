@@ -375,28 +375,43 @@ class Session:
 
         await self._telemetry.start()
 
-        # Emit one ResourceLayout per backend so viewers can size their grid
-        # to the actual topology. Backends that don't report a layout return
-        # [] and the event still goes out — viewers fall back to a default.
+        for backend in self.backends.values():
+            self._emit_resource_layout(backend)
+
+        return self._telemetry
+
+    def _attach_telemetry_adapter(self, backend: BaseBackend | DataBackend) -> None:
+        """Attach telemetry to a backend added after :meth:`start_telemetry`."""
+        self._telemetry.attach_backend(
+            backend,
+            session_id=self.uid,
+            backend_name=backend.name,
+            interval=self._resource_poll_interval,
+        )
+        self._emit_resource_layout(backend)
+
+    def _emit_resource_layout(self, backend: BaseBackend | DataBackend) -> None:
+        """Emit the backend's ResourceLayout so viewers can size their grid.
+
+        Backends that don't report a layout return [] and the event still goes out — viewers fall
+        back to a default.
+        """
         from rhapsody.telemetry.events import ResourceLayout
         from rhapsody.telemetry.events import make_event
 
-        for backend in self.backends.values():
-            try:
-                nodes = backend.topology()
-            except Exception:
-                logger.debug("backend.topology() failed for %s", backend.name, exc_info=True)
-                nodes = []
-            self._telemetry.emit(
-                make_event(
-                    ResourceLayout,
-                    session_id=self.uid,
-                    backend=backend.name,
-                    attributes={"nodes": nodes},
-                )
+        try:
+            nodes = backend.topology()
+        except Exception:
+            logger.debug("backend.topology() failed for %s", backend.name, exc_info=True)
+            nodes = []
+        self._telemetry.emit(
+            make_event(
+                ResourceLayout,
+                session_id=self.uid,
+                backend=backend.name,
+                attributes={"nodes": nodes},
             )
-
-        return self._telemetry
+        )
 
     def get_telemetry(self) -> TelemetryManager:
         """Return the active TelemetryManager.

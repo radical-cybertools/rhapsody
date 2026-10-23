@@ -791,7 +791,7 @@ class TelemetryManager:
             ended = now_wall
             if running_ts is not None:
                 duration = max(ended - running_ts, 0.0)
-                attrs: dict = {"executable": executable, "task_type": task_type}
+                attrs = {"executable": executable, "task_type": task_type}
             else:
                 # NOTE: RUNNING was never seen for this task (backend did not emit
                 # a RUNNING callback, or the task completed before telemetry started).

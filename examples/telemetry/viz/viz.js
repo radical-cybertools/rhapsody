@@ -514,6 +514,17 @@
     }
   }
 
+  function resetTaskState() {
+    // Forget every task and free every slot; topology stays.  Used when a
+    // live stream (re)connects (its backlog rebuilds the running tasks) and
+    // when a new file replaces the current replay.
+    tasks.clear();
+    for (const nodeBox of nodes) {
+      for (const s of nodeBox.gpu) snapSlotIdle(s);
+      for (const s of nodeBox.cpu) snapSlotIdle(s);
+    }
+  }
+
   function snapSlotIdle(s) {
     s.phase       = 'idle';
     s.phaseStart  = animTime;
@@ -819,6 +830,9 @@
     if (filePick) filePick.style.display = live ? 'none' : 'inline-block';
   }
 
+  // Bumped per loaded file so an older replay's pump stops.
+  let replayGen = 0;
+
   function loadJsonlText(text) {
     // Parse all lines, sort by event_time, replay back-to-back via setInterval
     // so the simTime clock advances normally; the user can scale with `speed`.
@@ -835,6 +849,8 @@
     }
     events.sort((a, b) => a.event_time - b.event_time);
     if (!events.length) { setStatus('empty file'); return; }
+    const gen = ++replayGen;
+    resetTaskState();
     setStatus(`replaying ${events.length} events`);
     firstEventTime = null;
     simTime  = 0;
@@ -858,6 +874,7 @@
     }
     // Hook pump into the animation loop.  Cheaper than setInterval.
     function tickAndPump() {
+      if (gen !== replayGen) return;  // a newer file took over
       pump();
       if (idx < events.length) requestAnimationFrame(tickAndPump);
     }
@@ -881,6 +898,9 @@
     // Snap the slot state to its current value (no fade animation) so a
     // late-joining viewer doesn't play a misleading entry animation for
     // tasks that have been running for minutes.
+    // Sent first on every (re)connect: the backlog that follows is the
+    // complete set of running tasks.
+    es.addEventListener('reset', () => resetTaskState());
     es.addEventListener('backlog', (msg) => {
       try {
         const ev = JSON.parse(msg.data);

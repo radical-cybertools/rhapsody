@@ -236,7 +236,12 @@ class LiveVizBridge:
                 try:
                     q.put_nowait(None)  # sentinel — wakes handler
                 except queue.Full:
-                    pass
+                    # Make room: the viewer must see the shutdown, not a stale event.
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        pass
+                    q.put_nowait(None)
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
@@ -327,6 +332,8 @@ class LiveVizBridge:
                     speed = float((qs.get("speed") or ["1.0"])[0])
                 except ValueError:
                     speed = 1.0
+                if speed <= 0:
+                    speed = 1.0
                 self._begin_sse()
                 prev_time: float | None = None
                 try:
@@ -338,10 +345,12 @@ class LiveVizBridge:
                         except Exception:
                             et = None
                         if speed != float("inf") and prev_time is not None and et is not None:
-                            gap = max(0.0, (et - prev_time) / max(speed, 1e-9))
+                            gap = max(0.0, (et - prev_time) / speed)
                             if gap > 0:
                                 time.sleep(gap)
-                        if et is not None:
+                        # Checkpoints are in dispatch order; a backwards step must not
+                        # reset the clock and stretch the next gap.
+                        if et is not None and (prev_time is None or et > prev_time):
                             prev_time = et
                         try:
                             self.wfile.write(_sse_chunk(raw))
@@ -362,6 +371,14 @@ class LiveVizBridge:
             def _serve_live(self) -> None:
                 q, backlog = bridge._register_client()
                 self._begin_sse()
+                # A (re)connecting viewer drops its task/slot state; the backlog
+                # below rebuilds it, so tasks that ended while it was away vanish.
+                try:
+                    self.wfile.write(_sse_chunk("", event="reset"))
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    bridge._unregister_client(q)
+                    return
                 # Replay the backlog first so a late-joining client still
                 # sees SessionStarted + ResourceLayout + recent task events.
                 # Tag each frame with ``event: backlog`` so the viewer

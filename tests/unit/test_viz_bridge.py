@@ -406,6 +406,44 @@ def test_live_bridge_sends_shutdown_event_on_stop():
         t.join(timeout=2.0)
 
 
+def test_live_bridge_sends_reset_first():
+    """Every /live stream starts with a reset so a reconnecting viewer drops stale tasks."""
+    from bridge import LiveVizBridge  # type: ignore[import-not-found]
+
+    port = _free_port()
+    bridge = LiveVizBridge(port=port)
+    bridge.start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5.0)
+        conn.request("GET", "/live")
+        resp = conn.getresponse()
+        fp = resp.fp
+        first = fp.readline().decode("utf-8").rstrip("\r\n")
+        while first.startswith(":") or not first:
+            first = fp.readline().decode("utf-8").rstrip("\r\n")
+        assert first == "event: reset"
+        conn.close()
+    finally:
+        bridge.stop()
+
+
+def test_stop_reaches_a_full_client_queue():
+    """The shutdown sentinel must not be dropped when a viewer's queue is full."""
+    from bridge import LiveVizBridge  # type: ignore[import-not-found]
+
+    bridge = LiveVizBridge(port=_free_port(), queue_size=3)
+    bridge.start()
+    q, _backlog = bridge._register_client()
+    for i in range(10):
+        bridge.emit({"event_type": "ResourceUpdate", "i": i})
+    bridge.stop()
+
+    items = []
+    while not q.empty():
+        items.append(q.get_nowait())
+    assert items[-1] is None
+
+
 def test_live_bridge_drops_on_overflow_without_blocking():
     """A slow/disconnected viewer must never back up the emitter."""
     from bridge import LiveVizBridge  # type: ignore[import-not-found]

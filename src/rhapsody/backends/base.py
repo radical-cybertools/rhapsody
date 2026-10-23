@@ -6,6 +6,7 @@ implement.
 
 from __future__ import annotations
 
+import logging
 import os
 from abc import ABC
 from abc import abstractmethod
@@ -15,6 +16,8 @@ from typing import Callable
 
 if TYPE_CHECKING:
     pass
+
+logger = logging.getLogger(__name__)
 
 
 class BaseBackend(ABC):
@@ -216,7 +219,7 @@ class BaseBackend(ABC):
 
             cores = psutil.cpu_count(logical=True) or 0
         except Exception:
-            self.logger.debug("psutil core probe failed", exc_info=True)
+            logger.debug("psutil core probe failed", exc_info=True)
         try:
             import pynvml  # type: ignore[import-not-found]
 
@@ -226,5 +229,5 @@ class BaseBackend(ABC):
             finally:
                 pynvml.nvmlShutdown()
         except Exception:
-            self.logger.debug("pynvml gpu probe failed", exc_info=True)
+            logger.debug("pynvml gpu probe failed", exc_info=True)
         return cores, gpus
