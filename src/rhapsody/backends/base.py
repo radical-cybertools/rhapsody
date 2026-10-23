@@ -206,3 +206,25 @@ class BaseBackend(ABC):
         unknown" and the viewer falls back to a generic default.
         """
         return []
+
+    def _probe_local_resources(self) -> tuple[int, int]:
+        """Return ``(cores, gpus)`` of the local node; 0 where a probe is unavailable."""
+        cores = 0
+        gpus = 0
+        try:
+            import psutil  # type: ignore[import-not-found]
+
+            cores = psutil.cpu_count(logical=True) or 0
+        except Exception:
+            self.logger.debug("psutil core probe failed", exc_info=True)
+        try:
+            import pynvml  # type: ignore[import-not-found]
+
+            pynvml.nvmlInit()
+            try:
+                gpus = int(pynvml.nvmlDeviceGetCount())
+            finally:
+                pynvml.nvmlShutdown()
+        except Exception:
+            self.logger.debug("pynvml gpu probe failed", exc_info=True)
+        return cores, gpus

@@ -91,7 +91,16 @@ def test_bridge_replay_streams_every_line(tmp_path):
 
     port = _free_port()
     proc = subprocess.Popen(
-        [sys.executable, str(BRIDGE), "--host", "127.0.0.1", "--port", str(port)],
+        [
+            sys.executable,
+            str(BRIDGE),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--replay",
+            str(sample),
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -114,6 +123,34 @@ def test_bridge_replay_streams_every_line(tmp_path):
             proc.wait(timeout=3.0)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def test_bridge_replay_serves_only_the_configured_file(tmp_path):
+    """/replay must refuse any path other than the replay file given at startup."""
+    from bridge import LiveVizBridge  # type: ignore[import-not-found]
+
+    allowed = tmp_path / "allowed.jsonl"
+    other = tmp_path / "other.jsonl"
+    allowed.write_text('{"event_type": "SessionStarted", "event_time": 1.0}\n')
+    other.write_text('{"event_type": "SessionStarted", "event_time": 1.0}\n')
+
+    port = _free_port()
+    bridge = LiveVizBridge(port=port, replay_file=str(allowed))
+    bridge.start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=4.0)
+        conn.request("GET", f"/replay?file={other}&speed=inf")
+        assert conn.getresponse().status == 404
+        conn.close()
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=4.0)
+        conn.request("GET", f"/replay?file={allowed}&speed=inf")
+        resp = conn.getresponse()
+        assert resp.status == 200
+        assert "SessionStarted" in resp.read().decode("utf-8")
+        conn.close()
+    finally:
+        bridge.stop()
 
 
 def test_live_bridge_streams_subscriber_events():

@@ -398,6 +398,8 @@
         if (!ev.task_id) break;
         const tk = tasks.get(ev.task_id) || { uid: ev.task_id, slots: [] };
         if (!tasks.has(ev.task_id)) tasks.set(ev.task_id, tk);
+        // Already placed: a reconnect re-sends TaskStarted from the backlog.
+        if (tk.slots.length) break;
 
         const placement = (ev.attributes && ev.attributes.placement) || null;
         const nodeId    = (placement && placement.node_id) || ev.node_id;
@@ -825,9 +827,13 @@
     for (const line of text.split(/\r?\n/)) {
       const s = line.trim();
       if (!s) continue;
-      try { events.push(JSON.parse(s)); } catch (_) {}
+      try {
+        const ev = JSON.parse(s);
+        // Metric / span rows carry no event_time; they would rebase t0 to 0.
+        if (typeof ev.event_time === 'number') events.push(ev);
+      } catch (_) {}
     }
-    events.sort((a, b) => (a.event_time || 0) - (b.event_time || 0));
+    events.sort((a, b) => a.event_time - b.event_time);
     if (!events.length) { setStatus('empty file'); return; }
     setStatus(`replaying ${events.length} events`);
     firstEventTime = null;
@@ -837,13 +843,13 @@
     for (const e of events) if (e.event_type === 'ResourceLayout') onEvent(e);
 
     // Re-emit in event_time order, mapped to simTime via the same clock.
-    const t0 = events[0].event_time || 0;
+    const t0 = events[0].event_time;
     let idx = 0;
     function pump() {
       // Pump as many events as fit before the current simTime (rebased).
       while (idx < events.length) {
         const ev = events[idx];
-        const rel = (ev.event_time || 0) - t0;
+        const rel = ev.event_time - t0;
         if (rel > simTime) return;
         if (ev.event_type !== 'ResourceLayout') onEvent(ev);
         idx++;
@@ -881,7 +887,10 @@
         onEvent(ev, true);
       } catch (_) { /* skip malformed line */ }
     });
-    es.addEventListener('eof', () => setStatus(label + ' — eof'));
+    es.addEventListener('eof', () => {
+      setStatus(label + ' — eof');
+      es.close();
+    });
     // Bridge is shutting down: switch the viewer to its "completed"
     // state.  Topology is preserved; the queue label flips to
     // "completed", slot tiles clear, the time counter freezes.

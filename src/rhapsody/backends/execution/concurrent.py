@@ -102,24 +102,13 @@ class ConcurrentExecutionBackend(BaseBackend):
         return StateMapper(backend=self)
 
     def topology(self):
-        """Single-node best-effort: probe local CPU/GPU counts."""
+        """Single node: local GPU count, cores capped at the executor's worker count."""
         import socket
 
-        cores = 0
-        gpus = 0
-        try:
-            import psutil  # type: ignore[import-not-found]
-
-            cores = psutil.cpu_count(logical=True) or 0
-        except Exception:
-            self.logger.debug("psutil core probe failed", exc_info=True)
-        try:
-            import pynvml  # type: ignore[import-not-found]
-
-            pynvml.nvmlInit()
-            gpus = int(pynvml.nvmlDeviceGetCount())
-        except Exception:
-            self.logger.debug("pynvml gpu probe failed", exc_info=True)
+        cores, gpus = self._probe_local_resources()
+        max_workers = getattr(self.executor, "_max_workers", None)
+        if max_workers:
+            cores = min(cores, max_workers) if cores else max_workers
         return [{"id": socket.gethostname(), "cores": cores, "gpus": gpus}]
 
     async def _execute_task(self, task: dict) -> tuple[dict, str]:

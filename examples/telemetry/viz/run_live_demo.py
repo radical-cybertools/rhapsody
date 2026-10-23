@@ -23,7 +23,6 @@ import argparse
 import asyncio
 import logging
 import sys
-import time
 import webbrowser
 from pathlib import Path
 
@@ -61,13 +60,13 @@ async def main(n_tasks: int, port: int, open_browser: bool) -> None:
     telemetry.subscribe(bridge.emit)
 
     # let the viewer connect and settle before we start submitting tasks
-    time.sleep(2)
+    await asyncio.sleep(2)
 
     # Mix sleep durations so the size buckets in the viewer light up.
     # On the Concurrent backend cores/gpus per task aren't meaningful
     # (everything is "tiny"); the durations still drive the timing.
-    tasks = []
-    for I in range(3):
+    for _ in range(3):
+        tasks = []
         for i in range(n_tasks):
             dur = [1.0, 1.5, 2.0, 2.5][i % 4]
             tasks.append(ComputeTask(executable="/bin/sleep", arguments=[str(dur)]))

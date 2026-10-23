@@ -134,9 +134,12 @@ class LiveVizBridge:
         *,
         queue_size: int = 10_000,
         backlog_size: int = 5_000,
+        replay_file: str | None = None,
     ) -> None:
         self.host = host
         self.port = port
+        # The only file /replay serves; the request's path must match it.
+        self._replay_file = os.path.realpath(replay_file) if replay_file else None
         self._queue_size = queue_size
         self._clients: list[queue.Queue] = []
         # Backlog for late-joining /live clients.  Split in two so the
@@ -213,6 +216,7 @@ class LiveVizBridge:
         """
         if self._server is not None:
             return
+        self._stopped.clear()
         self._server = ThreadingHTTPServer((self.host, self.port), self._make_handler())
         self._thread = threading.Thread(
             target=self._server.serve_forever,
@@ -311,7 +315,12 @@ class LiveVizBridge:
             # ---- /replay (still file-backed — post-mortem only)
             def _serve_replay(self, qs: dict[str, list[str]]) -> None:
                 path = (qs.get("file") or [""])[0]
-                if not path or not os.path.isfile(path):
+                if (
+                    not path
+                    or bridge._replay_file is None
+                    or os.path.realpath(path) != bridge._replay_file
+                    or not os.path.isfile(path)
+                ):
                     self.send_error(404, "file not found")
                     return
                 try:
@@ -324,7 +333,8 @@ class LiveVizBridge:
                     for raw in _stream_existing(path):
                         et: float | None = None
                         try:
-                            et = float(json.loads(raw).get("event_time") or 0.0)
+                            ev_time = json.loads(raw).get("event_time")
+                            et = float(ev_time) if ev_time else None
                         except Exception:
                             et = None
                         if speed != float("inf") and prev_time is not None and et is not None:
@@ -445,7 +455,7 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    bridge = LiveVizBridge(host=args.host, port=args.port)
+    bridge = LiveVizBridge(host=args.host, port=args.port, replay_file=args.replay)
     bridge.start()
 
     if args.open_browser:
@@ -458,7 +468,7 @@ def main() -> int:
             pass
 
     sys.stderr.write(
-        "[bridge]   /replay?file=<path>   post-mortem replay\n"
+        "[bridge]   /replay?file=<path>   post-mortem replay of the --replay file\n"
         "[bridge]   /live                 in-process subscriber feed (see LiveVizBridge)\n"
     )
 

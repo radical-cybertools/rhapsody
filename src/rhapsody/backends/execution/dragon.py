@@ -150,35 +150,22 @@ class DragonExecutionBackend(BaseBackend):
         )
 
     def topology(self) -> list[dict[str, Any]]:
-        """Best-effort topology for Dragon.
+        """Node layout from Dragon's ``Batch.topology()``: one entry per pool node.
 
-        Dragon's Batch API does not surface per-task placement, so this is
-        derived from the batch's ``num_nodes`` plus a probe of the local
-        node. When the real placement API lands, this should switch to the
-        explicit resource-manager data source.
+        Cores are the pool's workers per node. Batch reports no GPU count, so GPUs come from a probe
+        of the local node (assumes homogeneous nodes).
         """
-        num_nodes = getattr(self.batch, "num_nodes", None) or 1
-        # Per-node defaults — Dragon doesn't expose this directly via Batch.
-        # Use psutil locally; multi-node will report the same shape per node
-        # which is the best we can do without an RM topology call.
-        cores = 0
-        gpus = 0
         try:
-            import psutil  # type: ignore[import-not-found]
-
-            cores = psutil.cpu_count(logical=True) or 0
+            batch_topology = self.batch.topology()
         except Exception:
-            self.logger.debug("psutil core probe failed", exc_info=True)
-        try:
-            import pynvml  # type: ignore[import-not-found]
-
-            pynvml.nvmlInit()
-            gpus = int(pynvml.nvmlDeviceGetCount())
-        except Exception:
-            self.logger.debug("pynvml gpu probe failed", exc_info=True)
-        return [
-            {"id": f"node-{i:04d}", "cores": cores, "gpus": gpus} for i in range(int(num_nodes))
-        ]
+            self.logger.debug("Batch.topology() failed", exc_info=True)
+            return []
+        _, gpus = self._probe_local_resources()
+        nodes = []
+        for hosts, workers in zip(batch_topology.pool_hostnames, batch_topology.workers_per_pool):
+            cores = workers // len(hosts) if hosts else 0
+            nodes.extend({"id": host, "cores": cores, "gpus": gpus} for host in hosts)
+        return nodes
 
     def __await__(self):
         return self._async_init().__await__()
