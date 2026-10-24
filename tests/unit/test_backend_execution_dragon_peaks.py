@@ -1,10 +1,12 @@
 """DragonExecutionBackend ``observe_peaks``, tested without a Dragon install.
 
 With ``observe_peaks=True``, executable tasks run under the peak launcher, whose per-process records
-the monitor thread combines into ``task["observed"]``; native function tasks are wrapped in
-``_peak.measured_call``. These tests swap Batch and ProcessTemplate for fakes. One fake Batch runs
-each process template for real, so the launcher, the monitor thread and the delivery to the
-callback are exercised end to end.
+the monitor thread combines into ``task["observed"]``, unless the Dragon in use reports each
+process's rusage with its Batch result (``Task.rusage``), which is then read instead. Native function
+tasks are wrapped in ``_peak.measured_call``. These tests swap Batch and ProcessTemplate for fakes.
+One fake Batch runs each process template for real (reaping it with ``wait4`` when it plays a Dragon
+with rusage), so the launcher, the monitor thread and the delivery to the callback are exercised end
+to end.
 """
 
 import asyncio
@@ -21,6 +23,7 @@ from rhapsody.backends.execution import _peak
 from rhapsody.backends.execution import dragon as dragon_module
 from rhapsody.backends.execution.dragon import PEAK_LAUNCHER
 from rhapsody.backends.execution.dragon import DragonExecutionBackend
+from rhapsody.backends.execution.dragon import _observed_from_rusage
 from rhapsody.backends.execution.dragon import _read_peaks
 
 MIB = 1 << 20
@@ -44,6 +47,7 @@ class FakeBatchTask:
         self.result = self.error = None
         self.traceback = None
         self.stdout_path = self.stderr_path = None
+        self.rusage = None
 
     def get(self, block=True):
         if self.error is not None:
@@ -77,8 +81,9 @@ class FakeBatch:
     num_workers = 1
     num_managers = 1
 
-    def __init__(self, run=False):
+    def __init__(self, run=False, rusage=False):
         self.run = run
+        self.rusage = rusage
         self.calls = []
         self.done = queue.Queue()
 
@@ -90,24 +95,33 @@ class FakeBatch:
         task = FakeBatchTask(f"tuid-{len(self.calls)}")
         if self.run:
             try:
-                task.result = self._execute(kind, payload)
+                task.result, task.rusage = self._execute(kind, payload, self.rusage)
             except Exception as exc:
                 task.error = exc
             self.done.put(task.uid)
         return task
 
     @staticmethod
-    def _execute(kind, payload):
+    def _execute(kind, payload, with_rusage=False):
+        """Run a submission; return (result, rusage) as a Dragon with Task.rusage would."""
         if kind == "function":
             target, args, kwargs = payload
-            return target(*args, **kwargs)
+            return target(*args, **kwargs), None
         templates = [(1, payload[0])] if kind == "process" else payload[0]
-        codes = []
+        codes, rusages = [], []
         for nranks, t in templates:
             for _ in range(nranks):
                 argv = [str(t.target), *(str(a) for a in t.args)]
-                codes.append(subprocess.run(argv, timeout=60).returncode)
-        return codes[0] if kind == "process" else codes
+                child = subprocess.Popen(argv)
+                _, status, ru = os.wait4(child.pid, 0)
+                child.returncode = os.waitstatus_to_exitcode(status)
+                codes.append(child.returncode)
+                rusages.append(
+                    {"max_rss": ru.ru_maxrss * _peak.MAXRSS_UNIT, "utime": 0, "stime": 0}
+                )
+        if kind == "process":
+            return codes[0], (rusages[0] if with_rusage else None)
+        return codes, (rusages if with_rusage else None)
 
     def poll(self, timeout=None):
         try:
@@ -129,12 +143,13 @@ class FakeTaskCancelledError(Exception):
     """Stands in for dragon.workflows.batch.TaskCancelledError."""
 
 
-def _make_backend(batch, tmp_path, observe_peaks=True):
+def _make_backend(batch, tmp_path, observe_peaks=True, dragon_rusage=False, peak_source="auto"):
     with (
         patch.object(dragon_module, "Batch", return_value=batch),
         patch.object(dragon_module, "ProcessTemplate", FakeProcessTemplate),
+        patch.object(dragon_module, "_batch_reports_rusage", return_value=dragon_rusage),
     ):
-        backend = DragonExecutionBackend(observe_peaks=observe_peaks)
+        backend = DragonExecutionBackend(observe_peaks=observe_peaks, peak_source=peak_source)
     backend._work_dir = str(tmp_path)
     return backend
 
@@ -370,3 +385,83 @@ async def test_measured_function_value_is_unwrapped(tmp_path):
     state, task = finals["bad"]
     assert state == "FAILED" and isinstance(task["exception"], RuntimeError)
     assert "observed" not in task
+
+
+# ============================================================================
+# Peaks from Dragon's Batch rusage (a Dragon with Task.rusage), launcher fallback
+# ============================================================================
+
+
+def test_stock_dragon_has_no_batch_rusage():
+    # Without Dragon (or with stock dragonhpc 0.14.1) the launcher is the source.
+    if dragon_module.dragon is None:
+        assert dragon_module._batch_reports_rusage() is False
+
+
+@pytest.mark.asyncio
+async def test_auto_reads_dragon_rusage_instead_of_launching(tmp_path):
+    def f():
+        return 0
+
+    be = _make_backend(FakeBatch(), tmp_path, dragon_rusage=True)
+    tmpl = {"uid": "f2", "function": f, "task_backend_specific_kwargs": {"process_template": {}}}
+    with patch.object(dragon_module, "ProcessTemplate", FakeProcessTemplate):
+        await be.build_task(_exe())
+        await be.build_task({"uid": "f1", "function": f})
+        await be.build_task(tmpl)
+    (_, (template,)), (_, (target, _, _)), (_, (ftemplate,)) = be.batch.calls
+    assert template.target == "/bin/echo" and template.args == ("hi", 3)
+    assert be._task_registry["t1"]["dragon_rusage"] is True
+    assert be._task_registry["t1"]["peak_dir"] is None
+    # Native functions are still measured in their pool worker.
+    assert target is _peak.measured_call and be._task_registry["f1"]["dragon_rusage"] is False
+    # A function in its own process gets Dragon's rusage too.
+    assert ftemplate.target is f and be._task_registry["f2"]["dragon_rusage"] is True
+    assert be._peak_roots == set()
+
+
+@pytest.mark.asyncio
+async def test_peak_source_launcher_overrides_dragon_rusage(tmp_path):
+    be = _make_backend(FakeBatch(), tmp_path, dragon_rusage=True, peak_source="launcher")
+    with patch.object(dragon_module, "ProcessTemplate", FakeProcessTemplate):
+        await be.build_task(_exe())
+    (_, (template,)) = be.batch.calls[0]
+    assert template.target == sys.executable
+    assert be._task_registry["t1"]["dragon_rusage"] is False
+
+
+def test_peak_source_is_checked(tmp_path):
+    with pytest.raises(ValueError, match="needs a Dragon"):
+        _make_backend(FakeBatch(), tmp_path, dragon_rusage=False, peak_source="dragon")
+    with pytest.raises(ValueError, match="peak_source must be one of"):
+        _make_backend(FakeBatch(), tmp_path, peak_source="nvml")
+    # Without observe_peaks the source does not matter.
+    _make_backend(FakeBatch(), tmp_path, observe_peaks=False, peak_source="dragon")
+
+
+def test_observed_from_rusage():
+    one = {"max_rss": 1 << 30, "utime": 0.1, "stime": 0.0}
+    assert _observed_from_rusage(one) == {"host_mem": 1.0, "gpu_mem": None}
+    assert _observed_from_rusage([one, one, one]) == {"host_mem": 3.0, "gpu_mem": None}
+    assert _observed_from_rusage(None) is None
+    assert _observed_from_rusage([]) is None
+    assert _observed_from_rusage([one, None]) is None
+    assert _observed_from_rusage({"max_rss": None}) is None
+
+
+@pytest.mark.asyncio
+async def test_dragon_rusage_reaches_callback(tmp_path):
+    be = _make_backend(FakeBatch(run=True, rusage=True), tmp_path, dragon_rusage=True)
+    job = _alloc_task("job", 200, task_backend_specific_kwargs={"process_templates": [(2, {})]})
+    with patch.object(dragon_module, "ProcessTemplate", FakeProcessTemplate):
+        finals = await _run(be, [_alloc_task("ok", 400), _alloc_task("bad", 300, code=5), job])
+
+    # wait4 here, as in Dragon: a peak includes what the child inherited from its parent at fork.
+    state, task = finals["ok"]
+    assert state == "DONE" and task["observed"]["gpu_mem"] is None
+    assert task["observed"]["host_mem"] * (1 << 30) >= 400 * MIB - SLACK
+    state, task = finals["bad"]
+    assert state == "FAILED" and task["observed"]["host_mem"] * (1 << 30) >= 300 * MIB - SLACK
+    state, task = finals["job"]
+    assert state == "DONE" and task["observed"]["host_mem"] * (1 << 30) >= 400 * MIB - SLACK
+    assert os.listdir(tmp_path) == []

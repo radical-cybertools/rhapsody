@@ -306,20 +306,31 @@ With `observe_peaks=True`, the backend reports each task's peak memory as
 FAILED. AsyncFlow's `ResourcePolicy` learns the memory demand of a kind of task from it.
 
 ```python
-backend = await DragonExecutionBackend(observe_peaks=True)
+backend = await DragonExecutionBackend(observe_peaks=True)  # peak_source="auto"
 ```
+
+Executable tasks take their peaks from one of two sources, chosen by `peak_source`:
+
+- `"dragon"`: a Dragon whose Batch tasks carry their processes' resource usage
+  (`Task.rusage`; stock dragonhpc 0.14.1 does not) reports `max_rss` with each exit code. No
+  extra process runs. It reports no GPU memory.
+- `"launcher"`: each command runs under a small launcher that reaps it with `wait4` and samples
+  NVML every 0.2 s. Works on stock Dragon, and also measures GPU memory.
+- `"auto"` (the default) uses Dragon's rusage when the Dragon in use reports it, and the
+  launcher otherwise. Pass `peak_source="launcher"` for GPU tasks.
 
 | Task | How | `host_mem` | `gpu_mem` |
 |------|-----|------------|-----------|
-| Executable (process, `process_template`) | runs under a small launcher that reaps it with `wait4` and samples NVML every 0.2 s | `ru_maxrss`: the largest single process of the command's tree | largest per-GPU sum over the tree's processes; needs `pynvml` |
-| Executable job (`process_templates`) | every rank under the launcher | sum over ranks (an upper bound) | per GPU, summed over the ranks that share it |
+| Executable (process, `process_template`) | Dragon's `Task.rusage`, or the launcher | `ru_maxrss`: the largest single process of the command's tree | launcher only: largest per-GPU sum over the tree's processes; needs `pynvml` |
+| Executable job (`process_templates`) | per rank, as above | sum over ranks (an upper bound) | launcher only: per GPU, summed over the ranks that share it |
 | Native function | the call is wrapped in the pool worker | worker RSS growth during the call, marked `"approximate": True` (Linux only) | not measured |
-| Function with `process_template(s)` | not measured | — | — |
+| Function with `process_template(s)` | Dragon's `Task.rusage` only | as for an executable | not measured |
 
 Limits:
 
-- The smallest `host_mem` an executable reports is about 10 MiB: the kernel carries the
-  launcher's own RSS at fork into the command's `ru_maxrss` across `exec`.
+- `ru_maxrss` keeps, across `exec`, the resident size of the process that forked the command.
+  So the smallest `host_mem` reported is about 10 MiB with the launcher, and the resident size
+  of Dragon's Local Services (about 140 MiB) with Dragon's rusage. Larger peaks are exact.
 - `gpu_mem` is `None` without `pynvml`, without a GPU, or when NVML never listed the task's
   processes on a GPU. NVML reports host PIDs, so a task in its own PID namespace (some
   containers) is not seen.
