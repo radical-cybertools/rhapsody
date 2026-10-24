@@ -213,6 +213,7 @@ class DragonExecutionBackend(BaseBackend):
                     continue
 
                 completed = []
+                cancelled = []
                 for t in tuids:
                     entry = self._monitored_batches.pop(t, None)
                     if entry is None:
@@ -237,9 +238,7 @@ class DragonExecutionBackend(BaseBackend):
                         raised, tb = False, None
                     except TaskCancelledError:
                         # Dragon-side timeout / upstream cancel (not a user cancel_task call)
-                        task_info = self._task_registry.pop(uid, None)
-                        if task_info:
-                            self._callback_func(task_info["description"], "CANCELED")
+                        cancelled.append(uid)
                         continue
                     except Exception as exc:
                         result, raised, tb = exc, True, batch_task.traceback
@@ -276,6 +275,8 @@ class DragonExecutionBackend(BaseBackend):
 
                 if completed:
                     self._loop.call_soon_threadsafe(self._deliver_batch, completed)
+                if cancelled:
+                    self._loop.call_soon_threadsafe(self._deliver_cancelled, cancelled)
 
             except Exception as e:
                 self.logger.exception(f"Critical error in monitor loop: {e}")
@@ -307,6 +308,17 @@ class DragonExecutionBackend(BaseBackend):
                 task_desc["stdout"] = stdout
                 task_desc["stderr"] = stderr
                 self._callback_func(task_desc, "DONE")
+
+    def _deliver_cancelled(self, uids: list) -> None:
+        """Deliver CANCELED for tasks Dragon cancelled itself (timeout / upstream cancel). Runs on
+        the asyncio event loop (via call_soon_threadsafe), like _deliver_batch.
+
+        A task cancel_task() already reported is no longer in _task_registry and is skipped.
+        """
+        for uid in uids:
+            task_info = self._task_registry.pop(uid, None)
+            if task_info:
+                self._callback_func(task_info["description"], "CANCELED")
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
         """Submit tasks to the backend.
