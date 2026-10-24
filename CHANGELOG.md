@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`DragonExecutionBackend` oversubscribed partial-node Slurm allocations** (#95) —
+  Dragon's `Batch` sizes each worker pool as `os.cpu_count() // 2`, even when the job may
+  use only some of the node's CPUs. A 4-CPU job on a 512-CPU node got 256 workers, plus
+  the Dragon infrastructure, on those 4 CPUs: the 3-task AsyncFlow workflow from #95 took
+  271 s and its shutdown did not finish in 5 minutes. The backend now compares each Dragon
+  node's CPU affinity (`Node.cpus`) with its CPU count and, when the affinity is smaller,
+  sizes the pools from the allowed CPUs and logs a warning. On the same job: 2 workers, and
+  the workflow finishes in 2.2 s. `size_pool_to_affinity=False` keeps Batch's sizing and
+  only warns. Whole-node allocations are unchanged.
+
 ## [0.6.0] 2026-10-19
 
 ### Fixed

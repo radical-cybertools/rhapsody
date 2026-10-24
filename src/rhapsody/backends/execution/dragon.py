@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import os
 import shutil
@@ -16,12 +17,16 @@ DRAGON_BATCH_INIT_ERROR = None
 
 try:
     import dragon
+    from dragon.native.machine import Node
+    from dragon.native.machine import System
     from dragon.native.process import ProcessTemplate
     from dragon.workflows.batch import Batch
     from dragon.workflows.batch import TaskCancelledError
 
 except ImportError as e:  # pragma: no cover - environment without Dragon
     dragon = None
+    Node = None
+    System = None
     ProcessTemplate = None
     Batch = None
     TaskCancelledError = None
@@ -36,6 +41,71 @@ def _get_logger() -> logging.Logger:
     configured logging, not at module import time.
     """
     return logging.getLogger(__name__)
+
+
+def _nodes_with_restricted_cpus() -> list[tuple[str, int, int]]:
+    """Return ``(hostname, allowed, total)`` for Dragon nodes that may not use all their CPUs.
+
+    ``Node.num_cpus`` is the node's ``os.cpu_count()``; ``Node.cpus`` is the CPU affinity of
+    Dragon's Local Services on that node, i.e. what the job step allows. They differ when a
+    Slurm job holds only part of a node.
+    """
+    restricted = []
+    for h_uid in System().nodes:
+        node = Node(h_uid)
+        allowed = len(node.cpus)
+        if 0 < allowed < node.num_cpus:
+            restricted.append((node.hostname, allowed, node.num_cpus))
+    return restricted
+
+
+@contextlib.contextmanager
+def _pool_sized_to_affinity(enabled: bool, logger: logging.Logger):
+    """Make ``Batch()`` size its worker pools from the CPUs Dragon may use.
+
+    Batch sizes each node's pool as ``Node.num_cpus // 2``. On a partial-node allocation that
+    puts every worker on the few CPUs the job holds (256 workers on 4 CPUs of a 512-CPU node),
+    and task latency grows to minutes. While Batch is built inside this context,
+    ``Node.num_cpus`` reports the number of allowed CPUs instead. With ``enabled=False`` the
+    sizing is left alone and only a warning is logged.
+    """
+    try:
+        restricted = _nodes_with_restricted_cpus()
+    except Exception as e:  # never let the probe block Batch creation
+        logger.debug(f"Could not compare Dragon node CPUs with their affinity: {e}")
+        restricted = []
+
+    if not restricted:
+        yield
+        return
+
+    nodes = ", ".join(f"{host} {allowed}/{total}" for host, allowed, total in restricted)
+    can_patch = isinstance(getattr(Node, "num_cpus", None), property)
+    if not (enabled and can_patch):
+        hint = "" if enabled else ", or pass size_pool_to_affinity=True"
+        logger.warning(
+            f"Dragon may use only part of the CPUs on some nodes (allowed/total: {nodes}), "
+            "but Batch sizes its worker pools from all of them, so workers will oversubscribe "
+            f"the allowed CPUs. Request whole nodes{hint}."
+        )
+        yield
+        return
+
+    logger.warning(
+        f"Dragon may use only part of the CPUs on some nodes (allowed/total: {nodes}); "
+        "sizing the Batch worker pools from the allowed CPUs. Request whole nodes to use all "
+        "CPUs."
+    )
+    num_cpus = Node.num_cpus
+
+    def allowed_cpus(node):
+        return min(num_cpus.fget(node), len(node.cpus) or num_cpus.fget(node))
+
+    Node.num_cpus = property(allowed_cpus)
+    try:
+        yield
+    finally:
+        Node.num_cpus = num_cpus
 
 
 # ============================================================================
@@ -85,6 +155,12 @@ class DragonExecutionBackend(BaseBackend):
               Dragon clamps automatically.
             - ``pool_nodes`` — **no-op in Dragon 0.14.0+**, kept for API compatibility.
 
+        size_pool_to_affinity: Batch sizes each worker pool from the node's CPU count
+            (``os.cpu_count() // 2``), even when the job may use only some of those CPUs, as
+            on a Slurm allocation of part of a node. When True (the default), the pools are
+            sized from the CPUs Dragon may use instead, and a warning says so. When False,
+            Batch's sizing is kept and only the warning is logged.
+
     Note on working directory:
         DragonExecutionBackend does not support a backend-level working directory.
         Set it per task via ``task_backend_specific_kwargs`` with ``process_template``
@@ -113,6 +189,7 @@ class DragonExecutionBackend(BaseBackend):
         self,
         batch_kwargs: Optional[dict] = None,
         name: Optional[str] = "dragon",
+        size_pool_to_affinity: bool = True,
     ):
         if not Batch:
             raise RuntimeError(DRAGON_BATCH_INIT_ERROR)
@@ -126,7 +203,8 @@ class DragonExecutionBackend(BaseBackend):
                 "task_logs is disabled: task['stdout']/task['stderr'] will be empty "
                 "for capture_stdio=False tasks; output goes directly to the console."
             )
-        self.batch = Batch(**effective_kwargs)
+        with _pool_sized_to_affinity(size_pool_to_affinity, self.logger):
+            self.batch = Batch(**effective_kwargs)
 
         self._backend_state = BackendMainStates.INITIALIZED
         self._callback_func: Callable = lambda t, s: None

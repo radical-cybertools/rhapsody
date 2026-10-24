@@ -13,6 +13,9 @@ This section provides machine-specific setup guides and verified examples for ru
 
 Each guide covers environment setup, module loading, job allocation, and working examples.
 
+!!! warning "Partial-node allocations"
+    Dragon's `Batch` sizes each node's worker pool from the node's CPU count (`os.cpu_count() // 2`), not from the CPUs the job may use. On a Slurm job that holds part of a node (for example `--ntasks=4` on a 512-CPU node), that puts hundreds of workers on a few CPUs, and each task can take minutes. `DragonExecutionBackend` therefore sizes the pools from the CPUs Dragon may use on each node and logs a warning when it does. Request whole nodes (`--exclusive`, plus `--mem=0` where the default memory per CPU would exceed the node) to get the full pool; pass `size_pool_to_affinity=False` to keep Batch's own sizing.
+
 ## Supported Machines
 
 | Machine | Facility | Stack | Status |
