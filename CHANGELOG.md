@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`DragonExecutionBackend(observe_peaks=True)`** reports each task's peak memory as
+  `task["observed"] = {"host_mem": GiB, "gpu_mem": GiB per GPU}`, which AsyncFlow's
+  `ResourcePolicy` learns memory demand from. Executable tasks run under a small launcher
+  (`rhapsody.backends.execution._peak`) that reaps the command with `wait4` for its peak RSS
+  and, when `pynvml` is installed, samples its per-process GPU memory through NVML; a job sums
+  its ranks. Native function tasks share pool workers, so they report the worker's RSS growth
+  during the call, marked `"approximate": True`. Off by default. See
+  `docs/getting-started/resource-specification.md#peak-memory-observe_peaks`.
+
 ## [0.6.0] 2026-10-19
 
 ### Fixed

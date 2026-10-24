@@ -298,3 +298,37 @@ task = ComputeTask(
     },
 )
 ```
+
+### Peak memory (`observe_peaks`)
+
+With `observe_peaks=True`, the backend reports each task's peak memory as
+`task["observed"] = {"host_mem": GiB, "gpu_mem": GiB per GPU}` when the task is DONE or
+FAILED. AsyncFlow's `ResourcePolicy` learns the memory demand of a kind of task from it.
+
+```python
+backend = await DragonExecutionBackend(observe_peaks=True)
+```
+
+| Task | How | `host_mem` | `gpu_mem` |
+|------|-----|------------|-----------|
+| Executable (process, `process_template`) | runs under a small launcher that reaps it with `wait4` and samples NVML every 0.2 s | `ru_maxrss`: the largest single process of the command's tree | largest per-GPU sum over the tree's processes; needs `pynvml` |
+| Executable job (`process_templates`) | every rank under the launcher | sum over ranks (an upper bound) | per GPU, summed over the ranks that share it |
+| Native function | the call is wrapped in the pool worker | worker RSS growth during the call, marked `"approximate": True` (Linux only) | not measured |
+| Function with `process_template(s)` | not measured | — | — |
+
+Limits:
+
+- The smallest `host_mem` an executable reports is about 10 MiB: the kernel carries the
+  launcher's own RSS at fork into the command's `ru_maxrss` across `exec`.
+- `gpu_mem` is `None` without `pynvml`, without a GPU, or when NVML never listed the task's
+  processes on a GPU. NVML reports host PIDs, so a task in its own PID namespace (some
+  containers) is not seen.
+- GPU memory is sampled every 0.2 s, so a GPU peak that lasts less than that can be missed
+  or under-stated: a 0.3 s task that allocated 1 GiB reported 12 MiB.
+- The launcher writes one small record per process to `<work_dir>/rhapsody-peaks.<tag>/<uid>/`,
+  which must be on a file system the nodes share. A job reports nothing unless every rank wrote
+  its record.
+- A native function's figure misses memory the allocator kept from earlier calls in the same
+  worker, and counts other threads of the worker.
+- A task cancelled with `cancel_task()` reports nothing. A Dragon `timeout` ends as FAILED and
+  still reports: the launcher passes the signal to the command and reaps it.
