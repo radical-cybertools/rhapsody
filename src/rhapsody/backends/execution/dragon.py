@@ -1,9 +1,12 @@
 import asyncio
+import contextlib
 import logging
 import os
+import pickle
 import shutil
 import threading
 import time
+import traceback
 from typing import Any
 from typing import Callable
 from typing import Optional
@@ -16,12 +19,18 @@ DRAGON_BATCH_INIT_ERROR = None
 
 try:
     import dragon
+    from dragon.infrastructure.policy import Policy
+    from dragon.native.machine import Node
+    from dragon.native.machine import System
     from dragon.native.process import ProcessTemplate
     from dragon.workflows.batch import Batch
     from dragon.workflows.batch import TaskCancelledError
 
 except ImportError as e:  # pragma: no cover - environment without Dragon
     dragon = None
+    Policy = None
+    Node = None
+    System = None
     ProcessTemplate = None
     Batch = None
     TaskCancelledError = None
@@ -36,6 +45,79 @@ def _get_logger() -> logging.Logger:
     configured logging, not at module import time.
     """
     return logging.getLogger(__name__)
+
+
+# ============================================================================
+# Task Placement
+# ============================================================================
+
+
+def _placement_policy(placement: Optional[dict]):
+    """Translate a task's ``placement`` into a Dragon host-name policy.
+
+    ``placement`` is ``{"node": index, "host": name, "gpus": [device, ...]}``, as written by
+    AsyncFlow's ``ResourcePolicy`` in node mode. Returns None when there is no placement or no
+    host, so Dragon keeps choosing the node.
+    """
+    if not placement or not placement.get("host"):
+        return None
+    return Policy(
+        placement=Policy.Placement.HOST_NAME,
+        host_name=placement["host"],
+        gpu_affinity=list(placement.get("gpus") or []),
+    )
+
+
+def _run_placed_function(result_path: str, target: Callable, args: tuple, kwargs: dict) -> None:
+    """Run a placed function task in its own Dragon process.
+
+    Dragon discards a process's return value, so the outcome is pickled to ``result_path`` as
+    ``(result, raised, traceback)`` for the monitor thread to read back. An exception raised by
+    ``target`` is stored there rather than re-raised.
+    """
+    try:
+        outcome = (target(*args, **kwargs), False, None)
+    except Exception as exc:
+        outcome = (exc, True, traceback.format_exc())
+    try:
+        data = pickle.dumps(outcome)
+    except Exception as exc:
+        error = RuntimeError(f"cannot pickle the outcome of the placed function: {exc}")
+        data = pickle.dumps((error, True, traceback.format_exc()))
+    tmp_path = f"{result_path}.tmp"
+    with open(tmp_path, "wb") as f:
+        f.write(data)
+    os.replace(tmp_path, result_path)
+
+
+def _read_placed_result(result_path: str, result: Any, raised: bool, tb: Optional[str]) -> tuple:
+    """Swap a placed function's exit code for the outcome it wrote to ``result_path``.
+
+    Returns ``(result, raised, traceback)``. A Dragon-side failure (``raised``) is kept as is.
+    """
+    try:
+        if raised:
+            return result, raised, tb
+        try:
+            with open(result_path, "rb") as f:
+                # Written by _run_placed_function into this backend's own work dir.
+                return pickle.load(f)  # noqa: S301
+        except FileNotFoundError:
+            if isinstance(result, int) and result != 0:
+                return SystemExit(result), True, None
+            return (
+                RuntimeError(
+                    f"placed function task exited without a result at {result_path}; "
+                    "the backend work dir must be on a file system shared with the nodes"
+                ),
+                True,
+                None,
+            )
+        except Exception as exc:
+            return exc, True, None
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(result_path)
 
 
 # ============================================================================
@@ -104,6 +186,15 @@ class DragonExecutionBackend(BaseBackend):
                     "process_templates": [(nranks, {"cwd": "/path/to/dir"})]
                 },
             )
+
+    Note on placement:
+        A task description may carry ``placement = {"node": i, "host": name, "gpus": [...]}``
+        (AsyncFlow's ``ResourcePolicy`` in node mode writes it). With a host, the task runs on
+        that host, pinned to those GPUs, through a Dragon ``Policy`` on its process template(s).
+        ``Batch.function()`` takes no policy, so a placed function task without templates runs
+        as one Dragon process, and its result comes back through ``<work_dir>/<uid>.result``.
+        A host or GPU that Dragon does not have fails the task. A ``policy`` the user set in a
+        process template wins over the placement.
     """
 
     # Hygiene backstop: max wall-clock seconds a tuid can stay pending before it's dropped.
@@ -141,6 +232,8 @@ class DragonExecutionBackend(BaseBackend):
         self._cancelled_tuids: set[str] = set()
         self._batch_monitor_thread = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Dragon host name -> GPU device ids, looked up on the first placed task.
+        self._node_gpus: Optional[dict[str, set[int]]] = None
 
         self._shutdown_event = threading.Event()
 
@@ -245,6 +338,9 @@ class DragonExecutionBackend(BaseBackend):
                         result, raised, tb = exc, True, batch_task.traceback
 
                     task_reg = self._task_registry.get(uid)
+                    result_path = task_reg.get("result_path") if task_reg else None
+                    if result_path:
+                        result, raised, tb = _read_placed_result(result_path, result, raised, tb)
                     is_native_function = (
                         task_reg.get("is_native_function", False) if task_reg else False
                     )
@@ -356,20 +452,49 @@ class DragonExecutionBackend(BaseBackend):
         # otherwise complete and be polled before this loop even finishes).
         self.logger.info(f"Submitted {len(batch_tasks_data)} tasks (streaming, auto-dispatched)")
 
+    def _check_placement(self, policy) -> None:
+        """Reject a placement on a host or GPU this Dragon runtime does not have.
+
+        Dragon aborts the whole runtime on an unknown host name, and silently drops unknown GPU ids,
+        which leaves the task unpinned. Raising here fails only this task.
+        """
+        if self._node_gpus is None:
+            nodes = [Node(h_uid) for h_uid in System().nodes]
+            self._node_gpus = {node.hostname: set(node.gpus or []) for node in nodes}
+        gpus = self._node_gpus.get(policy.host_name)
+        if gpus is None:
+            raise ValueError(
+                f"placement host {policy.host_name!r} is not a Dragon node; "
+                f"Dragon nodes: {sorted(self._node_gpus)}"
+            )
+        unknown = sorted(set(policy.gpu_affinity) - gpus)
+        if unknown:
+            raise ValueError(
+                f"placement GPUs {unknown} are not on Dragon node {policy.host_name!r}; "
+                f"its GPUs: {sorted(gpus)}"
+            )
+
     async def build_task(self, task: dict):
         """Translate AsyncFlow task to Dragon Batch task.
 
         Translation Priority (in order):
         1. If process_templates (list) provided → Job mode [function/executable]
         2. If process_template (single) provided → Process mode [function/executable]
-        3. If is_function (no templates) → Function mode (native) [function only]
-        4. If is_executable (no templates) → Process mode (auto-build) [executable only]
+        3. If is_function with a placement (no templates) → Placed function mode
+        4. If is_function (no templates) → Function mode (native) [function only]
+        5. If is_executable (no templates) → Process mode (auto-build) [executable only]
 
         Execution Modes:
         - Function Native: batch.function() - direct Python function call
+        - Placed Function: batch.process() - function in one placed process, returns its value
         - Function Process: batch.process() - function wrapped in ProcessTemplate
         - Executable Process: batch.process() - single executable process
         - Executable Job: batch.job() - executable in MPI job via process_templates
+
+        Placement:
+            ``task["placement"]`` with a ``host`` adds ``Policy(placement=HOST_NAME,
+            host_name=host, gpu_affinity=gpus)`` to every process template that has no
+            ``policy`` of its own. A user-set template ``policy`` wins, with a warning.
 
         Setting cwd (working directory):
             Pass ``cwd`` inside ``process_template`` or each entry of ``process_templates``
@@ -422,9 +547,27 @@ class DragonExecutionBackend(BaseBackend):
             stdout_path = os.path.join(self._work_dir, f"{uid}.stdout")
             stderr_path = os.path.join(self._work_dir, f"{uid}.stderr")
 
+        placement = task.get("placement")
+        placement_policy = _placement_policy(placement)
+        result_path = None
+        if placement_policy is not None:
+            self._check_placement(placement_policy)
+            self.logger.debug(
+                f"Placing task {uid} on {placement_policy.host_name}, "
+                f"GPUs {placement_policy.gpu_affinity}"
+            )
+
         def _build_process_template_kwargs(template_cfg: dict[str, Any]) -> dict[str, Any]:
-            """Build ProcessTemplate kwargs from user config."""
-            return {**template_cfg, "args": task_args, "kwargs": task_kwargs}
+            """Build ProcessTemplate kwargs from user config, adding the placement policy."""
+            template_kwargs = {**template_cfg, "args": task_args, "kwargs": task_kwargs}
+            if placement_policy is not None:
+                if template_cfg.get("policy") is None:
+                    template_kwargs["policy"] = placement_policy
+                else:
+                    self.logger.warning(
+                        f"Task {uid}: process template policy overrides placement {placement}"
+                    )
+            return template_kwargs
 
         # Build task options once and reuse across all submission paths.
         # Dragon 0.14.1-rc requires metadata (name, timeout, stdio paths) to go through
@@ -451,12 +594,24 @@ class DragonExecutionBackend(BaseBackend):
                 ProcessTemplate(target, **_build_process_template_kwargs(process_template_config))
             )
 
+        elif is_function and placement_policy is not None:
+            # Priority 3: Placed function. batch.function() takes no policy, so run the
+            # function as one placed process; _run_placed_function writes its result.
+            result_path = os.path.join(self._work_dir, f"{uid}.result")
+            batch_task = task_opts.process(
+                ProcessTemplate(
+                    _run_placed_function,
+                    args=(result_path, target, tuple(task_args), task_kwargs),
+                    policy=placement_policy,
+                )
+            )
+
         elif is_function:
-            # Priority 3: Function native (batch.function — returns Python value, not exit code)
+            # Priority 4: Function native (batch.function — returns Python value, not exit code)
             batch_task = task_opts.function(target, *task_args, **task_kwargs)
 
         else:
-            # Priority 4: Executable process auto-build
+            # Priority 5: Executable process auto-build
             batch_task = task_opts.process(
                 ProcessTemplate(target, **_build_process_template_kwargs({}))
             )
@@ -467,6 +622,7 @@ class DragonExecutionBackend(BaseBackend):
             "description": task,
             "batch_task": batch_task,
             "is_native_function": is_native_function,
+            "result_path": result_path,
         }
         self._monitored_batches[batch_task.uid] = (batch_task, uid)
 

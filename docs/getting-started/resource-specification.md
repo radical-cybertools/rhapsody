@@ -298,3 +298,33 @@ task = ComputeTask(
     },
 )
 ```
+
+### Placement from AsyncFlow (`placement`)
+
+AsyncFlow's `ResourcePolicy` in `node` mode picks the node and GPUs for each task
+and writes them into the task description:
+
+```python
+task["placement"] = {"node": 0, "host": "gpua001", "gpus": [2]}
+```
+
+When `placement` has a `host`, `DragonExecutionBackend` runs the task on that host
+and pins it to those GPUs with
+`Policy(placement=Policy.Placement.HOST_NAME, host_name=host, gpu_affinity=gpus)`:
+
+- **Process and job tasks** (executables, or any task with `process_template` /
+  `process_templates`): the policy goes on every process template.
+- **Function tasks without templates**: `Batch.function()` takes no policy, so the
+  function runs as one placed Dragon process. Its return value or exception still
+  comes back as for a native function task, through a `<uid>.result` file in the
+  backend work directory, which must be on a file system the nodes share.
+
+`host` must be the name Dragon gives the node (`Node(h_uid).hostname` for
+`h_uid in System().nodes`, which is `localhost` on a single-node local run), and
+`gpus` must be device ids of that node. The backend checks both before submitting:
+Dragon aborts the whole runtime on an unknown host and silently drops unknown GPU
+ids, so a bad placement fails only its own task, with a `ValueError`.
+
+A `policy` you set yourself in `process_template` or a `process_templates` entry
+wins over the placement, and the backend logs a warning. Tasks without
+`placement`, or with `host` set to `None`, are submitted as before.

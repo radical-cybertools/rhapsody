@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`DragonExecutionBackend` honours `task["placement"]`** — AsyncFlow's
+  `ResourcePolicy` in node mode writes `{"node", "host", "gpus"}` into each task it
+  admits. With a host, the task now runs on that host, pinned to those GPUs,
+  through a Dragon `Policy(placement=HOST_NAME, host_name=..., gpu_affinity=...)`
+  on its process template(s). `Batch.function()` takes no policy, so a placed
+  function task without templates runs as one placed Dragon process and returns
+  its value through `<work_dir>/<uid>.result`. A host or GPU that Dragon does not
+  have fails only that task (Dragon would abort the runtime on an unknown host). A
+  user-set template `policy` wins, with a warning; tasks without a placement are
+  unchanged.
+
 ## [0.6.0] 2026-10-19
 
 ### Fixed
