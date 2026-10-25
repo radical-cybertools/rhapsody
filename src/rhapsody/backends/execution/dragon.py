@@ -92,21 +92,43 @@ print(count.value)
 """
 
 
-def _cuda_device_count() -> Optional[int]:
-    """Count the CUDA devices a process on this node can use; None when that is unknown.
+def _cuda_device_count() -> tuple[Optional[int], bool]:
+    """Count the CUDA devices a process of this Python on this node can use.
 
-    The probe runs in a subprocess, so this process never initialises CUDA: CUDA does not survive a
-    fork, and the caller may fork later.
+    Returns ``(count, loaded)``. ``loaded`` is False when this Python cannot load libcuda, and
+    ``count`` is None whenever the count is unknown. The probe runs in a subprocess, so this
+    process never initialises CUDA: CUDA does not survive a fork, and the caller may fork later.
     """
     try:
         probe = subprocess.run(
             [sys.executable, "-c", _CUDA_PROBE], capture_output=True, text=True, timeout=60
         )
-        if probe.returncode == 0:
-            return int(probe.stdout.strip())
-    except (OSError, subprocess.SubprocessError, ValueError):
-        pass
-    return None
+    except (OSError, subprocess.SubprocessError):
+        return None, True
+    if probe.returncode == 2:
+        return None, False
+    try:
+        return (int(probe.stdout.strip()) if probe.returncode == 0 else None), True
+    except ValueError:
+        return None, True
+
+
+def _nvidia_smi_device_count() -> Optional[int]:
+    """Count the GPUs ``nvidia-smi -L`` lists on this node; None without nvidia-smi.
+
+    Only lines starting with ``GPU`` count: in a job without GPUs, nvidia-smi prints "No devices
+    found." (exit 0 on some versions), and Dragon 0.14.1 counts that line as GPU 0.
+    """
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi is None:
+        return None
+    try:
+        out = subprocess.run([nvidia_smi, "-L"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return 0 if "No devices" in out.stdout + out.stderr else None
+    return sum(1 for line in out.stdout.splitlines() if line.startswith("GPU "))
 
 
 def _run_placed_function(result_path: str, target: Callable, args: tuple, kwargs: dict) -> None:
@@ -521,21 +543,31 @@ class DragonExecutionBackend(BaseBackend):
             self._warn_unreachable_gpus()
 
     def _warn_unreachable_gpus(self) -> None:
-        """Warn once when CUDA reaches fewer GPUs on this node than Dragon lists for it.
+        """Warn once when this node reaches fewer GPUs than Dragon lists for it.
 
         Dragon counts a node's GPUs from ``nvidia-smi -L`` or ``lspci``, not from what the job may
         use: in a Slurm job without ``--gres`` it still lists GPU 0, and a task pinned there runs
-        without a GPU. Only the node this process runs on is probed, and only for CUDA.
+        without a GPU. The count comes from libcuda, through this Python; when this Python cannot
+        load libcuda, it comes from ``nvidia-smi -L``. Only the node this process runs on is
+        probed, and only NVIDIA GPUs.
         """
         host = current_node().hostname
         listed = sorted(self._node_gpus.get(host, ()))
         if not listed:
             return
-        reachable = _cuda_device_count()
+        reachable, loaded = _cuda_device_count()
+        source = "CUDA"
+        if not loaded:
+            self.logger.warning(
+                f"Dragon lists GPUs {listed} on {host}, but this Python ({sys.executable}) "
+                "cannot load libcuda.so.1 there: Python function tasks it runs may not reach "
+                "CUDA either."
+            )
+            reachable, source = _nvidia_smi_device_count(), "nvidia-smi"
         if reachable is not None and reachable < len(listed):
             self.logger.warning(
-                f"Dragon lists GPUs {listed} on {host}, but CUDA reaches {reachable} of them "
-                "from this process: GPU tasks placed there may run without their GPU. "
+                f"Dragon lists GPUs {listed} on {host}, but {source} reaches {reachable} of them: "
+                "GPU tasks placed there may run without their GPU. "
                 "Does the job request GPUs (e.g. Slurm --gres or --gpus)?"
             )
 

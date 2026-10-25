@@ -12,8 +12,9 @@
   function task without templates runs as one placed Dragon process and returns
   its value through `<work_dir>/<uid>.result`. A host or GPU that Dragon does not
   have fails only that task (Dragon would abort the runtime on an unknown host).
-  The first GPU placement also probes CUDA once on the backend's node, and warns
-  when it reaches fewer GPUs than Dragon lists (a Slurm job without `--gres`). A
+  The first GPU placement also counts the GPUs the backend's node can reach, once
+  (libcuda, or `nvidia-smi -L` when the backend's Python cannot load libcuda), and
+  warns when that is fewer than Dragon lists (a Slurm job without `--gres`). A
   user-set template `policy` wins, with a warning; tasks without a placement are
   unchanged.
 

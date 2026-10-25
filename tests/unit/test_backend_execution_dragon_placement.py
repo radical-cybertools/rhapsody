@@ -319,21 +319,34 @@ class FakeCurrentNode:
 
 @pytest.fixture
 def probe(backend):
-    """Arm the one-time GPU probe; set ``probe.reachable`` to what CUDA reports."""
+    """Arm the one-time GPU probe.
+
+    Set ``probe.reachable`` to what CUDA reports, ``probe.loaded`` to whether this Python can load
+    libcuda, and ``probe.smi`` to what ``nvidia-smi -L`` counts.
+    """
 
     class Probe:
         reachable = None
+        loaded = True
+        smi = None
         calls = 0
+        smi_calls = 0
 
         @classmethod
         def count(cls):
             cls.calls += 1
-            return cls.reachable
+            return cls.reachable, cls.loaded
+
+        @classmethod
+        def smi_count(cls):
+            cls.smi_calls += 1
+            return cls.smi
 
     backend._gpus_probed = False
     with (
         patch.object(dragon_module, "current_node", FakeCurrentNode),
         patch.object(dragon_module, "_cuda_device_count", Probe.count),
+        patch.object(dragon_module, "_nvidia_smi_device_count", Probe.smi_count),
     ):
         yield Probe
 
@@ -345,6 +358,7 @@ async def test_unreachable_gpus_warn_once(backend, probe, caplog):
         await backend.build_task(_task(uid="t.2", placement=PLACEMENT))
 
     assert probe.calls == 1
+    assert probe.smi_calls == 0
     assert caplog.text.count("CUDA reaches 0 of them") == 1
     # A warning, not an error: both tasks are still submitted with their placement.
     assert [kind for kind, _ in backend.batch.calls] == ["process", "process"]
@@ -356,15 +370,38 @@ async def test_reachable_gpus_do_not_warn(backend, probe, caplog):
         await backend.build_task(_task(placement=PLACEMENT))
 
     assert probe.calls == 1
-    assert "CUDA reaches" not in caplog.text
+    assert "reaches" not in caplog.text
 
 
 async def test_unknown_reachability_does_not_warn(backend, probe, caplog):
-    probe.reachable = None  # no libcuda, or a CUDA error
+    probe.reachable = None  # a CUDA error other than "no device"
     with caplog.at_level(logging.WARNING, logger=dragon_module.__name__):
         await backend.build_task(_task(placement=PLACEMENT))
 
-    assert "CUDA reaches" not in caplog.text
+    assert probe.smi_calls == 0
+    assert caplog.text == ""
+
+
+async def test_without_libcuda_nvidia_smi_counts(backend, probe, caplog):
+    # rust job 24840: EESSI's Python cannot load libcuda on julia, and the job has no --gres.
+    probe.loaded = False
+    probe.smi = 0
+    with caplog.at_level(logging.WARNING, logger=dragon_module.__name__):
+        await backend.build_task(_task(placement=PLACEMENT))
+
+    assert probe.smi_calls == 1
+    assert "cannot load libcuda.so.1" in caplog.text
+    assert "nvidia-smi reaches 0 of them" in caplog.text
+
+
+async def test_without_libcuda_or_nvidia_smi_only_names_libcuda(backend, probe, caplog):
+    probe.loaded = False
+    probe.smi = None
+    with caplog.at_level(logging.WARNING, logger=dragon_module.__name__):
+        await backend.build_task(_task(placement=PLACEMENT))
+
+    assert "cannot load libcuda.so.1" in caplog.text
+    assert "reaches" not in caplog.text
 
 
 async def test_no_probe_without_gpus_in_the_placement(backend, probe):
@@ -383,19 +420,20 @@ async def test_no_probe_when_this_node_has_no_listed_gpus(backend, probe):
 
 
 class FakeCompleted:
-    def __init__(self, returncode, stdout=""):
+    def __init__(self, returncode, stdout="", stderr=""):
         self.returncode = returncode
         self.stdout = stdout
+        self.stderr = stderr
 
 
 @pytest.mark.parametrize(
     ("outcome", "expected"),
     [
-        (FakeCompleted(0, "2\n"), 2),
-        (FakeCompleted(0, "0\n"), 0),
-        (FakeCompleted(2), None),  # no libcuda
-        (FakeCompleted(3), None),  # CUDA error other than "no device"
-        (FakeCompleted(0, "garbage"), None),
+        (FakeCompleted(0, "2\n"), (2, True)),
+        (FakeCompleted(0, "0\n"), (0, True)),
+        (FakeCompleted(2), (None, False)),  # no libcuda
+        (FakeCompleted(3), (None, True)),  # CUDA error other than "no device"
+        (FakeCompleted(0, "garbage"), (None, True)),
     ],
 )
 def test_cuda_device_count_parses_the_probe(outcome, expected):
@@ -406,12 +444,41 @@ def test_cuda_device_count_parses_the_probe(outcome, expected):
 def test_cuda_device_count_survives_a_hung_probe():
     hung = dragon_module.subprocess.TimeoutExpired(cmd="probe", timeout=60)
     with patch.object(dragon_module.subprocess, "run", side_effect=hung):
-        assert dragon_module._cuda_device_count() is None
+        assert dragon_module._cuda_device_count() == (None, True)
 
 
 def test_cuda_device_count_runs_for_real():
-    count = dragon_module._cuda_device_count()
+    count, loaded = dragon_module._cuda_device_count()
     assert count is None or count >= 0
+    assert loaded or count is None
+
+
+SMI_TWO_GPUS = (
+    "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-ccdb6af5-102b-3fb4-4e06-8b7aaeba0578)\n"
+    "GPU 1: NVIDIA A100-SXM4-40GB (UUID: GPU-43539da6-e86a-d93e-8db2-f8814ef47c41)\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (FakeCompleted(0, SMI_TWO_GPUS), 2),
+        (FakeCompleted(0, "No devices found.\n"), 0),  # rust, job without --gres
+        (FakeCompleted(6, "No devices were found\n"), 0),  # versions that exit non-zero
+        (FakeCompleted(9, stderr="NVIDIA-SMI has failed\n"), None),
+    ],
+)
+def test_nvidia_smi_device_count_counts_gpu_lines(outcome, expected):
+    with (
+        patch.object(dragon_module.shutil, "which", return_value="/usr/bin/nvidia-smi"),
+        patch.object(dragon_module.subprocess, "run", return_value=outcome),
+    ):
+        assert dragon_module._nvidia_smi_device_count() == expected
+
+
+def test_nvidia_smi_device_count_without_nvidia_smi():
+    with patch.object(dragon_module.shutil, "which", return_value=None):
+        assert dragon_module._nvidia_smi_device_count() is None
 
 
 # ============================================================================
