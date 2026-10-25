@@ -325,6 +325,12 @@ and pins it to those GPUs with
 Dragon aborts the whole runtime on an unknown host and silently drops unknown GPU
 ids, so a bad placement fails only its own task, with a `ValueError`.
 
+Dragon lists a node's GPUs from `nvidia-smi -L` or `lspci`, not from the GPUs the
+job may use: in a Slurm job without `--gres` (or `--gpus`) it still lists GPU 0,
+and a task pinned there runs without a GPU. On the first placement that asks for
+GPUs, the backend probes CUDA once, in a subprocess, on the node it runs on. If
+CUDA reaches fewer GPUs than Dragon lists, it logs a warning; the tasks still run.
+
 A `policy` you set yourself in `process_template` or a `process_templates` entry
 wins over the placement, and the backend logs a warning. Tasks without
 `placement`, or with `host` set to `None`, are submitted as before.

@@ -4,6 +4,8 @@ import logging
 import os
 import pickle
 import shutil
+import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -22,6 +24,7 @@ try:
     from dragon.infrastructure.policy import Policy
     from dragon.native.machine import Node
     from dragon.native.machine import System
+    from dragon.native.machine import current as current_node
     from dragon.native.process import ProcessTemplate
     from dragon.workflows.batch import Batch
     from dragon.workflows.batch import TaskCancelledError
@@ -31,6 +34,7 @@ except ImportError as e:  # pragma: no cover - environment without Dragon
     Policy = None
     Node = None
     System = None
+    current_node = None
     ProcessTemplate = None
     Batch = None
     TaskCancelledError = None
@@ -66,6 +70,43 @@ def _placement_policy(placement: Optional[dict]):
         host_name=placement["host"],
         gpu_affinity=list(placement.get("gpus") or []),
     )
+
+
+# Prints how many CUDA devices a fresh process can use; exits 2 without libcuda, 3 on a CUDA error.
+_CUDA_PROBE = """
+import ctypes, sys
+try:
+    cu = ctypes.CDLL("libcuda.so.1")
+except OSError:
+    sys.exit(2)
+rc = cu.cuInit(0)
+if rc == 100:  # CUDA_ERROR_NO_DEVICE
+    print(0)
+    sys.exit(0)
+if rc != 0:
+    sys.exit(3)
+count = ctypes.c_int()
+if cu.cuDeviceGetCount(ctypes.byref(count)) != 0:
+    sys.exit(3)
+print(count.value)
+"""
+
+
+def _cuda_device_count() -> Optional[int]:
+    """Count the CUDA devices a process on this node can use; None when that is unknown.
+
+    The probe runs in a subprocess, so this process never initialises CUDA: CUDA does not survive a
+    fork, and the caller may fork later.
+    """
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-c", _CUDA_PROBE], capture_output=True, text=True, timeout=60
+        )
+        if probe.returncode == 0:
+            return int(probe.stdout.strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return None
 
 
 def _run_placed_function(result_path: str, target: Callable, args: tuple, kwargs: dict) -> None:
@@ -234,6 +275,8 @@ class DragonExecutionBackend(BaseBackend):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         # Dragon host name -> GPU device ids, looked up on the first placed task.
         self._node_gpus: Optional[dict[str, set[int]]] = None
+        # Whether the first placed GPU task has had its GPUs probed for reachability.
+        self._gpus_probed = False
 
         self._shutdown_event = threading.Event()
 
@@ -472,6 +515,28 @@ class DragonExecutionBackend(BaseBackend):
             raise ValueError(
                 f"placement GPUs {unknown} are not on Dragon node {policy.host_name!r}; "
                 f"its GPUs: {sorted(gpus)}"
+            )
+        if policy.gpu_affinity and not self._gpus_probed:
+            self._gpus_probed = True
+            self._warn_unreachable_gpus()
+
+    def _warn_unreachable_gpus(self) -> None:
+        """Warn once when CUDA reaches fewer GPUs on this node than Dragon lists for it.
+
+        Dragon counts a node's GPUs from ``nvidia-smi -L`` or ``lspci``, not from what the job may
+        use: in a Slurm job without ``--gres`` it still lists GPU 0, and a task pinned there runs
+        without a GPU. Only the node this process runs on is probed, and only for CUDA.
+        """
+        host = current_node().hostname
+        listed = sorted(self._node_gpus.get(host, ()))
+        if not listed:
+            return
+        reachable = _cuda_device_count()
+        if reachable is not None and reachable < len(listed):
+            self.logger.warning(
+                f"Dragon lists GPUs {listed} on {host}, but CUDA reaches {reachable} of them "
+                "from this process: GPU tasks placed there may run without their GPU. "
+                "Does the job request GPUs (e.g. Slurm --gres or --gpus)?"
             )
 
     async def build_task(self, task: dict):

@@ -93,6 +93,8 @@ def backend(tmp_path):
         backend._work_dir = str(tmp_path)
         # Dragon's node list, which build_task checks placements against.
         backend._node_gpus = {"gpua042": {0, 1, 2, 3}, "cn001": set()}
+        # The GPU reachability probe has its own tests below.
+        backend._gpus_probed = True
         yield backend
 
 
@@ -304,6 +306,112 @@ async def test_dragon_nodes_are_looked_up_once(backend):
     assert FakeSystem.calls == 1
     assert backend._node_gpus == {"gpua042": {0, 1}, "cn001": set()}
     assert [kind for kind, _ in backend.batch.calls] == ["process", "process"]
+
+
+# ============================================================================
+# GPU reachability: Dragon lists GPUs a Slurm job without --gres cannot use
+# ============================================================================
+
+
+class FakeCurrentNode:
+    hostname = "gpua042"
+
+
+@pytest.fixture
+def probe(backend):
+    """Arm the one-time GPU probe; set ``probe.reachable`` to what CUDA reports."""
+
+    class Probe:
+        reachable = None
+        calls = 0
+
+        @classmethod
+        def count(cls):
+            cls.calls += 1
+            return cls.reachable
+
+    backend._gpus_probed = False
+    with (
+        patch.object(dragon_module, "current_node", FakeCurrentNode),
+        patch.object(dragon_module, "_cuda_device_count", Probe.count),
+    ):
+        yield Probe
+
+
+async def test_unreachable_gpus_warn_once(backend, probe, caplog):
+    probe.reachable = 0
+    with caplog.at_level(logging.WARNING, logger=dragon_module.__name__):
+        await backend.build_task(_task(uid="t.1", placement=PLACEMENT))
+        await backend.build_task(_task(uid="t.2", placement=PLACEMENT))
+
+    assert probe.calls == 1
+    assert caplog.text.count("CUDA reaches 0 of them") == 1
+    # A warning, not an error: both tasks are still submitted with their placement.
+    assert [kind for kind, _ in backend.batch.calls] == ["process", "process"]
+
+
+async def test_reachable_gpus_do_not_warn(backend, probe, caplog):
+    probe.reachable = 4
+    with caplog.at_level(logging.WARNING, logger=dragon_module.__name__):
+        await backend.build_task(_task(placement=PLACEMENT))
+
+    assert probe.calls == 1
+    assert "CUDA reaches" not in caplog.text
+
+
+async def test_unknown_reachability_does_not_warn(backend, probe, caplog):
+    probe.reachable = None  # no libcuda, or a CUDA error
+    with caplog.at_level(logging.WARNING, logger=dragon_module.__name__):
+        await backend.build_task(_task(placement=PLACEMENT))
+
+    assert "CUDA reaches" not in caplog.text
+
+
+async def test_no_probe_without_gpus_in_the_placement(backend, probe):
+    await backend.build_task(_task(placement={"node": 0, "host": "cn001", "gpus": []}))
+
+    assert probe.calls == 0
+    assert backend._gpus_probed is False
+
+
+async def test_no_probe_when_this_node_has_no_listed_gpus(backend, probe):
+    # This process runs on cn001, which has no GPUs to compare against.
+    with patch.object(FakeCurrentNode, "hostname", "cn001"):
+        await backend.build_task(_task(placement=PLACEMENT))
+
+    assert probe.calls == 0
+
+
+class FakeCompleted:
+    def __init__(self, returncode, stdout=""):
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        (FakeCompleted(0, "2\n"), 2),
+        (FakeCompleted(0, "0\n"), 0),
+        (FakeCompleted(2), None),  # no libcuda
+        (FakeCompleted(3), None),  # CUDA error other than "no device"
+        (FakeCompleted(0, "garbage"), None),
+    ],
+)
+def test_cuda_device_count_parses_the_probe(outcome, expected):
+    with patch.object(dragon_module.subprocess, "run", return_value=outcome):
+        assert dragon_module._cuda_device_count() == expected
+
+
+def test_cuda_device_count_survives_a_hung_probe():
+    hung = dragon_module.subprocess.TimeoutExpired(cmd="probe", timeout=60)
+    with patch.object(dragon_module.subprocess, "run", side_effect=hung):
+        assert dragon_module._cuda_device_count() is None
+
+
+def test_cuda_device_count_runs_for_real():
+    count = dragon_module._cuda_device_count()
+    assert count is None or count >= 0
 
 
 # ============================================================================
