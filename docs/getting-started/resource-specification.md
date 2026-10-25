@@ -334,6 +334,10 @@ cannot load libcuda (which also gets its own warning, since Python function task
 it runs may not reach CUDA either). If fewer GPUs are reachable than Dragon lists,
 it logs a warning; the tasks still run.
 
+These warnings go to the `rhapsody` logger. Under Dragon, a handler you put on
+the root logger may never see them, so call `rhapsody.enable_logging()` before
+creating the backend, or attach your handler to `logging.getLogger("rhapsody")`.
+
 A `policy` you set yourself in `process_template` or a `process_templates` entry
 wins over the placement, and the backend logs a warning. Tasks without
 `placement`, or with `host` set to `None`, are submitted as before.
