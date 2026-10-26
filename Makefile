@@ -1,4 +1,4 @@
-.PHONY: help install lint format test test-all test-unit test-unit-no-dragon test-unit-dragon test-integration test-quick test-regular test-dragon-only test-ci check setup-pre-commit
+.PHONY: help install lint format test test-all test-unit test-unit-no-dragon test-unit-dragon test-integration test-quick test-regular test-dragon-only test-ci test-allocation-shapes check setup-pre-commit
 .DEFAULT_GOAL := help
 
 # Python executable - override with PYTHON variable if needed
@@ -98,6 +98,25 @@ test-ci:  ## CI test - regular tests + Dragon tests when the dragon launcher is 
 	else \
 		echo "Dragon launcher not available on this Python version, skipping Dragon tests."; \
 	fi
+
+# Each shape runs in its own Dragon runtime: the whole machine, half of it, one CPU. A hung
+# backend can leave the process stuck after pytest reports, so each run has a time limit.
+SHAPES_TIME_LIMIT ?= 600
+
+test-allocation-shapes:  ## Dragon tests on the whole machine, half of its CPUs and one CPU (taskset)
+	@if ! command -v dragon >/dev/null 2>&1; then \
+		echo "Dragon launcher not available, skipping the allocation-shape tests."; exit 0; \
+	fi; \
+	n=$$(nproc); rc=0; shapes="0-$$((n - 1))"; \
+	[ "$$n" -ge 4 ] && shapes="$$shapes 0-$$((n / 2 - 1))"; \
+	[ "$$n" -ge 2 ] && shapes="$$shapes 0"; \
+	for cpus in $$shapes; do \
+		echo "== allocation shape: CPUs $$cpus of $$n"; \
+		RHAPSODY_TEST_MODE=dragon timeout --signal=INT --kill-after=30 $(SHAPES_TIME_LIMIT) \
+			taskset -c $$cpus dragon $(PYTHON) -m pytest tests/integration/test_allocation_shapes.py -v -s \
+			|| rc=1; \
+	done; \
+	exit $$rc
 
 test-dask:  ## Run Dask backend tests only
 	@echo "Running Dask tests..."

@@ -48,3 +48,6 @@ jobs:
 
       - name: Run tests
         run: make test-ci
+
+      - name: Allocation-shape tests (Dragon on all, half and one of the runner's CPUs)
+        run: make test-allocation-shapes
