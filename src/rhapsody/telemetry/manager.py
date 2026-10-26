@@ -120,6 +120,10 @@ class TelemetryManager:
         self._queue: asyncio.Queue = asyncio.Queue()
         self._subscribers: list[Callable[[BaseEvent], Any]] = []
         self._adapters: list[TelemetryAdapter] = []
+        # Backends that already have an adapter (by id), and whether the one
+        # runtime-wide Dragon node poller exists — see attach_backend().
+        self._attached_backends: set[int] = set()
+        self._dragon_adapter_attached = False
         self._running = False
         self._dispatch_task: asyncio.Task | None = None
         self._checkpoint_task: asyncio.Task | None = None
@@ -434,9 +438,16 @@ class TelemetryManager:
         """Detect backend type and register the appropriate telemetry adapter.
 
         Silently skips backends with no adapter (LocalExecutionBackend, NoopExecutionBackend,
-        unknown types). Safe to call before or after start(); if already running the adapter is
-        started immediately.
+        unknown types) and data backends (no ``submit_tasks``). Safe to call before or after
+        start(); if already running the adapter is started immediately. Attaching the same backend
+        again is a no-op, and all Dragon backends of a session share one node poller.
         """
+        if not hasattr(backend, "submit_tasks"):
+            return  # data backend: no task execution, no resource adapter
+        if id(backend) in self._attached_backends:
+            return
+        self._attached_backends.add(id(backend))
+
         try:
             from rhapsody.backends.execution.concurrent import ConcurrentExecutionBackend
             from rhapsody.telemetry.adapters.concurrent import ConcurrentTelemetryAdapter
@@ -475,7 +486,11 @@ class TelemetryManager:
                 logger.warning("Could not attach DaskTelemetryAdapter", exc_info=True)
             return
 
-        if "Dragon" in backend_cls:
+        if backend_cls.startswith("Dragon"):
+            # Dragon node metrics are runtime-wide: a second Dragon backend in the
+            # session (e.g. an inference backend) would poll the same nodes again.
+            if self._dragon_adapter_attached:
+                return
             try:
                 from rhapsody.telemetry.adapters.dragon import DragonTelemetryAdapter
 
@@ -485,6 +500,7 @@ class TelemetryManager:
                     interval=interval,
                 )
                 self.register_adapter(adapter)
+                self._dragon_adapter_attached = True
                 if self._running:
                     adapter.start()
             except Exception:

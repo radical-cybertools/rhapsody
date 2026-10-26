@@ -130,6 +130,10 @@ class Session:
         self._tasks: dict[str, BaseTask | dict] = {}
         self._state_manager = TaskStateManager()
         self._telemetry: TelemetryManager | None = None
+        # Scheduled ResourceLayout emissions (keeps task references alive), and the
+        # backends (by id) whose layout went out — re-adding one must not resend it.
+        self._layout_tasks: set[asyncio.Task] = set()
+        self._layout_backends: set[int] = set()
         self._resource_poll_interval: float = 5.0
 
         # Register callbacks with all provided backends
@@ -182,7 +186,8 @@ class Session:
 
         # Register a telemetry adapter if telemetry is already enabled
         if self._telemetry is not None:
-            self._attach_telemetry_adapter(backend)
+            self._attach_telemetry(backend)
+            self._schedule_resource_layout(backend)
 
     async def submit_tasks(self, tasks: list[dict | BaseTask]) -> list[asyncio.Future]:
         """Submit tasks to execution backends and return futures.
@@ -365,45 +370,63 @@ class Session:
         )
         self._state_manager._telemetry_observer = self._telemetry._on_task_state_change
 
-        for backend in self.backends.values():
-            self._telemetry.attach_backend(
-                backend,
-                session_id=self.uid,
-                backend_name=backend.name,
-                interval=resource_poll_interval,
-            )
+        for backend in self._exec_backends.values():
+            self._attach_telemetry(backend)
 
         await self._telemetry.start()
 
+        # Scheduled, not awaited: callers subscribe right after this returns and
+        # must still see SessionStarted and the layouts (nothing yields before).
         for backend in self._exec_backends.values():
-            self._emit_resource_layout(backend)
+            self._schedule_resource_layout(backend)
 
         return self._telemetry
 
-    def _attach_telemetry_adapter(self, backend: BaseBackend | DataBackend) -> None:
-        """Attach telemetry to a backend added after :meth:`start_telemetry`."""
+    def _attach_telemetry(self, backend: BaseBackend) -> None:
+        """Attach the backend's resource telemetry adapter (a no-op if it already has one)."""
         self._telemetry.attach_backend(
             backend,
             session_id=self.uid,
             backend_name=backend.name,
             interval=self._resource_poll_interval,
         )
-        self._emit_resource_layout(backend)
 
-    def _emit_resource_layout(self, backend: BaseBackend | DataBackend) -> None:
+    def _schedule_resource_layout(self, backend: BaseBackend) -> None:
+        """Emit the backend's layout from a task on the running loop.
+
+        The (possibly blocking) topology probe must not hold up :meth:`start_telemetry` or the
+        synchronous :meth:`add_backend`.
+        """
+        if id(backend) in self._layout_backends:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning(
+                "no running event loop: no ResourceLayout for late backend %s", backend.name
+            )
+            return
+        self._layout_backends.add(id(backend))
+        task = loop.create_task(self._emit_resource_layout(backend))
+        self._layout_tasks.add(task)
+        task.add_done_callback(self._layout_tasks.discard)
+
+    async def _emit_resource_layout(self, backend: BaseBackend) -> None:
         """Emit the backend's ResourceLayout so viewers can size their grid.
 
-        Backends that don't report a layout return [] and the event still goes out — viewers fall
-        back to a default.
+        ``topology()`` may block (Dragon runtime calls, NVML), so it runs in a thread. A failed
+        probe is logged and the event goes out with no nodes — viewers fall back to a default.
         """
         from rhapsody.telemetry.events import ResourceLayout
         from rhapsody.telemetry.events import make_event
 
         try:
-            nodes = backend.topology()
+            nodes = await asyncio.to_thread(backend.topology)
         except Exception:
-            logger.debug("backend.topology() failed for %s", backend.name, exc_info=True)
+            logger.warning("backend.topology() failed for %s", backend.name, exc_info=True)
             nodes = []
+        if self._telemetry is None:
+            return  # telemetry stopped while the probe ran
         self._telemetry.emit(
             make_event(
                 ResourceLayout,
@@ -427,6 +450,8 @@ class Session:
 
     async def close(self) -> None:
         """Shutdown telemetry (if enabled) then all backends."""
+        for task in list(self._layout_tasks):
+            task.cancel()
         if self._telemetry is not None:
             await self._telemetry.stop()
             self._telemetry = None

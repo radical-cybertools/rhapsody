@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 logging.basicConfig(level=logging.WARNING)
@@ -25,7 +26,8 @@ from rhapsody.backends import ConcurrentExecutionBackend
 
 async def main(outdir: Path, n_tasks: int) -> Path:
     outdir.mkdir(parents=True, exist_ok=True)
-    backend = await ConcurrentExecutionBackend()
+    # Processes, not threads: closer to how tasks run on an HPC resource.
+    backend = await ConcurrentExecutionBackend(executor=ProcessPoolExecutor())
     session = Session(backends=[backend])
 
     telemetry = await session.start_telemetry(

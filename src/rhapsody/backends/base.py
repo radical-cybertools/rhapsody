@@ -211,17 +211,27 @@ class BaseBackend(ABC):
         return []
 
     def _probe_local_resources(self) -> tuple[int, int]:
-        """Return ``(cores, gpus)`` of the local node; 0 where a probe is unavailable."""
+        """Return ``(cores, gpus)`` of the local node.
+
+        No pynvml, or no NVIDIA library or driver, means no NVIDIA GPUs: ``gpus`` is 0. Any other
+        NVML failure is logged and raised, so a detection failure is not reported as "no GPUs".
+        """
         cores = os.cpu_count() or 0
-        gpus = 0
         try:
             import pynvml  # type: ignore[import-not-found]
-
+        except ImportError:
+            return cores, 0
+        try:
             pynvml.nvmlInit()
-            try:
-                gpus = int(pynvml.nvmlDeviceGetCount())
-            finally:
-                pynvml.nvmlShutdown()
-        except Exception:
-            logger.debug("pynvml gpu probe failed", exc_info=True)
-        return cores, gpus
+        except (pynvml.NVMLError_LibraryNotFound, pynvml.NVMLError_DriverNotLoaded):
+            return cores, 0
+        except pynvml.NVMLError:
+            logger.exception("NVML initialization failed; GPU count unknown")
+            raise
+        try:
+            return cores, int(pynvml.nvmlDeviceGetCount())
+        except pynvml.NVMLError:
+            logger.exception("NVML device count failed; GPU count unknown")
+            raise
+        finally:
+            pynvml.nvmlShutdown()
