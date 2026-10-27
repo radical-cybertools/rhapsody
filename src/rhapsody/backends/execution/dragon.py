@@ -214,69 +214,73 @@ class DragonExecutionBackend(BaseBackend):
 
                 completed = []
                 cancelled = []
-                for t in tuids:
-                    entry = self._monitored_batches.pop(t, None)
-                    if entry is None:
-                        if t in self._cancelled_tuids:
-                            self._cancelled_tuids.discard(t)
-                            self._pending_tuids.pop(t, None)
+                # Deliver what this sweep resolved even if a later tuid raises below.
+                try:
+                    for t in tuids:
+                        entry = self._monitored_batches.pop(t, None)
+                        if entry is None:
+                            if t in self._cancelled_tuids:
+                                self._cancelled_tuids.discard(t)
+                                self._pending_tuids.pop(t, None)
+                                continue
+                            # Not registered yet; keep retrying instead of assuming cancellation.
+                            first_seen = self._pending_tuids.setdefault(t, time.monotonic())
+                            if time.monotonic() - first_seen > self.PENDING_TUID_TIMEOUT:
+                                self.logger.warning(f"Dragon tuid {t} never registered; dropping")
+                                self._pending_tuids.pop(t, None)
                             continue
-                        # Not registered yet; keep retrying instead of assuming cancellation.
-                        first_seen = self._pending_tuids.setdefault(t, time.monotonic())
-                        if time.monotonic() - first_seen > self.PENDING_TUID_TIMEOUT:
-                            self.logger.warning(f"Dragon tuid {t} never registered; dropping")
-                            self._pending_tuids.pop(t, None)
-                        continue
-                    self._pending_tuids.pop(t, None)
-                    batch_task, uid = entry
+                        self._pending_tuids.pop(t, None)
+                        batch_task, uid = entry
 
-                    try:
-                        # Block until the result is fully committed to the DDict.
-                        # poll() and the DDict write are not atomic; block=True here
-                        # ensures get_stdout(block=False) is safe afterward.
-                        result = batch_task.get(block=True)
-                        raised, tb = False, None
-                    except TaskCancelledError:
-                        # Dragon-side timeout / upstream cancel (not a user cancel_task call)
-                        cancelled.append(uid)
-                        continue
-                    except Exception as exc:
-                        result, raised, tb = exc, True, batch_task.traceback
-
-                    task_reg = self._task_registry.get(uid)
-                    is_native_function = (
-                        task_reg.get("is_native_function", False) if task_reg else False
-                    )
-                    if not is_native_function:
-                        # Dragon returns exit codes as int/list[int] for process/job tasks.
-                        # Normalize non-zero to raised=True so Rhapsody delivers FAILED.
-                        if isinstance(result, int) and result != 0:
-                            result = SystemExit(result)
-                            raised = True
-                        elif isinstance(result, list) and any(
-                            c != 0 for c in result if isinstance(c, int)
-                        ):
-                            result = SystemExit(result)
-                            raised = True
-
-                    capture_stdio = (
-                        task_reg.get("description", {}).get("capture_stdio") if task_reg else False
-                    )
-                    if capture_stdio:
-                        stdout = batch_task.stdout_path or ""
-                        stderr = batch_task.stderr_path or ""
-                    else:
                         try:
-                            stdout = batch_task.get_stdout(block=False) or ""
-                            stderr = batch_task.get_stderr(block=False) or ""
-                        except OSError:
-                            stdout, stderr = "", ""
-                    completed.append((uid, result, tb, raised, stdout, stderr))
+                            # Block until the result is fully committed to the DDict.
+                            # poll() and the DDict write are not atomic; block=True here
+                            # ensures get_stdout(block=False) is safe afterward.
+                            result = batch_task.get(block=True)
+                            raised, tb = False, None
+                        except TaskCancelledError:
+                            # Dragon-side timeout / upstream cancel (not a user cancel_task call)
+                            cancelled.append(uid)
+                            continue
+                        except Exception as exc:
+                            result, raised, tb = exc, True, batch_task.traceback
 
-                if completed:
-                    self._loop.call_soon_threadsafe(self._deliver_batch, completed)
-                if cancelled:
-                    self._loop.call_soon_threadsafe(self._deliver_cancelled, cancelled)
+                        task_reg = self._task_registry.get(uid)
+                        is_native_function = (
+                            task_reg.get("is_native_function", False) if task_reg else False
+                        )
+                        if not is_native_function:
+                            # Dragon returns exit codes as int/list[int] for process/job tasks.
+                            # Normalize non-zero to raised=True so Rhapsody delivers FAILED.
+                            if isinstance(result, int) and result != 0:
+                                result = SystemExit(result)
+                                raised = True
+                            elif isinstance(result, list) and any(
+                                c != 0 for c in result if isinstance(c, int)
+                            ):
+                                result = SystemExit(result)
+                                raised = True
+
+                        capture_stdio = (
+                            task_reg.get("description", {}).get("capture_stdio")
+                            if task_reg
+                            else False
+                        )
+                        if capture_stdio:
+                            stdout = batch_task.stdout_path or ""
+                            stderr = batch_task.stderr_path or ""
+                        else:
+                            try:
+                                stdout = batch_task.get_stdout(block=False) or ""
+                                stderr = batch_task.get_stderr(block=False) or ""
+                            except OSError:
+                                stdout, stderr = "", ""
+                        completed.append((uid, result, tb, raised, stdout, stderr))
+                finally:
+                    if completed:
+                        self._loop.call_soon_threadsafe(self._deliver_batch, completed)
+                    if cancelled:
+                        self._loop.call_soon_threadsafe(self._deliver_cancelled, cancelled)
 
             except Exception as e:
                 self.logger.exception(f"Critical error in monitor loop: {e}")

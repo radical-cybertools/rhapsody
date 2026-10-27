@@ -149,3 +149,49 @@ async def test_dragon_side_cancel_after_user_cancel_is_not_reported_twice(backen
 
     assert [(task, state) for task, state, _ in delivered] == [(task_desc, "CANCELED")]
     assert uid not in backend._task_registry
+
+
+class FakeDoneBatchTask:
+    """Batch task that completed with ``value``; ``stdout_error`` makes get_stdout() raise."""
+
+    traceback = None
+
+    def __init__(self, tuid, value, stdout_error=None):
+        self.uid = tuid
+        self.value = value
+        self.stdout_error = stdout_error
+
+    def get(self, block=True):
+        return self.value
+
+    def get_stdout(self, block=False):
+        if self.stdout_error is not None:
+            raise self.stdout_error
+        return ""
+
+    def get_stderr(self, block=False):
+        return ""
+
+
+async def test_sweep_resolved_before_an_error_is_still_delivered(backend):
+    """A tuid that raises mid-sweep does not drop the DONE/CANCELED already resolved in it."""
+    done_task = FakeDoneBatchTask("dragon-tuid-done", 7)
+    cancelled_task = FakeCancelledBatchTask("dragon-tuid-cancelled")
+    broken_task = FakeDoneBatchTask("dragon-tuid-broken", 0, stdout_error=RuntimeError("boom"))
+    done_desc = _track(backend, "task.done", done_task)
+    _track(backend, "task.cancelled", cancelled_task)
+    _track(backend, "task.broken", broken_task)
+    delivered, _ = _record_callbacks(backend)
+
+    # Queued before the monitor starts, so one sweep drains all three in this order.
+    for batch_task in (done_task, cancelled_task, broken_task):
+        backend.batch.completed_tuids.put(batch_task.uid)
+    await backend.submit_tasks([])
+
+    backend._shutdown_event.set()
+    await asyncio.to_thread(backend._batch_monitor_thread.join, 5.0)
+    await asyncio.sleep(0.05)
+
+    states = {task["uid"]: state for task, state, _ in delivered}
+    assert states == {"task.done": "DONE", "task.cancelled": "CANCELED"}
+    assert done_desc["return_value"] == 7
