@@ -975,7 +975,7 @@ async def test_notification_of_other_session_is_ignored():
     uids are per-client counters: only this session's (or sid-less) ones
     may update our tasks."""
     backend = await _init_backend()
-    backend._mock_rh.sid = "sid-me"
+    backend._session_sid = "sid-me"
     backend._tasks["t.1"] = {"uid": "t.1", "state": "SUBMITTED"}
     backend._tasks["t.2"] = {"uid": "t.2", "state": "SUBMITTED"}
 
@@ -994,3 +994,23 @@ async def test_notification_of_other_session_is_ignored():
     )
     assert backend._tasks["t.1"]["state"] == "RUNNING"
     assert backend._tasks["t.2"]["state"] == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_session_filter_survives_shutdown_state():
+    """The filter uses the sid cached at init: it neither fails open once
+    ``_rh`` is gone nor drops our own completions once the client's sid is
+    cleared on close."""
+    backend = await _init_backend()
+    backend._session_sid = "sid-me"
+    backend._tasks["t.1"] = {"uid": "t.1", "state": "SUBMITTED"}
+
+    backend._mock_rh.sid = None  # client closed
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "RUNNING", "sid": "sid-me"})
+    assert backend._tasks["t.1"]["state"] == "RUNNING"
+
+    backend._rh = None  # backend shutting down
+    backend._handle_notification(
+        "task_status", {"uid": "t.1", "state": "FAILED", "sid": "sid-other"}
+    )
+    assert backend._tasks["t.1"]["state"] == "RUNNING"
