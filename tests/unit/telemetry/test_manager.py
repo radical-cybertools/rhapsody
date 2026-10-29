@@ -62,6 +62,61 @@ class TestEmit:
 
 
 class TestOtelInstruments:
+    async def test_task_metrics_have_no_task_id(self, manager):
+        """Task metrics aggregate across tasks: no per-task series, task_id only on spans."""
+        for tid in ("t1", "t2", "t3"):
+            manager.emit(
+                make_event(
+                    TaskSubmitted, session_id="test-session", backend="concurrent", task_id=tid
+                )
+            )
+            manager.emit(
+                make_event(
+                    TaskCompleted,
+                    session_id="test-session",
+                    backend="concurrent",
+                    task_id=tid,
+                    duration_seconds=0.1,
+                    attributes={"executable": "/bin/true", "task_type": "ComputeTask"},
+                )
+            )
+        await asyncio.sleep(0.1)
+        metrics = manager.read_metrics()
+        for name in ("tasks_submitted", "tasks_completed"):
+            points = [
+                dp
+                for rm in metrics.resource_metrics
+                for sm in rm.scope_metrics
+                for metric in sm.metrics
+                if metric.name == name
+                for dp in metric.data.data_points
+            ]
+            assert len(points) == 1, name
+            assert points[0].value == 3
+            assert "task_id" not in points[0].attributes
+        spans = {s.attributes.get("task_id") for s in manager.read_traces() if s.name == "task"}
+        assert spans == {"t1", "t2", "t3"}
+
+    async def test_stop_drains_a_backlog_slower_than_the_stall_timeout(self, manager, monkeypatch):
+        """Stop() keeps draining while the backlog shrinks instead of dropping events."""
+        monkeypatch.setattr(TelemetryManager, "_DRAIN_STALL_TIMEOUT", 0.05)
+        process = manager._process_event
+
+        def slow_process(event, *args):
+            time.sleep(0.001)
+            process(event, *args)
+
+        monkeypatch.setattr(manager, "_process_event", slow_process)
+        for i in range(300):  # ~0.3 s of processing, several stall timeouts
+            manager.emit(
+                make_event(
+                    TaskSubmitted, session_id="test-session", backend="concurrent", task_id=f"t{i}"
+                )
+            )
+        await manager.stop()
+        submitted = [e for e in manager._event_log if e.event_type == "TaskSubmitted"]
+        assert len(submitted) == 300
+
     async def test_task_submitted_counter(self, manager):
         manager.emit(
             make_event(TaskSubmitted, session_id="test-session", backend="concurrent", task_id="t1")

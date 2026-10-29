@@ -172,6 +172,13 @@ class TestMakeEvent:
         }
         assert len(ids) == 1000
 
+    def test_event_id_format(self):
+        """32 lowercase hex chars (128 random bits), the uuid4().hex format."""
+        import re
+
+        e = make_event(TaskSubmitted, session_id="s", backend="b", task_id="t1")
+        assert re.fullmatch(r"[0-9a-f]{32}", e.event_id)
+
     def test_immutable_fan_out(self):
         e = make_event(
             TaskCompleted, session_id="s", backend="b", task_id="t1", duration_seconds=1.0

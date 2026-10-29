@@ -13,14 +13,15 @@ TaskQueued is optional. TaskStarted is the authoritative "execution began" event
 from __future__ import annotations
 
 import dataclasses
+import os
 import time
-import uuid
 from dataclasses import dataclass
 from dataclasses import field
 
 
 def _new_event_id() -> str:
-    return uuid.uuid4().hex
+    # 128 random bits as 32 hex chars: the uuid4().hex format, without building a UUID object.
+    return os.urandom(16).hex()
 
 
 def _now_wall() -> float:
@@ -32,7 +33,7 @@ class BaseEvent:
     """Base class for all RHAPSODY telemetry events.
 
     Attributes:
-        event_id:   Unique event identifier (uuid4 hex, no hyphens).
+        event_id:   Unique event identifier (128-bit random hex, 32 chars).
         event_type: Discriminator string matching the subclass name.
         event_time: Wall-clock time when the event actually occurred (from task
                     history where available; otherwise time of emission).

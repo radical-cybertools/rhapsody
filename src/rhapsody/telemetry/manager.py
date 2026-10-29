@@ -107,6 +107,9 @@ class TelemetryManager:
         print(telemetry.task_spans())
     """
 
+    # stop() keeps draining while the event backlog shrinks within this many seconds.
+    _DRAIN_STALL_TIMEOUT = 5.0
+
     def __init__(
         self,
         session_id: str,
@@ -290,10 +293,21 @@ class TelemetryManager:
         self._running = False
         # Drain all in-flight events before signalling the dispatch loop to exit.
         # emit() is now a no-op (guard on _running), so no new events can arrive.
-        try:
-            await asyncio.wait_for(self._queue.join(), timeout=5.0)
-        except asyncio.TimeoutError:
-            logger.warning("Telemetry queue did not drain cleanly within timeout")
+        # Keep waiting while the backlog shrinks; give up only when it stalls, so a
+        # large backlog is processed instead of silently dropped.
+        backlog = None
+        while True:
+            try:
+                await asyncio.wait_for(self._queue.join(), timeout=self._DRAIN_STALL_TIMEOUT)
+                break
+            except asyncio.TimeoutError:
+                remaining = self._queue.qsize()
+                if backlog is not None and remaining >= backlog:
+                    logger.warning(
+                        "Telemetry queue stalled with %d events left; dropping them", remaining
+                    )
+                    break
+                backlog = remaining
         self._queue.put_nowait(_STOP_SENTINEL)
 
         for adapter in self._adapters:
@@ -1127,24 +1141,21 @@ class TelemetryManager:
                 self._active_spans[event.task_id] = self._tracer.start_span("task", attributes=a)
 
         elif etype == "TaskSubmitted":
-            self._c_submitted.add(1, {**attrs, "task_id": event.task_id})
+            self._c_submitted.add(1, attrs)
 
         elif etype == "TaskStarted":
             executable = event.attributes.get("executable", "")
             task_type = event.attributes.get("task_type", "")
-            a = {
-                **attrs,
-                "task_id": event.task_id,
-                "executable": executable,
-                "task_type": task_type,
-            }
+            # Metric attributes stay bounded (no task_id): per-task identity is on the span.
+            a = {**attrs, "executable": executable, "task_type": task_type}
+            a_task = {**a, "task_id": event.task_id}
             self._c_started.add(1, a)
             self._g_running.add(1, a)
             if event.task_id not in self._active_spans:
                 # Fallback: TaskCreated was never seen (incomplete lifecycle).
                 # Use a_span copy so metric attributes (a) are not polluted with
                 # workflow_id or other span-only extractor fields.
-                a_span = dict(a)
+                a_span = dict(a_task)
                 for extractor in self._span_attribute_extractors:
                     try:
                         a_span.update(extractor(event))
@@ -1167,19 +1178,16 @@ class TelemetryManager:
         elif etype == "TaskCompleted":
             executable = event.attributes.get("executable", "")
             task_type = event.attributes.get("task_type", "")
-            a = {
-                **attrs,
-                "task_id": event.task_id,
-                "executable": executable,
-                "task_type": task_type,
-            }
+            # Metric attributes stay bounded (no task_id): per-task identity is on the span.
+            a = {**attrs, "executable": executable, "task_type": task_type}
+            a_task = {**a, "task_id": event.task_id}
             self._c_completed.add(1, a)
             self._h_duration.record(event.duration_seconds, a)
             span = self._active_spans.pop(event.task_id, None)
             if span is not None:
                 self._g_running.add(-1, a)
             else:
-                span = self._tracer.start_span("task", attributes=a)
+                span = self._tracer.start_span("task", attributes=a_task)
             span.set_attribute("status", "completed")
             span.set_attribute("executable", executable)
             span.set_attribute("task_type", task_type)
@@ -1193,19 +1201,16 @@ class TelemetryManager:
             executable = event.attributes.get("executable", "")
             task_type = event.attributes.get("task_type", "")
             error_type = event.attributes.get("error_type", event.error_type)
-            a = {
-                **attrs,
-                "task_id": event.task_id,
-                "executable": executable,
-                "task_type": task_type,
-            }
+            # Metric attributes stay bounded (no task_id): per-task identity is on the span.
+            a = {**attrs, "executable": executable, "task_type": task_type}
+            a_task = {**a, "task_id": event.task_id}
             self._c_failed.add(1, a)
             self._h_duration.record(event.duration_seconds, a)
             span = self._active_spans.pop(event.task_id, None)
             if span is not None:
                 self._g_running.add(-1, a)
             else:
-                span = self._tracer.start_span("task", attributes=a)
+                span = self._tracer.start_span("task", attributes=a_task)
             span.set_attribute("status", "failed")
             span.set_attribute("error_type", error_type)
             span.set_attribute("executable", executable)
@@ -1219,19 +1224,16 @@ class TelemetryManager:
         elif etype == "TaskCanceled":
             executable = event.attributes.get("executable", "")
             task_type = event.attributes.get("task_type", "")
-            a = {
-                **attrs,
-                "task_id": event.task_id,
-                "executable": executable,
-                "task_type": task_type,
-            }
+            # Metric attributes stay bounded (no task_id): per-task identity is on the span.
+            a = {**attrs, "executable": executable, "task_type": task_type}
+            a_task = {**a, "task_id": event.task_id}
             self._c_canceled.add(1, a)
             self._h_duration.record(event.duration_seconds, a)
             span = self._active_spans.pop(event.task_id, None)
             if span is not None:
                 self._g_running.add(-1, a)
             else:
-                span = self._tracer.start_span("task", attributes=a)
+                span = self._tracer.start_span("task", attributes=a_task)
             span.set_attribute("status", "canceled")
             span.set_attribute("executable", executable)
             span.set_attribute("task_type", task_type)

@@ -10,7 +10,7 @@ All telemetry originates as **frozen Python dataclasses** (`BaseEvent` subclasse
 
 - **Immutable** — safe for zero-copy fan-out to multiple subscribers.
 - **Timestamped** — every event carries two wall-clock times: `event_time` (when it occurred in the task's history) and `emit_time` (when it entered the event bus). Their difference is the queue latency.
-- **Identified** — every event carries a unique `event_id` (UUID4 hex), a `session_id`, and a `backend` name.
+- **Identified** — every event carries a unique `event_id` (128-bit random hex, 32 chars), a `session_id`, and a `backend` name.
 - **OTel-enriched** in the JSONL file — the serializer adds `trace_id` and `span_id` fields that link the event to the correct OTel span.
 
 ---
@@ -19,7 +19,7 @@ All telemetry originates as **frozen Python dataclasses** (`BaseEvent` subclasse
 
 | Field | Type | Description |
 |---|---|---|
-| `event_id` | `str` | UUID4 hex, unique per event |
+| `event_id` | `str` | 128-bit random hex (32 chars), unique per event |
 | `event_type` | `str` | Discriminator string (matches the class name) |
 | `event_time` | `float` | Wall-clock time the event occurred (`time.time()`) |
 | `emit_time` | `float` | Wall-clock time of queue insertion (`time.time()`) |
@@ -391,7 +391,7 @@ The `TelemetryManager` registers the following instruments on a `rhapsody` meter
 | `node_memory_utilization` | UpDownCounter | % | Current memory % per node |
 | `node_gpu_utilization` | UpDownCounter | % | Current GPU % per node |
 
-All instruments carry `session_id` and `backend` as label dimensions. Task instruments additionally carry `task_id`, `executable`, and `task_type`.
+All instruments carry `session_id` and `backend` as label dimensions. Task instruments additionally carry `executable` and `task_type`. They do not carry `task_id`: one series per task would grow without bound. Per-task identity is on the task spans.
 
 ---
 

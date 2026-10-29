@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- **Telemetry dropped events on `stop()` and grew per task** — `stop()` gave
+  the event backlog a fixed 5 s to drain and then dropped the rest silently: a
+  100k-task session lost 59% of its task events. It now keeps draining while
+  the backlog shrinks and warns only if it stalls. Task metrics (`tasks_*`,
+  `task_duration_seconds`) no longer carry `task_id` as an attribute, which
+  opened a new metric series for every task (unbounded memory, and the most
+  expensive part of per-event processing); per-task identity stays on the task
+  spans. Event ids are 128-bit random hex without building a `UUID` object
+  (same 32-char format). Together: about 30% less telemetry cost per task and
+  per dependent step.
+
 - **Dragon process/job exit codes reported like the other backends** — a
   non-zero exit code from a `process()`/`job()` task (executables, and functions
   run via `process_template`/`process_templates`) no longer becomes a
