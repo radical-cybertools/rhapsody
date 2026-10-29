@@ -167,9 +167,10 @@ class TelemetryManager:
         # Wall-clock time recorded when RUNNING is first seen for each task.
         self._task_start_times: dict[str, float] = {}
 
-        # Tasks counted in tasks_running (TaskStarted seen, no terminal event yet):
-        # a task that ends before RUNNING must not decrement the shared series.
-        self._running_tasks: set[str] = set()
+        # Tasks counted in tasks_running (TaskStarted seen, no terminal event yet), with
+        # the metric attributes of their +1: a task that ends before RUNNING must not
+        # decrement the shared series, and the -1 must hit the series the +1 went to.
+        self._running_tasks: dict[str, dict] = {}
 
         # Temporary span context store: task_id → SpanContext, populated in
         # _process_event() on TaskCompleted/Failed, consumed in _span_ids_for_event().
@@ -306,6 +307,8 @@ class TelemetryManager:
                 break
             except asyncio.TimeoutError:
                 remaining = self._queue.qsize()
+                if self._dispatch_task.done():
+                    break  # reported below
                 if backlog is not None and remaining >= backlog:
                     logger.warning(
                         "Telemetry queue stalled with %d events left; not waiting further",
@@ -1152,7 +1155,14 @@ class TelemetryManager:
                 self._active_spans[event.task_id] = self._tracer.start_span("task", attributes=a)
 
         elif etype == "TaskSubmitted":
-            self._c_submitted.add(1, attrs)
+            self._c_submitted.add(
+                1,
+                {
+                    **attrs,
+                    "executable": event.attributes.get("executable", ""),
+                    "task_type": event.attributes.get("task_type", ""),
+                },
+            )
 
         elif etype == "TaskStarted":
             executable = event.attributes.get("executable", "")
@@ -1160,7 +1170,7 @@ class TelemetryManager:
             # Metric attributes stay bounded (no task_id): per-task identity is on the span.
             a = {**attrs, "executable": executable, "task_type": task_type}
             if event.task_id not in self._running_tasks:
-                self._running_tasks.add(event.task_id)
+                self._running_tasks[event.task_id] = a
                 self._c_started.add(1, a)
                 self._g_running.add(1, a)
             if event.task_id not in self._active_spans:
@@ -1194,9 +1204,9 @@ class TelemetryManager:
             a = {**attrs, "executable": executable, "task_type": task_type}
             self._c_completed.add(1, a)
             self._h_duration.record(event.duration_seconds, a)
-            if event.task_id in self._running_tasks:
-                self._running_tasks.discard(event.task_id)
-                self._g_running.add(-1, a)
+            running_attrs = self._running_tasks.pop(event.task_id, None)
+            if running_attrs is not None:
+                self._g_running.add(-1, running_attrs)
             span = self._active_spans.pop(event.task_id, None)
             if span is None:
                 span = self._tracer.start_span("task", attributes={**a, "task_id": event.task_id})
@@ -1217,9 +1227,9 @@ class TelemetryManager:
             a = {**attrs, "executable": executable, "task_type": task_type}
             self._c_failed.add(1, a)
             self._h_duration.record(event.duration_seconds, a)
-            if event.task_id in self._running_tasks:
-                self._running_tasks.discard(event.task_id)
-                self._g_running.add(-1, a)
+            running_attrs = self._running_tasks.pop(event.task_id, None)
+            if running_attrs is not None:
+                self._g_running.add(-1, running_attrs)
             span = self._active_spans.pop(event.task_id, None)
             if span is None:
                 span = self._tracer.start_span("task", attributes={**a, "task_id": event.task_id})
@@ -1240,9 +1250,9 @@ class TelemetryManager:
             a = {**attrs, "executable": executable, "task_type": task_type}
             self._c_canceled.add(1, a)
             self._h_duration.record(event.duration_seconds, a)
-            if event.task_id in self._running_tasks:
-                self._running_tasks.discard(event.task_id)
-                self._g_running.add(-1, a)
+            running_attrs = self._running_tasks.pop(event.task_id, None)
+            if running_attrs is not None:
+                self._g_running.add(-1, running_attrs)
             span = self._active_spans.pop(event.task_id, None)
             if span is None:
                 span = self._tracer.start_span("task", attributes={**a, "task_id": event.task_id})

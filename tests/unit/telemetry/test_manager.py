@@ -124,12 +124,12 @@ class TestOtelInstruments:
             await manager.stop()
         submitted = [e for e in manager._event_log if e.event_type == "TaskSubmitted"]
         assert len(submitted) == n
-        assert not [r for r in caplog.records if r.levelname == "WARNING"]
-        assert any("draining" in r.getMessage() for r in caplog.records)
+        own = [r for r in caplog.records if r.name == "rhapsody.telemetry.manager"]
+        assert not [r for r in own if r.levelname == "WARNING"]
+        assert any("draining" in r.getMessage() for r in own)
 
     async def test_stop_does_not_wait_for_a_dead_dispatch_loop(self, manager, monkeypatch, caplog):
         """With the dispatch task gone, stop() does not wait and warns about the backlog."""
-        monkeypatch.setattr(TelemetryManager, "_DRAIN_STALL_TIMEOUT", 0.05)
         manager._dispatch_task.cancel()
         await asyncio.sleep(0)
         for i in range(10):
@@ -141,7 +141,7 @@ class TestOtelInstruments:
         t0 = time.perf_counter()
         with caplog.at_level("WARNING", logger="rhapsody.telemetry.manager"):
             await manager.stop()
-        assert time.perf_counter() - t0 < 0.05
+        assert time.perf_counter() - t0 < 2.0  # one stall window would be 5 s
         assert any("not processed" in r.getMessage() for r in caplog.records)
 
     async def test_tasks_running_ignores_tasks_ended_before_start(self, manager):
@@ -151,10 +151,30 @@ class TestOtelInstruments:
         manager.emit(make_event(TaskCanceled, task_id="c1", duration_seconds=0.0, **base))
         manager.emit(make_event(TaskStarted, task_id="r1", **base))
         manager.emit(make_event(TaskStarted, task_id="r1", **base))  # duplicate report
+        # a task whose labels differ between start and end still returns to zero
+        manager.emit(make_event(TaskStarted, task_id="r2", attributes={"executable": "a"}, **base))
+        manager.emit(
+            make_event(
+                TaskCompleted,
+                task_id="r2",
+                duration_seconds=0.1,
+                attributes={"executable": "b"},
+                **base,
+            )
+        )
         await asyncio.sleep(0.1)
         metrics = manager.read_metrics()
         assert _sum_counter(metrics, "tasks_running") == 1
-        assert _sum_counter(metrics, "tasks_started") == 1
+        assert _sum_counter(metrics, "tasks_started") == 2
+        running = [
+            dp.value
+            for rm in metrics.resource_metrics
+            for sm in rm.scope_metrics
+            for metric in sm.metrics
+            if metric.name == "tasks_running"
+            for dp in metric.data.data_points
+        ]
+        assert min(running) >= 0, running
 
     async def test_task_submitted_counter(self, manager):
         manager.emit(
