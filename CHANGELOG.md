@@ -15,6 +15,19 @@
   same `call_soon_threadsafe` path; a task already reported by `cancel_task()`
   is still reported only once.
 
+### Added
+
+- **`OrbitDataBackend`** — the data-infrastructure counterpart of
+  `OrbitExecutionBackend`: starts a data backend (`redis`, `dragon`, ...) inside
+  the remote rhapsody session of an `OrbitExecutionBackend`, so the store runs on
+  the endpoint next to (and for Dragon in the same runtime as) the session's
+  tasks; `endpoints` returns the remote descriptors. Only the lifecycle crosses
+  ORBIT; local data backends are unchanged. Needs the radical.orbit
+  `data_start`/`data_endpoints`/`data_shutdown` routes.
+- **`DataBackendRegistry` / `get_data_backend(name, ...)`** — data backends by
+  name (`redis`, `dragon`), discovered from `rhapsody.backends.data` plus the
+  `rhapsody.data_backends` entry-point group for external packages.
+
 ## [0.6.0] 2026-10-19
 
 ### Fixed
