@@ -20,6 +20,9 @@
 - **Dragon pin raised to `dragonhpc==0.15.0`** in the `dragon` extra (was
   `==0.14.1`). radex needs `DDict.wait_for_keys()` (first in 0.14.2), and 0.15.0
   supports co-located attach to a running Dragon runtime, which 0.14.1 lacks.
+  Dragon start-up and teardown are noticeably slower on 0.15.0 (35-60% longer
+  Dragon test suites on Perlmutter). The `backends`/`all` extras now resolve
+  `dragonhpc[ai]` at 0.15.0, whose vLLM range is `>=0.11,<0.20`.
 
 ## [0.6.0] 2026-10-19
 
