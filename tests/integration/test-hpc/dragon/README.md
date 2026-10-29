@@ -21,8 +21,8 @@ tests/integration/test-hpc/
 
 | Requirement | Details |
 |-------------|---------|
-| Python | 3.10 – 3.12 (Dragon constraint) |
-| DragonHPC | 0.14.0+ installed in the active environment |
+| Python | 3.11 – 3.13 (Dragon constraint) |
+| DragonHPC | 0.15.0 (the version pinned by the `dragon` extra) |
 | RHAPSODY | installed from source (`pip install -e .`) |
 | mpi4py | required only for MPI tests (`pip install mpi4py`) |
 | Active allocation | Dragon global services must be running (`dragon` launcher) |
@@ -66,6 +66,10 @@ salloc -N 4 --gpus-per-node=4 -t 01:00:00
 ### Step 3 — run the tests
 
 ```bash
+# Dragon's worker processes import hpc_workers by name, so the suite
+# directory must be on PYTHONPATH (pytest's own sys.path does not reach them)
+export PYTHONPATH=$PWD/tests/integration/test-hpc/dragon${PYTHONPATH:+:$PYTHONPATH}
+
 # All standard tests (scale excluded by default)
 RHAPSODY_HPC=1 dragon python3 -m pytest tests/integration/test-hpc/dragon/ -v
 
@@ -93,7 +97,7 @@ RHAPSODY_HPC=1 dragon python3 -m pytest tests/integration/test-hpc/dragon/test_m
 dragon/
 ├── conftest.py            # topology detection, shared fixtures, auto-skip logic
 ├── hpc_workers.py         # worker functions importable by Dragon remote processes
-├── pytest.ini             # asyncio mode, marker registration, pythonpath = .
+├── pytest.ini             # asyncio mode, marker registration
 ├── test_multinode_gpu.py  # Category 1 — multi-node, multi-GPU execution
 ├── test_singlenode_gpu.py # Category 2 — single-node, single-GPU execution
 ├── test_pinning.py        # Category 3 — task pinning and GPU affinity
@@ -139,8 +143,9 @@ Dragon serialises Python functions by **module reference**
 deserialises the function, it imports `hpc_workers` by name. Functions defined
 directly in test files (e.g. `test_scale.py`) would require `test_scale` to be
 importable on every worker node, which fails on multi-node clusters where the
-test directory is not on `sys.path`. `pytest.ini` sets `pythonpath = .` so
-`hpc_workers.py` (in the same directory) is always importable.
+test directory is not on `sys.path`. The worker processes only see the
+environment, so `PYTHONPATH` must include this directory (step 3); without it
+every function task fails with `No module named 'hpc_workers'`.
 
 ### Pinning tests use executables, not Python functions
 
