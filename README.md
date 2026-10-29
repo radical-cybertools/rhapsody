@@ -70,7 +70,7 @@ pip install rhapsody-py
 
 # With specific backends
 pip install rhapsody-py[dask]           # Dask distributed computing
-pip install rhapsody-py[dragon]         # Dragon runtime (Python 3.10-3.12)
+pip install rhapsody-py[dragon]         # Dragon runtime (Python 3.11-3.13)
 
 # Development
 pip install rhapsody-py[dev]

@@ -21,8 +21,8 @@ tests/integration/test-hpc/
 
 | Requirement | Details |
 |-------------|---------|
-| Python | 3.10 – 3.12 (Dragon constraint) |
-| DragonHPC | 0.14.0+ installed in the active environment |
+| Python | 3.11 – 3.13 (Dragon constraint) |
+| DragonHPC | 0.15.0 (the version pinned by the `dragon` extra) |
 | RHAPSODY | installed from source (`pip install -e .`) |
 | mpi4py | required only for MPI tests (`pip install mpi4py`) |
 | Active allocation | Dragon global services must be running (`dragon` launcher) |
