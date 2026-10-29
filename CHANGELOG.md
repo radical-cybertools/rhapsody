@@ -2,18 +2,25 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Task metrics no longer carry `task_id`** — `tasks_*` and
+  `task_duration_seconds` aggregate per (session, backend, executable,
+  task_type). The `task_id` attribute opened a new metric series for every task:
+  memory grew with the task count, and it was the most expensive part of
+  per-event processing. Per-task identity stays on the task spans; dashboards
+  that grouped these metrics by `task_id` need to use the spans. Event ids are
+  128-bit random hex without building a `UUID` object (same 32-char format).
+  Together about 30% less telemetry cost per task and per dependent step.
+
 ### Fixed
 
-- **Telemetry dropped events on `stop()` and grew per task** — `stop()` gave
-  the event backlog a fixed 5 s to drain and then dropped the rest silently: a
-  100k-task session lost 59% of its task events. It now keeps draining while
-  the backlog shrinks and warns only if it stalls. Task metrics (`tasks_*`,
-  `task_duration_seconds`) no longer carry `task_id` as an attribute, which
-  opened a new metric series for every task (unbounded memory, and the most
-  expensive part of per-event processing); per-task identity stays on the task
-  spans. Event ids are 128-bit random hex without building a `UUID` object
-  (same 32-char format). Together: about 30% less telemetry cost per task and
-  per dependent step.
+- **Telemetry dropped events on `stop()`** — `stop()` gave the event backlog a
+  fixed 5 s to drain and then dropped the rest silently: a 100k-task session
+  lost 59% of its task events. It now keeps draining while the backlog shrinks
+  (logging progress), gives up only on a stall or a dead dispatch loop, and
+  warns then. `tasks_running` no longer counts down tasks that ended before
+  RUNNING.
 
 - **Dragon process/job exit codes reported like the other backends** — a
   non-zero exit code from a `process()`/`job()` task (executables, and functions

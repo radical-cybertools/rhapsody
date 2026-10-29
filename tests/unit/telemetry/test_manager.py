@@ -97,25 +97,60 @@ class TestOtelInstruments:
         spans = {s.attributes.get("task_id") for s in manager.read_traces() if s.name == "task"}
         assert spans == {"t1", "t2", "t3"}
 
-    async def test_stop_drains_a_backlog_slower_than_the_stall_timeout(self, manager, monkeypatch):
-        """Stop() keeps draining while the backlog shrinks instead of dropping events."""
+    async def test_stop_drains_a_backlog_slower_than_the_stall_timeout(
+        self, manager, monkeypatch, caplog
+    ):
+        """Stop() keeps draining while the backlog shrinks instead of dropping events.
+
+        1500 events take three 500-event dispatch batches of ~0.15 s each; the loop yields between
+        batches, so several 0.05 s stall windows expire while progress continues.
+        """
         monkeypatch.setattr(TelemetryManager, "_DRAIN_STALL_TIMEOUT", 0.05)
         process = manager._process_event
 
         def slow_process(event, *args):
-            time.sleep(0.001)
+            time.sleep(0.0003)
             process(event, *args)
 
         monkeypatch.setattr(manager, "_process_event", slow_process)
-        for i in range(300):  # ~0.3 s of processing, several stall timeouts
+        n = 1500
+        for i in range(n):
             manager.emit(
                 make_event(
                     TaskSubmitted, session_id="test-session", backend="concurrent", task_id=f"t{i}"
                 )
             )
-        await manager.stop()
+        with caplog.at_level("INFO", logger="rhapsody.telemetry.manager"):
+            await manager.stop()
         submitted = [e for e in manager._event_log if e.event_type == "TaskSubmitted"]
-        assert len(submitted) == 300
+        assert len(submitted) == n
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("draining" in r.getMessage() for r in caplog.records)
+
+    async def test_stop_does_not_wait_for_a_dead_dispatch_loop(self, manager, monkeypatch):
+        """With the dispatch task gone, stop() drops the backlog after one stall window."""
+        monkeypatch.setattr(TelemetryManager, "_DRAIN_STALL_TIMEOUT", 0.05)
+        manager._dispatch_task.cancel()
+        await asyncio.sleep(0)
+        for i in range(10):
+            manager.emit(
+                make_event(
+                    TaskSubmitted, session_id="test-session", backend="concurrent", task_id=f"t{i}"
+                )
+            )
+        t0 = time.perf_counter()
+        await manager.stop()
+        assert time.perf_counter() - t0 < 1.0
+
+    async def test_tasks_running_ignores_tasks_ended_before_start(self, manager):
+        """A task created and canceled before RUNNING must not decrement tasks_running."""
+        base = {"session_id": "test-session", "backend": "concurrent"}
+        manager.emit(make_event(TaskCreated, task_id="c1", **base))
+        manager.emit(make_event(TaskCanceled, task_id="c1", duration_seconds=0.0, **base))
+        manager.emit(make_event(TaskStarted, task_id="r1", **base))
+        manager.emit(make_event(TaskStarted, task_id="r1", **base))  # duplicate report
+        await asyncio.sleep(0.1)
+        assert _sum_counter(manager.read_metrics(), "tasks_running") == 1
 
     async def test_task_submitted_counter(self, manager):
         manager.emit(
