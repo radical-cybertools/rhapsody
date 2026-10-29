@@ -173,11 +173,16 @@ class TestMakeEvent:
         assert len(ids) == 1000
 
     def test_event_id_format(self):
-        """32 lowercase hex chars (128 random bits), the uuid4().hex format."""
+        """uuid4().hex: 32 lowercase hex chars that parse as a version-4 RFC 4122 UUID."""
         import re
+        import uuid
 
-        e = make_event(TaskSubmitted, session_id="s", backend="b", task_id="t1")
-        assert re.fullmatch(r"[0-9a-f]{32}", e.event_id)
+        for _ in range(100):
+            e = make_event(TaskSubmitted, session_id="s", backend="b", task_id="t1")
+            assert re.fullmatch(r"[0-9a-f]{32}", e.event_id)
+            u = uuid.UUID(e.event_id)
+            assert u.version == 4
+            assert u.variant == uuid.RFC_4122
 
     def test_immutable_fan_out(self):
         e = make_event(

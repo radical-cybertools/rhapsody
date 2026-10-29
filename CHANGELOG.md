@@ -10,7 +10,7 @@
   memory grew with the task count, and it was the most expensive part of
   per-event processing. Per-task identity stays on the task spans; dashboards
   that grouped these metrics by `task_id` need to use the spans. Event ids are
-  128-bit random hex without building a `UUID` object (same 32-char format).
+  built without a `UUID` object (still UUID4 hex).
   Together about 30% less telemetry cost per task and per dependent step.
 
 ### Fixed

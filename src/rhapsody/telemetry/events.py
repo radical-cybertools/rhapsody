@@ -20,8 +20,12 @@ from dataclasses import field
 
 
 def _new_event_id() -> str:
-    # 128 random bits as 32 hex chars: the uuid4().hex format, without building a UUID object.
-    return os.urandom(16).hex()
+    # uuid4().hex without building a UUID object: random bytes with the version-4 and
+    # RFC 4122 variant bits set, so the id still parses as a UUID4.
+    b = bytearray(os.urandom(16))
+    b[6] = (b[6] & 0x0F) | 0x40
+    b[8] = (b[8] & 0x3F) | 0x80
+    return b.hex()
 
 
 def _now_wall() -> float:
@@ -33,7 +37,7 @@ class BaseEvent:
     """Base class for all RHAPSODY telemetry events.
 
     Attributes:
-        event_id:   Unique event identifier (128-bit random hex, 32 chars).
+        event_id:   Unique event identifier (uuid4 hex, no hyphens).
         event_type: Discriminator string matching the subclass name.
         event_time: Wall-clock time when the event actually occurred (from task
                     history where available; otherwise time of emission).

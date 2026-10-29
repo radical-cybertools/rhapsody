@@ -300,24 +300,25 @@ class TelemetryManager:
         # Keep waiting while the backlog shrinks; give up only when it stalls, so a
         # large backlog is processed instead of silently dropped.
         backlog = None
-        while True:
+        while self._dispatch_task is not None and not self._dispatch_task.done():
             try:
                 await asyncio.wait_for(self._queue.join(), timeout=self._DRAIN_STALL_TIMEOUT)
                 break
             except asyncio.TimeoutError:
                 remaining = self._queue.qsize()
-                if self._dispatch_task is None or self._dispatch_task.done():
-                    logger.warning(
-                        "Telemetry dispatch loop is not running; dropping %d events", remaining
-                    )
-                    break
                 if backlog is not None and remaining >= backlog:
                     logger.warning(
-                        "Telemetry queue stalled with %d events left; dropping them", remaining
+                        "Telemetry queue stalled with %d events left; not waiting further",
+                        remaining,
                     )
                     break
                 logger.info("Telemetry: draining %d events before shutdown", remaining)
                 backlog = remaining
+        if (self._dispatch_task is None or self._dispatch_task.done()) and self._queue.qsize():
+            logger.warning(
+                "Telemetry dispatch loop is not running; %d events not processed",
+                self._queue.qsize(),
+            )
         self._queue.put_nowait(_STOP_SENTINEL)
 
         for adapter in self._adapters:
@@ -1158,9 +1159,9 @@ class TelemetryManager:
             task_type = event.attributes.get("task_type", "")
             # Metric attributes stay bounded (no task_id): per-task identity is on the span.
             a = {**attrs, "executable": executable, "task_type": task_type}
-            self._c_started.add(1, a)
             if event.task_id not in self._running_tasks:
                 self._running_tasks.add(event.task_id)
+                self._c_started.add(1, a)
                 self._g_running.add(1, a)
             if event.task_id not in self._active_spans:
                 # Fallback: TaskCreated was never seen (incomplete lifecycle).

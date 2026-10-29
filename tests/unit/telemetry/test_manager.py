@@ -127,8 +127,8 @@ class TestOtelInstruments:
         assert not [r for r in caplog.records if r.levelname == "WARNING"]
         assert any("draining" in r.getMessage() for r in caplog.records)
 
-    async def test_stop_does_not_wait_for_a_dead_dispatch_loop(self, manager, monkeypatch):
-        """With the dispatch task gone, stop() drops the backlog after one stall window."""
+    async def test_stop_does_not_wait_for_a_dead_dispatch_loop(self, manager, monkeypatch, caplog):
+        """With the dispatch task gone, stop() does not wait and warns about the backlog."""
         monkeypatch.setattr(TelemetryManager, "_DRAIN_STALL_TIMEOUT", 0.05)
         manager._dispatch_task.cancel()
         await asyncio.sleep(0)
@@ -139,8 +139,10 @@ class TestOtelInstruments:
                 )
             )
         t0 = time.perf_counter()
-        await manager.stop()
-        assert time.perf_counter() - t0 < 1.0
+        with caplog.at_level("WARNING", logger="rhapsody.telemetry.manager"):
+            await manager.stop()
+        assert time.perf_counter() - t0 < 0.05
+        assert any("not processed" in r.getMessage() for r in caplog.records)
 
     async def test_tasks_running_ignores_tasks_ended_before_start(self, manager):
         """A task created and canceled before RUNNING must not decrement tasks_running."""
@@ -150,7 +152,9 @@ class TestOtelInstruments:
         manager.emit(make_event(TaskStarted, task_id="r1", **base))
         manager.emit(make_event(TaskStarted, task_id="r1", **base))  # duplicate report
         await asyncio.sleep(0.1)
-        assert _sum_counter(manager.read_metrics(), "tasks_running") == 1
+        metrics = manager.read_metrics()
+        assert _sum_counter(metrics, "tasks_running") == 1
+        assert _sum_counter(metrics, "tasks_started") == 1
 
     async def test_task_submitted_counter(self, manager):
         manager.emit(
