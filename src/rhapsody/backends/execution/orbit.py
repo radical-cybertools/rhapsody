@@ -241,9 +241,30 @@ class OrbitExecutionBackend(BaseBackend):
         ``self._tasks`` and the task dicts happens single-threaded there, never
         racing loop-side writers (submit / cancel / flush-error).
         """
+        if self._is_foreign(data):
+            return  # another session's: drop before waking the loop
         loop = self._loop
         if loop is not None and not loop.is_closed():
             loop.call_soon_threadsafe(self._handle_notification, topic, data)
+
+    def _is_foreign(self, data) -> bool:
+        """True for a notification stamped with another session's ``sid``.
+
+        A notification without ``sid`` is accepted (older endpoint, or a
+        producer that does not stamp, such as the pool task dispatcher), and
+        so is everything while our own session id is unknown.
+        """
+        sid = data.get("sid") if isinstance(data, dict) else None
+        if sid is None:
+            if not self._warned_no_sid:
+                self._warned_no_sid = True
+                self.logger.warning(
+                    "ORBIT task notifications without a session id (older "
+                    "endpoint, or pool mode): results of other clients with the "
+                    "same task uids cannot be told apart"
+                )
+            return False
+        return self._session_sid is not None and sid != self._session_sid
 
     def _handle_notification(self, topic, data):
         """Dispatch a notification on the event-loop thread.
@@ -253,16 +274,7 @@ class OrbitExecutionBackend(BaseBackend):
         notification stamped with another session's ``sid`` is ignored.  One
         without ``sid`` (older endpoint) is accepted.
         """
-        sid = data.get("sid") if isinstance(data, dict) else None
-        if sid is None:
-            if not self._warned_no_sid:
-                self._warned_no_sid = True
-                self.logger.warning(
-                    "ORBIT endpoint sends task notifications without a session id: "
-                    "results of other clients with the same task uids cannot be "
-                    "told apart"
-                )
-        elif sid != self._session_sid:
+        if self._is_foreign(data):
             return
         if topic == "task_status_batch":
             for t in data.get("tasks", []):
