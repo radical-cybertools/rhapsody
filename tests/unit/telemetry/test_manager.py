@@ -1132,3 +1132,22 @@ def _sum_gauge(metrics_data, name: str) -> float:
                     for dp in metric.data.data_points:
                         total += dp.value
     return total
+
+
+def test_task_executable_label_is_stable_per_callable():
+    """Function labels must not embed per-object addresses (they are metric attributes)."""
+    import functools
+
+    from rhapsody.telemetry.manager import _task_executable
+
+    def work(i):
+        return i
+
+    class Job:
+        def __call__(self):
+            pass
+
+    assert _task_executable({"function": work}) == "work"
+    assert _task_executable({"function": functools.partial(work, 1)}) == "work"
+    assert _task_executable({"function": functools.partial(functools.partial(work), 2)}) == "work"
+    assert _task_executable({"function": Job()}) == "Job"

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import json
 import logging
 import time
@@ -317,7 +318,10 @@ class TelemetryManager:
                     break
                 logger.info("Telemetry: draining %d events before shutdown", remaining)
                 backlog = remaining
-        if (self._dispatch_task is None or self._dispatch_task.done()) and self._queue.qsize():
+        task = self._dispatch_task
+        if task is not None and task.done() and not task.cancelled() and task.exception():
+            logger.error("Telemetry dispatch loop failed", exc_info=task.exception())
+        if (task is None or task.done()) and self._queue.qsize():
             logger.warning(
                 "Telemetry dispatch loop is not running; %d events not processed",
                 self._queue.qsize(),
@@ -1394,10 +1398,13 @@ def _task_executable(task: dict) -> str:
     # ComputeTask stores executable directly
     if "executable" in task:
         return str(task["executable"])
-    # FunctionTask stores func reference
+    # FunctionTask stores func reference. The label must not vary per task (it is a
+    # metric attribute): unwrap partials, and never use str(func), which embeds an address.
     func = task.get("func") or task.get("function")
     if func is not None:
-        return getattr(func, "__name__", str(func))
+        while isinstance(func, functools.partial):
+            func = func.func
+        return getattr(func, "__name__", None) or type(func).__name__
     # AITask or others may have a model field
     model = task.get("model") or task.get("model_name")
     if model:
