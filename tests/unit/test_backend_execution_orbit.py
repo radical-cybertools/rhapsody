@@ -1014,3 +1014,26 @@ async def test_session_filter_survives_shutdown_state():
         "task_status", {"uid": "t.1", "state": "FAILED", "sid": "sid-other"}
     )
     assert backend._tasks["t.1"]["state"] == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_unknown_own_sid_does_not_drop_notifications():
+    """Without a known own session id nothing is filtered (no silent hang)."""
+    backend = await _init_backend()
+    backend._session_sid = None
+    backend._tasks["t.1"] = {"uid": "t.1", "state": "SUBMITTED"}
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "RUNNING", "sid": "s.1"})
+    assert backend._tasks["t.1"]["state"] == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_foreign_notification_dropped_before_loop():
+    """A foreign frame is dropped on the callback thread, not scheduled."""
+    backend = await _init_backend()
+    backend._session_sid = "sid-me"
+    backend._loop = MagicMock()
+    backend._loop.is_closed.return_value = False
+    backend._on_task_notification("e", "rhapsody", "task_status", {"uid": "t.1", "sid": "sid-x"})
+    backend._loop.call_soon_threadsafe.assert_not_called()
+    backend._on_task_notification("e", "rhapsody", "task_status", {"uid": "t.1", "sid": "sid-me"})
+    backend._loop.call_soon_threadsafe.assert_called_once()
