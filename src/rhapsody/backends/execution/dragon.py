@@ -263,22 +263,9 @@ class DragonExecutionBackend(BaseBackend):
                         except Exception as exc:
                             result, raised, tb = exc, True, batch_task.traceback
 
+                        # Exit codes of process/job tasks pass through unchanged;
+                        # _deliver_batch maps them to exit_code and DONE/FAILED.
                         task_reg = self._task_registry.get(uid)
-                        is_native_function = (
-                            task_reg.get("is_native_function", False) if task_reg else False
-                        )
-                        if not is_native_function:
-                            # Dragon returns exit codes as int/list[int] for process/job tasks.
-                            # Normalize non-zero to raised=True so Rhapsody delivers FAILED.
-                            if isinstance(result, int) and result != 0:
-                                result = SystemExit(result)
-                                raised = True
-                            elif isinstance(result, list) and any(
-                                c != 0 for c in result if isinstance(c, int)
-                            ):
-                                result = SystemExit(result)
-                                raised = True
-
                         capture_stdio = (
                             task_reg.get("description", {}).get("capture_stdio")
                             if task_reg
@@ -329,7 +316,17 @@ class DragonExecutionBackend(BaseBackend):
                 task_desc["return_value"] = result
                 task_desc["stdout"] = stdout
                 task_desc["stderr"] = stderr
-                self._callback_func(task_desc, "DONE")
+                state = "DONE"
+                if not task_info.get("is_native_function", False):
+                    # Process/job tasks return exit code(s) as int/list[int]. Report the
+                    # first non-zero one like the other backends; the session then raises
+                    # TaskExecutionError(uid, stderr, exit_code) for FAILED tasks.
+                    codes = result if isinstance(result, list) else [result]
+                    exit_code = next((c for c in codes if isinstance(c, int) and c != 0), 0)
+                    task_desc["exit_code"] = exit_code
+                    if exit_code != 0:
+                        state = "FAILED"
+                self._callback_func(task_desc, state)
 
     def _deliver_cancelled(self, uids: list) -> None:
         """Deliver CANCELED for tasks Dragon cancelled itself (timeout / upstream cancel). Runs on
