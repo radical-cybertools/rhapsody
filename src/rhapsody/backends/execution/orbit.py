@@ -127,6 +127,8 @@ class OrbitExecutionBackend(BaseBackend):
             ) from _radical_orbit_import_error
 
         self.logger = logging.getLogger(__name__)
+        self._session_sid: str | None = None
+        self._warned_no_sid = False
         self._broker_url = broker_url
         self._participant_name = participant_name
         self._endpoint_name = endpoint_name
@@ -208,6 +210,10 @@ class OrbitExecutionBackend(BaseBackend):
         # block up to ``start_timeout + init_timeout`` — all connection and
         # session waiting is paid here, never on the submit path.
         self._rh = await asyncio.to_thread(self._get_rhapsody_handle)
+        # the plugin session's id, cached: the notification filter must not
+        # depend on ``self._rh`` (cleared on shutdown) or its live ``sid``
+        # (cleared on close) while late notifications still arrive
+        self._session_sid = self._rh.sid
 
         # Register persistent notification callback for task completions
         self._rh.register_notification_callback(self._on_task_notification, topic="task_status")
@@ -248,7 +254,15 @@ class OrbitExecutionBackend(BaseBackend):
         without ``sid`` (older endpoint) is accepted.
         """
         sid = data.get("sid") if isinstance(data, dict) else None
-        if sid is not None and self._rh is not None and sid != self._rh.sid:
+        if sid is None:
+            if not self._warned_no_sid:
+                self._warned_no_sid = True
+                self.logger.warning(
+                    "ORBIT endpoint sends task notifications without a session id: "
+                    "results of other clients with the same task uids cannot be "
+                    "told apart"
+                )
+        elif sid != self._session_sid:
             return
         if topic == "task_status_batch":
             for t in data.get("tasks", []):
