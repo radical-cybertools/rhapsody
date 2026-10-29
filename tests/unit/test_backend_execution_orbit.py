@@ -1037,3 +1037,10 @@ async def test_foreign_notification_dropped_before_loop():
     backend._loop.call_soon_threadsafe.assert_not_called()
     backend._on_task_notification("e", "rhapsody", "task_status", {"uid": "t.1", "sid": "sid-me"})
     backend._loop.call_soon_threadsafe.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_init_caches_plugin_session_sid():
+    """The filter's session id is taken from the plugin client at init."""
+    backend = await _init_backend()
+    assert backend._session_sid is backend._mock_rh.sid

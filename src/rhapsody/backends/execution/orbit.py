@@ -214,6 +214,11 @@ class OrbitExecutionBackend(BaseBackend):
         # depend on ``self._rh`` (cleared on shutdown) or its live ``sid``
         # (cleared on close) while late notifications still arrive
         self._session_sid = self._rh.sid
+        if self._session_sid is None:
+            self.logger.warning(
+                "ORBIT plugin session id unknown: task notifications of other "
+                "sessions cannot be filtered"
+            )
 
         # Register persistent notification callback for task completions
         self._rh.register_notification_callback(self._on_task_notification, topic="task_status")
@@ -254,9 +259,12 @@ class OrbitExecutionBackend(BaseBackend):
         producer that does not stamp, such as the pool task dispatcher), and
         so is everything while our own session id is unknown.
         """
-        sid = data.get("sid") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return False
+        sid = data.get("sid")
         if sid is None:
-            if not self._warned_no_sid:
+            # the pool task dispatcher never stamps sid: no warning in pool mode
+            if not self._warned_no_sid and self._pool is None:
                 self._warned_no_sid = True
                 self.logger.warning(
                     "ORBIT task notifications without a session id (older "
