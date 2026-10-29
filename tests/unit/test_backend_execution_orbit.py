@@ -967,3 +967,30 @@ async def test_pool_mode_compat_resolves_executing_endpoint():
 
     backend._mock_rt.get_plugin.assert_called_once_with("compute_ep", "sysinfo")
     assert backend._endpoint_python_mm == (mm.major, mm.minor)
+
+
+@pytest.mark.asyncio
+async def test_notification_of_other_session_is_ignored():
+    """Task notifications are broadcast to every client of the plugin and
+    uids are per-client counters: only this session's (or sid-less) ones
+    may update our tasks."""
+    backend = await _init_backend()
+    backend._mock_rh.sid = "sid-me"
+    backend._tasks["t.1"] = {"uid": "t.1", "state": "SUBMITTED"}
+    backend._tasks["t.2"] = {"uid": "t.2", "state": "SUBMITTED"}
+
+    backend._handle_notification(
+        "task_status", {"uid": "t.1", "state": "RUNNING", "sid": "sid-other"}
+    )
+    backend._handle_notification(
+        "task_status_batch", {"sid": "sid-other", "tasks": [{"uid": "t.2", "state": "RUNNING"}]}
+    )
+    assert backend._tasks["t.1"]["state"] == "SUBMITTED"
+    assert backend._tasks["t.2"]["state"] == "SUBMITTED"
+
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "RUNNING", "sid": "sid-me"})
+    backend._handle_notification(  # older endpoint: no sid
+        "task_status_batch", {"tasks": [{"uid": "t.2", "state": "RUNNING"}]}
+    )
+    assert backend._tasks["t.1"]["state"] == "RUNNING"
+    assert backend._tasks["t.2"]["state"] == "RUNNING"

@@ -240,7 +240,16 @@ class OrbitExecutionBackend(BaseBackend):
             loop.call_soon_threadsafe(self._handle_notification, topic, data)
 
     def _handle_notification(self, topic, data):
-        """Dispatch a notification on the event-loop thread."""
+        """Dispatch a notification on the event-loop thread.
+
+        Task notifications are broadcast to every client of the endpoint's
+        rhapsody plugin, and task uids are only unique per client, so a
+        notification stamped with another session's ``sid`` is ignored.  One
+        without ``sid`` (older endpoint) is accepted.
+        """
+        sid = data.get("sid") if isinstance(data, dict) else None
+        if sid is not None and self._rh is not None and sid != self._rh.sid:
+            return
         if topic == "task_status_batch":
             for t in data.get("tasks", []):
                 self._apply_task_update(t)
