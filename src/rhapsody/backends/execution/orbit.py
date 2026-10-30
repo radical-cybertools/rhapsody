@@ -276,9 +276,9 @@ class OrbitExecutionBackend(BaseBackend):
         return own is not None and str(sid) != str(own)
 
     def _own_sid(self):
-        """This backend's plugin session id: the client's live one (it changes
-        if the client re-registers), else the one cached at init (the client
-        clears it on close, and ``_rh`` is gone after shutdown)."""
+        """This backend's plugin session id: the client's live one (it changes if the client re-
+        registers), else the one cached at init (the client clears it on close, and ``_rh`` is gone
+        after shutdown)."""
         rh = self._rh
         live = rh.sid if rh is not None else None
         return live or self._session_sid
