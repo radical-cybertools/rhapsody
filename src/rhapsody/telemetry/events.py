@@ -13,14 +13,19 @@ TaskQueued is optional. TaskStarted is the authoritative "execution began" event
 from __future__ import annotations
 
 import dataclasses
+import os
 import time
-import uuid
 from dataclasses import dataclass
 from dataclasses import field
 
 
 def _new_event_id() -> str:
-    return uuid.uuid4().hex
+    # uuid4().hex without building a UUID object: random bytes with the version-4 and
+    # RFC 4122 variant bits set, so the id still parses as a UUID4.
+    b = bytearray(os.urandom(16))
+    b[6] = (b[6] & 0x0F) | 0x40
+    b[8] = (b[8] & 0x3F) | 0x80
+    return b.hex()
 
 
 def _now_wall() -> float:
