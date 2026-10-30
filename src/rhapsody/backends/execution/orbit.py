@@ -127,6 +127,8 @@ class OrbitExecutionBackend(BaseBackend):
             ) from _radical_orbit_import_error
 
         self.logger = logging.getLogger(__name__)
+        self._session_sid: str | None = None
+        self._warned_no_sid = False
         self._broker_url = broker_url
         self._participant_name = participant_name
         self._endpoint_name = endpoint_name
@@ -208,6 +210,15 @@ class OrbitExecutionBackend(BaseBackend):
         # block up to ``start_timeout + init_timeout`` — all connection and
         # session waiting is paid here, never on the submit path.
         self._rh = await asyncio.to_thread(self._get_rhapsody_handle)
+        # the plugin session's id, cached: the notification filter must not
+        # depend on ``self._rh`` (cleared on shutdown) or its live ``sid``
+        # (cleared on close) while late notifications still arrive
+        self._session_sid = self._rh.sid
+        if self._session_sid is None:
+            self.logger.warning(
+                "ORBIT plugin session id unknown: task notifications of other "
+                "sessions cannot be filtered"
+            )
 
         # Register persistent notification callback for task completions
         self._rh.register_notification_callback(self._on_task_notification, topic="task_status")
@@ -235,12 +246,53 @@ class OrbitExecutionBackend(BaseBackend):
         ``self._tasks`` and the task dicts happens single-threaded there, never
         racing loop-side writers (submit / cancel / flush-error).
         """
+        if self._is_foreign(data):
+            return  # another session's: drop before waking the loop
         loop = self._loop
         if loop is not None and not loop.is_closed():
             loop.call_soon_threadsafe(self._handle_notification, topic, data)
 
+    def _is_foreign(self, data) -> bool:
+        """True for a notification stamped with another session's ``sid``.
+
+        A notification without ``sid`` is accepted (older endpoint, or a
+        producer that does not stamp, such as the pool task dispatcher), and
+        so is everything while our own session id is unknown.
+        """
+        if not isinstance(data, dict):
+            return False
+        sid = data.get("sid")
+        if not sid:
+            # the pool task dispatcher never stamps sid: no warning in pool mode
+            if not self._warned_no_sid and self._pool is None:
+                self._warned_no_sid = True
+                self.logger.warning(
+                    "ORBIT task notifications without a session id (older "
+                    "endpoint, or pool mode): results of other clients with the "
+                    "same task uids cannot be told apart"
+                )
+            return False
+        own = self._own_sids()
+        return bool(own) and str(sid) not in own
+
+    def _own_sids(self) -> set:
+        """The plugin session ids that count as ours: the one cached at init
+        (completions of tasks submitted under it may still arrive) and the
+        client's live one (it changes if the client re-registers)."""
+        rh = self._rh
+        sids = {self._session_sid, rh.sid if rh is not None else None}
+        return {str(x) for x in sids if x}
+
     def _handle_notification(self, topic, data):
-        """Dispatch a notification on the event-loop thread."""
+        """Dispatch a notification on the event-loop thread.
+
+        Task notifications are broadcast to every client of the endpoint's
+        rhapsody plugin, and task uids are only unique per client, so a
+        notification stamped with another session's ``sid`` is ignored.  One
+        without ``sid`` (older endpoint) is accepted.
+        """
+        if self._is_foreign(data):
+            return
         if topic == "task_status_batch":
             for t in data.get("tasks", []):
                 self._apply_task_update(t)
