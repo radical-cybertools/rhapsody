@@ -272,16 +272,16 @@ class OrbitExecutionBackend(BaseBackend):
                     "same task uids cannot be told apart"
                 )
             return False
-        own = self._own_sid()
-        return own is not None and str(sid) != str(own)
+        own = self._own_sids()
+        return bool(own) and str(sid) not in own
 
-    def _own_sid(self):
-        """This backend's plugin session id: the client's live one (it changes if the client re-
-        registers), else the one cached at init (the client clears it on close, and ``_rh`` is gone
-        after shutdown)."""
+    def _own_sids(self) -> set:
+        """The plugin session ids that count as ours: the one cached at init
+        (completions of tasks submitted under it may still arrive) and the
+        client's live one (it changes if the client re-registers)."""
         rh = self._rh
-        live = rh.sid if rh is not None else None
-        return live or self._session_sid
+        sids = {self._session_sid, rh.sid if rh is not None else None}
+        return {str(x) for x in sids if x}
 
     def _handle_notification(self, topic, data):
         """Dispatch a notification on the event-loop thread.
