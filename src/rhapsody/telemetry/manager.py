@@ -119,8 +119,11 @@ class TelemetryManager:
         span_processors: list[SpanProcessor] | None = None,
         metric_readers: list[MetricReader] | None = None,
         resource: OtelResource | None = None,
+        drain_on_stop: bool = True,
     ) -> None:
         self._session_id = session_id
+        # stop(): process the event backlog (True) or discard it for a fast shutdown.
+        self._drain_on_stop = drain_on_stop
         self._queue: asyncio.Queue = asyncio.Queue()
         self._subscribers: list[Callable[[BaseEvent], Any]] = []
         self._adapters: list[TelemetryAdapter] = []
@@ -286,6 +289,20 @@ class TelemetryManager:
 
     async def stop(self) -> None:
         """Stop: emit SessionEnded, drain queue, flush file, stop adapters, shutdown OTel."""
+        if not self._drain_on_stop:
+            # Discard before SessionEnded is queued, so the session span still ends.
+            discarded = 0
+            while True:
+                try:
+                    self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                self._queue.task_done()
+                discarded += 1
+            if discarded:
+                logger.warning(
+                    "Telemetry drain disabled: %d queued events not processed", discarded
+                )
         duration = time.time() - self._session_start_time
         self.emit(
             make_event(

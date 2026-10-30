@@ -19,7 +19,8 @@
   fixed 5 s to drain and then dropped the rest silently: a 100k-task session
   lost 59% of its task events. It now keeps draining while the backlog shrinks
   (logging progress), gives up only on a stall or a dead dispatch loop, and
-  warns then. `tasks_running` no longer counts down tasks that ended before
+  warns then. `start_telemetry(drain_on_stop=False)` skips the backlog instead
+  (discarded with a warning) for a fast shutdown, e.g. close to a job walltime. `tasks_running` no longer counts down tasks that ended before
   RUNNING.
 
 - **Dragon process/job exit codes reported like the other backends** — a

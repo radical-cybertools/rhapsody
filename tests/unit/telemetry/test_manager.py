@@ -128,6 +128,31 @@ class TestOtelInstruments:
         assert not [r for r in own if r.levelname == "WARNING"]
         assert any("draining" in r.getMessage() for r in own)
 
+    async def test_stop_without_drain_discards_the_backlog(self, monkeypatch, caplog):
+        """drain_on_stop=False: stop() skips the backlog, warns with the count, ends the session."""
+        m = TelemetryManager(session_id="test-session", drain_on_stop=False)
+        await m.start()
+        process = m._process_event
+
+        def slow_process(event, *args):
+            time.sleep(0.01)
+            process(event, *args)
+
+        monkeypatch.setattr(m, "_process_event", slow_process)
+        for i in range(1000):  # ~10 s if processed
+            m.emit(
+                make_event(
+                    TaskSubmitted, session_id="test-session", backend="concurrent", task_id=f"t{i}"
+                )
+            )
+        t0 = time.perf_counter()
+        with caplog.at_level("WARNING", logger="rhapsody.telemetry.manager"):
+            await m.stop()
+        assert time.perf_counter() - t0 < 2.0
+        assert any("drain disabled" in r.getMessage() for r in caplog.records)
+        assert any(e.event_type == "SessionEnded" for e in m._event_log)
+        assert sum(1 for e in m._event_log if e.event_type == "TaskSubmitted") < 1000
+
     async def test_stop_does_not_wait_for_a_dead_dispatch_loop(self, manager, monkeypatch, caplog):
         """With the dispatch task gone, stop() does not wait and warns about the backlog."""
         manager._dispatch_task.cancel()
