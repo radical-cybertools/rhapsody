@@ -975,7 +975,7 @@ async def test_notification_of_other_session_is_ignored():
     uids are per-client counters: only this session's (or sid-less) ones
     may update our tasks."""
     backend = await _init_backend()
-    backend._session_sid = "sid-me"
+    backend._session_sid = backend._mock_rh.sid = "sid-me"
     backend._tasks["t.1"] = {"uid": "t.1", "state": "SUBMITTED"}
     backend._tasks["t.2"] = {"uid": "t.2", "state": "SUBMITTED"}
 
@@ -998,18 +998,18 @@ async def test_notification_of_other_session_is_ignored():
 
 @pytest.mark.asyncio
 async def test_session_filter_survives_shutdown_state():
-    """The filter uses the sid cached at init: it neither fails open once
-    ``_rh`` is gone nor drops our own completions once the client's sid is
-    cleared on close."""
+    """While the client is closed (sid cleared) or gone (shutdown), the sid
+    cached at init still filters: own notifications pass, foreign ones don't."""
     backend = await _init_backend()
     backend._session_sid = "sid-me"
     backend._tasks["t.1"] = {"uid": "t.1", "state": "SUBMITTED"}
 
-    backend._mock_rh.sid = None  # client closed
+    backend._mock_rh.sid = None  # client closed: live sid cleared
     backend._handle_notification("task_status", {"uid": "t.1", "state": "RUNNING", "sid": "sid-me"})
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "FAILED", "sid": "sid-x"})
     assert backend._tasks["t.1"]["state"] == "RUNNING"
 
-    backend._rh = None  # backend shutting down
+    backend._rh = None  # backend shut down
     backend._handle_notification(
         "task_status", {"uid": "t.1", "state": "FAILED", "sid": "sid-other"}
     )
@@ -1017,10 +1017,34 @@ async def test_session_filter_survives_shutdown_state():
 
 
 @pytest.mark.asyncio
+async def test_session_filter_follows_reregistration():
+    """If the client re-registers, its new (live) sid is ours, the old is not."""
+    backend = await _init_backend()
+    backend._session_sid = "sid-old"
+    backend._mock_rh.sid = "sid-new"
+    backend._tasks["t.1"] = {"uid": "t.1", "state": "SUBMITTED"}
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "FAILED", "sid": "sid-old"})
+    assert backend._tasks["t.1"]["state"] == "SUBMITTED"
+    backend._handle_notification(
+        "task_status", {"uid": "t.1", "state": "RUNNING", "sid": "sid-new"}
+    )
+    assert backend._tasks["t.1"]["state"] == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_empty_sid_counts_as_unstamped():
+    backend = await _init_backend()
+    backend._session_sid = backend._mock_rh.sid = "sid-me"
+    backend._tasks["t.1"] = {"uid": "t.1", "state": "SUBMITTED"}
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "RUNNING", "sid": ""})
+    assert backend._tasks["t.1"]["state"] == "RUNNING"
+
+
+@pytest.mark.asyncio
 async def test_unknown_own_sid_does_not_drop_notifications():
     """Without a known own session id nothing is filtered (no silent hang)."""
     backend = await _init_backend()
-    backend._session_sid = None
+    backend._session_sid = backend._mock_rh.sid = None
     backend._tasks["t.1"] = {"uid": "t.1", "state": "SUBMITTED"}
     backend._handle_notification("task_status", {"uid": "t.1", "state": "RUNNING", "sid": "s.1"})
     assert backend._tasks["t.1"]["state"] == "RUNNING"
@@ -1030,7 +1054,7 @@ async def test_unknown_own_sid_does_not_drop_notifications():
 async def test_foreign_notification_dropped_before_loop():
     """A foreign frame is dropped on the callback thread, not scheduled."""
     backend = await _init_backend()
-    backend._session_sid = "sid-me"
+    backend._session_sid = backend._mock_rh.sid = "sid-me"
     backend._loop = MagicMock()
     backend._loop.is_closed.return_value = False
     backend._on_task_notification("e", "rhapsody", "task_status", {"uid": "t.1", "sid": "sid-x"})

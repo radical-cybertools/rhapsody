@@ -262,7 +262,7 @@ class OrbitExecutionBackend(BaseBackend):
         if not isinstance(data, dict):
             return False
         sid = data.get("sid")
-        if sid is None:
+        if not sid:
             # the pool task dispatcher never stamps sid: no warning in pool mode
             if not self._warned_no_sid and self._pool is None:
                 self._warned_no_sid = True
@@ -272,7 +272,16 @@ class OrbitExecutionBackend(BaseBackend):
                     "same task uids cannot be told apart"
                 )
             return False
-        return self._session_sid is not None and sid != self._session_sid
+        own = self._own_sid()
+        return own is not None and str(sid) != str(own)
+
+    def _own_sid(self):
+        """This backend's plugin session id: the client's live one (it changes
+        if the client re-registers), else the one cached at init (the client
+        clears it on close, and ``_rh`` is gone after shutdown)."""
+        rh = self._rh
+        live = rh.sid if rh is not None else None
+        return live or self._session_sid
 
     def _handle_notification(self, topic, data):
         """Dispatch a notification on the event-loop thread.
