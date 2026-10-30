@@ -20,8 +20,11 @@
   lost 59% of its task events. It now keeps draining while the backlog shrinks
   (logging progress), gives up only on a stall or a dead dispatch loop, and
   warns then. `start_telemetry(drain_on_stop=False)` skips the backlog instead
-  (discarded with a warning) for a fast shutdown, e.g. close to a job walltime. `tasks_running` no longer counts down tasks that ended before
-  RUNNING.
+  (discarded with a warning) for a fast shutdown, e.g. close to a job walltime.
+- **`tasks_running` counted tasks that never ran** — a task that ended before
+  RUNNING decremented the gauge without a matching increment, and its -1 could
+  land on a different label set than its +1. Each task now counts once, and its
+  -1 uses the labels of its +1.
 
 - **Dragon process/job exit codes reported like the other backends** — a
   non-zero exit code from a `process()`/`job()` task (executables, and functions
