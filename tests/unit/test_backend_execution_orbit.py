@@ -1018,17 +1018,22 @@ async def test_session_filter_survives_shutdown_state():
 
 @pytest.mark.asyncio
 async def test_session_filter_follows_reregistration():
-    """If the client re-registers, its new (live) sid is ours, the old is not."""
+    """After a re-registration both sessions count as ours: completions of
+    tasks submitted under the old one still arrive; others are dropped."""
     backend = await _init_backend()
     backend._session_sid = "sid-old"
     backend._mock_rh.sid = "sid-new"
     backend._tasks["t.1"] = {"uid": "t.1", "state": "SUBMITTED"}
-    backend._handle_notification("task_status", {"uid": "t.1", "state": "FAILED", "sid": "sid-old"})
-    assert backend._tasks["t.1"]["state"] == "SUBMITTED"
+    backend._tasks["t.2"] = {"uid": "t.2", "state": "SUBMITTED"}
     backend._handle_notification(
-        "task_status", {"uid": "t.1", "state": "RUNNING", "sid": "sid-new"}
+        "task_status", {"uid": "t.1", "state": "RUNNING", "sid": "sid-old"}
     )
+    backend._handle_notification(
+        "task_status", {"uid": "t.2", "state": "RUNNING", "sid": "sid-new"}
+    )
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "FAILED", "sid": "sid-x"})
     assert backend._tasks["t.1"]["state"] == "RUNNING"
+    assert backend._tasks["t.2"]["state"] == "RUNNING"
 
 
 @pytest.mark.asyncio
@@ -1066,5 +1071,9 @@ async def test_foreign_notification_dropped_before_loop():
 @pytest.mark.asyncio
 async def test_init_caches_plugin_session_sid():
     """The filter's session id is taken from the plugin client at init."""
-    backend = await _init_backend()
-    assert backend._session_sid is backend._mock_rh.sid
+    backend = _make_backend()
+    rt, rh = _mock_runtime()
+    rh.sid = "sid-from-client"
+    with patch("rhapsody.backends.execution.orbit.EndpointRuntime", return_value=rt):
+        await backend._async_init()
+    assert backend._session_sid == "sid-from-client"
