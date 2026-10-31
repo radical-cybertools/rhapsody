@@ -16,12 +16,16 @@ DRAGON_BATCH_INIT_ERROR = None
 
 try:
     import dragon
+    from dragon.native.machine import Node
+    from dragon.native.machine import System
     from dragon.native.process import ProcessTemplate
     from dragon.workflows.batch import Batch
     from dragon.workflows.batch import TaskCancelledError
 
 except ImportError as e:  # pragma: no cover - environment without Dragon
     dragon = None
+    Node = None
+    System = None
     ProcessTemplate = None
     Batch = None
     TaskCancelledError = None
@@ -36,6 +40,77 @@ def _get_logger() -> logging.Logger:
     configured logging, not at module import time.
     """
     return logging.getLogger(__name__)
+
+
+_SYSFS_CPU = "/sys/devices/system/cpu"
+
+
+def _physical_cores(cpus: list[int]) -> int:
+    """Count the physical cores that ``cpus`` belong to, from this node's sysfs topology.
+
+    Without sysfs, assume two hardware threads per core, as Batch does. Other nodes are read with
+    this node's topology, so this assumes homogeneous nodes.
+    """
+    cores = set()
+    try:
+        for cpu in cpus:
+            topology = f"{_SYSFS_CPU}/cpu{cpu}/topology"
+            with open(f"{topology}/physical_package_id") as f:
+                package = f.read().strip()
+            with open(f"{topology}/core_id") as f:
+                core = f.read().strip()
+            cores.add((package, core))
+    except OSError:
+        return max(1, len(cpus) // 2)
+    return max(1, len(cores))
+
+
+def _workers_per_node_for_affinity(
+    batch_kwargs: dict, enabled: bool, logger: logging.Logger
+) -> Optional[int]:
+    """Return a ``workers_per_node`` that fits the CPUs Dragon may use, or None to keep Batch's.
+
+    Batch starts ``Node.num_cpus // 2`` workers per node, and ``Node.num_cpus`` is the node's
+    ``os.cpu_count()``. When the job may use only part of a node (``Node.cpus``, the affinity of
+    Dragon's Local Services there), that puts every worker on the few CPUs the job holds: 256
+    workers on 4 CPUs of a 512-CPU node (#95). Batch uses the first ``num_nodes`` nodes of the
+    allocation and one worker count for all of them, so the smallest node sets it.
+    """
+    if "workers_per_node" in batch_kwargs:
+        return None
+    try:
+        h_uids = list(System().nodes)
+        num_nodes = batch_kwargs.get("num_nodes") or len(h_uids)
+        nodes = [Node(h_uid) for h_uid in h_uids[: max(1, num_nodes)]]
+        default = max(1, nodes[0].num_cpus // 2)
+        restricted = []
+        for node in nodes:
+            cpus = list(node.cpus)
+            cores = _physical_cores(cpus) if cpus else default
+            if cores < default:
+                restricted.append((node.hostname, cores))
+    except Exception as e:  # never let the probe block Batch creation
+        logger.debug(f"Could not compare Dragon nodes' CPUs with their affinity: {e}")
+        return None
+    if not restricted:
+        return None
+
+    workers = min(cores for _, cores in restricted)
+    nodes_text = ", ".join(f"{host} {cores}" for host, cores in restricted)
+    if not enabled:
+        logger.warning(
+            f"Dragon may use only part of some nodes (physical cores allowed: {nodes_text}), "
+            f"but Batch will start {default} workers per node, oversubscribing them. Request "
+            "whole nodes, or pass size_pool_to_affinity=True or workers_per_node in batch_kwargs."
+        )
+        return None
+    logger.warning(
+        f"Dragon may use only part of some nodes (physical cores allowed: {nodes_text}); "
+        f"starting {workers} workers per node instead of {default}. Batch still places process "
+        "and MPI jobs as if the job had whole nodes, so keep their ranks within the CPUs the job "
+        "holds. Request whole nodes to use all CPUs."
+    )
+    return workers
 
 
 # ============================================================================
@@ -67,7 +142,7 @@ class DragonExecutionBackend(BaseBackend):
     Args:
         batch_kwargs: Forwarded verbatim to ``dragon.workflows.batch.Batch()``.
 
-            Supported keys (Dragon 0.14.1+):
+            Supported keys (Dragon 0.15.0+):
 
             - ``num_nodes`` *(int, optional)* — nodes to use; defaults to the full
               allocation.
@@ -83,7 +158,18 @@ class DragonExecutionBackend(BaseBackend):
               per worker pool (default: 4). At large scale (64K+ tasks), increasing this
               reduces DDict write contention. Valid range: ``[1, workers_per_node]``;
               Dragon clamps automatically.
+            - ``workers_per_node`` *(int, optional)* — workers in each node's pool, from 1
+              to ``os.cpu_count() // 2`` of the first node. Set it to override the sizing
+              below.
             - ``pool_nodes`` — **no-op in Dragon 0.14.0+**, kept for API compatibility.
+
+        size_pool_to_affinity: Batch starts ``os.cpu_count() // 2`` workers on each node,
+            even when the job may use only part of the node, as on a Slurm allocation of a few
+            CPUs. When True (the default) and ``batch_kwargs`` sets no ``workers_per_node``, the
+            backend passes one worker per physical core the job may use on its smallest node,
+            and logs a warning. When False, Batch's sizing is kept and only the warning is
+            logged. Either way, Batch still places process and MPI jobs as if the job had whole
+            nodes.
 
     Note on working directory:
         DragonExecutionBackend does not support a backend-level working directory.
@@ -113,6 +199,7 @@ class DragonExecutionBackend(BaseBackend):
         self,
         batch_kwargs: Optional[dict] = None,
         name: Optional[str] = "dragon",
+        size_pool_to_affinity: bool = True,
     ):
         if not Batch:
             raise RuntimeError(DRAGON_BATCH_INIT_ERROR)
@@ -126,7 +213,17 @@ class DragonExecutionBackend(BaseBackend):
                 "task_logs is disabled: task['stdout']/task['stderr'] will be empty "
                 "for capture_stdio=False tasks; output goes directly to the console."
             )
+        workers = _workers_per_node_for_affinity(
+            effective_kwargs, size_pool_to_affinity, self.logger
+        )
+        if workers is not None:
+            effective_kwargs["workers_per_node"] = workers
         self.batch = Batch(**effective_kwargs)
+        if workers is not None and getattr(self.batch, "num_workers", workers) != workers:
+            self.logger.warning(
+                f"Asked Batch for {workers} workers per node but it reports "
+                f"{self.batch.num_workers}: the pools may oversubscribe the allowed CPUs."
+            )
 
         self._backend_state = BackendMainStates.INITIALIZED
         self._callback_func: Callable = lambda t, s: None
