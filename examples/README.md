@@ -56,11 +56,11 @@ Runs **five different execution modes** in a single session:
 |------|------|---------------|
 | Native function | Function Native | No backend kwargs |
 | Shell command (single process) | Executable Process | `process_template: {}` |
-| Shell command (2+2 parallel) | Executable Job | `process_templates: [(2, {}), (2, {})]` |
+| Shell command (2+2 parallel) | Executable Job | `process_templates: [(2, {}), (2, {})]`, `pmi: "none"` |
 | Python function (single process) | Function Process | `process_template: {}` |
-| Python function (2+2 parallel) | Function Job | `process_templates: [(2, {}), (2, {})]` |
+| Python function (2+2 parallel) | Function Job | `process_templates: [(2, {}), (2, {})]`, `pmi: "none"` |
 
-**What you'll learn:** `task_backend_specific_kwargs`, `process_template` vs `process_templates`, mixing task types in one submission.
+**What you'll learn:** `task_backend_specific_kwargs`, `process_template` vs `process_templates`, mixing task types in one submission. The parallel jobs aren't MPI, so they set `pmi: "none"` and run without a PMI: off Cray, Batch's default PMI crashed the function job.
 
 ---
 
