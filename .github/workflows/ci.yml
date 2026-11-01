@@ -8,7 +8,9 @@ on:
 jobs:
   pre-commit:
     name: Pre-commit checks
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest: ubuntu-26.04 has no python3.12, which .pre-commit-config.yaml pins,
+    # and setup-python has no Python 3.9 for it, which the tests matrix needs
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -27,7 +29,7 @@ jobs:
 
   tests:
     name: Tests (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: pre-commit
     strategy:
       matrix:
