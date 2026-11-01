@@ -37,10 +37,10 @@
   does not end the job, and the other ranks wait until the timeout (`1e9` s by
   default). `"pmi": "none"` declares a job's processes non-MPI: they run without a
   PMI, and neither warning is logged. No job is refused.
-- **Example 02's parallel function job crashed off Cray** — with Batch's default
-  PMI, every rank of its 2+2 Python function job aborted with "double free or
-  corruption" (exit code -6) on a non-Cray node, with Dragon 0.14.1 and 0.15.0.
-  Its parallel jobs now set `"pmi": "none"`.
+- **Example 02's and the tutorials' parallel function jobs crashed off Cray** —
+  with Batch's default PMI, every rank of a 2+2 Python function job aborted with
+  "double free or corruption" (exit code -6) on a non-Cray node, with Dragon 0.14.1
+  and 0.15.0. Their parallel jobs now set `"pmi": "none"`.
 
 ## [0.6.0] 2026-10-19
 
