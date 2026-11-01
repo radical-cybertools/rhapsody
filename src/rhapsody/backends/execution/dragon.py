@@ -52,6 +52,26 @@ class TaskStateMapper:
     terminal_states = {DONE, FAILED, CANCELED}
 
 
+def _pmi_options(pmi: Optional[str]) -> dict[str, Any]:
+    """Return the ``Batch.options()`` kwargs that launch a job with ``pmi``.
+
+    ``pmi`` is ``"pmix"``, ``"cray"``, ``"none"`` (no PMI) or a Dragon ``PMIBackend``. None is no
+    choice: no kwargs, so Batch's default (``PMIBackend.CRAY``) applies.
+    """
+    if pmi is None:
+        return {}
+    if isinstance(pmi, str) and pmi.lower() == "none":
+        return {"pmi": None}
+    from dragon.infrastructure.facts import PMIBackend
+
+    try:
+        return {"pmi": PMIBackend(pmi.lower() if isinstance(pmi, str) else pmi)}
+    except ValueError:
+        raise ValueError(
+            f"Unknown pmi {pmi!r}: use 'pmix', 'cray', 'none' or a Dragon PMIBackend"
+        ) from None
+
+
 # ============================================================================
 # Main Backend Class — Dragon.Batch API (event-driven, HPC-scale)
 # ============================================================================
@@ -104,6 +124,35 @@ class DragonExecutionBackend(BaseBackend):
                     "process_templates": [(nranks, {"cwd": "/path/to/dir"})]
                 },
             )
+
+    Note on MPI jobs:
+        A task with ``process_templates`` runs as one Batch job, which Dragon launches with a
+        PMI. Batch's default is ``PMIBackend.CRAY``, right for Cray MPICH. With Open MPI it is
+        wrong, often silently: each rank may run as a one-rank job, or every rank may fail.
+        Choose the PMI with ``pmi``: ``"pmix"`` (Open MPI and other PMIx-based MPIs),
+        ``"cray"``, ``"none"`` (no PMI, for jobs of non-MPI processes) or a Dragon
+        ``PMIBackend``. Set it for every job with ``DragonExecutionBackend(pmi=...)``, or per
+        task with ``"pmi"`` in ``task_backend_specific_kwargs``, which takes precedence. With
+        neither, Batch's default applies, and the first multi-rank job logs a warning. Tasks
+        with ``process_template`` or no template run without a PMI.
+
+        Give MPI jobs a ``timeout`` (seconds) too: when a rank dies, Dragon does not end the
+        job, and the other ranks can wait for it until the timeout, 1e9 s by default. The
+        first multi-rank job without one logs a warning::
+
+            ComputeTask(
+                executable="./mpi_app",
+                task_backend_specific_kwargs={
+                    "process_templates": [(16, {})],
+                    "pmi": "pmix",
+                    "timeout": 600,
+                },
+            )
+
+        Dragon loads PMIx with ``dlopen("libpmix.so")``, so a directory holding
+        ``libpmix.so`` must be on ``LD_LIBRARY_PATH``; some distributions ship that name only
+        in their PMIx development package. When it can't be loaded, the whole Dragon runtime
+        aborts.
     """
 
     # Hygiene backstop: max wall-clock seconds a tuid can stay pending before it's dropped.
@@ -113,9 +162,13 @@ class DragonExecutionBackend(BaseBackend):
         self,
         batch_kwargs: Optional[dict] = None,
         name: Optional[str] = "dragon",
+        pmi: Optional[str] = None,
     ):
         if not Batch:
             raise RuntimeError(DRAGON_BATCH_INIT_ERROR)
+
+        # PMI kwargs for Batch.options() of MPI jobs, checked before Batch starts.
+        self._job_pmi_options = _pmi_options(pmi)
 
         super().__init__(name=name)
 
@@ -141,6 +194,9 @@ class DragonExecutionBackend(BaseBackend):
         self._cancelled_tuids: set[str] = set()
         self._batch_monitor_thread = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Multi-rank job warnings, logged once per backend.
+        self._warned_job_pmi = False
+        self._warned_job_timeout = False
 
         self._shutdown_event = threading.Event()
 
@@ -444,6 +500,10 @@ class DragonExecutionBackend(BaseBackend):
         is_native_function = (
             is_function and process_templates_config is None and process_template_config is None
         )
+        # Batch launches only job() tasks with a PMI.
+        job_options: dict[str, Any] = {}
+        if process_templates_config is not None:
+            job_options = self._job_options(uid, backend_kwargs, process_templates_config)
 
         # Compute per-task stdio paths when capture is requested.
         # Dragon creates parent directories automatically.
@@ -465,6 +525,7 @@ class DragonExecutionBackend(BaseBackend):
             timeout=timeout,
             stdout=stdout_path,
             stderr=stderr_path,
+            **job_options,
         )
 
         # Single decision tree - no redundant checks
@@ -506,6 +567,37 @@ class DragonExecutionBackend(BaseBackend):
         )
 
         return batch_task
+
+    def _job_options(self, uid: str, backend_kwargs: dict, process_templates_config: list) -> dict:
+        """Return the PMI kwargs for an MPI job's ``Batch.options()``.
+
+        The task's ``pmi`` takes precedence over the backend's. The first multi-rank job with no
+        PMI, and the first with no timeout, log a warning; neither is refused.
+        """
+        pmi = backend_kwargs.get("pmi")
+        options = self._job_pmi_options if pmi is None else _pmi_options(pmi)
+        nranks = sum(n for n, _ in process_templates_config)
+        if nranks <= 1:
+            return options
+
+        if not options and not self._warned_job_pmi:
+            self._warned_job_pmi = True
+            self.logger.warning(
+                f"MPI job {uid} has {nranks} ranks and no PMI, so Dragon launches it with "
+                "Batch's default, cray. That suits Cray MPICH; with Open MPI each rank may run "
+                "as a one-rank job, or every rank may fail. Set pmi ('pmix', 'cray' or 'none') "
+                "on DragonExecutionBackend or in the task's task_backend_specific_kwargs. "
+                "Logged once."
+            )
+        if "timeout" not in backend_kwargs and not self._warned_job_timeout:
+            self._warned_job_timeout = True
+            self.logger.warning(
+                f"MPI job {uid} has {nranks} ranks and no timeout. If a rank dies, Dragon does "
+                "not end the job, and the other ranks can wait for it until the timeout, 1e9 s "
+                "by default. Set timeout (seconds) in the task's task_backend_specific_kwargs. "
+                "Logged once."
+            )
+        return options
 
     def link_implicit_data_deps(self, src_task, dst_task):
         pass
@@ -629,9 +721,10 @@ class DragonExecutionBackend(BaseBackend):
     async def create(
         cls,
         batch_kwargs: Optional[dict] = None,
+        pmi: Optional[str] = None,
     ):
         """Create and initialize a DragonExecutionBackend."""
-        backend = cls(batch_kwargs=batch_kwargs)
+        backend = cls(batch_kwargs=batch_kwargs, pmi=pmi)
         return await backend
 
 
