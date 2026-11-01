@@ -183,6 +183,8 @@ All accepted keys and their defaults are documented in the
 |-----|------|-------------|
 | `process_template` | `dict` | `ProcessTemplate` kwargs for a single-process task |
 | `process_templates` | `list[tuple[int, dict]]` | List of `(n_procs, template_dict)` for multi-rank jobs |
+| `pmi` | `str` or `PMIBackend` | PMI for a `process_templates` job: `"pmix"`, `"cray"` or `"none"`; overrides the backend's `pmi` (see [MPI jobs](#mpi-jobs-pmi-and-timeout)) |
+| `timeout` | `float` | Seconds before Dragon cancels the task (default `1e9`) |
 
 **`ProcessTemplate` kwargs** (passed inside `process_template` or each entry of `process_templates`):
 
@@ -250,6 +252,39 @@ task = ComputeTask(
     },
 )
 ```
+
+### MPI jobs: PMI and timeout
+
+Dragon launches a `process_templates` job with a PMI, and Batch's default is
+`PMIBackend.CRAY`. That is right for Cray MPICH. With Open MPI it is wrong, often
+silently: each rank may run as a job of one rank, or every rank may fail. Choose the PMI
+for every job on the backend, or per task (the task's choice wins):
+
+```python
+backend = await DragonExecutionBackend(pmi="pmix")  # Open MPI and other PMIx-based MPIs
+
+task = ComputeTask(
+    executable="./mpi_app",
+    task_backend_specific_kwargs={
+        "process_templates": [(16, {})],
+        "pmi": "pmix",     # or "cray", or "none" for jobs of non-MPI processes
+        "timeout": 600,    # seconds
+    },
+)
+```
+
+When neither sets one, Batch's default applies, and the first multi-rank job logs a
+warning. Tasks with `process_template`, or with no template, run without a PMI.
+
+Give MPI jobs a `timeout` too. When a rank dies, Dragon does not end the job: the other
+ranks can wait for it until the timeout, `1e9` s by default. The first multi-rank job
+without one logs a warning.
+
+!!! note "PMIx needs `libpmix.so`"
+    Dragon loads PMIx with `dlopen("libpmix.so")`, so a directory holding `libpmix.so`
+    must be on `LD_LIBRARY_PATH`. Some distributions ship that name only in their PMIx
+    development package (`libpmix-dev` on Ubuntu). When it can't be loaded, the whole
+    Dragon runtime aborts with "Unable to initialize PMIx server".
 
 ### GPU affinity with `Policy`
 

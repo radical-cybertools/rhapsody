@@ -25,6 +25,17 @@
   dependents waited on their own periodic scans. Cancellations now take the
   same `call_soon_threadsafe` path; a task already reported by `cancel_task()`
   is still reported only once.
+- **Dragon MPI jobs launched with Cray's PMI everywhere** — `DragonExecutionBackend`
+  passed no PMI to `Batch.options()`, so every `process_templates` job got Batch's
+  default, `PMIBackend.CRAY`. That is right for Cray MPICH, but with Open MPI each
+  rank ran as a one-rank job with no error (Open MPI 5), or every rank exited 1
+  (Open MPI 4.1). A new `pmi` argument (`"pmix"`, `"cray"`, `"none"` or a
+  `PMIBackend`) sets the PMI for every job, and `"pmi"` in a task's
+  `task_backend_specific_kwargs` overrides it; only job submissions get it. With
+  neither, Batch's default is kept and the first multi-rank job logs a warning. The
+  first multi-rank job without a `timeout` logs one too: when a rank dies, Dragon
+  does not end the job, and the other ranks wait until the timeout (`1e9` s by
+  default). No job is refused.
 
 ## [0.6.0] 2026-10-19
 
