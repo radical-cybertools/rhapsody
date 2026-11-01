@@ -213,9 +213,8 @@ async def test_ranks_are_counted_across_templates():
         (None, _job_task(templates=[(1, {})])),
         ("pmix", _job_task(timeout=60)),
         (None, _job_task(pmi="cray", timeout=60)),
-        (None, _job_task(pmi="none", timeout=60)),
     ],
-    ids=["single-rank", "backend-pmi", "task-pmi", "task-pmi-none"],
+    ids=["single-rank", "backend-pmi", "task-pmi"],
 )
 async def test_job_with_pmi_and_timeout_or_one_rank_does_not_warn(backend_pmi, task):
     backend = _make_backend(pmi=backend_pmi)
@@ -223,3 +222,33 @@ async def test_job_with_pmi_and_timeout_or_one_rank_does_not_warn(backend_pmi, t
     await backend.build_task(task)
 
     backend.logger.warning.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("backend_pmi", "task"),
+    [
+        (None, _job_task(pmi="none")),
+        ("none", _job_task()),
+        ("pmix", _job_task(pmi="none")),
+    ],
+    ids=["task-none", "backend-none", "task-none-over-backend-pmix"],
+)
+async def test_job_with_pmi_none_needs_no_timeout(backend_pmi, task):
+    """A job with pmi="none" is non-MPI: no rank waits in a collective for a dead one."""
+    backend = _make_backend(pmi=backend_pmi)
+
+    await backend.build_task(task)
+
+    assert _options_kwargs(backend)["pmi"] is None
+    backend.logger.warning.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_task_pmi_none_does_not_use_up_the_timeout_warning():
+    backend = _make_backend(pmi="pmix")
+
+    await backend.build_task(_job_task(pmi="none"))
+    await backend.build_task(_job_task())
+
+    assert len(_warnings(backend, "no timeout")) == 1

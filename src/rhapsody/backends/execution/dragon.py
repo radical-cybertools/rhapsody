@@ -133,12 +133,14 @@ class DragonExecutionBackend(BaseBackend):
         ``"cray"``, ``"none"`` (no PMI, for jobs of non-MPI processes) or a Dragon
         ``PMIBackend``. Set it for every job with ``DragonExecutionBackend(pmi=...)``, or per
         task with ``"pmi"`` in ``task_backend_specific_kwargs``, which takes precedence. With
-        neither, Batch's default applies, and the first multi-rank job logs a warning. Tasks
-        with ``process_template`` or no template run without a PMI.
+        neither, Batch's default applies, and the first multi-rank job logs a warning. Use
+        ``"none"`` for jobs of non-MPI processes: Batch's default can break them too (on a
+        non-Cray node, every rank of a Python function job crashed with it). Tasks with
+        ``process_template`` or no template run without a PMI.
 
         Give MPI jobs a ``timeout`` (seconds) too: when a rank dies, Dragon does not end the
         job, and the other ranks can wait for it until the timeout, 1e9 s by default. The
-        first multi-rank job without one logs a warning::
+        first multi-rank job without one logs a warning, unless its ``pmi`` is ``"none"``::
 
             ComputeTask(
                 executable="./mpi_app",
@@ -572,29 +574,33 @@ class DragonExecutionBackend(BaseBackend):
         """Return the PMI kwargs for an MPI job's ``Batch.options()``.
 
         The task's ``pmi`` takes precedence over the backend's. The first multi-rank job with no
-        PMI, and the first with no timeout, log a warning; neither is refused.
+        PMI, and the first with no timeout, log a warning; neither is refused. ``pmi="none"``
+        declares the processes non-MPI, so neither warning applies.
         """
         pmi = backend_kwargs.get("pmi")
         options = self._job_pmi_options if pmi is None else _pmi_options(pmi)
         nranks = sum(n for n, _ in process_templates_config)
-        if nranks <= 1:
+        # Without MPI there is no collective for the other ranks to wait in when one dies.
+        if nranks <= 1 or options == {"pmi": None}:
             return options
 
         if not options and not self._warned_job_pmi:
             self._warned_job_pmi = True
             self.logger.warning(
-                f"MPI job {uid} has {nranks} ranks and no PMI, so Dragon launches it with "
-                "Batch's default, cray. That suits Cray MPICH; with Open MPI each rank may run "
-                "as a one-rank job, or every rank may fail. Set pmi ('pmix', 'cray' or 'none') "
-                "on DragonExecutionBackend or in the task's task_backend_specific_kwargs. "
-                "Logged once."
+                f"Job {uid} has {nranks} ranks and no PMI, so Dragon launches it with Batch's "
+                "default, cray. That suits Cray MPICH. Elsewhere it can break the job: with Open "
+                "MPI each rank may run as a one-rank job, or every rank may fail, and a job of "
+                "Python functions may crash. Set pmi ('pmix' or 'cray', or 'none' if the "
+                "processes are not MPI) on DragonExecutionBackend or in the task's "
+                "task_backend_specific_kwargs. Logged once."
             )
         if "timeout" not in backend_kwargs and not self._warned_job_timeout:
             self._warned_job_timeout = True
             self.logger.warning(
-                f"MPI job {uid} has {nranks} ranks and no timeout. If a rank dies, Dragon does "
-                "not end the job, and the other ranks can wait for it until the timeout, 1e9 s "
-                "by default. Set timeout (seconds) in the task's task_backend_specific_kwargs. "
+                f"Job {uid} has {nranks} ranks and no timeout. If it is an MPI job and a rank "
+                "dies, Dragon does not end it, and the other ranks can wait for that rank until "
+                "the timeout, 1e9 s by default. Set timeout (seconds) in the task's "
+                "task_backend_specific_kwargs, or pmi 'none' if the processes are not MPI. "
                 "Logged once."
             )
         return options

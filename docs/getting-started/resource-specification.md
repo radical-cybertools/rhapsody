@@ -280,6 +280,12 @@ Give MPI jobs a `timeout` too. When a rank dies, Dragon does not end the job: th
 ranks can wait for it until the timeout, `1e9` s by default. The first multi-rank job
 without one logs a warning.
 
+RHAPSODY can't tell whether a job's processes use MPI, so set `"pmi": "none"` for jobs
+that don't, such as several copies of a script or a Python function. They then run
+without a PMI, and log neither warning. Batch's default can break such jobs too: on a
+non-Cray node, every rank of a 4-rank Python function job crashed with it ("double free
+or corruption", exit code -6), and the same job ran with `"none"`.
+
 !!! note "PMIx needs `libpmix.so`"
     Dragon loads PMIx with `dlopen("libpmix.so")`, so a directory holding `libpmix.so`
     must be on `LD_LIBRARY_PATH`. Some distributions ship that name only in their PMIx
