@@ -120,6 +120,10 @@ class TelemetryManager:
         self._queue: asyncio.Queue = asyncio.Queue()
         self._subscribers: list[Callable[[BaseEvent], Any]] = []
         self._adapters: list[TelemetryAdapter] = []
+        # Backends that already have an adapter (by id), and whether the one
+        # runtime-wide Dragon node poller exists — see attach_backend().
+        self._attached_backends: set[int] = set()
+        self._dragon_adapter_attached = False
         self._running = False
         self._dispatch_task: asyncio.Task | None = None
         self._checkpoint_task: asyncio.Task | None = None
@@ -434,9 +438,16 @@ class TelemetryManager:
         """Detect backend type and register the appropriate telemetry adapter.
 
         Silently skips backends with no adapter (LocalExecutionBackend, NoopExecutionBackend,
-        unknown types). Safe to call before or after start(); if already running the adapter is
-        started immediately.
+        unknown types) and data backends (no ``submit_tasks``). Safe to call before or after
+        start(); if already running the adapter is started immediately. Attaching the same backend
+        again is a no-op, and all Dragon backends of a session share one node poller.
         """
+        if not hasattr(backend, "submit_tasks"):
+            return  # data backend: no task execution, no resource adapter
+        if id(backend) in self._attached_backends:
+            return
+        self._attached_backends.add(id(backend))
+
         try:
             from rhapsody.backends.execution.concurrent import ConcurrentExecutionBackend
             from rhapsody.telemetry.adapters.concurrent import ConcurrentTelemetryAdapter
@@ -475,7 +486,11 @@ class TelemetryManager:
                 logger.warning("Could not attach DaskTelemetryAdapter", exc_info=True)
             return
 
-        if "Dragon" in backend_cls:
+        if backend_cls.startswith("Dragon"):
+            # Dragon node metrics are runtime-wide: a second Dragon backend in the
+            # session (e.g. an inference backend) would poll the same nodes again.
+            if self._dragon_adapter_attached:
+                return
             try:
                 from rhapsody.telemetry.adapters.dragon import DragonTelemetryAdapter
 
@@ -485,6 +500,7 @@ class TelemetryManager:
                     interval=interval,
                 )
                 self.register_adapter(adapter)
+                self._dragon_adapter_attached = True
                 if self._running:
                     adapter.start()
             except Exception:
@@ -765,6 +781,18 @@ class TelemetryManager:
             # Record the wall-clock time we first see RUNNING so we can compute
             # duration in DONE/FAILED.
             self._task_start_times[task_id] = now_wall
+            attrs: dict = {"executable": executable, "task_type": task_type}
+            # Optional placement info — populated by backends that know it.
+            # Schema: {node_id: str, cores: int, gpu_ids: list[int]}.
+            # When future placement APIs land they should write the same key.
+            placement = task.get("placement")
+            node_id_for_event = None
+            if isinstance(placement, dict):
+                # Snapshot without deepcopy: a placement may hold uncopyable objects.
+                attrs["placement"] = {
+                    k: list(v) if isinstance(v, list) else v for k, v in placement.items()
+                }
+                node_id_for_event = placement.get("node_id")
             self.emit(
                 make_event(
                     TaskStarted,
@@ -772,10 +800,8 @@ class TelemetryManager:
                     backend=backend,
                     task_id=task_id,
                     event_time=now_wall,
-                    attributes={
-                        "executable": executable,
-                        "task_type": task_type,
-                    },
+                    node_id=node_id_for_event,
+                    attributes=attrs,
                 )
             )
 
@@ -784,7 +810,7 @@ class TelemetryManager:
             ended = now_wall
             if running_ts is not None:
                 duration = max(ended - running_ts, 0.0)
-                attrs: dict = {"executable": executable, "task_type": task_type}
+                attrs = {"executable": executable, "task_type": task_type}
             else:
                 # NOTE: RUNNING was never seen for this task (backend did not emit
                 # a RUNNING callback, or the task completed before telemetry started).

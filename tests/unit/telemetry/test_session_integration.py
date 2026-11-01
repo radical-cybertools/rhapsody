@@ -21,6 +21,47 @@ async def backend():
 
 
 class TestStartTelemetry:
+    async def test_failing_topology_emits_empty_layout(self, backend, monkeypatch):
+        """A topology probe failure is logged; the layout goes out with no nodes."""
+
+        def boom():
+            raise RuntimeError("probe failed")
+
+        monkeypatch.setattr(backend, "topology", boom)
+        session = Session(backends=[backend])
+        telemetry = await session.start_telemetry()
+        received = []
+        telemetry.subscribe(received.append)
+        await asyncio.sleep(0.2)
+        try:
+            layouts = [e for e in received if e.event_type == "ResourceLayout"]
+            assert len(layouts) == 1
+            assert layouts[0].attributes["nodes"] == []
+        finally:
+            await session.close()
+
+    async def test_add_backend_after_start_emits_layout(self, backend):
+        """A backend added to a session with running telemetry gets an adapter and a layout."""
+        session = Session(backends=[backend])
+        telemetry = await session.start_telemetry()
+        received = []
+        telemetry.subscribe(received.append)
+
+        late = await ConcurrentExecutionBackend(
+            executor=ThreadPoolExecutor(max_workers=2), name="late"
+        )
+        try:
+            session.add_backend(late)
+            await asyncio.sleep(0.2)
+            layouts = [
+                e for e in received if e.event_type == "ResourceLayout" and e.backend == "late"
+            ]
+            assert len(layouts) == 1
+            assert layouts[0].attributes["nodes"][0]["cores"] == 2
+        finally:
+            await session.close()
+            await late.shutdown()
+
     async def test_returns_telemetry_manager(self, backend):
         session = Session(backends=[backend])
         telemetry = await session.start_telemetry()
