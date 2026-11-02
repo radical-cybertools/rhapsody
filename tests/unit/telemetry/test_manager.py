@@ -239,6 +239,44 @@ class TestOtelInstruments:
         assert m._queue.qsize() == 0
         assert not caplog.records
 
+    async def test_retried_stop_after_a_cancelled_one_cleans_up(self, monkeypatch):
+        """A stop() cancelled mid-drain leaves cleanup to the next stop(), which must run it."""
+        monkeypatch.setattr(TelemetryManager, "_DRAIN_STALL_TIMEOUT", 0.05)
+        m = TelemetryManager(session_id="test-session")
+        await m.start()
+        m._dispatch_task.cancel()
+        await asyncio.sleep(0)
+        hung = asyncio.create_task(asyncio.sleep(3600))
+        m._dispatch_task = hung
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(m.stop(), timeout=0.01)
+            assert not m._stopped
+            await m.stop()  # retried: stall, cancel, cleanup
+            assert m._stopped
+            assert hung.cancelled()
+        finally:
+            hung.cancel()
+
+    async def test_stop_after_a_failed_start_still_cleans_up(self, monkeypatch):
+        """Stop() after start() failed partway shuts down what start() created."""
+        m = TelemetryManager(session_id="test-session")
+
+        def fail():
+            raise OSError("cannot open checkpoint file")
+
+        monkeypatch.setattr(m, "_open_checkpoint_file", fail)
+        m._checkpoint_path = "/nonexistent"
+        with pytest.raises(OSError):
+            await m.start()
+        await m.stop()
+        assert m._stopped
+
+    async def test_second_start_is_a_no_op(self, manager):
+        first = manager._dispatch_task
+        await manager.start()
+        assert manager._dispatch_task is first
+
     async def test_tasks_running_ignores_tasks_ended_before_start(self, manager):
         """A task created and canceled before RUNNING must not decrement tasks_running."""
         base = {"session_id": "test-session", "backend": "concurrent"}

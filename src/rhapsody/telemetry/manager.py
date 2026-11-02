@@ -134,6 +134,7 @@ class TelemetryManager:
         self._attached_backends: set[int] = set()
         self._dragon_adapter_attached = False
         self._running = False
+        self._stopped = False  # set once stop() has completed its cleanup
         self._dispatch_task: asyncio.Task | None = None
         self._checkpoint_task: asyncio.Task | None = None
         self._session_start_time: float = 0.0
@@ -222,6 +223,9 @@ class TelemetryManager:
 
     async def start(self) -> None:
         """Start the telemetry manager: set up OTel SDK, open checkpoint file, start loops."""
+        if self._running:
+            return  # already started: a second dispatch loop would be orphaned
+        self._stopped = False
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import InMemoryMetricReader
         from opentelemetry.sdk.resources import Resource
@@ -293,8 +297,8 @@ class TelemetryManager:
 
     async def stop(self) -> None:
         """Stop: emit SessionEnded, drain queue, flush file, stop adapters, shutdown OTel."""
-        if not self._running:
-            return  # never started, or already stopped
+        if self._stopped:
+            return  # a completed stop() already cleaned up; a cancelled one is retried
         if not self._drain_on_stop:
             # Discard before SessionEnded is queued, so the session span still ends.
             discarded = self._discard_queue()
@@ -386,6 +390,7 @@ class TelemetryManager:
             self._meter_provider.shutdown()
         if self._tracer_provider:
             self._tracer_provider.shutdown()
+        self._stopped = True
 
     def _discard_queue(self) -> int:
         """Empty the event queue without processing it; return the number of events dropped."""
