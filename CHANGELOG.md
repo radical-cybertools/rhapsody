@@ -26,6 +26,13 @@
   same `call_soon_threadsafe` path; a task already reported by `cancel_task()`
   is still reported only once.
 
+### Removed
+
+- **Python 3.9 support** — RHAPSODY now requires Python 3.10 or newer
+  (`requires-python = ">=3.10"`). Python 3.9 reached end of life in October
+  2025, and CI no longer tests it. The 3.8 and 3.9 classifiers are gone, and
+  the install and contributing docs say 3.10.
+
 ## [0.6.0] 2026-10-19
 
 ### Fixed
