@@ -194,6 +194,8 @@ class TestOtelInstruments:
         lost = [r.getMessage() for r in caplog.records if "not processed" in r.getMessage()]
         assert len(lost) == 1
         assert "plus up to" in lost[0], lost
+        # SessionEnded was in the lost batch: stop() still ends the session span
+        assert any(s.name == "session" for s in manager.read_traces())
 
     async def test_stop_cancels_a_stalled_dispatch_loop(self, manager, monkeypatch, caplog):
         """A dispatch loop that makes no progress is cancelled after one stall window."""

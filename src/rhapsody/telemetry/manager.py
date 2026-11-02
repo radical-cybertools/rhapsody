@@ -277,7 +277,9 @@ class TelemetryManager:
         # A fresh queue: nothing left by an earlier stop() (e.g. a sentinel) reaches this loop.
         self._queue = asyncio.Queue()
         self._running = True
-        self._dispatch_task = asyncio.create_task(self._dispatch_loop(), name="telemetry-dispatch")
+        self._dispatch_task = asyncio.create_task(
+            self._dispatch_loop(self._queue), name="telemetry-dispatch"
+        )
 
         if self._checkpoint_interval is not None and self._checkpoint_file is not None:
             self._checkpoint_task = asyncio.create_task(
@@ -341,12 +343,18 @@ class TelemetryManager:
                 break
             logger.info("Telemetry: draining %d events before shutdown", now - 1)
             last = now
-        if task is not None and task.done() and not task.cancelled() and task.exception():
-            logger.error("Telemetry dispatch loop failed", exc_info=task.exception())
-        ended_early = (
-            task is None or not task.done() or task.cancelled() or task.exception() is not None
+        exc = (
+            task.exception() if task is not None and task.done() and not task.cancelled() else None
         )
+        if exc is not None:
+            logger.error("Telemetry dispatch loop failed", exc_info=exc)
+        ended_early = task is None or not task.done() or task.cancelled() or exc is not None
         if ended_early:
+            # SessionEnded may be among the unprocessed events: end the session span here.
+            if self._session_span is not None:
+                self._completed_session_ctx = self._session_span.get_span_context()
+                self._session_span.end()
+                self._session_span = None
             # Not processed: what is still queued (the sentinel aside), and possibly part of
             # the batch the loop was handling when it ended.
             queued = self._discard_queue()
@@ -1074,8 +1082,12 @@ class TelemetryManager:
     # Internal: dispatch loop
     # ------------------------------------------------------------------
 
-    async def _dispatch_loop(self) -> None:
-        """Background task: drain queue in batches, update OTel instruments, notify subscribers."""
+    async def _dispatch_loop(self, queue: asyncio.Queue) -> None:
+        """Background task: drain ``queue`` in batches, update OTel instruments, notify subscribers.
+
+        The queue is passed in, not read from ``self._queue``: a loop only ever serves the queue
+        it was started with, even if a later start() creates a new one.
+        """
         from opentelemetry import context as otel_context
         from opentelemetry import trace
 
@@ -1087,13 +1099,13 @@ class TelemetryManager:
             batch: list[BaseEvent] = []
             try:
                 while len(batch) < _batch_size:
-                    item = self._queue.get_nowait()
+                    item = queue.get_nowait()
                     if item is _STOP_SENTINEL:
-                        self._queue.task_done()
+                        queue.task_done()
                         if batch:
                             self._flush_batch(batch, trace, otel_context)
                             for _ in batch:
-                                self._queue.task_done()
+                                queue.task_done()
                         return
                     batch.append(item)
             except asyncio.QueueEmpty:
@@ -1102,15 +1114,15 @@ class TelemetryManager:
             if not batch:
                 # Slow path: queue was empty — wait without a timeout.
                 # Plain queue.get(), no wait_for(), no timer handle, no Task allocation.
-                item = await self._queue.get()
+                item = await queue.get()
                 if item is _STOP_SENTINEL:
-                    self._queue.task_done()
+                    queue.task_done()
                     return
                 batch.append(item)
 
             self._flush_batch(batch, trace, otel_context)
             for _ in batch:
-                self._queue.task_done()  # task_done AFTER processing (Fix 1)
+                queue.task_done()  # task_done AFTER processing (Fix 1)
 
             # Yield only when a full batch was drained — queue likely has more items.
             # Partial batch means queue is exhausted; await queue.get() yields naturally.
