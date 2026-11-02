@@ -175,6 +175,7 @@ class TestOtelInstruments:
         """A crashing dispatch loop is noticed when it ends, not after a stall window."""
 
         def crash(batch, *args):
+            manager._inflight = len(batch)  # as _flush_batch does before it processes
             raise RuntimeError("flush failed")
 
         monkeypatch.setattr(manager, "_flush_batch", crash)
@@ -192,7 +193,7 @@ class TestOtelInstruments:
         # the batch the loop was flushing when it crashed is counted as not processed
         lost = [r.getMessage() for r in caplog.records if "not processed" in r.getMessage()]
         assert len(lost) == 1
-        assert int(lost[0].split("; ")[1].split()[0]) >= 10
+        assert "plus up to" in lost[0], lost
 
     async def test_stop_cancels_a_stalled_dispatch_loop(self, manager, monkeypatch, caplog):
         """A dispatch loop that makes no progress is cancelled after one stall window."""
@@ -215,16 +216,17 @@ class TestOtelInstruments:
         assert "not processed" in warnings[0]
         assert manager._queue.qsize() == 0  # no stale events for a later start()
 
-    async def test_cancelling_stop_during_a_stalled_drain_propagates(self, manager, monkeypatch):
+    async def test_cancelling_stop_during_a_stalled_drain_propagates(self, manager):
         """Stop() must not swallow a cancellation aimed at itself (e.g. an outer timeout)."""
-        monkeypatch.setattr(TelemetryManager, "_DRAIN_STALL_TIMEOUT", 5.0)
         manager._dispatch_task.cancel()
         await asyncio.sleep(0)
         hung = asyncio.create_task(asyncio.sleep(3600))
         manager._dispatch_task = hung
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(manager.stop(), timeout=0.1)
-        hung.cancel()
+        try:
+            with pytest.raises(asyncio.TimeoutError):  # the stall window is 5 s
+                await asyncio.wait_for(manager.stop(), timeout=0.1)
+        finally:
+            hung.cancel()
 
     async def test_tasks_running_ignores_tasks_ended_before_start(self, manager):
         """A task created and canceled before RUNNING must not decrement tasks_running."""

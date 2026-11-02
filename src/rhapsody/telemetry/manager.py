@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Pushed onto the queue by stop() after queue.join() to unblock the dispatch loop cleanly.
+# Queued by stop() behind the backlog: the dispatch loop exits when it reaches it.
 _STOP_SENTINEL = object()
 
 
@@ -270,6 +270,8 @@ class TelemetryManager:
             trace_mod.set_span_in_context(self._session_span)
         )
 
+        # A fresh queue: nothing left by an earlier stop() (e.g. a sentinel) reaches this loop.
+        self._queue = asyncio.Queue()
         self._running = True
         self._dispatch_task = asyncio.create_task(self._dispatch_loop(), name="telemetry-dispatch")
 
@@ -335,6 +337,8 @@ class TelemetryManager:
                 task.cancel()
                 # Bounded; asyncio.wait() also lets a cancellation of stop() itself propagate.
                 await asyncio.wait({task}, timeout=self._DRAIN_STALL_TIMEOUT)
+                if not task.done():
+                    logger.warning("Telemetry dispatch loop did not stop after cancel")
                 break
             logger.info("Telemetry: draining %d events before shutdown", now - 1)
             last = now
@@ -344,10 +348,9 @@ class TelemetryManager:
             task is None or not task.done() or task.cancelled() or task.exception() is not None
         )
         if ended_early:
-            # Not processed: what is still queued (the sentinel aside) plus the batch the loop
-            # was flushing. Empty the queue, so a later start() does not see stale events.
-            lost = self._inflight
-            self._inflight = 0
+            # Not processed: what is still queued (the sentinel aside), and possibly part of
+            # the batch the loop was handling when it ended.
+            queued = 0
             while True:
                 try:
                     item = self._queue.get_nowait()
@@ -355,12 +358,14 @@ class TelemetryManager:
                     break
                 self._queue.task_done()
                 if item is not _STOP_SENTINEL:
-                    lost += 1
-            if lost:
+                    queued += 1
+            inflight, self._inflight = self._inflight, 0
+            if queued or inflight:
                 logger.warning(
-                    "Telemetry dispatch loop %s; %d events not processed",
+                    "Telemetry dispatch loop %s; %d queued events not processed%s",
                     "stalled" if stalled else "is not running",
-                    lost,
+                    queued,
+                    f", plus up to {inflight} in the batch it was handling" if inflight else "",
                 )
 
         for adapter in self._adapters:
@@ -1082,9 +1087,7 @@ class TelemetryManager:
                     if item is _STOP_SENTINEL:
                         self._queue.task_done()
                         if batch:
-                            self._inflight = len(batch)
                             self._flush_batch(batch, trace, otel_context)
-                            self._inflight = 0
                             for _ in batch:
                                 self._queue.task_done()
                         return
@@ -1101,9 +1104,7 @@ class TelemetryManager:
                     return
                 batch.append(item)
 
-            self._inflight = len(batch)
             self._flush_batch(batch, trace, otel_context)
-            self._inflight = 0
             for _ in batch:
                 self._queue.task_done()  # task_done AFTER processing (Fix 1)
 
@@ -1114,6 +1115,7 @@ class TelemetryManager:
 
     def _flush_batch(self, batch: list[BaseEvent], trace_mod: Any, otel_context: Any) -> None:
         """Process a collected batch: OTel instruments, JSONL write, subscribers."""
+        self._inflight = len(batch)  # reported by stop() if the loop dies in this batch
         for event in batch:
             self._event_log.append(event)
             try:
@@ -1134,6 +1136,7 @@ class TelemetryManager:
                             sub(event)
                     except Exception:
                         logger.debug("Subscriber raised exception", exc_info=True)
+        self._inflight = 0
 
     def _write_batch(self, events: list[BaseEvent]) -> None:
         """Write a batch of events to JSONL in a single file.write() call."""
