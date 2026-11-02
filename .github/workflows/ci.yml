@@ -12,15 +12,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The hooks run on python3.12, which .pre-commit-config.yaml pins. Only
+      # ubuntu-24.04 has it as the system Python.
       - uses: actions/setup-python@v5
+        id: python
         with:
-          python-version: "3.13"
+          python-version: "3.12"
 
-      # Cache pre-commit environments for faster runs
+      # Cache pre-commit environments for faster runs. Keyed by image and Python:
+      # ubuntu-latest moves between images, and the environments hold interpreter paths.
       - uses: actions/cache@v4
         with:
           path: ~/.cache/pre-commit
-          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+          key: pre-commit-${{ env.ImageOS }}-${{ steps.python.outputs.python-version }}-${{ hashFiles('.pre-commit-config.yaml') }}
 
       - name: Run pre-commit
         uses: pre-commit/action@v3.0.1
