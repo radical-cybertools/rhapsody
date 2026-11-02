@@ -4,11 +4,6 @@
 # Enable all checks
 on: true
 
-# Labels newer than the pinned actionlint knows
-self-hosted-runner:
-  labels:
-    - ubuntu-26.04
-
 # Shellcheck configuration
 shellcheck:
   enable: true
