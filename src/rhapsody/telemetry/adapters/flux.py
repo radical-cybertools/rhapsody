@@ -76,6 +76,8 @@ class FluxTelemetryAdapter(TelemetryAdapter):
         ]
 
     def start(self) -> None:
+        if self._running:
+            return  # already sampling: a second start must not add a second sampler set
         try:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:

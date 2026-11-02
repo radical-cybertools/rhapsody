@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dragon process/job exit codes reported like the other backends** — a
+  non-zero exit code from a `process()`/`job()` task (executables, and functions
+  run via `process_template`/`process_templates`) no longer becomes a
+  `SystemExit` in `task["exception"]`, which exited the caller when the task was
+  awaited. `task["exit_code"]` is now set (`0` on success; for a job, a non-zero
+  code from Dragon's per-rank list, whose order is not guaranteed — all codes
+  stay in `task["return_value"]`), and awaiting a failed task raises
+  `TaskExecutionError(uid, stderr, exit_code)` with the task's stderr (for
+  templated functions, the rank's traceback), as documented and as the
+  concurrent and dask backends do.
+  `task["exception"]` stays `None` for these failures.
+- **Dragon-side cancellations reported off the event loop** — when Dragon
+  cancelled a task itself (a timeout or an upstream cancel, surfacing as
+  `TaskCancelledError` from `get()`), `DragonExecutionBackend` called the
+  registered callback with `CANCELED` directly on its `dragon_monitor_loop`
+  thread, while `DONE`/`FAILED` were handed to the event loop with
+  `call_soon_threadsafe`. Consumers that touch asyncio from the callback had
+  those calls rejected (and the error swallowed by the monitor loop), so
+  dependents waited on their own periodic scans. Cancellations now take the
+  same `call_soon_threadsafe` path; a task already reported by `cancel_task()`
+  is still reported only once.
+
 ## [0.6.0] 2026-10-19
 
 ### Fixed

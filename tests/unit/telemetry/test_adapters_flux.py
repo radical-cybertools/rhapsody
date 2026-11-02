@@ -235,6 +235,9 @@ class TestFluxAdapterSelection:
 
     def test_failing_telemetry_info_falls_through(self, caplog):
         class Broken:
+            def submit_tasks(self, tasks):  # an execution backend; data backends are skipped
+                pass
+
             def telemetry_info(self):
                 raise RuntimeError("boom")
 
