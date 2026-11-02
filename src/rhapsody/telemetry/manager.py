@@ -11,6 +11,7 @@ in opentelemetry at startup unless telemetry is explicitly enabled.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import functools
 import json
@@ -108,7 +109,7 @@ class TelemetryManager:
         print(telemetry.task_spans())
     """
 
-    # stop() keeps draining while the event backlog shrinks within this many seconds.
+    # stop() keeps waiting while the event backlog shrinks within this many seconds.
     _DRAIN_STALL_TIMEOUT = 5.0
 
     def __init__(
@@ -314,36 +315,39 @@ class TelemetryManager:
         )
 
         self._running = False
-        # Drain all in-flight events before signalling the dispatch loop to exit.
-        # emit() is now a no-op (guard on _running), so no new events can arrive.
-        # Keep waiting while the backlog shrinks; give up only when it stalls, so a
-        # large backlog is processed instead of silently dropped.
-        backlog = None
-        while self._dispatch_task is not None and not self._dispatch_task.done():
-            try:
-                await asyncio.wait_for(self._queue.join(), timeout=self._DRAIN_STALL_TIMEOUT)
-                break
-            except asyncio.TimeoutError:
-                remaining = self._queue.qsize()
-                if self._dispatch_task.done():
-                    break  # reported below
-                if backlog is not None and remaining >= backlog:
-                    logger.warning(
-                        "Telemetry queue stalled with %d events left; not waiting further",
-                        remaining,
-                    )
-                    break
-                logger.info("Telemetry: draining %d events before shutdown", remaining)
-                backlog = remaining
+        # Drain: queue the sentinel behind the backlog and wait for the dispatch loop to
+        # reach it. The queue is FIFO, so the loop ending at the sentinel means every event
+        # before it was processed. emit() is now a no-op (guard on _running). Keep waiting
+        # while the backlog shrinks; on a stall, cancel the loop so nothing runs while the
+        # checkpoint file and the OTel providers are closed below.
+        self._queue.put_nowait(_STOP_SENTINEL)
         task = self._dispatch_task
+        stalled = False
+        last = self._queue.qsize()
+        while task is not None and not task.done():
+            await asyncio.wait({task}, timeout=self._DRAIN_STALL_TIMEOUT)
+            if task.done():
+                break
+            now = self._queue.qsize()
+            if now >= last:
+                stalled = True
+                logger.warning(
+                    "Telemetry queue stalled with %d events left; not waiting further", now - 1
+                )
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+                break
+            logger.info("Telemetry: draining %d events before shutdown", now - 1)
+            last = now
         if task is not None and task.done() and not task.cancelled() and task.exception():
             logger.error("Telemetry dispatch loop failed", exc_info=task.exception())
-        if (task is None or task.done()) and self._queue.qsize():
+        ended_early = task is None or task.cancelled() or task.exception() is not None
+        if ended_early and not stalled and self._queue.qsize() > 1:
             logger.warning(
                 "Telemetry dispatch loop is not running; %d events not processed",
-                self._queue.qsize(),
+                self._queue.qsize() - 1,  # the sentinel is still queued
             )
-        self._queue.put_nowait(_STOP_SENTINEL)
 
         for adapter in self._adapters:
             try:
@@ -357,12 +361,6 @@ class TelemetryManager:
                 await self._checkpoint_task
             except asyncio.CancelledError:
                 pass
-
-        if self._dispatch_task and not self._dispatch_task.done():
-            try:
-                await asyncio.wait_for(self._dispatch_task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                logger.warning("Telemetry dispatch loop did not drain cleanly within timeout")
 
         # Final flush of metrics + spans to file
         if self._checkpoint_file is not None:

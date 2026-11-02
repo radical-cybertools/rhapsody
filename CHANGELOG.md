@@ -16,10 +16,12 @@
 ### Fixed
 
 - **Telemetry dropped events on `stop()`** — `stop()` gave the event backlog a
-  fixed 5 s to drain and then dropped the rest silently: a 100k-task session
-  lost 59% of its task events. It now keeps draining while the backlog shrinks
-  (logging progress), gives up only on a stall or a dead dispatch loop, and
-  warns then. `start_telemetry(drain_on_stop=False)` skips the backlog instead
+  fixed 5 s to drain and then dropped the rest, logging only that the drain had
+  not finished: a 100k-task session lost 59% of its task events. It now queues
+  the stop sentinel behind the backlog and waits for the dispatch loop to reach
+  it, as long as the backlog shrinks (logging progress). A crashed dispatch loop
+  is reported at once, a stalled one is cancelled after one stall window, and
+  both warnings give the number of events not processed. `start_telemetry(drain_on_stop=False)` skips the backlog instead
   (discarded with a warning) for a fast shutdown, e.g. close to a job walltime.
 - **`tasks_running` counted tasks that never ran** — a task that ended before
   RUNNING decremented the gauge without a matching increment, and its -1 could

@@ -169,6 +169,46 @@ class TestOtelInstruments:
         assert time.perf_counter() - t0 < 2.0  # one stall window would be 5 s
         assert any("not processed" in r.getMessage() for r in caplog.records)
 
+    async def test_stop_returns_at_once_when_the_dispatch_loop_crashes(
+        self, manager, monkeypatch, caplog
+    ):
+        """A crashing dispatch loop is noticed when it ends, not after a stall window."""
+
+        def crash(batch, *args):
+            raise RuntimeError("flush failed")
+
+        monkeypatch.setattr(manager, "_flush_batch", crash)
+        for i in range(10):
+            manager.emit(
+                make_event(
+                    TaskSubmitted, session_id="test-session", backend="concurrent", task_id=f"t{i}"
+                )
+            )
+        t0 = time.perf_counter()
+        with caplog.at_level("WARNING", logger="rhapsody.telemetry.manager"):
+            await manager.stop()
+        assert time.perf_counter() - t0 < 1.0  # the stall window is 5 s
+        assert any("dispatch loop failed" in r.getMessage() for r in caplog.records)
+
+    async def test_stop_cancels_a_stalled_dispatch_loop(self, manager, monkeypatch, caplog):
+        """A dispatch loop that makes no progress is cancelled after one stall window."""
+        monkeypatch.setattr(TelemetryManager, "_DRAIN_STALL_TIMEOUT", 0.05)
+        manager._dispatch_task.cancel()
+        await asyncio.sleep(0)
+        hung = asyncio.create_task(asyncio.sleep(3600))
+        manager._dispatch_task = hung
+        manager.emit(
+            make_event(TaskSubmitted, session_id="test-session", backend="concurrent", task_id="t1")
+        )
+        t0 = time.perf_counter()
+        with caplog.at_level("WARNING", logger="rhapsody.telemetry.manager"):
+            await manager.stop()
+        assert time.perf_counter() - t0 < 1.0
+        assert hung.cancelled()
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("stalled with 2 events left" in w for w in warnings), warnings
+        assert not any("not processed" in w for w in warnings)  # reported once
+
     async def test_tasks_running_ignores_tasks_ended_before_start(self, manager):
         """A task created and canceled before RUNNING must not decrement tasks_running."""
         base = {"session_id": "test-session", "backend": "concurrent"}
