@@ -174,11 +174,11 @@ class TestOtelInstruments:
     ):
         """A crashing dispatch loop is noticed when it ends, not after a stall window."""
 
-        def crash(batch, *args):
-            manager._inflight = len(batch)  # as _flush_batch does before it processes
-            raise RuntimeError("flush failed")
+        class FailingLog(list):
+            def append(self, event):  # _flush_batch's first step, outside its per-event try
+                raise RuntimeError("flush failed")
 
-        monkeypatch.setattr(manager, "_flush_batch", crash)
+        monkeypatch.setattr(manager, "_event_log", FailingLog())
         for i in range(10):
             manager.emit(
                 make_event(
@@ -227,6 +227,17 @@ class TestOtelInstruments:
                 await asyncio.wait_for(manager.stop(), timeout=0.1)
         finally:
             hung.cancel()
+
+    async def test_second_stop_is_a_no_op(self, caplog):
+        """A repeated stop() neither queues a stale sentinel nor reports phantom losses."""
+        m = TelemetryManager(session_id="test-session", drain_on_stop=False)
+        await m.start()
+        await m.stop()
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="rhapsody.telemetry.manager"):
+            await m.stop()
+        assert m._queue.qsize() == 0
+        assert not caplog.records
 
     async def test_tasks_running_ignores_tasks_ended_before_start(self, manager):
         """A task created and canceled before RUNNING must not decrement tasks_running."""

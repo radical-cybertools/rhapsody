@@ -293,16 +293,11 @@ class TelemetryManager:
 
     async def stop(self) -> None:
         """Stop: emit SessionEnded, drain queue, flush file, stop adapters, shutdown OTel."""
+        if not self._running:
+            return  # never started, or already stopped
         if not self._drain_on_stop:
             # Discard before SessionEnded is queued, so the session span still ends.
-            discarded = 0
-            while True:
-                try:
-                    self._queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                self._queue.task_done()
-                discarded += 1
+            discarded = self._discard_queue()
             if discarded:
                 logger.warning(
                     "Telemetry drain disabled: %d queued events not processed", discarded
@@ -350,15 +345,7 @@ class TelemetryManager:
         if ended_early:
             # Not processed: what is still queued (the sentinel aside), and possibly part of
             # the batch the loop was handling when it ended.
-            queued = 0
-            while True:
-                try:
-                    item = self._queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                self._queue.task_done()
-                if item is not _STOP_SENTINEL:
-                    queued += 1
+            queued = self._discard_queue()
             inflight, self._inflight = self._inflight, 0
             if queued or inflight:
                 logger.warning(
@@ -399,6 +386,18 @@ class TelemetryManager:
             self._meter_provider.shutdown()
         if self._tracer_provider:
             self._tracer_provider.shutdown()
+
+    def _discard_queue(self) -> int:
+        """Empty the event queue without processing it; return the number of events dropped."""
+        dropped = 0
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return dropped
+            self._queue.task_done()
+            if item is not _STOP_SENTINEL:
+                dropped += 1
 
     # ------------------------------------------------------------------
     # Public API
