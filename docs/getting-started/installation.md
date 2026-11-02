@@ -4,7 +4,7 @@ RHAPSODY can be installed from source or via pip. We recommend using a virtual e
 
 ## Prerequisites
 
-- **Python**: 3.10 or higher.
+- **Python**: 3.11 or higher.
 - **asyncio**: Included in the Python standard library.
 
 ## Standard Installation

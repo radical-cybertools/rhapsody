@@ -28,10 +28,11 @@
 
 ### Removed
 
-- **Python 3.9 support** — RHAPSODY now requires Python 3.10 or newer
-  (`requires-python = ">=3.10"`). Python 3.9 reached end of life in October
-  2025, and CI no longer tests it. The 3.8 and 3.9 classifiers are gone, and
-  the install and contributing docs say 3.10.
+- **Python 3.9 and 3.10 support** — RHAPSODY now requires Python 3.11 or
+  newer (`requires-python = ">=3.11"`). Python 3.9 reached end of life in
+  October 2025 and 3.10 in October 2026, and CI no longer tests them. The 3.8,
+  3.9 and 3.10 classifiers are gone, and the install, contributing and AI
+  backend docs say 3.11.
 
 ## [0.6.0] 2026-10-19
 
