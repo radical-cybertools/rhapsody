@@ -21,8 +21,9 @@
   the stop sentinel behind the backlog and waits for the dispatch loop to reach
   it, as long as the backlog shrinks (logging progress). A crashed dispatch loop
   is reported at once, a stalled one is cancelled after one stall window, and
-  both warnings give the number of events not processed. `start_telemetry(drain_on_stop=False)` skips the backlog instead
-  (discarded with a warning) for a fast shutdown, e.g. close to a job walltime.
+  both warnings give the number of events not processed.
+  `start_telemetry(drain_on_stop=False)` skips the backlog instead (discarded
+  with a warning) for a fast shutdown, e.g. close to a job walltime.
 - **`tasks_running` counted tasks that never ran** — a task that ended before
   RUNNING decremented the gauge without a matching increment, and its -1 could
   land on a different label set than its +1. Each task now counts once, and its

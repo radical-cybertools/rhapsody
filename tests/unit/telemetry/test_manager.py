@@ -189,6 +189,10 @@ class TestOtelInstruments:
             await manager.stop()
         assert time.perf_counter() - t0 < 1.0  # the stall window is 5 s
         assert any("dispatch loop failed" in r.getMessage() for r in caplog.records)
+        # the batch the loop was flushing when it crashed is counted as not processed
+        lost = [r.getMessage() for r in caplog.records if "not processed" in r.getMessage()]
+        assert len(lost) == 1
+        assert int(lost[0].split("; ")[1].split()[0]) >= 10
 
     async def test_stop_cancels_a_stalled_dispatch_loop(self, manager, monkeypatch, caplog):
         """A dispatch loop that makes no progress is cancelled after one stall window."""
@@ -206,8 +210,21 @@ class TestOtelInstruments:
         assert time.perf_counter() - t0 < 1.0
         assert hung.cancelled()
         warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-        assert any("stalled with 2 events left" in w for w in warnings), warnings
-        assert not any("not processed" in w for w in warnings)  # reported once
+        assert len(warnings) == 1, warnings  # reported once
+        assert "stalled" in warnings[0]
+        assert "not processed" in warnings[0]
+        assert manager._queue.qsize() == 0  # no stale events for a later start()
+
+    async def test_cancelling_stop_during_a_stalled_drain_propagates(self, manager, monkeypatch):
+        """Stop() must not swallow a cancellation aimed at itself (e.g. an outer timeout)."""
+        monkeypatch.setattr(TelemetryManager, "_DRAIN_STALL_TIMEOUT", 5.0)
+        manager._dispatch_task.cancel()
+        await asyncio.sleep(0)
+        hung = asyncio.create_task(asyncio.sleep(3600))
+        manager._dispatch_task = hung
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(manager.stop(), timeout=0.1)
+        hung.cancel()
 
     async def test_tasks_running_ignores_tasks_ended_before_start(self, manager):
         """A task created and canceled before RUNNING must not decrement tasks_running."""

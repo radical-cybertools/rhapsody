@@ -11,7 +11,6 @@ in opentelemetry at startup unless telemetry is explicitly enabled.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import dataclasses
 import functools
 import json
@@ -126,6 +125,8 @@ class TelemetryManager:
         # stop(): process the event backlog (True) or discard it for a fast shutdown.
         self._drain_on_stop = drain_on_stop
         self._queue: asyncio.Queue = asyncio.Queue()
+        # Events of the batch the dispatch loop is flushing: lost if the loop dies mid-batch.
+        self._inflight = 0
         self._subscribers: list[Callable[[BaseEvent], Any]] = []
         self._adapters: list[TelemetryAdapter] = []
         # Backends that already have an adapter (by id), and whether the one
@@ -331,23 +332,36 @@ class TelemetryManager:
             now = self._queue.qsize()
             if now >= last:
                 stalled = True
-                logger.warning(
-                    "Telemetry queue stalled with %d events left; not waiting further", now - 1
-                )
                 task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
+                # Bounded; asyncio.wait() also lets a cancellation of stop() itself propagate.
+                await asyncio.wait({task}, timeout=self._DRAIN_STALL_TIMEOUT)
                 break
             logger.info("Telemetry: draining %d events before shutdown", now - 1)
             last = now
         if task is not None and task.done() and not task.cancelled() and task.exception():
             logger.error("Telemetry dispatch loop failed", exc_info=task.exception())
-        ended_early = task is None or task.cancelled() or task.exception() is not None
-        if ended_early and not stalled and self._queue.qsize() > 1:
-            logger.warning(
-                "Telemetry dispatch loop is not running; %d events not processed",
-                self._queue.qsize() - 1,  # the sentinel is still queued
-            )
+        ended_early = (
+            task is None or not task.done() or task.cancelled() or task.exception() is not None
+        )
+        if ended_early:
+            # Not processed: what is still queued (the sentinel aside) plus the batch the loop
+            # was flushing. Empty the queue, so a later start() does not see stale events.
+            lost = self._inflight
+            self._inflight = 0
+            while True:
+                try:
+                    item = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                self._queue.task_done()
+                if item is not _STOP_SENTINEL:
+                    lost += 1
+            if lost:
+                logger.warning(
+                    "Telemetry dispatch loop %s; %d events not processed",
+                    "stalled" if stalled else "is not running",
+                    lost,
+                )
 
         for adapter in self._adapters:
             try:
@@ -1068,7 +1082,9 @@ class TelemetryManager:
                     if item is _STOP_SENTINEL:
                         self._queue.task_done()
                         if batch:
+                            self._inflight = len(batch)
                             self._flush_batch(batch, trace, otel_context)
+                            self._inflight = 0
                             for _ in batch:
                                 self._queue.task_done()
                         return
@@ -1085,7 +1101,9 @@ class TelemetryManager:
                     return
                 batch.append(item)
 
+            self._inflight = len(batch)
             self._flush_batch(batch, trace, otel_context)
+            self._inflight = 0
             for _ in batch:
                 self._queue.task_done()  # task_done AFTER processing (Fix 1)
 
