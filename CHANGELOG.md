@@ -12,6 +12,13 @@
   that grouped these metrics by `task_id` need to use the spans. Event ids are
   built without a `UUID` object (still UUID4 hex).
   Together about 30% less telemetry cost per task and per dependent step.
+- **Dragon pin raised to `dragonhpc==0.15.0`** in the `dragon` extra (was
+  `==0.14.1`). radex needs `DDict.wait_for_keys()` (first in 0.14.2), and 0.15.0
+  supports co-located attach to a running Dragon runtime, which 0.14.1 lacks.
+  Dragon start-up and teardown are noticeably slower on 0.15.0 (35-60% longer
+  Dragon test suites on Perlmutter). Because the `backends`/`all` extras also
+  include `dragon`, they now resolve `dragonhpc[ai]` at 0.15.0 (vLLM
+  `>=0.11,<0.20`); the `ai` extra on its own stays unpinned.
 
 ### Fixed
 
