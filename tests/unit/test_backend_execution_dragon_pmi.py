@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
+from rhapsody.backends.execution.dragon import CRAY_MPICH_ENV
 from rhapsody.backends.execution.dragon import DragonExecutionBackend
 
 PMIBackend = pytest.importorskip(
@@ -42,6 +43,27 @@ def _job_task(templates=((4, {}),), **backend_specific):
         "name": "mpi",
         "task_backend_specific_kwargs": {"process_templates": list(templates), **backend_specific},
     }
+
+
+def _work():
+    return 0
+
+
+def _function_job_task(templates=((1, {}),), **backend_specific):
+    """A Python function task run as one Batch job of ``templates``' ranks."""
+    return {
+        **_job_task(templates, **backend_specific),
+        "executable": None,
+        "function": _work,
+        "name": "fn",
+    }
+
+
+@pytest.fixture(autouse=True)
+def _no_cray_mpich(monkeypatch):
+    """Outside Cray MPICH, as on CI; the tests that need it set it."""
+    for name in CRAY_MPICH_ENV:
+        monkeypatch.delenv(name, raising=False)
 
 
 def _options_kwargs(backend):
@@ -194,6 +216,34 @@ async def test_multi_rank_job_without_timeout_warns_once():
 
     assert len(_warnings(backend, "no timeout")) == 1
     assert backend.batch.options.return_value.job.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_one_rank_function_job_without_pmi_warns():
+    """Batch's default PMI reaches a one-rank job too, and a Python function can crash under it."""
+    backend = _make_backend()
+
+    await backend.build_task(_function_job_task())
+
+    assert len(_warnings(backend, "has 1 rank and no PMI")) == 1
+    assert _warnings(backend, "no timeout") == []
+    assert "pmi" not in _options_kwargs(backend)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", CRAY_MPICH_ENV)
+async def test_cray_mpich_environment_keeps_the_default_without_a_pmi_warning(monkeypatch, name):
+    monkeypatch.setenv(name, "8.1.30")
+    backend = _make_backend()
+
+    await backend.build_task(_job_task())
+    await backend.build_task(_function_job_task())
+
+    assert _warnings(backend, "no PMI") == []
+    assert len(_warnings(backend, "no timeout")) == 1
+    assert "pmi" not in _options_kwargs(backend)
+    debug = [c.args[0] for c in backend.logger.debug.call_args_list]
+    assert sum("Cray MPICH environment detected" in m for m in debug) == 1
 
 
 @pytest.mark.asyncio

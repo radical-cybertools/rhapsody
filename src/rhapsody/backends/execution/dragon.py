@@ -4,9 +4,11 @@ import os
 import shutil
 import threading
 import time
+from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
 from typing import Optional
+from typing import Union
 
 from ..base import BaseBackend
 from ..constants import BackendMainStates
@@ -52,7 +54,14 @@ class TaskStateMapper:
     terminal_states = {DONE, FAILED, CANCELED}
 
 
-def _pmi_options(pmi: Optional[str]) -> dict[str, Any]:
+if TYPE_CHECKING:
+    from dragon.infrastructure.facts import PMIBackend
+
+# The Cray MPICH module sets these; Batch's default PMI, cray, is the right one there.
+CRAY_MPICH_ENV = ("CRAY_MPICH_DIR", "CRAY_MPICH_VERSION")
+
+
+def _pmi_options(pmi: Optional[Union[str, "PMIBackend"]]) -> dict[str, Any]:
     """Return the ``Batch.options()`` kwargs that launch a job with ``pmi``.
 
     ``pmi`` is ``"pmix"``, ``"cray"``, ``"none"`` (no PMI) or a Dragon ``PMIBackend``. None is no
@@ -133,9 +142,11 @@ class DragonExecutionBackend(BaseBackend):
         ``"cray"``, ``"none"`` (no PMI, for jobs of non-MPI processes) or a Dragon
         ``PMIBackend``. Set it for every job with ``DragonExecutionBackend(pmi=...)``, or per
         task with ``"pmi"`` in ``task_backend_specific_kwargs``, which takes precedence. With
-        neither, Batch's default applies, and the first multi-rank job logs a warning. Use
-        ``"none"`` for jobs of non-MPI processes: Batch's default can break them too (on a
-        non-Cray node, every rank of a Python function job crashed with it). Tasks with
+        neither, Batch's default applies, and the first multi-rank job, or job of a Python
+        function, logs a warning; not under Cray MPICH (``CRAY_MPICH_DIR`` or
+        ``CRAY_MPICH_VERSION`` set), where the default is right. Use ``"none"`` for jobs of
+        non-MPI processes: Batch's default can break them too (on a non-Cray node, every rank
+        of a Python function job crashed with it, one rank alone included). Tasks with
         ``process_template`` or no template run without a PMI.
 
         Give MPI jobs a ``timeout`` (seconds) too: when a rank dies, Dragon does not end the
@@ -164,7 +175,7 @@ class DragonExecutionBackend(BaseBackend):
         self,
         batch_kwargs: Optional[dict] = None,
         name: Optional[str] = "dragon",
-        pmi: Optional[str] = None,
+        pmi: Optional[Union[str, "PMIBackend"]] = None,
     ):
         if not Batch:
             raise RuntimeError(DRAGON_BATCH_INIT_ERROR)
@@ -196,7 +207,7 @@ class DragonExecutionBackend(BaseBackend):
         self._cancelled_tuids: set[str] = set()
         self._batch_monitor_thread = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        # Multi-rank job warnings, logged once per backend.
+        # Job warnings (no PMI, no timeout), logged once per backend.
         self._warned_job_pmi = False
         self._warned_job_timeout = False
 
@@ -505,7 +516,9 @@ class DragonExecutionBackend(BaseBackend):
         # Batch launches only job() tasks with a PMI.
         job_options: dict[str, Any] = {}
         if process_templates_config is not None:
-            job_options = self._job_options(uid, backend_kwargs, process_templates_config)
+            job_options = self._job_options(
+                uid, backend_kwargs, process_templates_config, is_function
+            )
 
         # Compute per-task stdio paths when capture is requested.
         # Dragon creates parent directories automatically.
@@ -570,31 +583,44 @@ class DragonExecutionBackend(BaseBackend):
 
         return batch_task
 
-    def _job_options(self, uid: str, backend_kwargs: dict, process_templates_config: list) -> dict:
+    def _job_options(
+        self, uid: str, backend_kwargs: dict, process_templates_config: list, is_function: bool
+    ) -> dict:
         """Return the PMI kwargs for an MPI job's ``Batch.options()``.
 
-        The task's ``pmi`` takes precedence over the backend's. The first multi-rank job with no
-        PMI, and the first with no timeout, log a warning; neither is refused. ``pmi="none"``
-        declares the processes non-MPI, so neither warning applies.
+        The task's ``pmi`` takes precedence over the backend's. The first job with no PMI that
+        has several ranks or runs a Python function, and the first multi-rank job with no
+        timeout, log a warning; neither is refused. Batch's default PMI reaches a one-rank job
+        too, and a Python function can crash under it on a non-Cray node. Under Cray MPICH
+        (``CRAY_MPICH_ENV``) that default is right, so no PMI warning. ``pmi="none"`` declares
+        the processes non-MPI, so neither warning applies.
         """
         pmi = backend_kwargs.get("pmi")
         options = self._job_pmi_options if pmi is None else _pmi_options(pmi)
-        nranks = sum(n for n, _ in process_templates_config)
-        # Without MPI there is no collective for the other ranks to wait in when one dies.
-        if nranks <= 1 or options == {"pmi": None}:
+        if options == {"pmi": None}:
             return options
+        nranks = sum(n for n, _ in process_templates_config)
+        ranks = f"{nranks} rank{'' if nranks == 1 else 's'}"
 
-        if not options and not self._warned_job_pmi:
+        if not options and (nranks > 1 or is_function) and not self._warned_job_pmi:
             self._warned_job_pmi = True
-            self.logger.warning(
-                f"Job {uid} has {nranks} ranks and no PMI, so Dragon launches it with Batch's "
-                "default, cray. That suits Cray MPICH. Elsewhere it can break the job: with Open "
-                "MPI each rank may run as a one-rank job, or every rank may fail, and a job of "
-                "Python functions may crash. Set pmi ('pmix' or 'cray', or 'none' if the "
-                "processes are not MPI) on DragonExecutionBackend or in the task's "
-                "task_backend_specific_kwargs. Logged once."
-            )
-        if "timeout" not in backend_kwargs and not self._warned_job_timeout:
+            cray_mpich = [v for v in CRAY_MPICH_ENV if os.environ.get(v)]
+            if cray_mpich:
+                self.logger.debug(
+                    f"Cray MPICH environment detected ({', '.join(cray_mpich)}), keeping Batch's "
+                    f"default PMI, cray, for job {uid} and the jobs after it."
+                )
+            else:
+                self.logger.warning(
+                    f"Job {uid} has {ranks} and no PMI, so Dragon launches it with Batch's "
+                    "default, cray. That suits Cray MPICH. Elsewhere it can break the job: with "
+                    "Open MPI each rank may run as a one-rank job, or every rank may fail, and a "
+                    "job of Python functions may crash, even with one rank. Set pmi ('pmix' or "
+                    "'cray', or 'none' if the processes are not MPI) on DragonExecutionBackend or "
+                    "in the task's task_backend_specific_kwargs. Logged once."
+                )
+        # A rank alone has no other rank to wait for it in a collective when it dies.
+        if nranks > 1 and "timeout" not in backend_kwargs and not self._warned_job_timeout:
             self._warned_job_timeout = True
             self.logger.warning(
                 f"Job {uid} has {nranks} ranks and no timeout. If it is an MPI job and a rank "
@@ -727,7 +753,7 @@ class DragonExecutionBackend(BaseBackend):
     async def create(
         cls,
         batch_kwargs: Optional[dict] = None,
-        pmi: Optional[str] = None,
+        pmi: Optional[Union[str, "PMIBackend"]] = None,
     ):
         """Create and initialize a DragonExecutionBackend."""
         backend = cls(batch_kwargs=batch_kwargs, pmi=pmi)
