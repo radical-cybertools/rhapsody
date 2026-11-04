@@ -2,7 +2,36 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Task metrics no longer carry `task_id`** — `tasks_*` and
+  `task_duration_seconds` aggregate per (session, backend, executable,
+  task_type). The `task_id` attribute opened a new metric series for every task:
+  memory grew with the task count, and it was the most expensive part of
+  per-event processing. Per-task identity stays on the task spans; dashboards
+  that grouped these metrics by `task_id` need to use the spans. Event ids are
+  built without a `UUID` object (still UUID4 hex).
+  Together about 30% less telemetry cost per task and per dependent step.
+- **Dragon pin raised to `dragonhpc==0.15.0`** in the `dragon` extra (was
+  `==0.14.1`). radex needs `DDict.wait_for_keys()` (first in 0.14.2), and 0.15.0
+  supports co-located attach to a running Dragon runtime, which 0.14.1 lacks.
+  Dragon start-up and teardown are noticeably slower on 0.15.0 (35-60% longer
+  Dragon test suites on Perlmutter). Because the `backends`/`all` extras also
+  include `dragon`, they now resolve `dragonhpc[ai]` at 0.15.0 (vLLM
+  `>=0.11,<0.20`); the `ai` extra on its own stays unpinned.
+
 ### Fixed
+
+- **Telemetry dropped events on `stop()`** — `stop()` gave the event backlog a
+  fixed 5 s to drain and then dropped the rest silently: a 100k-task session
+  lost 59% of its task events. It now keeps draining while the backlog shrinks
+  (logging progress), gives up only on a stall or a dead dispatch loop, and
+  warns then. `start_telemetry(drain_on_stop=False)` skips the backlog instead
+  (discarded with a warning) for a fast shutdown, e.g. close to a job walltime.
+- **`tasks_running` counted tasks that never ran** — a task that ended before
+  RUNNING decremented the gauge without a matching increment, and its -1 could
+  land on a different label set than its +1. Each task now counts once, and its
+  -1 uses the labels of its +1.
 
 - **Dragon process/job exit codes reported like the other backends** — a
   non-zero exit code from a `process()`/`job()` task (executables, and functions
@@ -25,6 +54,14 @@
   dependents waited on their own periodic scans. Cancellations now take the
   same `call_soon_threadsafe` path; a task already reported by `cancel_task()`
   is still reported only once.
+
+### Removed
+
+- **Python 3.9 and 3.10 support** — RHAPSODY now requires Python 3.11 or
+  newer (`requires-python = ">=3.11"`). Python 3.9 reached end of life in
+  October 2025 and 3.10 in October 2026, and CI no longer tests them. The 3.8,
+  3.9 and 3.10 classifiers are gone, and the install, contributing and AI
+  backend docs say 3.11.
 
 ## [0.6.0] 2026-10-19
 

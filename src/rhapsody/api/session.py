@@ -316,6 +316,7 @@ class Session:
         span_processors: list | None = None,
         metric_readers: list | None = None,
         resource: object | None = None,
+        drain_on_stop: bool = True,
     ) -> TelemetryManager:
         """Enable and start telemetry collection for this session in one call.
 
@@ -350,6 +351,11 @@ class Session:
                                     When None (default), ``Resource.create()`` is called
                                     automatically and reads ``OTEL_SERVICE_NAME`` /
                                     ``OTEL_RESOURCE_ATTRIBUTES`` from the environment.
+            drain_on_stop:          When True (default), :meth:`close` processes every
+                                    queued telemetry event before shutting telemetry down,
+                                    however long that takes. When False, events still
+                                    queued at close are discarded with a warning, so
+                                    shutdown is fast (e.g. close to a job walltime).
 
         Returns:
             The active :class:`~rhapsody.telemetry.manager.TelemetryManager`.
@@ -367,6 +373,7 @@ class Session:
             span_processors=span_processors,
             metric_readers=metric_readers,
             resource=resource,
+            drain_on_stop=drain_on_stop,
         )
         self._state_manager._telemetry_observer = self._telemetry._on_task_state_change
 
