@@ -643,7 +643,11 @@ def test_deliver_batch_success_stores_value_and_fires_done(backend_dragon):
     """_deliver_batch stores return_value on the task dict and fires the DONE callback."""
     uid = "task.unit-done"
     task_desc = {"uid": uid}
-    backend_dragon._task_registry[uid] = {"uid": uid, "description": task_desc}
+    backend_dragon._task_registry[uid] = {
+        "uid": uid,
+        "description": task_desc,
+        "is_native_function": True,
+    }
 
     backend_dragon._deliver_batch([(uid, 42, None, False, "", "")])
 
@@ -693,6 +697,49 @@ def test_deliver_batch_prefers_traceback_over_str_exc(backend_dragon):
     backend_dragon._deliver_batch([(uid, exc, tb, True, "", "")])
 
     assert task_desc["stderr"] == tb
+
+
+@pytest.mark.parametrize(
+    "result, exit_code, state",
+    [(0, 0, "DONE"), ([0, 0], 0, "DONE"), (2, 2, "FAILED"), ([0, -6, 1], -6, "FAILED")],
+)
+def test_deliver_batch_process_exit_code(backend_dragon, result, exit_code, state):
+    """Process/job exit codes set task exit_code (first non-zero) and the DONE/FAILED state.
+
+    No exception is set: the session raises TaskExecutionError(uid, stderr, exit_code) from
+    exit_code, as for the other backends.
+    """
+    uid = "task.unit-exit"
+    task_desc = {"uid": uid}
+    backend_dragon._task_registry[uid] = {
+        "uid": uid,
+        "description": task_desc,
+        "is_native_function": False,
+    }
+
+    backend_dragon._deliver_batch([(uid, result, None, False, "", "ValueError: root cause\n")])
+
+    assert task_desc["exit_code"] == exit_code
+    assert task_desc["return_value"] == result
+    assert task_desc["stderr"] == "ValueError: root cause\n"
+    assert "exception" not in task_desc
+    backend_dragon._callback_func.assert_called_once_with(task_desc, state)
+
+
+def test_deliver_batch_native_function_int_return_is_not_exit_code(backend_dragon):
+    """A native function returning a non-zero int is DONE and gets no exit_code."""
+    uid = "task.unit-native-int"
+    task_desc = {"uid": uid}
+    backend_dragon._task_registry[uid] = {
+        "uid": uid,
+        "description": task_desc,
+        "is_native_function": True,
+    }
+
+    backend_dragon._deliver_batch([(uid, 42, None, False, "", "")])
+
+    assert "exit_code" not in task_desc
+    backend_dragon._callback_func.assert_called_once_with(task_desc, "DONE")
 
 
 def test_cancelled_task_skips_callback(backend_dragon):
@@ -891,8 +938,8 @@ def test_monitor_loop_reads_paths_from_batch_task(backend_dragon):
     assert completions[0][5] == "/work/uid.stderr"
 
 
-def test_monitor_loop_nonzero_exit_delivers_failed(backend_dragon):
-    """Process task: get() returning int 1 must produce raised=True + SystemExit(1)."""
+def test_monitor_loop_nonzero_exit_passed_through(backend_dragon):
+    """Process task: get() returning int 1 is passed on as-is; _deliver_batch maps it."""
     uid, tuid = "task.exit-1", "tuid-exit-1"
     mock_task = MagicMock()
     mock_task.get.return_value = 1
@@ -904,38 +951,14 @@ def test_monitor_loop_nonzero_exit_delivers_failed(backend_dragon):
         backend_dragon,
         poll_tuid=tuid,
         monitored_entry=(mock_task, uid),
-        task_registry_entry={"uid": uid, "description": {"uid": uid}, "is_native_function": False},
-    )
-
-    _, completions = mock_loop.call_soon_threadsafe.call_args.args
-    uid_c, result_c, _tb, raised_c, *_ = completions[0]
-    assert uid_c == uid
-    assert raised_c is True
-    assert isinstance(result_c, SystemExit)
-    assert result_c.code == 1
-
-
-def test_monitor_loop_function_int_return_delivers_done(backend_dragon):
-    """Function task returning int 42 must deliver DONE — exit-code check must not fire."""
-    uid, tuid = "task.func-42", "tuid-func-42"
-    mock_task = MagicMock()
-    mock_task.get.return_value = 42
-    mock_task.traceback = None
-    mock_task.get_stdout.return_value = None
-    mock_task.get_stderr.return_value = None
-
-    mock_loop = _run_monitor_one_cycle(
-        backend_dragon,
-        poll_tuid=tuid,
-        monitored_entry=(mock_task, uid),
-        task_registry_entry={"uid": uid, "description": {"uid": uid}, "is_native_function": True},
+        task_registry_entry={"uid": uid, "description": {"uid": uid}},
     )
 
     _, completions = mock_loop.call_soon_threadsafe.call_args.args
     uid_c, result_c, _tb, raised_c, *_ = completions[0]
     assert uid_c == uid
     assert raised_c is False
-    assert result_c == 42
+    assert result_c == 1
 
 
 @pytest.mark.asyncio
