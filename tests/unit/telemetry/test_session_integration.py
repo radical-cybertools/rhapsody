@@ -21,6 +21,17 @@ async def backend():
 
 
 class TestStartTelemetry:
+    async def test_drain_on_stop_reaches_the_manager(self, backend):
+        session = Session(backends=[backend])
+        telemetry = await session.start_telemetry()
+        assert telemetry._drain_on_stop is True
+        await session.close()
+
+        session = Session(backends=[backend])
+        telemetry = await session.start_telemetry(drain_on_stop=False)
+        assert telemetry._drain_on_stop is False
+        await session.close()
+
     async def test_failing_topology_emits_empty_layout(self, backend, monkeypatch):
         """A topology probe failure is logged; the layout goes out with no nodes."""
 
