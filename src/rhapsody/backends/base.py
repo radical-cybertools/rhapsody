@@ -6,6 +6,7 @@ implement.
 
 from __future__ import annotations
 
+import logging
 import os
 from abc import ABC
 from abc import abstractmethod
@@ -15,6 +16,8 @@ from typing import Callable
 
 if TYPE_CHECKING:
     pass
+
+logger = logging.getLogger(__name__)
 
 
 class BaseBackend(ABC):
@@ -189,3 +192,46 @@ class BaseBackend(ABC):
             NotImplementedError: If the backend doesn't support cancellation
         """
         raise NotImplementedError("Not implemented in the base backend")
+
+    def topology(self) -> list[dict[str, Any]]:
+        """Best-effort description of the resources this backend has access to.
+
+        Consumed by the telemetry layer to emit a one-shot ResourceLayout event
+        at session start, so external viewers can size their node-grid to the
+        actual cluster shape instead of hardcoding it.
+
+        Returns:
+            A list of node descriptors, each a dict with ``id`` (str, node identifier),
+            ``cores`` (int, CPU cores on the node) and ``gpus`` (int, GPUs on the node).
+
+        Default implementation returns an empty list. Backends that know their
+        layout should override; the telemetry layer treats ``[]`` as "topology
+        unknown" and the viewer falls back to a generic default.
+        """
+        return []
+
+    def _probe_local_resources(self) -> tuple[int, int]:
+        """Return ``(cores, gpus)`` of the local node.
+
+        No pynvml, or no NVIDIA library or driver, means no NVIDIA GPUs: ``gpus`` is 0. Any other
+        NVML failure is logged and raised, so a detection failure is not reported as "no GPUs".
+        """
+        cores = os.cpu_count() or 0
+        try:
+            import pynvml  # type: ignore[import-not-found]
+        except ImportError:
+            return cores, 0
+        try:
+            pynvml.nvmlInit()
+        except (pynvml.NVMLError_LibraryNotFound, pynvml.NVMLError_DriverNotLoaded):
+            return cores, 0
+        except pynvml.NVMLError:
+            logger.exception("NVML initialization failed; GPU count unknown")
+            raise
+        try:
+            return cores, int(pynvml.nvmlDeviceGetCount())
+        except pynvml.NVMLError:
+            logger.exception("NVML device count failed; GPU count unknown")
+            raise
+        finally:
+            pynvml.nvmlShutdown()

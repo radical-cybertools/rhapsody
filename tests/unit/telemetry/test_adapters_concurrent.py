@@ -39,7 +39,12 @@ class TestConcurrentTelemetryAdapter:
         ):
             manager.register_adapter(adapter)
             adapter.start()
-            await asyncio.sleep(0.3)  # give the daemon thread time to fire
+            # The daemon thread initializes NVML and I/O baselines before its first
+            # sample; under load that takes longer than a fixed short sleep.
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                if received:
+                    break
             adapter.stop()
 
         assert len(received) >= 1

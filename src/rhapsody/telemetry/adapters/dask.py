@@ -68,6 +68,8 @@ class DaskTelemetryAdapter(TelemetryAdapter):
         self._prev_disk: dict[str, tuple[float, float]] = {}
 
     def start(self) -> None:
+        if self._running:
+            return  # already polling: a second start must not add a second worker
         self._running = True
         self._task = asyncio.create_task(self._collect_loop(), name="telemetry-dask-adapter")
 
