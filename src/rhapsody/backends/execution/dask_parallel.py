@@ -249,6 +249,22 @@ class DaskExecutionBackend(BaseBackend):
         """
         self._callback_func = func
 
+    def topology(self) -> list[dict[str, Any]]:
+        """Node layout from the scheduler: one entry per worker host.
+
+        Cores are the summed ``nthreads`` of the host's workers; GPUs are the summed ``GPU``
+        worker resources (``dask worker --resources GPU=n``), 0 when none are declared.
+        """
+        if self._client is None:
+            return []
+        hosts: dict[str, dict[str, Any]] = {}
+        for worker in self._client.scheduler_info(n_workers=-1).get("workers", {}).values():
+            host = worker.get("host") or worker.get("name") or "unknown"
+            node = hosts.setdefault(host, {"id": host, "cores": 0, "gpus": 0})
+            node["cores"] += int(worker.get("nthreads") or 0)
+            node["gpus"] += int((worker.get("resources") or {}).get("GPU", 0))
+        return list(hosts.values())
+
     def get_task_states_map(self) -> StateMapper:
         """Retrieve a mapping of task IDs to their current states.
 
