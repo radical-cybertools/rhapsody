@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Pushed onto the queue by stop() after queue.join() to unblock the dispatch loop cleanly.
+# Queued by stop() behind the backlog: the dispatch loop exits when it reaches it.
 _STOP_SENTINEL = object()
 
 
@@ -108,7 +108,7 @@ class TelemetryManager:
         print(telemetry.task_spans())
     """
 
-    # stop() keeps draining while the event backlog shrinks within this many seconds.
+    # stop() keeps waiting while the event backlog shrinks within this many seconds.
     _DRAIN_STALL_TIMEOUT = 5.0
 
     def __init__(
@@ -125,6 +125,8 @@ class TelemetryManager:
         # stop(): process the event backlog (True) or discard it for a fast shutdown.
         self._drain_on_stop = drain_on_stop
         self._queue: asyncio.Queue = asyncio.Queue()
+        # Events of the batch the dispatch loop is flushing: lost if the loop dies mid-batch.
+        self._inflight = 0
         self._subscribers: list[Callable[[BaseEvent], Any]] = []
         self._adapters: list[TelemetryAdapter] = []
         # Backends that already have an adapter (by id), and whether the one
@@ -132,6 +134,7 @@ class TelemetryManager:
         self._attached_backends: set[int] = set()
         self._dragon_adapter_attached = False
         self._running = False
+        self._stopped = False  # set once stop() has completed its cleanup
         self._dispatch_task: asyncio.Task | None = None
         self._checkpoint_task: asyncio.Task | None = None
         self._session_start_time: float = 0.0
@@ -220,6 +223,9 @@ class TelemetryManager:
 
     async def start(self) -> None:
         """Start the telemetry manager: set up OTel SDK, open checkpoint file, start loops."""
+        if self._running:
+            return  # already started: a second dispatch loop would be orphaned
+        self._stopped = False
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import InMemoryMetricReader
         from opentelemetry.sdk.resources import Resource
@@ -268,8 +274,12 @@ class TelemetryManager:
             trace_mod.set_span_in_context(self._session_span)
         )
 
+        # A fresh queue: nothing left by an earlier stop() (e.g. a sentinel) reaches this loop.
+        self._queue = asyncio.Queue()
         self._running = True
-        self._dispatch_task = asyncio.create_task(self._dispatch_loop(), name="telemetry-dispatch")
+        self._dispatch_task = asyncio.create_task(
+            self._dispatch_loop(self._queue), name="telemetry-dispatch"
+        )
 
         if self._checkpoint_interval is not None and self._checkpoint_file is not None:
             self._checkpoint_task = asyncio.create_task(
@@ -289,16 +299,11 @@ class TelemetryManager:
 
     async def stop(self) -> None:
         """Stop: emit SessionEnded, drain queue, flush file, stop adapters, shutdown OTel."""
+        if self._stopped:
+            return  # a completed stop() already cleaned up; a cancelled one is retried
         if not self._drain_on_stop:
             # Discard before SessionEnded is queued, so the session span still ends.
-            discarded = 0
-            while True:
-                try:
-                    self._queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                self._queue.task_done()
-                discarded += 1
+            discarded = self._discard_queue()
             if discarded:
                 logger.warning(
                     "Telemetry drain disabled: %d queued events not processed", discarded
@@ -314,36 +319,53 @@ class TelemetryManager:
         )
 
         self._running = False
-        # Drain all in-flight events before signalling the dispatch loop to exit.
-        # emit() is now a no-op (guard on _running), so no new events can arrive.
-        # Keep waiting while the backlog shrinks; give up only when it stalls, so a
-        # large backlog is processed instead of silently dropped.
-        backlog = None
-        while self._dispatch_task is not None and not self._dispatch_task.done():
-            try:
-                await asyncio.wait_for(self._queue.join(), timeout=self._DRAIN_STALL_TIMEOUT)
-                break
-            except asyncio.TimeoutError:
-                remaining = self._queue.qsize()
-                if self._dispatch_task.done():
-                    break  # reported below
-                if backlog is not None and remaining >= backlog:
-                    logger.warning(
-                        "Telemetry queue stalled with %d events left; not waiting further",
-                        remaining,
-                    )
-                    break
-                logger.info("Telemetry: draining %d events before shutdown", remaining)
-                backlog = remaining
-        task = self._dispatch_task
-        if task is not None and task.done() and not task.cancelled() and task.exception():
-            logger.error("Telemetry dispatch loop failed", exc_info=task.exception())
-        if (task is None or task.done()) and self._queue.qsize():
-            logger.warning(
-                "Telemetry dispatch loop is not running; %d events not processed",
-                self._queue.qsize(),
-            )
+        # Drain: queue the sentinel behind the backlog and wait for the dispatch loop to
+        # reach it. The queue is FIFO, so the loop ending at the sentinel means every event
+        # before it was processed. emit() is now a no-op (guard on _running). Keep waiting
+        # while the backlog shrinks; on a stall, cancel the loop so nothing runs while the
+        # checkpoint file and the OTel providers are closed below.
         self._queue.put_nowait(_STOP_SENTINEL)
+        task = self._dispatch_task
+        stalled = False
+        last = self._queue.qsize()
+        while task is not None and not task.done():
+            await asyncio.wait({task}, timeout=self._DRAIN_STALL_TIMEOUT)
+            if task.done():
+                break
+            now = self._queue.qsize()
+            if now >= last:
+                stalled = True
+                task.cancel()
+                # Bounded; asyncio.wait() also lets a cancellation of stop() itself propagate.
+                await asyncio.wait({task}, timeout=self._DRAIN_STALL_TIMEOUT)
+                if not task.done():
+                    logger.warning("Telemetry dispatch loop did not stop after cancel")
+                break
+            logger.info("Telemetry: draining %d events before shutdown", now - 1)
+            last = now
+        exc = (
+            task.exception() if task is not None and task.done() and not task.cancelled() else None
+        )
+        if exc is not None:
+            logger.error("Telemetry dispatch loop failed", exc_info=exc)
+        ended_early = task is None or not task.done() or task.cancelled() or exc is not None
+        if ended_early:
+            # SessionEnded may be among the unprocessed events: end the session span here.
+            if self._session_span is not None:
+                self._completed_session_ctx = self._session_span.get_span_context()
+                self._session_span.end()
+                self._session_span = None
+            # Not processed: what is still queued (the sentinel aside), and possibly part of
+            # the batch the loop was handling when it ended.
+            queued = self._discard_queue()
+            inflight, self._inflight = self._inflight, 0
+            if queued or inflight:
+                logger.warning(
+                    "Telemetry dispatch loop %s; %d queued events not processed%s",
+                    "stalled" if stalled else "is not running",
+                    queued,
+                    f", plus up to {inflight} in the batch it was handling" if inflight else "",
+                )
 
         for adapter in self._adapters:
             try:
@@ -357,12 +379,6 @@ class TelemetryManager:
                 await self._checkpoint_task
             except asyncio.CancelledError:
                 pass
-
-        if self._dispatch_task and not self._dispatch_task.done():
-            try:
-                await asyncio.wait_for(self._dispatch_task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                logger.warning("Telemetry dispatch loop did not drain cleanly within timeout")
 
         # Final flush of metrics + spans to file
         if self._checkpoint_file is not None:
@@ -382,6 +398,19 @@ class TelemetryManager:
             self._meter_provider.shutdown()
         if self._tracer_provider:
             self._tracer_provider.shutdown()
+        self._stopped = True
+
+    def _discard_queue(self) -> int:
+        """Empty the event queue without processing it; return the number of events dropped."""
+        dropped = 0
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return dropped
+            self._queue.task_done()
+            if item is not _STOP_SENTINEL:
+                dropped += 1
 
     # ------------------------------------------------------------------
     # Public API
@@ -1053,8 +1082,12 @@ class TelemetryManager:
     # Internal: dispatch loop
     # ------------------------------------------------------------------
 
-    async def _dispatch_loop(self) -> None:
-        """Background task: drain queue in batches, update OTel instruments, notify subscribers."""
+    async def _dispatch_loop(self, queue: asyncio.Queue) -> None:
+        """Background task: drain ``queue`` in batches, update OTel instruments, notify subscribers.
+
+        The queue is passed in, not read from ``self._queue``: a loop only ever serves the queue
+        it was started with, even if a later start() creates a new one.
+        """
         from opentelemetry import context as otel_context
         from opentelemetry import trace
 
@@ -1066,13 +1099,13 @@ class TelemetryManager:
             batch: list[BaseEvent] = []
             try:
                 while len(batch) < _batch_size:
-                    item = self._queue.get_nowait()
+                    item = queue.get_nowait()
                     if item is _STOP_SENTINEL:
-                        self._queue.task_done()
+                        queue.task_done()
                         if batch:
                             self._flush_batch(batch, trace, otel_context)
                             for _ in batch:
-                                self._queue.task_done()
+                                queue.task_done()
                         return
                     batch.append(item)
             except asyncio.QueueEmpty:
@@ -1081,15 +1114,15 @@ class TelemetryManager:
             if not batch:
                 # Slow path: queue was empty — wait without a timeout.
                 # Plain queue.get(), no wait_for(), no timer handle, no Task allocation.
-                item = await self._queue.get()
+                item = await queue.get()
                 if item is _STOP_SENTINEL:
-                    self._queue.task_done()
+                    queue.task_done()
                     return
                 batch.append(item)
 
             self._flush_batch(batch, trace, otel_context)
             for _ in batch:
-                self._queue.task_done()  # task_done AFTER processing (Fix 1)
+                queue.task_done()  # task_done AFTER processing (Fix 1)
 
             # Yield only when a full batch was drained — queue likely has more items.
             # Partial batch means queue is exhausted; await queue.get() yields naturally.
@@ -1098,6 +1131,7 @@ class TelemetryManager:
 
     def _flush_batch(self, batch: list[BaseEvent], trace_mod: Any, otel_context: Any) -> None:
         """Process a collected batch: OTel instruments, JSONL write, subscribers."""
+        self._inflight = len(batch)  # reported by stop() if the loop dies in this batch
         for event in batch:
             self._event_log.append(event)
             try:
@@ -1118,6 +1152,7 @@ class TelemetryManager:
                             sub(event)
                     except Exception:
                         logger.debug("Subscriber raised exception", exc_info=True)
+        self._inflight = 0
 
     def _write_batch(self, events: list[BaseEvent]) -> None:
         """Write a batch of events to JSONL in a single file.write() call."""
