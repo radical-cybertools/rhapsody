@@ -62,6 +62,145 @@ class TestEmit:
 
 
 class TestOtelInstruments:
+    async def test_task_metrics_have_no_task_id(self, manager):
+        """Task metrics aggregate across tasks: no per-task series, task_id only on spans."""
+        for tid in ("t1", "t2", "t3"):
+            manager.emit(
+                make_event(
+                    TaskSubmitted, session_id="test-session", backend="concurrent", task_id=tid
+                )
+            )
+            manager.emit(
+                make_event(
+                    TaskCompleted,
+                    session_id="test-session",
+                    backend="concurrent",
+                    task_id=tid,
+                    duration_seconds=0.1,
+                    attributes={"executable": "/bin/true", "task_type": "ComputeTask"},
+                )
+            )
+        await asyncio.sleep(0.1)
+        metrics = manager.read_metrics()
+        for name in ("tasks_submitted", "tasks_completed"):
+            points = [
+                dp
+                for rm in metrics.resource_metrics
+                for sm in rm.scope_metrics
+                for metric in sm.metrics
+                if metric.name == name
+                for dp in metric.data.data_points
+            ]
+            assert len(points) == 1, name
+            assert points[0].value == 3
+            assert "task_id" not in points[0].attributes
+        spans = {s.attributes.get("task_id") for s in manager.read_traces() if s.name == "task"}
+        assert spans == {"t1", "t2", "t3"}
+
+    async def test_stop_drains_a_backlog_slower_than_the_stall_timeout(
+        self, manager, monkeypatch, caplog
+    ):
+        """Stop() keeps draining while the backlog shrinks instead of dropping events.
+
+        1500 events take three 500-event dispatch batches of ~0.15 s each; the loop yields between
+        batches, so several 0.05 s stall windows expire while progress continues.
+        """
+        monkeypatch.setattr(TelemetryManager, "_DRAIN_STALL_TIMEOUT", 0.05)
+        process = manager._process_event
+
+        def slow_process(event, *args):
+            time.sleep(0.0003)
+            process(event, *args)
+
+        monkeypatch.setattr(manager, "_process_event", slow_process)
+        n = 1500
+        for i in range(n):
+            manager.emit(
+                make_event(
+                    TaskSubmitted, session_id="test-session", backend="concurrent", task_id=f"t{i}"
+                )
+            )
+        with caplog.at_level("INFO", logger="rhapsody.telemetry.manager"):
+            await manager.stop()
+        submitted = [e for e in manager._event_log if e.event_type == "TaskSubmitted"]
+        assert len(submitted) == n
+        own = [r for r in caplog.records if r.name == "rhapsody.telemetry.manager"]
+        assert not [r for r in own if r.levelname == "WARNING"]
+        assert any("draining" in r.getMessage() for r in own)
+
+    async def test_stop_without_drain_discards_the_backlog(self, monkeypatch, caplog):
+        """drain_on_stop=False: stop() skips the backlog, warns with the count, ends the session."""
+        m = TelemetryManager(session_id="test-session", drain_on_stop=False)
+        await m.start()
+        process = m._process_event
+
+        def slow_process(event, *args):
+            time.sleep(0.01)
+            process(event, *args)
+
+        monkeypatch.setattr(m, "_process_event", slow_process)
+        for i in range(1000):  # ~10 s if processed
+            m.emit(
+                make_event(
+                    TaskSubmitted, session_id="test-session", backend="concurrent", task_id=f"t{i}"
+                )
+            )
+        t0 = time.perf_counter()
+        with caplog.at_level("WARNING", logger="rhapsody.telemetry.manager"):
+            await m.stop()
+        assert time.perf_counter() - t0 < 2.0
+        assert any("drain disabled" in r.getMessage() for r in caplog.records)
+        assert any(e.event_type == "SessionEnded" for e in m._event_log)
+        assert sum(1 for e in m._event_log if e.event_type == "TaskSubmitted") < 1000
+
+    async def test_stop_does_not_wait_for_a_dead_dispatch_loop(self, manager, monkeypatch, caplog):
+        """With the dispatch task gone, stop() does not wait and warns about the backlog."""
+        manager._dispatch_task.cancel()
+        await asyncio.sleep(0)
+        for i in range(10):
+            manager.emit(
+                make_event(
+                    TaskSubmitted, session_id="test-session", backend="concurrent", task_id=f"t{i}"
+                )
+            )
+        t0 = time.perf_counter()
+        with caplog.at_level("WARNING", logger="rhapsody.telemetry.manager"):
+            await manager.stop()
+        assert time.perf_counter() - t0 < 2.0  # one stall window would be 5 s
+        assert any("not processed" in r.getMessage() for r in caplog.records)
+
+    async def test_tasks_running_ignores_tasks_ended_before_start(self, manager):
+        """A task created and canceled before RUNNING must not decrement tasks_running."""
+        base = {"session_id": "test-session", "backend": "concurrent"}
+        manager.emit(make_event(TaskCreated, task_id="c1", **base))
+        manager.emit(make_event(TaskCanceled, task_id="c1", duration_seconds=0.0, **base))
+        manager.emit(make_event(TaskStarted, task_id="r1", **base))
+        manager.emit(make_event(TaskStarted, task_id="r1", **base))  # duplicate report
+        # a task whose labels differ between start and end still returns to zero
+        manager.emit(make_event(TaskStarted, task_id="r2", attributes={"executable": "a"}, **base))
+        manager.emit(
+            make_event(
+                TaskCompleted,
+                task_id="r2",
+                duration_seconds=0.1,
+                attributes={"executable": "b"},
+                **base,
+            )
+        )
+        await asyncio.sleep(0.1)
+        metrics = manager.read_metrics()
+        assert _sum_counter(metrics, "tasks_running") == 1
+        assert _sum_counter(metrics, "tasks_started") == 2
+        running = [
+            dp.value
+            for rm in metrics.resource_metrics
+            for sm in rm.scope_metrics
+            for metric in sm.metrics
+            if metric.name == "tasks_running"
+            for dp in metric.data.data_points
+        ]
+        assert min(running) >= 0, running
+
     async def test_task_submitted_counter(self, manager):
         manager.emit(
             make_event(TaskSubmitted, session_id="test-session", backend="concurrent", task_id="t1")
@@ -1018,3 +1157,22 @@ def _sum_gauge(metrics_data, name: str) -> float:
                     for dp in metric.data.data_points:
                         total += dp.value
     return total
+
+
+def test_task_executable_label_is_stable_per_callable():
+    """Function labels must not embed per-object addresses (they are metric attributes)."""
+    import functools
+
+    from rhapsody.telemetry.manager import _task_executable
+
+    def work(i):
+        return i
+
+    class Job:
+        def __call__(self):
+            pass
+
+    assert _task_executable({"function": work}) == "work"
+    assert _task_executable({"function": functools.partial(work, 1)}) == "work"
+    assert _task_executable({"function": functools.partial(functools.partial(work), 2)}) == "work"
+    assert _task_executable({"function": Job()}) == "Job"

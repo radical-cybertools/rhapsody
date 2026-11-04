@@ -391,7 +391,7 @@ The `TelemetryManager` registers the following instruments on a `rhapsody` meter
 | `node_memory_utilization` | UpDownCounter | % | Current memory % per node |
 | `node_gpu_utilization` | UpDownCounter | % | Current GPU % per node |
 
-All instruments carry `session_id` and `backend` as label dimensions. Task instruments additionally carry `task_id`, `executable`, and `task_type`.
+All instruments carry `session_id` and `backend` as label dimensions. Task instruments additionally carry `executable` and `task_type`. They do not carry `task_id`: one series per task would grow without bound. Per-task identity is on the task spans.
 
 ---
 
