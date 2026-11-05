@@ -51,6 +51,13 @@ try:
 except ImportError:
     pass
 
+try:
+    from .execution import DragonNativeExecutionBackend  # noqa: F401
+
+    __all__.append("DragonNativeExecutionBackend")
+except ImportError:
+    pass
+
 # Try to import optional AI (inference) backends
 try:
     from .ai.vllm import DragonVllmInferenceBackend  # noqa: F401
