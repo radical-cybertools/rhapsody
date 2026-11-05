@@ -273,8 +273,10 @@ task = ComputeTask(
 )
 ```
 
-When neither sets one, Batch's default applies, and the first multi-rank job logs a
-warning. Tasks with `process_template`, or with no template, run without a PMI.
+When neither sets one, Batch's default applies, and the first job with several ranks or
+a Python function logs a warning. Under Cray MPICH (`CRAY_MPICH_DIR` or
+`CRAY_MPICH_VERSION` set), where that default is right, it logs a debug line instead.
+Tasks with `process_template`, or with no template, run without a PMI.
 
 Give MPI jobs a `timeout` too. When a rank dies, Dragon does not end the job: the other
 ranks can wait for it until the timeout, `1e9` s by default. The first multi-rank job
@@ -284,7 +286,8 @@ RHAPSODY can't tell whether a job's processes use MPI, so set `"pmi": "none"` fo
 that don't, such as several copies of a script or a Python function. They then run
 without a PMI, and log neither warning. Batch's default can break such jobs too: on a
 non-Cray node, every rank of a 4-rank Python function job crashed with it ("double free
-or corruption", exit code -6), and the same job ran with `"none"`.
+or corruption", exit code -6), and the same job ran with `"none"`. A one-rank function
+job gets Batch's default too.
 
 !!! note "PMIx needs `libpmix.so`"
     Dragon loads PMIx with `dlopen("libpmix.so")`, so a directory holding `libpmix.so`

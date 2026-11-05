@@ -61,8 +61,10 @@
   (Open MPI 4.1). A new `pmi` argument (`"pmix"`, `"cray"`, `"none"` or a
   `PMIBackend`) sets the PMI for every job, and `"pmi"` in a task's
   `task_backend_specific_kwargs` overrides it; only job submissions get it. With
-  neither, Batch's default is kept and the first multi-rank job logs a warning. The
-  first multi-rank job without a `timeout` logs one too: when a rank dies, Dragon
+  neither, Batch's default is kept, and the first job with several ranks or a Python
+  function logs a warning, or a debug line under Cray MPICH (`CRAY_MPICH_DIR` or
+  `CRAY_MPICH_VERSION` set), where the default is right. The first multi-rank job
+  without a `timeout` logs a warning too: when a rank dies, Dragon
   does not end the job, and the other ranks wait until the timeout (`1e9` s by
   default). `"pmi": "none"` declares a job's processes non-MPI: they run without a
   PMI, and neither warning is logged. No job is refused.
