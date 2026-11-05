@@ -13,6 +13,8 @@ redirects to files (see the V3 ``capture_stdio`` code path).
 
 from __future__ import annotations
 
+import shlex
+
 import pytest
 from dragon.native.process import ProcessTemplate
 from dragon.workflows.batch import Batch
@@ -72,7 +74,9 @@ def test_process_capture_stdio_via_shell_redirect(batch: Batch, tmp_path):
     """
     stdout_path = tmp_path / "task.stdout"
     script_path = tmp_path / "task.sh"
-    script_path.write_text(f"#!/usr/bin/bash\n/bin/echo 'stdout-from-wrapped' 1>{stdout_path}\n")
+    script_path.write_text(
+        f"#!/usr/bin/bash\n/bin/echo 'stdout-from-wrapped' 1>{shlex.quote(str(stdout_path))}\n"
+    )
     script_path.chmod(0o755)
 
     task = batch.process(ProcessTemplate("/bin/bash", args=(str(script_path),)))

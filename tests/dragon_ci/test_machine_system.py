@@ -33,9 +33,11 @@ def test_hostname_policies_returns_one_policy_per_node():
 def test_hostname_policies_identify_each_node():
     """Each per-node Policy must carry an identifier (host_name or host_id)."""
     for p in System().hostname_policies():
-        assert p.host_name or p.host_id >= 0 or p.placement == Policy.Placement.HOST_NAME, (
-            f"hostname_policies returned a Policy with no node identifier: {p}"
-        )
+        assert (
+            p.host_name
+            or (p.host_id is not None and p.host_id >= 0)
+            or p.placement == Policy.Placement.HOST_NAME
+        ), f"hostname_policies returned a Policy with no node identifier: {p}"
 
 
 @pytest.mark.requires_multi_node

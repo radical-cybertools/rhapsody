@@ -11,12 +11,15 @@ import inspect
 import pytest
 from dragon.infrastructure.gpu_desc import AccVendor
 from dragon.infrastructure.gpu_desc import find_accelerators
-from dragon.telemetry.collector import get_amd_metrics
-from dragon.telemetry.collector import get_intel_metrics
-from dragon.telemetry.collector import get_nvidia_metrics
-from dragon.telemetry.collector import identify_gpu
 
-# All tests here need dragon.telemetry.collector — auto-skip if unavailable.
+# All tests here need dragon.telemetry.collector. Skip the module before importing from it:
+# an import error at collection would fail before the marker below could skip.
+pytest.importorskip("dragon.telemetry.collector")
+from dragon.telemetry.collector import get_amd_metrics  # noqa: E402
+from dragon.telemetry.collector import get_intel_metrics  # noqa: E402
+from dragon.telemetry.collector import get_nvidia_metrics  # noqa: E402
+from dragon.telemetry.collector import identify_gpu  # noqa: E402
+
 pytestmark = pytest.mark.requires_telemetry_collector
 
 
