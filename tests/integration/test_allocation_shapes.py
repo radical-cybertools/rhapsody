@@ -13,19 +13,18 @@ placement hang in #106). These tests check three properties that should hold for
 3. No leaked state: starting and closing a backend leaves process-wide state as it was, apart
    from changes listed in ``KNOWN_DRAGON_CHANGES``.
 
-Run them under Dragon, once per shape. ``taskset`` gives the job part of the machine, and
-``dragon -s`` inherits that CPU set::
+``make test-allocation-shapes`` runs them under Dragon once per shape, each in its own process
+(see ``run_allocation_shapes.sh``), because the first test needs a process where no backend has
+started. ``taskset`` gives the job part of the machine, and ``dragon -s`` inherits that CPU set.
+Inside a Slurm job, plain ``sbatch -c N`` does the same as ``taskset``. By hand::
 
-    RHAPSODY_TEST_MODE=dragon dragon python -m pytest tests/integration/test_allocation_shapes.py
-    RHAPSODY_TEST_MODE=dragon taskset -c 0-1 dragon python -m pytest tests/integration/test_allocation_shapes.py
-    RHAPSODY_TEST_MODE=dragon taskset -c 0 dragon python -m pytest tests/integration/test_allocation_shapes.py
-
-``make test-allocation-shapes`` runs all three. Inside a Slurm job, plain ``sbatch -c N`` does
-the same as ``taskset``.
+    RHAPSODY_ALLOCATION_SHAPES=1 taskset -c 0,1 dragon -s python -m pytest \\
+        tests/integration/test_allocation_shapes.py
 
 Environment:
-    RHAPSODY_TEST_MODE: must be ``dragon`` or ``all``; otherwise the module is skipped.
-    RHAPSODY_SHAPES_TIMEOUT: seconds each task may take (default 120).
+    RHAPSODY_ALLOCATION_SHAPES=1: run this module; otherwise it is skipped, so it stays out of
+        the other test targets.
+    RHAPSODY_SHAPES_TIMEOUT: seconds each task, cancel or close may take (default 120).
     RHAPSODY_SHAPES_PROC_BASE, RHAPSODY_SHAPES_PROC_PER_CPU: the process bound,
         ``base + per_cpu * allowed CPUs`` (defaults 40 and 1).
     RHAPSODY_SHAPES_THREAD_BASE, RHAPSODY_SHAPES_THREAD_PER_CPU: the thread bound
@@ -47,10 +46,8 @@ import time
 import pytest
 import pytest_asyncio
 
-if os.environ.get("RHAPSODY_TEST_MODE", "regular").lower() not in ("dragon", "all"):
-    pytest.skip(
-        "set RHAPSODY_TEST_MODE=dragon and run under the dragon launcher", allow_module_level=True
-    )
+if os.environ.get("RHAPSODY_ALLOCATION_SHAPES") != "1":
+    pytest.skip("run with make test-allocation-shapes", allow_module_level=True)
 
 pytest.importorskip("dragon", reason="Dragon is required for the allocation-shape tests")
 psutil = pytest.importorskip("psutil", reason="psutil counts the backend's processes")
@@ -65,11 +62,6 @@ PROC_PER_CPU = float(os.environ.get("RHAPSODY_SHAPES_PROC_PER_CPU", "1"))
 THREAD_BASE = int(os.environ.get("RHAPSODY_SHAPES_THREAD_BASE", "100"))
 THREAD_PER_CPU = float(os.environ.get("RHAPSODY_SHAPES_THREAD_PER_CPU", "2"))
 STRICT = os.environ.get("RHAPSODY_SHAPES_STRICT") == "1"
-
-# Tasks left running after a timeout. Closing a session with one of them can hang in Dragon's
-# shutdown (cancel_task doesn't release a job that waits for nodes), so the module then skips the
-# close and lets pytest print its report.
-HUNG = []
 
 # Process-wide changes that Dragon makes and RHAPSODY can't undo. Each one is reported, not failed.
 KNOWN_DRAGON_CHANGES = {
@@ -167,6 +159,31 @@ def _diff(before, after):
     return changes
 
 
+async def _cancel(session, task):
+    """Cancel a task, within the timeout: Dragon's cancel can block on a job that waits for
+    nodes."""
+    try:
+        await asyncio.wait_for(
+            session.backends[task["backend"]].cancel_task(task["uid"]), timeout=TIMEOUT
+        )
+    except (asyncio.TimeoutError, Exception) as e:
+        print(f"could not cancel {task['uid']}: {type(e).__name__}: {e}")
+
+
+def _close(session):
+    """Close a session, within the timeout. Return whether it closed.
+
+    The backend's shutdown blocks the event loop, so ``asyncio.wait_for`` can't limit it: it runs
+    in a thread instead, and a daemon one, so a stuck shutdown can't keep pytest from reporting.
+    """
+    closer = threading.Thread(target=lambda: asyncio.run(session.close()), daemon=True)
+    closer.start()
+    closer.join(TIMEOUT)
+    if closer.is_alive():
+        print(f"session not closed after {TIMEOUT:.0f} s")
+    return not closer.is_alive()
+
+
 async def _run(session, tasks, timeout=TIMEOUT):
     """Submit and wait.
 
@@ -178,11 +195,9 @@ async def _run(session, tasks, timeout=TIMEOUT):
         await session.wait_tasks(tasks, timeout=timeout)
     except asyncio.TimeoutError:
         states = sorted({str(t.get("state")) for t in tasks})
-        for backend in session.backends.values():
-            for t in tasks:
-                if t.get("state") not in ("DONE", "FAILED", "CANCELED"):
-                    HUNG.append(t["uid"])
-                    await backend.cancel_task(t["uid"])
+        for t in tasks:
+            if t.get("state") not in ("DONE", "FAILED", "CANCELED"):
+                await _cancel(session, t)
         pytest.fail(f"{len(tasks)} task(s) not finished after {timeout:.0f} s; states {states}")
     print(f"{len(tasks)} task(s) finished in {time.monotonic() - start:.1f} s")
     return tasks
@@ -223,10 +238,7 @@ async def session(shape):
     session = Session(backends=[backend])
     session.baseline = (procs, threads)
     yield session
-    if HUNG:
-        print(f"\nnot closing the session: {len(HUNG)} task(s) timed out; the run may need a kill")
-        return
-    await asyncio.wait_for(session.close(), timeout=TIMEOUT)
+    _close(session)
 
 
 # ============================================================================
@@ -240,8 +252,11 @@ async def test_backend_leaves_process_state(shape):
     backend = await get_backend("dragon")
     session = Session(backends=[backend])
     task = _square_task(3)
-    await _run(session, [task])
-    await asyncio.wait_for(session.close(), timeout=TIMEOUT)
+    try:
+        await _run(session, [task])
+    finally:
+        closed = _close(session)
+    assert closed, "session did not close"
     after = _snapshot()
 
     changes = _diff(before, after)
@@ -334,7 +349,9 @@ async def test_job_with_one_rank_per_cpu_finishes(session, shape):
 @pytest.mark.asyncio(loop_scope="module")
 async def test_backend_resources_follow_allowed_cpus(session, shape):
     # Run a round of tasks so every pool is up, then let process startup settle.
-    await _run(session, [_square_task(i) for i in range(shape["allowed"])])
+    tasks = [_square_task(i) for i in range(shape["allowed"])]
+    await _run(session, tasks)
+    _assert_done(tasks)
     await asyncio.sleep(2)
     procs, threads = _count()
     base_procs, base_threads = session.baseline
