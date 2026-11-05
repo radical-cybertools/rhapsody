@@ -129,6 +129,15 @@ async def test_task_pmi_takes_precedence_over_backend_pmi():
 
 
 @pytest.mark.asyncio
+async def test_task_pmi_of_python_none_takes_the_backend_pmi():
+    backend = _make_backend(pmi="pmix")
+
+    await backend.build_task(_job_task(pmi=None, timeout=60))
+
+    assert _options_kwargs(backend)["pmi"] is PMIBackend.PMIX
+
+
+@pytest.mark.asyncio
 async def test_job_without_pmi_keeps_batch_default():
     backend = _make_backend()
 
@@ -191,8 +200,31 @@ async def test_unknown_task_pmi_raises():
     backend.batch.options.assert_not_called()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "task",
+    [
+        {"function": lambda: None, "task_backend_specific_kwargs": {"pmi": "openmpi"}},
+        {
+            "function": lambda: None,
+            "task_backend_specific_kwargs": {"process_template": {}, "pmi": "openmpi"},
+        },
+        {"executable": "/bin/true", "task_backend_specific_kwargs": {"pmi": "openmpi"}},
+    ],
+    ids=["native-function", "process-template", "executable"],
+)
+async def test_unknown_task_pmi_raises_outside_a_job(task):
+    backend = _make_backend()
+    task = {"uid": f"task.pmi-{uuid.uuid4().hex[:8]}", "name": "single", **task}
+
+    with pytest.raises(ValueError, match="Unknown pmi 'openmpi'"):
+        await backend.build_task(task)
+
+    backend.batch.options.assert_not_called()
+
+
 # ============================================================================
-# Warnings for multi-rank jobs; none is refused
+# Warnings for jobs with no PMI or no timeout; none is refused
 # ============================================================================
 
 
@@ -208,6 +240,30 @@ async def test_multi_rank_job_without_pmi_warns_once():
 
 
 @pytest.mark.asyncio
+async def test_pmi_warning_is_logged_once_per_kind_of_job():
+    backend = _make_backend()
+
+    for _ in range(2):
+        await backend.build_task(_job_task(timeout=60))
+        await backend.build_task(_function_job_task())
+        await backend.build_task(_function_job_task(templates=[(2, {})], timeout=60))
+
+    assert len(_warnings(backend, "no PMI")) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("function_ranks", [1, 2])
+async def test_function_job_does_not_use_up_the_pmi_warning_of_an_executable_job(function_ranks):
+    """With no PMI, a later Open MPI job can run as 64 one-rank jobs, so it needs the warning."""
+    backend = _make_backend()
+
+    await backend.build_task(_function_job_task(templates=[(function_ranks, {})], timeout=60))
+    await backend.build_task(_job_task(templates=[(64, {})], timeout=60))
+
+    assert len(_warnings(backend, "has 64 ranks and no PMI")) == 1
+
+
+@pytest.mark.asyncio
 async def test_multi_rank_job_without_timeout_warns_once():
     backend = _make_backend(pmi="pmix")
 
@@ -216,6 +272,16 @@ async def test_multi_rank_job_without_timeout_warns_once():
 
     assert len(_warnings(backend, "no timeout")) == 1
     assert backend.batch.options.return_value.job.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_timeout_of_none_is_no_timeout():
+    backend = _make_backend(pmi="pmix")
+
+    await backend.build_task(_job_task(timeout=None))
+
+    assert len(_warnings(backend, "no timeout")) == 1
+    assert _options_kwargs(backend)["timeout"] == 1e9
 
 
 @pytest.mark.asyncio
@@ -243,7 +309,7 @@ async def test_cray_mpich_environment_keeps_the_default_without_a_pmi_warning(mo
     assert len(_warnings(backend, "no timeout")) == 1
     assert "pmi" not in _options_kwargs(backend)
     debug = [c.args[0] for c in backend.logger.debug.call_args_list]
-    assert sum("Cray MPICH environment detected" in m for m in debug) == 1
+    assert sum("Cray MPICH environment detected" in m for m in debug) == 2
 
 
 @pytest.mark.asyncio

@@ -184,7 +184,7 @@ All accepted keys and their defaults are documented in the
 | `process_template` | `dict` | `ProcessTemplate` kwargs for a single-process task |
 | `process_templates` | `list[tuple[int, dict]]` | List of `(n_procs, template_dict)` for multi-rank jobs |
 | `pmi` | `str` or `PMIBackend` | PMI for a `process_templates` job: `"pmix"`, `"cray"` or `"none"`; overrides the backend's `pmi` (see [MPI jobs](#mpi-jobs-pmi-and-timeout)) |
-| `timeout` | `float` | Seconds before Dragon cancels the task (default `1e9`) |
+| `timeout` | `float` | Seconds before Dragon cancels the task (default `1e9`, also for `None`) |
 
 **`ProcessTemplate` kwargs** (passed inside `process_template` or each entry of `process_templates`):
 
@@ -273,14 +273,23 @@ task = ComputeTask(
 )
 ```
 
-When neither sets one, Batch's default applies, and the first job with several ranks or
-a Python function logs a warning. Under Cray MPICH (`CRAY_MPICH_DIR` or
-`CRAY_MPICH_VERSION` set), where that default is right, it logs a debug line instead.
-Tasks with `process_template`, or with no template, run without a PMI.
+When neither sets one, Batch's default applies, and a warning is logged once for each
+kind of job it can break: an executable with several ranks, and a Python function with
+one rank or with several. Under Cray MPICH (`CRAY_MPICH_DIR` or `CRAY_MPICH_VERSION`
+set), where that default is right, a debug line takes its place. That check reads only
+the environment of the process running the backend, so an Open MPI binary run with
+`cray-mpich` loaded gets no warning, and still needs `pmi="pmix"`.
+
+A task's `"pmi": None` is the same as no `pmi` key: the task takes the backend's PMI.
+Batch's default is `"cray"`, so a task on a backend with another PMI asks for it by that
+name.
+
+Tasks with `process_template`, or with no template, run without a PMI: a `pmi` has no
+effect on them, but an unknown name still fails the task.
 
 Give MPI jobs a `timeout` too. When a rank dies, Dragon does not end the job: the other
 ranks can wait for it until the timeout, `1e9` s by default. The first multi-rank job
-without one logs a warning.
+without one, or with `None`, logs a warning.
 
 RHAPSODY can't tell whether a job's processes use MPI, so set `"pmi": "none"` for jobs
 that don't, such as several copies of a script or a Python function. They then run

@@ -60,14 +60,16 @@
   rank ran as a one-rank job with no error (Open MPI 5), or every rank exited 1
   (Open MPI 4.1). A new `pmi` argument (`"pmix"`, `"cray"`, `"none"` or a
   `PMIBackend`) sets the PMI for every job, and `"pmi"` in a task's
-  `task_backend_specific_kwargs` overrides it; only job submissions get it. With
-  neither, Batch's default is kept, and the first job with several ranks or a Python
-  function logs a warning, or a debug line under Cray MPICH (`CRAY_MPICH_DIR` or
-  `CRAY_MPICH_VERSION` set), where the default is right. The first multi-rank job
-  without a `timeout` logs a warning too: when a rank dies, Dragon
-  does not end the job, and the other ranks wait until the timeout (`1e9` s by
-  default). `"pmi": "none"` declares a job's processes non-MPI: they run without a
-  PMI, and neither warning is logged. No job is refused.
+  `task_backend_specific_kwargs` overrides it; only job submissions get it, and an
+  unknown name fails any task. With neither, Batch's default is kept, and a warning
+  is logged once for each kind of job it can break: an executable with several ranks,
+  and a Python function with one rank or with several. Under Cray MPICH
+  (`CRAY_MPICH_DIR` or `CRAY_MPICH_VERSION` set), where that default is right, a debug
+  line takes its place. The first multi-rank job without a `timeout`, or with `None`,
+  which now means the default, logs a warning too: when a rank dies, Dragon does not
+  end the job, and the other ranks wait until the timeout (`1e9` s by default).
+  `"pmi": "none"` declares a job's processes non-MPI: they run without a PMI, and
+  neither warning is logged. No job is refused.
 - **Example 02's and the tutorials' parallel function jobs crashed on a non-Cray
   node** — with Batch's default PMI, every rank of a 2+2 Python function job aborted
   with "double free or corruption" (exit code -6) under Dragon 0.14.1 and 0.15.0.
