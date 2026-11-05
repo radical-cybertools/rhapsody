@@ -169,6 +169,116 @@ class TestOtelInstruments:
         assert time.perf_counter() - t0 < 2.0  # one stall window would be 5 s
         assert any("not processed" in r.getMessage() for r in caplog.records)
 
+    async def test_stop_returns_at_once_when_the_dispatch_loop_crashes(
+        self, manager, monkeypatch, caplog
+    ):
+        """A crashing dispatch loop is noticed when it ends, not after a stall window."""
+
+        class FailingLog(list):
+            def append(self, event):  # _flush_batch's first step, outside its per-event try
+                raise RuntimeError("flush failed")
+
+        monkeypatch.setattr(manager, "_event_log", FailingLog())
+        for i in range(10):
+            manager.emit(
+                make_event(
+                    TaskSubmitted, session_id="test-session", backend="concurrent", task_id=f"t{i}"
+                )
+            )
+        t0 = time.perf_counter()
+        with caplog.at_level("WARNING", logger="rhapsody.telemetry.manager"):
+            await manager.stop()
+        assert time.perf_counter() - t0 < 1.0  # the stall window is 5 s
+        assert any("dispatch loop failed" in r.getMessage() for r in caplog.records)
+        # the batch the loop was flushing when it crashed is counted as not processed
+        lost = [r.getMessage() for r in caplog.records if "not processed" in r.getMessage()]
+        assert len(lost) == 1
+        assert "plus up to" in lost[0], lost
+        # SessionEnded was in the lost batch: stop() still ends the session span
+        assert any(s.name == "session" for s in manager.read_traces())
+
+    async def test_stop_cancels_a_stalled_dispatch_loop(self, manager, monkeypatch, caplog):
+        """A dispatch loop that makes no progress is cancelled after one stall window."""
+        monkeypatch.setattr(TelemetryManager, "_DRAIN_STALL_TIMEOUT", 0.05)
+        manager._dispatch_task.cancel()
+        await asyncio.sleep(0)
+        hung = asyncio.create_task(asyncio.sleep(3600))
+        manager._dispatch_task = hung
+        manager.emit(
+            make_event(TaskSubmitted, session_id="test-session", backend="concurrent", task_id="t1")
+        )
+        t0 = time.perf_counter()
+        with caplog.at_level("WARNING", logger="rhapsody.telemetry.manager"):
+            await manager.stop()
+        assert time.perf_counter() - t0 < 1.0
+        assert hung.cancelled()
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1, warnings  # reported once
+        assert "stalled" in warnings[0]
+        assert "not processed" in warnings[0]
+        assert manager._queue.qsize() == 0  # no stale events for a later start()
+
+    async def test_cancelling_stop_during_a_stalled_drain_propagates(self, manager):
+        """Stop() must not swallow a cancellation aimed at itself (e.g. an outer timeout)."""
+        manager._dispatch_task.cancel()
+        await asyncio.sleep(0)
+        hung = asyncio.create_task(asyncio.sleep(3600))
+        manager._dispatch_task = hung
+        try:
+            with pytest.raises(asyncio.TimeoutError):  # the stall window is 5 s
+                await asyncio.wait_for(manager.stop(), timeout=0.1)
+        finally:
+            hung.cancel()
+
+    async def test_second_stop_is_a_no_op(self, caplog):
+        """A repeated stop() neither queues a stale sentinel nor reports phantom losses."""
+        m = TelemetryManager(session_id="test-session", drain_on_stop=False)
+        await m.start()
+        await m.stop()
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="rhapsody.telemetry.manager"):
+            await m.stop()
+        assert m._queue.qsize() == 0
+        assert not caplog.records
+
+    async def test_retried_stop_after_a_cancelled_one_cleans_up(self, monkeypatch):
+        """A stop() cancelled mid-drain leaves cleanup to the next stop(), which must run it."""
+        monkeypatch.setattr(TelemetryManager, "_DRAIN_STALL_TIMEOUT", 0.05)
+        m = TelemetryManager(session_id="test-session")
+        await m.start()
+        m._dispatch_task.cancel()
+        await asyncio.sleep(0)
+        hung = asyncio.create_task(asyncio.sleep(3600))
+        m._dispatch_task = hung
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(m.stop(), timeout=0.01)
+            assert not m._stopped
+            await m.stop()  # retried: stall, cancel, cleanup
+            assert m._stopped
+            assert hung.cancelled()
+        finally:
+            hung.cancel()
+
+    async def test_stop_after_a_failed_start_still_cleans_up(self, monkeypatch):
+        """Stop() after start() failed partway shuts down what start() created."""
+        m = TelemetryManager(session_id="test-session")
+
+        def fail():
+            raise OSError("cannot open checkpoint file")
+
+        monkeypatch.setattr(m, "_open_checkpoint_file", fail)
+        m._checkpoint_path = "/nonexistent"
+        with pytest.raises(OSError):
+            await m.start()
+        await m.stop()
+        assert m._stopped
+
+    async def test_second_start_is_a_no_op(self, manager):
+        first = manager._dispatch_task
+        await manager.start()
+        assert manager._dispatch_task is first
+
     async def test_tasks_running_ignores_tasks_ended_before_start(self, manager):
         """A task created and canceled before RUNNING must not decrement tasks_running."""
         base = {"session_id": "test-session", "backend": "concurrent"}
