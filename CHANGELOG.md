@@ -4,6 +4,15 @@
 
 ### Changed
 
+- **HPC test suite restructured into groups** — `tests/integration/test-hpc/run_suite.py`
+  runs `tasks`, `placement`, `scale`, and `mpi` as separate `dragon` launches in one
+  allocation, each with a time budget, and merges the results into one JUnit file. A crash
+  or hang costs that group, not the whole run, and appears as a failed `<group>.launcher`
+  test. Duplicate tests were merged, leaving 19 tests instead of 24, and GPU tests now check
+  the exact GPU assigned. `RHAPSODY_RUN_SCALE` is removed: use `-m scale`. The new
+  `RHAPSODY_HPC_REQUIRE` turns a missing capability into a failure instead of a skip. The
+  throughput benchmark moved to `tests/integration/test-hpc/benchmarks/dragon_throughput.py`.
+
 - **Task metrics no longer carry `task_id`** — `tasks_*` and
   `task_duration_seconds` aggregate per (session, backend, executable,
   task_type). The `task_id` attribute opened a new metric series for every task:
