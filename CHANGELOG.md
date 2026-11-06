@@ -58,6 +58,12 @@
   same `call_soon_threadsafe` path; a task already reported by `cancel_task()`
   is still reported only once.
 
+- **`pip install rhapsody-py[dragon]` could not import Dragon's `Batch`** —
+  dragonhpc 0.15.0 imports `requests` in `dragon.workflows.batch`, but lists it
+  only under its own extras, so a plain install failed with
+  `ModuleNotFoundError: No module named 'requests'`. The `dragon` extra now
+  requires `dragonhpc[requests]==0.15.0`.
+
 ### Removed
 
 - **Python 3.9 and 3.10 support** — RHAPSODY now requires Python 3.11 or
