@@ -22,6 +22,16 @@
 
 ### Fixed
 
+- **A cancelled command stops its process** — `cancel_task()` on
+  `ConcurrentExecutionBackend` reported `CANCELED` while the task's command ran on to
+  the end, with whatever it was using. The backend now sends SIGTERM to the command and
+  the processes it started, and SIGKILL to what is left after `term_grace` seconds (5
+  by default), and reports `CANCELED` once they have stopped, so `cancel_task()` can
+  take up to that long to return. Each command runs in its own session, because killing
+  a shell alone leaves its children running: a signal sent to the process group of the
+  caller, such as Ctrl-C in a terminal, no longer reaches commands directly.
+  `shutdown()` and `asyncio.run()` stop them instead. `shutdown()` now waits for the
+  commands, and a repeated `cancel_task()` no longer reports the task twice.
 - **Telemetry dropped events on `stop()`** — `stop()` gave the event backlog a
   fixed 5 s to drain and then dropped the rest, logging only that the drain had
   not finished: a 100k-task session lost 59% of its task events. It now queues
