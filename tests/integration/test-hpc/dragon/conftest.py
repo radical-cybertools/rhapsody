@@ -43,7 +43,7 @@ def topology():
     nodes = []
     for huid in System().nodes:
         node = Node(huid)
-        gpu_ids = list(node.gpus)
+        gpu_ids = list(node.gpus or [])  # None on nodes without GPUs
         nodes.append(
             {
                 "huid": huid,
