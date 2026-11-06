@@ -841,7 +841,9 @@ async def test_terminal_tasks_are_pruned():
         endpoint="e",
         plugin="rhapsody",
         topic="task_status",
-        data={"uid": "t.1", "state": "DONE"},
+        # stdout present: an executable without it is fetched first (see the
+        # DONE-executable tests below), which is not what this test is about
+        data={"uid": "t.1", "state": "DONE", "stdout": ""},
     )
     await asyncio.sleep(0)
 
@@ -1271,3 +1273,124 @@ async def test_real_runtime_drops_foreign_session_events():
     await backend.shutdown()
     with rt._cb_lock:
         assert not rt._callbacks  # scoped registrations removed
+
+
+# ---------------------------------------------------------------------------
+# DONE executables: stdout is fetched, not taken from the notification
+# ---------------------------------------------------------------------------
+
+
+async def _settle():
+    """Let the fetch coroutine and its to_thread call complete."""
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_done_executable_fetches_stdout_before_callback():
+    """The ORBIT plugin's DONE notification carries no stdout; an executable's result is its stdout,
+    so the backend fetches the task and only then fires."""
+    backend = await _init_backend(batch_window=0)
+    backend._mock_rh.get_task = MagicMock(
+        return_value={"uid": "t.1", "state": "DONE", "stdout": "42\n", "stderr": "", "exit_code": 0}
+    )
+    fired = []
+    backend.register_callback(lambda task, state: fired.append((dict(task), state)))
+    await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/echo", "arguments": ["42"]}])
+
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "DONE", "exit_code": 0})
+    assert fired == []  # not before the fetch
+
+    await _settle()
+    backend._mock_rh.get_task.assert_called_once_with("t.1")
+    assert len(fired) == 1
+    task, state = fired[0]
+    assert state == "DONE"
+    assert task["stdout"] == "42\n"
+    assert "t.1" not in backend._tasks
+    assert backend._output_fetches == {}
+
+
+@pytest.mark.asyncio
+async def test_done_function_task_needs_no_fetch():
+    """A function task's result rides in the notification (return_value)."""
+    backend = await _init_backend(batch_window=0)
+    backend._mock_rh.get_task = MagicMock()
+    fired = []
+    backend.register_callback(lambda task, state: fired.append(state))
+    await backend.submit_tasks([{"uid": "t.1", "function": "cloudpickle::X"}])
+
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "DONE", "return_value": 7})
+    assert fired == ["DONE"]
+    backend._mock_rh.get_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_done_executable_with_stdout_needs_no_fetch():
+    """A notification that already carries stdout is used as is."""
+    backend = await _init_backend(batch_window=0)
+    backend._mock_rh.get_task = MagicMock()
+    fired = []
+    backend.register_callback(lambda task, state: fired.append(task["stdout"]))
+    await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/true"}])
+
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "DONE", "stdout": "x"})
+    assert fired == ["x"]
+    backend._mock_rh.get_task.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_done_executable_fetch_failure_reports_failed():
+    """If the output cannot be fetched, the task fails with the reason instead of hanging or
+    resolving without its result."""
+    backend = await _init_backend(batch_window=0)
+    backend._mock_rh.get_task = MagicMock(side_effect=RuntimeError("404 gone"))
+    fired = []
+    backend.register_callback(lambda task, state: fired.append((task.get("exception"), state)))
+    await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/true"}])
+
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "DONE"})
+    await _settle()
+
+    assert len(fired) == 1
+    exc, state = fired[0]
+    assert state == "FAILED"
+    assert isinstance(exc, RuntimeError) and "404 gone" in str(exc)
+    assert "t.1" not in backend._tasks
+
+
+@pytest.mark.asyncio
+async def test_duplicate_done_executable_fetches_and_fires_once():
+    """A repeated DONE while the fetch is in flight neither fetches nor fires twice."""
+    backend = await _init_backend(batch_window=0)
+    backend._mock_rh.get_task = MagicMock(return_value={"uid": "t.1", "stdout": "ok"})
+    fired = []
+    backend.register_callback(lambda task, state: fired.append(state))
+    await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/true"}])
+
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "DONE"})
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "DONE"})
+    await _settle()
+
+    backend._mock_rh.get_task.assert_called_once_with("t.1")
+    assert fired == ["DONE"]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_output_fetch():
+    """Shutdown lets an in-flight output fetch finish while the client is open."""
+    backend = await _init_backend(batch_window=0)
+
+    def slow_get_task(uid):
+        time.sleep(0.2)
+        return {"uid": uid, "stdout": "late"}
+
+    backend._mock_rh.get_task = MagicMock(side_effect=slow_get_task)
+    fired = []
+    backend.register_callback(lambda task, state: fired.append(task["stdout"]))
+    await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/true"}])
+
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "DONE"})
+    await backend.shutdown()
+
+    assert fired == ["late"]
