@@ -45,6 +45,17 @@
   RUNNING decremented the gauge without a matching increment, and its -1 could
   land on a different label set than its +1. Each task now counts once, and its
   -1 uses the labels of its +1.
+- **`DragonExecutionBackend` oversubscribed partial-node Slurm allocations** (#95) —
+  Dragon's `Batch` starts `os.cpu_count() // 2` workers per node, even when the job may use
+  only part of the node: a 4-CPU job on a 512-CPU node got 256 workers on those 4 CPUs, and
+  every task took minutes. When the job may use fewer physical cores than that on the nodes
+  Batch uses, the backend now passes `workers_per_node` (one per allowed core on the smallest
+  node) and logs a warning. Batch's placement capacity for process and MPI jobs is unchanged,
+  so those jobs still place ranks as if the job had whole nodes. A `workers_per_node` in
+  `batch_kwargs` takes precedence; `size_pool_to_affinity=False` keeps Batch's sizing and only
+  warns. Whole-node allocations are unchanged. Supersedes the `Node.num_cpus` patch first
+  proposed in #106, which also shrank the placement capacity and hung process jobs with more
+  ranks than `allowed // 2`.
 
 - **Dragon process/job exit codes reported like the other backends** — a
   non-zero exit code from a `process()`/`job()` task (executables, and functions
