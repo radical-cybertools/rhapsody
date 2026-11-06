@@ -85,7 +85,9 @@ backend = DragonExecutionBackend(
     thread. There is no compile or start step; tasks begin executing as soon as they are submitted.
 
 !!! note "Dragon Versions"
-    `DragonExecutionBackend` is the only supported Dragon backend as of RHAPSODY 0.5.0.
+    `DragonExecutionBackend`, on Dragon's Batch, is the default Dragon backend as of RHAPSODY
+    0.5.0. `DragonNativeExecutionBackend` takes the same tasks on Dragon's native API: see
+    [Dragon Native Backend](../execution/dragon-native.md).
 
 ### Orbit Backend
 Remote execution on an HPC system through the ORBIT broker/endpoint infrastructure.
