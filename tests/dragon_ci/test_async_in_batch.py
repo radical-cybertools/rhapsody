@@ -7,8 +7,8 @@ underlying primitives Rhapsody depends on:
 
 - ``asyncio.iscoroutinefunction`` recognises the user's function,
 - ``Batch.function`` accepts a plain (non-coroutine) callable,
-- a coroutine result reaches ``batch.results_ddict[uid]`` unchanged after
-  the wrapper applies ``asyncio.run``.
+- a coroutine result reaches ``task.get()`` unchanged after the wrapper
+  applies ``asyncio.run``.
 
 Helpers live in ``_dragon_ci_helpers`` — see the conftest module docstring
 for why callables passed to Batch tasks cannot be defined in this file.
@@ -28,11 +28,7 @@ def test_iscoroutinefunction_detects_async_def():
     assert not asyncio.iscoroutinefunction(async_run_shim)
 
 
-def test_async_result_reaches_results_ddict(batch: Batch):
-    """The shimmed coroutine result must surface as a plain int in the DDict."""
+def test_async_result_reaches_get(batch: Batch):
+    """The shimmed coroutine result must surface as a plain int."""
     task = batch.function(async_run_shim, 21)
     assert task.get(timeout=60.0) == 42
-
-    result, _tb, raised, _stdout, _stderr = batch.results_ddict[task.uid]
-    assert raised is False
-    assert result == 42

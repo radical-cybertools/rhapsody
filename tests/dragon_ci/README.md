@@ -17,7 +17,7 @@ the Dragon team at the specific contract that changed.
 | File                            | Subsystem                                            |
 |---------------------------------|------------------------------------------------------|
 | `test_batch_lifecycle.py`       | `Batch` ctor kwargs, attrs, close/join/terminate    |
-| `test_batch_function.py`        | `Batch.function()` + `results_ddict` 5-tuple shape  |
+| `test_batch_function.py`        | `Batch.function()` + `get()`/`traceback`/stdio      |
 | `test_batch_process.py`         | `Batch.process()` + stdio-capture pitfalls          |
 | `test_batch_job.py`             | `Batch.job()` (wire + opt-in real MPI launch)       |
 | `test_process_template.py`      | `ProcessTemplate` ctor, attrs, `Popen` consts       |

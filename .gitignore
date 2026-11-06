@@ -232,3 +232,6 @@ rhapsody.session.*
 *.png
 *.jpeg
 *.jsonl
+
+# Dragon DDict orchestrator files written to the working directory by test runs
+ddict_orc_*

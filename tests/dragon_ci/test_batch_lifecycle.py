@@ -42,7 +42,7 @@ def test_batch_num_workers_and_num_managers(batch):
 
 
 def test_batch_results_ddict_supports_lookup(batch):
-    """Rhapsody reads ``batch.results_ddict[task.uid]`` directly."""
+    """``batch.results_ddict`` stays a DDict-like mapping (sized via ``results_ddict_*``)."""
     rd = batch.results_ddict
     assert hasattr(rd, "__contains__") and hasattr(rd, "__getitem__")
 

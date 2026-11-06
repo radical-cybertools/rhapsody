@@ -44,7 +44,7 @@ def test_batch_job_launch(batch: Batch, nranks):
             name=f"dragon-ci-{nranks}rank",
             pmi=PMIBackend.PMIX,
         )
-        job.get(timeout=120.0)
+        result = job.get(timeout=120.0)
     except RuntimeError as exc:
         # Only skip for a genuine PMIx-unavailable host; let other RuntimeErrors
         # (and any TypeError/AttributeError/etc.) surface as real failures.
@@ -53,5 +53,5 @@ def test_batch_job_launch(batch: Batch, nranks):
         raise
 
     assert isinstance(job, Job)
-    result, tb, raised, _stdout, _stderr = batch.results_ddict[job.uid]
-    assert raised is False, f"{nranks}-rank job failed: result={result!r} tb={tb!r}"
+    # Like a process, a job reports its exit code (0, or a list of per-rank codes).
+    assert result in (0, [0] * nranks), f"{nranks}-rank job failed: result={result!r}"
