@@ -75,6 +75,7 @@ Dragon dps queue    →  DragonTelemetryAdapter  →   emit(ResourceUpdate)
 Dask scheduler_info →  DaskTelemetryAdapter    →   emit(ResourceUpdate)
 psutil + pynvml     →  ConcurrentTelemetry     →   emit(ResourceUpdate)
                         Adapter
+flux exec samplers  →  FluxTelemetryAdapter    →   emit(ResourceUpdate)
 ```
 
 This means:
