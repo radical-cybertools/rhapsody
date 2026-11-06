@@ -967,3 +967,307 @@ async def test_pool_mode_compat_resolves_executing_endpoint():
 
     backend._mock_rt.get_plugin.assert_called_once_with("compute_ep", "sysinfo")
     assert backend._endpoint_python_mm == (mm.major, mm.minor)
+
+
+@pytest.mark.asyncio
+async def test_notification_of_other_session_is_ignored():
+    """Task notifications are broadcast to every client of the plugin and
+    uids are per-client counters: only this session's (or sid-less) ones
+    may update our tasks."""
+    backend = await _init_backend()
+    backend._session_sid = backend._mock_rh.sid = "sid-me"
+    backend._tasks["t.1"] = {"uid": "t.1", "state": "SUBMITTED"}
+    backend._tasks["t.2"] = {"uid": "t.2", "state": "SUBMITTED"}
+
+    backend._handle_notification(
+        "task_status", {"uid": "t.1", "state": "RUNNING", "sid": "sid-other"}
+    )
+    backend._handle_notification(
+        "task_status_batch", {"sid": "sid-other", "tasks": [{"uid": "t.2", "state": "RUNNING"}]}
+    )
+    assert backend._tasks["t.1"]["state"] == "SUBMITTED"
+    assert backend._tasks["t.2"]["state"] == "SUBMITTED"
+
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "RUNNING", "sid": "sid-me"})
+    backend._handle_notification(  # older endpoint: no sid
+        "task_status_batch", {"tasks": [{"uid": "t.2", "state": "RUNNING"}]}
+    )
+    assert backend._tasks["t.1"]["state"] == "RUNNING"
+    assert backend._tasks["t.2"]["state"] == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_session_filter_survives_shutdown_state():
+    """While the client is closed (sid cleared) or gone (shutdown), the sid
+    cached at init still filters: own notifications pass, foreign ones don't."""
+    backend = await _init_backend()
+    backend._session_sid = "sid-me"
+    backend._tasks["t.1"] = {"uid": "t.1", "state": "SUBMITTED"}
+
+    backend._mock_rh.sid = None  # client closed: live sid cleared
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "RUNNING", "sid": "sid-me"})
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "FAILED", "sid": "sid-x"})
+    assert backend._tasks["t.1"]["state"] == "RUNNING"
+
+    backend._rh = None  # backend shut down
+    backend._handle_notification(
+        "task_status", {"uid": "t.1", "state": "FAILED", "sid": "sid-other"}
+    )
+    assert backend._tasks["t.1"]["state"] == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_session_filter_follows_reregistration():
+    """After a re-registration both sessions count as ours: completions of
+    tasks submitted under the old one still arrive; others are dropped."""
+    backend = await _init_backend()
+    backend._session_sid = "sid-old"
+    backend._mock_rh.sid = "sid-new"
+    backend._tasks["t.1"] = {"uid": "t.1", "state": "SUBMITTED"}
+    backend._tasks["t.2"] = {"uid": "t.2", "state": "SUBMITTED"}
+    backend._handle_notification(
+        "task_status", {"uid": "t.1", "state": "RUNNING", "sid": "sid-old"}
+    )
+    backend._handle_notification(
+        "task_status", {"uid": "t.2", "state": "RUNNING", "sid": "sid-new"}
+    )
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "FAILED", "sid": "sid-x"})
+    assert backend._tasks["t.1"]["state"] == "RUNNING"
+    assert backend._tasks["t.2"]["state"] == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_empty_sid_counts_as_unstamped():
+    backend = await _init_backend()
+    backend._session_sid = backend._mock_rh.sid = "sid-me"
+    backend._tasks["t.1"] = {"uid": "t.1", "state": "SUBMITTED"}
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "RUNNING", "sid": ""})
+    assert backend._tasks["t.1"]["state"] == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_unknown_own_sid_does_not_drop_notifications():
+    """Without a known own session id nothing is filtered (no silent hang)."""
+    backend = await _init_backend()
+    backend._session_sid = backend._mock_rh.sid = None
+    backend._tasks["t.1"] = {"uid": "t.1", "state": "SUBMITTED"}
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "RUNNING", "sid": "s.1"})
+    assert backend._tasks["t.1"]["state"] == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_foreign_notification_dropped_before_loop():
+    """A foreign frame is dropped on the callback thread, not scheduled."""
+    backend = await _init_backend()
+    backend._session_sid = backend._mock_rh.sid = "sid-me"
+    backend._loop = MagicMock()
+    backend._loop.is_closed.return_value = False
+    backend._on_task_notification("e", "rhapsody", "task_status", {"uid": "t.1", "sid": "sid-x"})
+    backend._loop.call_soon_threadsafe.assert_not_called()
+    backend._on_task_notification("e", "rhapsody", "task_status", {"uid": "t.1", "sid": "sid-me"})
+    backend._loop.call_soon_threadsafe.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_init_caches_plugin_session_sid():
+    """The filter's session id is taken from the plugin client at init."""
+    backend = _make_backend()
+    rt, rh = _mock_runtime()
+    rh.sid = "sid-from-client"
+    with patch("rhapsody.backends.execution.orbit.EndpointRuntime", return_value=rt):
+        await backend._async_init()
+    assert backend._session_sid == "sid-from-client"
+
+
+# ---------------------------------------------------------------------------
+# Session-scoped task callbacks
+# ---------------------------------------------------------------------------
+
+
+class _FakeRuntime:
+    """A minimal real runtime (not a MagicMock), so the backend's signature-based feature detection
+    sees real parameters.
+
+    ``scoped`` selects the callback API: with a named ``session`` parameter (radical.orbit with
+    session scoping) or the base contract without it.  Every call is appended to ``log``.
+    """
+
+    def __init__(self, rh, log, scoped=True):
+        self.name = "rhapsody.test0000"
+        self.broker_url = "http://localhost:8000"
+        self.log = log
+        self._rh = rh
+        if scoped:
+            self.register_callback = self._register_scoped
+            self.unregister_callback = self._unregister_scoped
+        else:
+            self.register_callback = self._register_base
+            self.unregister_callback = self._unregister_base
+
+    def start(self, wait=True, timeout=None):
+        return self
+
+    def wait_registered(self, timeout=None):
+        return True
+
+    def topology(self):
+        return {}
+
+    def get_plugin(self, eid, pname, **kwargs):
+        return self._rh
+
+    def stop(self):
+        self.log.append(("stop",))
+
+    def _register_scoped(
+        self, endpoint_id=None, plugin_name=None, topic=None, callback=None, session=None
+    ):
+        self.log.append(("register", endpoint_id, plugin_name, topic, callback, session))
+
+    def _unregister_scoped(
+        self, endpoint_id=None, plugin_name=None, topic=None, callback=None, session=None
+    ):
+        self.log.append(("unregister", endpoint_id, plugin_name, topic, callback, session))
+
+    def _register_base(self, endpoint_id=None, plugin_name=None, topic=None, callback=None):
+        self.log.append(("register", endpoint_id, plugin_name, topic, callback))
+
+    def _unregister_base(self, endpoint_id=None, plugin_name=None, topic=None, callback=None):
+        self.log.append(("unregister", endpoint_id, plugin_name, topic, callback))
+
+
+async def _init_backend_fake_rt(scoped=True, sid="sid-me"):
+    log = []
+    rh = _mock_rhapsody_client(sid=sid)
+    rh.close = MagicMock(side_effect=lambda: log.append(("close",)))
+    rt = _FakeRuntime(rh, log, scoped=scoped)
+    backend = _make_backend()
+    with patch("rhapsody.backends.execution.orbit.EndpointRuntime", return_value=rt):
+        await backend._async_init()
+    return backend, rt, rh, log
+
+
+@pytest.mark.asyncio
+async def test_mock_runtime_stays_unscoped():
+    """A MagicMock runtime accepts any kwarg but has no named ``session``: unscoped."""
+    backend = await _init_backend()
+    assert backend._scoped_sid is None
+    backend._mock_rt.register_callback.assert_not_called()
+    assert backend._mock_rh.register_notification_callback.call_count == 2
+    await backend.shutdown()
+    backend._mock_rt.unregister_callback.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scoped_registration_on_runtime():
+    backend, rt, rh, log = await _init_backend_fake_rt(scoped=True)
+    cb = backend._on_task_notification
+    assert log == [
+        ("register", "test_endpoint", "rhapsody", "task_status", cb, "sid-me"),
+        ("register", "test_endpoint", "rhapsody", "task_status_batch", cb, "sid-me"),
+    ]
+    rh.register_notification_callback.assert_not_called()
+    assert backend._scoped_sid == "sid-me"
+
+
+@pytest.mark.asyncio
+async def test_scoped_unregister_after_close_before_stop():
+    backend, rt, rh, log = await _init_backend_fake_rt(scoped=True)
+    cb = backend._on_task_notification
+    del log[:]
+    await backend.shutdown()
+    assert log == [
+        ("close",),
+        ("unregister", "test_endpoint", "rhapsody", "task_status", cb, "sid-me"),
+        ("unregister", "test_endpoint", "rhapsody", "task_status_batch", cb, "sid-me"),
+        ("stop",),
+    ]
+    assert backend._scoped_sid is None
+
+
+@pytest.mark.asyncio
+async def test_scoped_unregister_failure_still_stops_runtime():
+    backend, rt, rh, log = await _init_backend_fake_rt(scoped=True)
+
+    def boom(**kwargs):
+        raise RuntimeError("gone")
+
+    rt.unregister_callback = boom
+    del log[:]
+    await backend.shutdown()
+    assert log == [("close",), ("stop",)]
+    assert backend._runtime is None
+
+
+@pytest.mark.asyncio
+async def test_base_contract_runtime_falls_back_to_unscoped():
+    backend, rt, rh, log = await _init_backend_fake_rt(scoped=False)
+    assert backend._scoped_sid is None
+    assert [c[1]["topic"] for c in rh.register_notification_callback.call_args_list] == [
+        "task_status",
+        "task_status_batch",
+    ]
+    assert log == []
+    await backend.shutdown()
+    assert log == [("close",), ("stop",)]  # no unregister without session support
+
+
+@pytest.mark.asyncio
+async def test_unknown_sid_falls_back_to_unscoped():
+    backend, rt, rh, log = await _init_backend_fake_rt(scoped=True, sid=None)
+    assert backend._scoped_sid is None
+    assert rh.register_notification_callback.call_count == 2
+    assert log == []
+    await backend.shutdown()
+    assert log == [("close",), ("stop",)]
+
+
+@pytest.mark.asyncio
+async def test_real_runtime_drops_foreign_session_events():
+    """End to end through a real ``EndpointRuntime._on_event``: another session's event never
+    reaches the backend callback, a session-less one does."""
+    orbit = pytest.importorskip("radical.orbit")
+    from radical.orbit import protocol
+
+    real_rt_cls = orbit.EndpointRuntime
+    if not orbit_mod._has_session_param(real_rt_cls.register_callback):
+        pytest.skip("radical.orbit without session-scoped callbacks")
+
+    rt = real_rt_cls(broker_url="http://localhost:1", name="rhapsody.test0000")
+    rt._emit = MagicMock()  # no broker: swallow (un)subscribe frames
+    rt._cb = MagicMock()  # run callbacks inline instead of on the callback thread
+    rt._cb.submit = lambda cb, *args: cb(*args)
+    rt.start = MagicMock(return_value=rt)
+    rt.wait_registered = MagicMock(return_value=True)
+    rh = _mock_rhapsody_client(sid="sid-me")
+    rt.get_plugin = MagicMock(return_value=rh)
+    rt.stop = MagicMock()
+
+    backend = _make_backend()
+    with patch("rhapsody.backends.execution.orbit.EndpointRuntime", return_value=rt):
+        await backend._async_init()
+    assert backend._scoped_sid == "sid-me"
+    rh.register_notification_callback.assert_not_called()
+
+    seen = []
+    backend._is_foreign = lambda data: seen.append(data) or False  # count arrivals only
+
+    def event(session):
+        return protocol.Event(
+            src="test_endpoint",
+            plugin="rhapsody",
+            topic="task_status",
+            session=session,
+            data={"uid": "t.1", "state": "RUNNING"},
+        )
+
+    rt._on_event(event("sid-other"))
+    assert seen == []
+    rt._on_event(event(None))
+    assert len(seen) == 1
+    rt._on_event(event("sid-me"))
+    assert len(seen) == 2
+
+    await backend.shutdown()
+    with rt._cb_lock:
+        assert not rt._callbacks  # scoped registrations removed
