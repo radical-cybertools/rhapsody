@@ -170,18 +170,33 @@ async def _cancel(session, task):
         print(f"could not cancel {task['uid']}: {type(e).__name__}: {e}")
 
 
-def _close(session):
+async def _close(session):
     """Close a session, within the timeout. Return whether it closed.
 
     The backend's shutdown blocks the event loop, so ``asyncio.wait_for`` can't limit it: it runs
-    in a thread instead, and a daemon one, so a stuck shutdown can't keep pytest from reporting.
+    in a daemon thread instead, so a stuck shutdown can't keep pytest from reporting. That thread
+    has its own event loop. These sessions have no telemetry, so ``close()`` only shuts the backend
+    down, which needs no loop; the session's loop keeps running meanwhile for anything scheduled
+    on it. If ``close()`` needs that loop some other way it raises, and that counts as not closed.
     """
-    closer = threading.Thread(target=lambda: asyncio.run(session.close()), daemon=True)
+    errors = []
+
+    def close():
+        try:
+            asyncio.run(session.close())
+        except Exception as e:
+            errors.append(e)
+
+    closer = threading.Thread(target=close, daemon=True)
     closer.start()
-    closer.join(TIMEOUT)
+    deadline = time.monotonic() + TIMEOUT
+    while closer.is_alive() and time.monotonic() < deadline:  # not to_thread: it leaves a thread
+        await asyncio.sleep(0.1)
     if closer.is_alive():
         print(f"session not closed after {TIMEOUT:.0f} s")
-    return not closer.is_alive()
+    for e in errors:
+        print(f"session.close() failed: {type(e).__name__}: {e}")
+    return not closer.is_alive() and not errors
 
 
 async def _run(session, tasks, timeout=TIMEOUT):
@@ -238,7 +253,7 @@ async def session(shape):
     session = Session(backends=[backend])
     session.baseline = (procs, threads)
     yield session
-    _close(session)
+    await _close(session)
 
 
 # ============================================================================
@@ -255,7 +270,7 @@ async def test_backend_leaves_process_state(shape):
     try:
         await _run(session, [task])
     finally:
-        closed = _close(session)
+        closed = await _close(session)
     assert closed, "session did not close"
     after = _snapshot()
 
