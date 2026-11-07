@@ -645,10 +645,12 @@ class OrbitExecutionBackend(BaseBackend):
             if prof:
                 prof.prof("task_submit", uid=task["uid"])
 
-        # No batching — submit immediately
+        # No batching — send now, but in the background, through the same
+        # serialized path as a timer flush: the caller (asyncflow's run loop)
+        # must not wait while a slow or lost endpoint holds the request.  A
+        # failed send marks the tasks FAILED (see _send_batch).
         if self._batch_window <= 0:
-            task_dicts = [dict(t) for t in tasks]
-            await asyncio.to_thread(self._rh.submit_tasks, task_dicts)
+            self._spawn_send(self._send_batch([dict(t) for t in tasks]))
             return
 
         # Batching — collect and, if the buffer is now full, flush inline.
@@ -675,7 +677,15 @@ class OrbitExecutionBackend(BaseBackend):
         The task is tracked in ``_inflight_flushes`` so ``shutdown`` can await
         an in-progress send instead of dropping the batch.
         """
-        task = asyncio.ensure_future(self._locked_flush())
+        self._spawn_send(self._locked_flush())
+
+    def _spawn_send(self, coro) -> None:
+        """Run a send as a tracked background task.
+
+        Tracked in ``_inflight_flushes`` so ``shutdown`` can await it.  Sends
+        are serialized and ordered by ``_send_lock``.
+        """
+        task = asyncio.ensure_future(coro)
         self._inflight_flushes.add(task)
         task.add_done_callback(self._on_flush_done)
 
