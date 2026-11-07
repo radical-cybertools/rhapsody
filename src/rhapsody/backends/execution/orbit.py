@@ -198,10 +198,6 @@ class OrbitExecutionBackend(BaseBackend):
         # submits), awaited on shutdown so a batch that is mid-send is never
         # dropped.
         self._inflight_flushes: set[asyncio.Task] = set()
-        # uid -> its detached batch while that batch waits for ``_send_lock``:
-        # a cancel in that window drops the task from the batch instead of
-        # cancelling a uid the endpoint has not seen yet.
-        self._queued: dict[str, list[dict]] = {}
 
         # -- profiling --
         self._prof = rprof.Profiler("client.task", ns="radical.orbit") if rprof else None
@@ -658,9 +654,7 @@ class OrbitExecutionBackend(BaseBackend):
         # must not wait while a slow or lost endpoint holds the request.  A
         # failed send marks the tasks FAILED (see _send_batch).
         if self._batch_window <= 0:
-            batch = [dict(t) for t in tasks]
-            self._queue(batch)  # cancellable from the moment we return
-            self._spawn_send(self._send_batch(batch), batch)
+            self._spawn_send(self._send_batch([dict(t) for t in tasks]))
             return
 
         # Batching — collect and, if the buffer is now full, flush inline.
@@ -689,28 +683,15 @@ class OrbitExecutionBackend(BaseBackend):
         """
         self._spawn_send(self._locked_flush())
 
-    def _spawn_send(self, coro, batch: list[dict] | None = None) -> None:
+    def _spawn_send(self, coro) -> None:
         """Run a send as a tracked background task.
 
         Tracked in ``_inflight_flushes`` so ``shutdown`` can await it.  Sends
-        are serialized and ordered by ``_send_lock``.  If the task is cancelled
-        before it ever ran, its *batch* is reported FAILED here.
+        are serialized and ordered by ``_send_lock``.
         """
         task = asyncio.ensure_future(coro)
         self._inflight_flushes.add(task)
         task.add_done_callback(self._on_flush_done)
-        if batch is not None:
-            task.add_done_callback(
-                lambda t: (
-                    t.cancelled()
-                    and self._fail_batch(batch, RuntimeError("task submission was cancelled"))
-                )
-            )
-
-    def _queue(self, batch: list[dict]) -> None:
-        """List *batch* in ``_queued`` until its send takes the lock."""
-        for t in batch:
-            self._queued[t.get("uid")] = batch
 
     def _on_flush_done(self, task: asyncio.Task) -> None:
         """Untrack a finished background flush and retrieve its exception.
@@ -750,10 +731,9 @@ class OrbitExecutionBackend(BaseBackend):
         """Send an already-detached batch to the remote endpoint in one request.
 
         Runs *outside* ``_batch_lock`` (so other submitters can keep buffering
-        during the network I/O) but *under* ``_send_lock`` (so sends stay
-        serialized and ordered, and never use the client concurrently with
-        each other or with a cancel).  While it waits for the lock the batch
-        is listed in ``_queued``, so a cancel can still take a task out.
+        during the network I/O) but *under* ``_send_lock`` (so concurrent
+        flushes stay serialized and ordered, and never call the client
+        concurrently).
         """
         if not batch:
             return
@@ -761,47 +741,28 @@ class OrbitExecutionBackend(BaseBackend):
         # NOTE: compat is validated up front in submit_tasks(); buffered tasks
         # are already known-good by the time they reach the flush.
 
-        self._queue(batch)
-        try:
-            async with self._send_lock:
-                for t in batch:
-                    self._queued.pop(t.get("uid"), None)
-                if not batch:  # every task was cancelled while queued
-                    return
-                prof = self._prof
-                if prof:
-                    for t in batch:
-                        prof.prof("task_batch_flush", uid=t.get("uid", "?"))
-                self.logger.debug("Flushing batch of %d tasks", len(batch))
-                await asyncio.to_thread(self._rh.submit_tasks, batch)
-        except asyncio.CancelledError:
-            # A background send torn down (loop shutdown) must not leave its
-            # tasks pending forever.
-            self._fail_batch(batch, RuntimeError("task submission was cancelled"))
-            raise
-        except Exception as exc:
-            # A background send has no caller to raise to; an unhandled error
-            # here would leave the batch's tasks hung forever.  Fail them
-            # explicitly so the failure reaches the client (and re-raise for
-            # the inline buffer-full caller).
-            self.logger.error("Failed to submit batch of %d tasks: %s", len(batch), exc)
-            self._fail_batch(batch, exc)
-            raise
-        finally:
+        prof = self._prof
+        if prof:
             for t in batch:
-                self._queued.pop(t.get("uid"), None)
+                prof.prof("task_batch_flush", uid=t.get("uid", "?"))
 
-    def _fail_batch(self, batch: list[dict], exc: BaseException) -> None:
-        """Report every not yet terminal task of *batch* FAILED with *exc*."""
-        for t in batch:
-            task = self._tasks.get(t.get("uid"))
-            if task is None:
-                continue
-            if str(task.get("state", "")).upper() in self._TERMINAL_STATES:
-                continue
-            task["exception"] = exc
-            task["state"] = "FAILED"
-            self._fire_callback(task, "FAILED")
+        self.logger.debug("Flushing batch of %d tasks", len(batch))
+        async with self._send_lock:
+            try:
+                await asyncio.to_thread(self._rh.submit_tasks, batch)
+            except Exception as exc:
+                # A timer-triggered flush runs as a detached background task; an
+                # unhandled error here would leave the batch's tasks hung
+                # forever.  Fail them explicitly so the failure reaches the
+                # client (and re-raise for the inline buffer-full caller).
+                self.logger.error("Failed to submit batch of %d tasks: %s", len(batch), exc)
+                for t in batch:
+                    task = self._tasks.get(t.get("uid"))
+                    if task is not None:
+                        task["exception"] = exc
+                        task["state"] = "FAILED"
+                        self._fire_callback(task, "FAILED")
+                raise
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a single task on the remote endpoint."""
@@ -818,17 +779,9 @@ class OrbitExecutionBackend(BaseBackend):
             buffered = any(t.get("uid") == uid for t in self._batch_buffer)
             if buffered:
                 self._batch_buffer = [t for t in self._batch_buffer if t.get("uid") != uid]
-            # Detached but still waiting for its send: take it out of the batch.
-            queued = self._queued.pop(uid, None)
-            if queued is not None:
-                queued[:] = [t for t in queued if t.get("uid") != uid]
-                buffered = True
 
         if not buffered:
-            # Under the send lock: a send of this task that is in progress
-            # completes first, and the client is never used concurrently.
-            async with self._send_lock:
-                await asyncio.to_thread(self._rh.cancel_task, uid)
+            await asyncio.to_thread(self._rh.cancel_task, uid)
 
         task = self._tasks[uid]
         task["state"] = "CANCELED"
@@ -854,13 +807,8 @@ class OrbitExecutionBackend(BaseBackend):
             if self._flush_handle is not None:
                 self._flush_handle.cancel()
                 self._flush_handle = None
-            # Detached batches still waiting for their send go empty.
-            for batch in {id(b): b for b in self._queued.values()}.values():
-                batch.clear()
-            self._queued.clear()
 
-        async with self._send_lock:
-            result = await asyncio.to_thread(self._rh.cancel_all_tasks)
+        result = await asyncio.to_thread(self._rh.cancel_all_tasks)
 
         for task in list(self._tasks.values()):
             if str(task.get("state", "")).upper() not in self._TERMINAL_STATES:
