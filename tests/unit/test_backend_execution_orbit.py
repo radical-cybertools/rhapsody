@@ -155,6 +155,11 @@ async def test_async_init_idempotent():
 # ---------------------------------------------------------------------------
 
 
+async def _sent(backend):
+    """Wait until the background sends started by submit_tasks are done."""
+    await asyncio.gather(*list(backend._inflight_flushes), return_exceptions=True)
+
+
 @pytest.mark.asyncio
 async def test_submit_tasks_delegates_to_rhapsody_client():
     backend = await _init_backend(batch_window=0)
@@ -162,6 +167,7 @@ async def test_submit_tasks_delegates_to_rhapsody_client():
     tasks = [{"uid": "t.001", "executable": "/bin/echo", "arguments": ["hi"]}]
     await backend.submit_tasks(tasks)
 
+    await _sent(backend)
     backend._mock_rh.submit_tasks.assert_called_once()
     submitted = backend._mock_rh.submit_tasks.call_args[0][0]
     assert len(submitted) == 1
@@ -169,6 +175,77 @@ async def test_submit_tasks_delegates_to_rhapsody_client():
 
     # Task tracked locally
     assert "t.001" in backend._tasks
+
+
+@pytest.mark.asyncio
+async def test_immediate_submit_does_not_wait_for_a_blocked_send():
+    """With batch_window=0 the send runs in the background: a request that the
+    broker holds (a lost endpoint, up to its grace) must not hold the caller,
+    which is asyncflow's run loop."""
+    backend = await _init_backend(batch_window=0)
+    release = threading.Event()
+    backend._mock_rh.submit_tasks.side_effect = lambda batch: release.wait(5)
+
+    t0 = time.monotonic()
+    await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/true"}])
+    assert time.monotonic() - t0 < 0.5
+    assert backend._inflight_flushes  # the send is still running
+
+    release.set()
+    await _sent(backend)
+    backend._mock_rh.submit_tasks.assert_called_once()
+    await backend.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_immediate_sends_stay_in_order():
+    backend = await _init_backend(batch_window=0)
+    release = threading.Event()
+    seen = []
+
+    def send(batch):
+        release.wait(5)
+        seen.extend(t["uid"] for t in batch)
+
+    backend._mock_rh.submit_tasks.side_effect = send
+    for i in range(5):
+        await backend.submit_tasks([{"uid": f"t.{i}", "executable": "/bin/true"}])
+    release.set()
+    await _sent(backend)
+    assert seen == [f"t.{i}" for i in range(5)]
+    await backend.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_failed_immediate_send_marks_tasks_failed():
+    """The send error no longer reaches the caller; the tasks fail through the
+    callback, as a failed timer flush does."""
+    backend = await _init_backend(batch_window=0)
+    states = {}
+    backend.register_callback(lambda task, state: states.__setitem__(task["uid"], state))
+    backend._mock_rh.submit_tasks.side_effect = RuntimeError("HTTP 504 -- endpoint lost")
+
+    await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/true"}])  # no raise
+    await _sent(backend)
+    assert states.get("t.1") == "FAILED"
+    await backend.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_a_blocked_immediate_send():
+    backend = await _init_backend(batch_window=0)
+    release = threading.Event()
+    sent = threading.Event()
+
+    def send(batch):
+        release.wait(5)
+        sent.set()
+
+    backend._mock_rh.submit_tasks.side_effect = send
+    await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/true"}])
+    threading.Timer(0.2, release.set).start()
+    await backend.shutdown()
+    assert sent.is_set()
 
 
 @pytest.mark.asyncio
@@ -516,6 +593,7 @@ async def test_python_compat_skipped_for_executable_tasks():
         ]
     )
 
+    await _sent(backend)
     backend._mock_rh.submit_tasks.assert_called_once()
     backend._mock_sysinfo.host_role.assert_not_called()
 
@@ -532,6 +610,7 @@ async def test_python_compat_passes_for_matching_versions():
         ]
     )
 
+    await _sent(backend)
     backend._mock_rh.submit_tasks.assert_called_once()
     backend._mock_sysinfo.host_role.assert_called_once()
 
@@ -569,6 +648,7 @@ async def test_python_compat_caches_first_lookup():
             ]
         )
 
+    await _sent(backend)
     assert backend._mock_rh.submit_tasks.call_count == 3
     backend._mock_sysinfo.host_role.assert_called_once()
 
@@ -647,6 +727,7 @@ async def test_python_compat_retries_after_lookup_failure():
     await backend.submit_tasks([{"uid": "t.2", "function": "cloudpickle::X"}])
     assert backend._endpoint_python_lookup_done is True
     assert backend._mock_sysinfo.host_role.call_count == 2
+    await _sent(backend)
     assert backend._mock_rh.submit_tasks.call_count == 2
 
 
@@ -896,6 +977,7 @@ async def test_cancel_submitted_task_calls_remote():
     """A task already submitted (not buffered) still goes to the remote cancel."""
     backend = await _init_backend(batch_window=0)  # immediate submit, no buffering
     await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/true"}])
+    await _sent(backend)  # the background send has reached the endpoint
     assert not backend._batch_buffer
 
     ok = await backend.cancel_task("t.1")
@@ -959,6 +1041,7 @@ async def test_pool_mode_stamps_tasks():
         ]
     )
 
+    await _sent(backend)
     submitted = backend._mock_rh.submit_tasks.call_args[0][0]
     assert submitted[0]["pool"] == "insitu"
     assert submitted[1]["pool"] == "special"
