@@ -694,7 +694,7 @@ class OrbitExecutionBackend(BaseBackend):
         task.add_done_callback(self._on_flush_done)
 
     def _on_flush_done(self, task: asyncio.Task) -> None:
-        """Untrack a finished background flush and retrieve its exception.
+        """Untrack a finished background send and retrieve its exception.
 
         ``_send_batch`` already logs the failure and marks tasks FAILED; we
         retrieve the exception here only so asyncio does not emit a spurious
@@ -751,9 +751,9 @@ class OrbitExecutionBackend(BaseBackend):
             try:
                 await asyncio.to_thread(self._rh.submit_tasks, batch)
             except Exception as exc:
-                # A timer-triggered flush runs as a detached background task; an
-                # unhandled error here would leave the batch's tasks hung
-                # forever.  Fail them explicitly so the failure reaches the
+                # Timer flushes and immediate submits run as detached background
+                # tasks; an unhandled error here would leave the batch's tasks
+                # hung forever.  Fail them explicitly so the failure reaches the
                 # client (and re-raise for the inline buffer-full caller).
                 self.logger.error("Failed to submit batch of %d tasks: %s", len(batch), exc)
                 for t in batch:
@@ -825,10 +825,10 @@ class OrbitExecutionBackend(BaseBackend):
             # Never let a flush failure skip client cleanup below.
             self.logger.warning("Failed to flush pending tasks during shutdown: %s", e)
 
-        # Wait for any timer-triggered flush already in flight so its batch is
-        # sent before we tear down the clients.
-        # Loop: a send spawned while we wait (a concurrent submit, a timer)
-        # must not run against the closed client.
+        # Wait for every background send (timer flush or immediate submit)
+        # still in flight so its batch is sent before we tear down the
+        # clients.  Loop: a send spawned while we wait must not run against
+        # the closed client.
         while self._inflight_flushes:
             await asyncio.gather(*list(self._inflight_flushes), return_exceptions=True)
 
