@@ -100,8 +100,10 @@ def test_all_groups_pass_and_merge(runner, fake_bin, tmp_path):
 def test_groups_run_cheapest_first_with_launcher_args(runner, fake_bin, tmp_path):
     run(runner, tmp_path, "--", "-w", "slurm", "--network-prefix", "^(a|b)$")
     lines = calls(tmp_path)
-    assert [next(p for p in ("tasks", "placement", "scale", "mpi") if f"test_{p}.py" in line)
-            for line in lines] == ["tasks", "placement", "scale", "mpi"]
+    assert [
+        next(p for p in ("tasks", "placement", "scale", "mpi") if f"test_{p}.py" in line)
+        for line in lines
+    ] == ["tasks", "placement", "scale", "mpi"]
     assert all(line.startswith("-w slurm --network-prefix ^(a|b)$ ") for line in lines)
     assert "-m scale" in lines[2]
     assert "--maxfail=1" in lines[3]

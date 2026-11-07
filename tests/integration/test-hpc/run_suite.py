@@ -76,10 +76,17 @@ def launcher_failure(group, reason, log_path):
 
 
 def run_limited(command, budget, log_path, cwd, env):
-    """Run command in its own process group. Return True if it finished within budget."""
+    """Run command in its own process group.
+
+    Return True if it finished within budget.
+    """
     with open(log_path, "w") as log:
         process = subprocess.Popen(
-            command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT,
+            command,
+            cwd=cwd,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
             start_new_session=True,
         )
         try:
@@ -103,13 +110,18 @@ def run_limited(command, budget, log_path, cwd, env):
 def leftover_steps(job_id):
     output = subprocess.run(
         ["squeue", "-h", "-s", "-j", job_id, "-o", "%i"],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     ).stdout
     return [s for s in output.split() if not s.endswith((".batch", ".extern", ".interactive"))]
 
 
 def cancel_slurm_steps():
-    """Cancel steps a stopped launcher left behind. They would keep the nodes' memory."""
+    """Cancel steps a stopped launcher left behind.
+
+    They would keep the nodes' memory.
+    """
     job_id = os.environ.get("SLURM_JOB_ID")
     if not job_id or not shutil.which("squeue"):
         return
@@ -140,9 +152,15 @@ def run_group(group, launcher_args, budget, work_dir, env):
     log = work_dir / f"{group.name}.log"
     junit.unlink(missing_ok=True)
     command = [
-        "dragon", *launcher_args,
-        sys.executable, "-m", "pytest", str(HERE / group.test_file), "-v",
-        *group.pytest_args, f"--junitxml={junit}",
+        "dragon",
+        *launcher_args,
+        sys.executable,
+        "-m",
+        "pytest",
+        str(HERE / group.test_file),
+        "-v",
+        *group.pytest_args,
+        f"--junitxml={junit}",
     ]
     print(f"=== group {group.name}: budget {budget} s", flush=True)
     start = time.monotonic()
@@ -160,8 +178,11 @@ def run_group(group, launcher_args, budget, work_dir, env):
         clean_up_dragon(work_dir / f"{group.name}-cleanup.log", work_dir, env)
 
     print(read_tail(log), flush=True)
-    print(f"=== group {group.name}: {time.monotonic() - start:.0f} s, "
-          f"{len(cases or [])} tests, {problem or 'launcher ok'}", flush=True)
+    print(
+        f"=== group {group.name}: {time.monotonic() - start:.0f} s, "
+        f"{len(cases or [])} tests, {problem or 'launcher ok'}",
+        flush=True,
+    )
     cases = list(cases or [])
     if problem:
         cases.append(launcher_failure(group, problem, log))
@@ -170,7 +191,9 @@ def run_group(group, launcher_args, budget, work_dir, env):
 
 def write_junit(path, cases):
     suite = ET.Element(
-        "testsuite", name="hpc", tests=str(len(cases)),
+        "testsuite",
+        name="hpc",
+        tests=str(len(cases)),
         failures=str(sum(c.find("failure") is not None for c in cases)),
         errors=str(sum(c.find("error") is not None for c in cases)),
         skipped=str(sum(c.find("skipped") is not None for c in cases)),
@@ -187,13 +210,18 @@ def parse_args(argv):
     launcher_args = []
     if "--" in argv:
         split = argv.index("--")
-        argv, launcher_args = argv[:split], argv[split + 1:]
+        argv, launcher_args = argv[:split], argv[split + 1 :]
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--backend", required=True, choices=sorted(GROUPS))
     parser.add_argument("--junit", required=True, type=pathlib.Path)
     parser.add_argument("--groups", help="comma-separated groups to run; default all")
-    parser.add_argument("--budget", action="append", default=[], metavar="GROUP=SECONDS",
-                        help="override a group's time budget; can be repeated")
+    parser.add_argument(
+        "--budget",
+        action="append",
+        default=[],
+        metavar="GROUP=SECONDS",
+        help="override a group's time budget; can be repeated",
+    )
     args = parser.parse_args(argv)
     args.launcher_args = launcher_args
     return args
