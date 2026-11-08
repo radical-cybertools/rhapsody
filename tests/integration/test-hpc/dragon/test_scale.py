@@ -18,8 +18,7 @@ Execution strategy:
     so correctness can be verified per-task without relying on ordering.
 
 Resource requirements:
-    scale mark — long-running, not run by default.
-    Set RHAPSODY_RUN_SCALE=1 to enable, or use -m scale.
+    scale mark — not selected by default; use -m scale.
 
 Thresholds (configurable via env vars):
     RHAPSODY_SCALE_FUNC_COUNT   default 10_000  (function invocations)
@@ -32,7 +31,7 @@ Expected outcomes:
     - No TimeoutError within the configured deadline
 
 Run:
-    RHAPSODY_RUN_SCALE=1 dragon python3 -m pytest test-hpc/test_scale.py -v -s
+    dragon python3 -m pytest dragon/test_scale.py -m scale -v -s
 """
 
 import os
@@ -41,18 +40,8 @@ import time
 import pytest
 from hpc_workers import identity as _identity
 
-# ---------------------------------------------------------------------------
-# Scale-test gate — skip unless explicitly enabled
-# ---------------------------------------------------------------------------
-
-SCALE_ENABLED = os.environ.get("RHAPSODY_RUN_SCALE", "0") == "1"
 FUNC_COUNT = int(os.environ.get("RHAPSODY_SCALE_FUNC_COUNT", 10_000))
 EXEC_COUNT = int(os.environ.get("RHAPSODY_SCALE_EXEC_COUNT", 1_000))
-
-
-def _scale_skip():
-    if not SCALE_ENABLED:
-        pytest.skip("Scale tests disabled. Set RHAPSODY_RUN_SCALE=1 to enable.")
 
 
 # ---------------------------------------------------------------------------
@@ -61,22 +50,11 @@ def _scale_skip():
 
 
 @pytest.fixture(scope="module")
-async def scale_backend():
-    """DragonExecutionBackend with enlarged results DDict for scale tests."""
+async def scale_backend(start_backend):
+    """Backend with a larger results DDict and more scheduler workers."""
     from dragon.native.machine import System
 
-    from rhapsody.backends import DragonExecutionBackend
-
-    num_nodes = len(list(System().nodes))
-    ddict_gb = int(os.environ.get("RHAPSODY_DDICT_MEM_GB", 4))
-    ddict_mem = ddict_gb * num_nodes * (1024**3)
-
-    backend = await DragonExecutionBackend(
-        batch_kwargs={
-            "results_ddict_mem": ddict_mem,
-            "scheduler_workers": num_nodes * 4,
-        }
-    )
+    backend = await start_backend(ddict_gb=4, scheduler_workers=len(list(System().nodes)) * 4)
     yield backend
     await backend.shutdown()
 
@@ -98,7 +76,6 @@ async def scale_session(scale_backend):
 @pytest.mark.asyncio
 async def test_10k_function_tasks(scale_session):
     """Submit FUNC_COUNT function tasks; verify every result is correct."""
-    _scale_skip()
     from rhapsody.api import ComputeTask
 
     print(f"\nSubmitting {FUNC_COUNT:,} function tasks...", flush=True)
@@ -132,7 +109,6 @@ async def test_10k_function_tasks(scale_session):
 @pytest.mark.asyncio
 async def test_1k_executable_tasks(scale_session):
     """Submit EXEC_COUNT executable tasks (/bin/echo); verify all complete."""
-    _scale_skip()
     from rhapsody.api import ComputeTask
 
     print(f"\nSubmitting {EXEC_COUNT:,} executable tasks...", flush=True)
@@ -161,7 +137,6 @@ async def test_1k_executable_tasks(scale_session):
 @pytest.mark.asyncio
 async def test_mixed_function_and_executable_tasks(scale_session):
     """Interleave function and executable tasks in a single submission."""
-    _scale_skip()
     from rhapsody.api import ComputeTask
 
     n_func = FUNC_COUNT // 10  # 1/10 of the full scale to keep runtime reasonable
@@ -190,7 +165,6 @@ async def test_wave_submission_stability(scale_session):
     Simulates a workflow where tasks arrive incrementally rather than all at once.  Validates that
     the monitor loop keeps pace with new submissions.
     """
-    _scale_skip()
     from rhapsody.api import ComputeTask
 
     wave_size = 1_000
