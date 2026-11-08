@@ -13,6 +13,8 @@
   executables as one native process each, and
   `process_templates` as one process group, with the PMI chosen by `pmi`. Unlike a
   Batch job, a group has no PMI by default. See `docs/execution/dragon-native.md`.
+  `tests/integration/test-hpc/benchmarks/dragon_throughput.py` measures it with
+  `--with-rhapsody-dragon-native`, and `--workers_per_node` sets its pool size.
 
 ### Changed
 
