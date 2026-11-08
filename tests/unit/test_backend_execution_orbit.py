@@ -179,9 +179,8 @@ async def test_submit_tasks_delegates_to_rhapsody_client():
 
 @pytest.mark.asyncio
 async def test_immediate_submit_does_not_wait_for_a_blocked_send():
-    """With batch_window=0 the send runs in the background: a request that the
-    broker holds (a lost endpoint, up to its grace) must not hold the caller,
-    which is asyncflow's run loop."""
+    """With batch_window=0 the send runs in the background: a request that the broker holds (a lost
+    endpoint, up to its grace) must not hold the caller, which is asyncflow's run loop."""
     backend = await _init_backend(batch_window=0)
     release = threading.Event()
     backend._mock_rh.submit_tasks.side_effect = lambda batch: release.wait(5)
@@ -218,8 +217,8 @@ async def test_immediate_sends_stay_in_order():
 
 @pytest.mark.asyncio
 async def test_failed_immediate_send_marks_tasks_failed():
-    """The send error no longer reaches the caller; the tasks fail through the
-    callback, as a failed timer flush does."""
+    """The send error no longer reaches the caller; the tasks fail through the callback, as a failed
+    timer flush does."""
     backend = await _init_backend(batch_window=0)
     states = {}
     backend.register_callback(lambda task, state: states.__setitem__(task["uid"], state))
