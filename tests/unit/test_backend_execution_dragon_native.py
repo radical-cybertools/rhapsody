@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from dataclasses import dataclass
 from dataclasses import field
 
@@ -283,7 +284,9 @@ def dragon(monkeypatch):
     for name in ("Node", "System", "Process", "ProcessTemplate", "ProcessGroup", "Queue"):
         monkeypatch.setattr(dragon_native, name, getattr(fake, name))
     monkeypatch.setattr(dragon_native, "Policy", FakePolicy)
-    monkeypatch.setattr(dragon_native, "PMIBackend", FakePMI)
+    facts = types.ModuleType("dragon.infrastructure.facts")
+    facts.PMIBackend = FakePMI
+    monkeypatch.setitem(sys.modules, "dragon.infrastructure.facts", facts)
     monkeypatch.setattr(dragon_native, "multi_join", fake.multi_join)
     monkeypatch.setattr(dragon_native, "process_kill", fake.process_kill)
     monkeypatch.setattr(dragon_native, "current_node", lambda: fake.Node("n0"))

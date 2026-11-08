@@ -33,6 +33,7 @@ from collections import Counter
 from collections import defaultdict
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
 
@@ -42,6 +43,8 @@ from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
 from . import _dragon_native_worker as _worker
+from .dragon import CRAY_MPICH_ENV
+from .dragon import _pmi_options
 
 DRAGON_NATIVE_INIT_ERROR = None
 
@@ -53,7 +56,6 @@ except ImportError:  # pragma: no cover - Dragon depends on cloudpickle
 try:
     from dragon.globalservices.process import kill as process_kill
     from dragon.globalservices.process import multi_join
-    from dragon.infrastructure.facts import PMIBackend
     from dragon.infrastructure.policy import Policy
     from dragon.native.machine import Node
     from dragon.native.machine import System
@@ -66,7 +68,6 @@ try:
 except ImportError as e:  # pragma: no cover - environment without Dragon
     process_kill = None
     multi_join = None
-    PMIBackend = None
     Policy = None
     Node = None
     System = None
@@ -76,6 +77,9 @@ except ImportError as e:  # pragma: no cover - environment without Dragon
     ProcessGroup = None
     Queue = None
     DRAGON_NATIVE_INIT_ERROR = e
+
+if TYPE_CHECKING:
+    from dragon.infrastructure.facts import PMIBackend
 
 
 def _get_logger() -> logging.Logger:
@@ -98,8 +102,6 @@ _STOP_THREADS = 15.0
 _OWN_TEMPLATE_KEYS = ("target", "args", "kwargs")
 # Where a result message holds the task's pickled value.
 _VALUE_INDEX = {_worker.DONE: 4, _worker.RESULT: 3}
-# The Cray MPICH module sets these; its ranks need pmi="cray", and a group has none by default.
-CRAY_MPICH_ENV = ("CRAY_MPICH_DIR", "CRAY_MPICH_VERSION")
 # Descriptors Local Services holds, per node and per Python process it starts; 1 per executable.
 _FDS_PER_NODE = 40
 _FDS_PER_PYTHON_PROCESS = 3
@@ -257,17 +259,10 @@ def _split_cpus(cores: list, n: int) -> list:
 def _group_pmi(pmi) -> PMIBackend | None:
     """Return the ``ProcessGroup`` PMI for ``pmi``.
 
-    ``pmi`` is ``"pmix"``, ``"cray"``, ``"none"`` or a Dragon ``PMIBackend``. None and ``"none"``
-    both give None: a group without PMI.
+    ``pmi`` is ``"pmix"``, ``"cray"``, ``"none"`` or a Dragon ``PMIBackend``, read as the Batch
+    backend reads it. None and ``"none"`` both give None: a group has no default PMI.
     """
-    if pmi is None or (isinstance(pmi, str) and pmi.lower() == "none"):
-        return None
-    try:
-        return PMIBackend(pmi.lower() if isinstance(pmi, str) else pmi)
-    except ValueError:
-        raise ValueError(
-            f"Unknown pmi {pmi!r}: use 'pmix', 'cray', 'none' or a Dragon PMIBackend"
-        ) from None
+    return _pmi_options(pmi).get("pmi")
 
 
 def _load_value(msg: tuple) -> tuple:
