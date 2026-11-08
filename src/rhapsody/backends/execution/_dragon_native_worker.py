@@ -114,7 +114,8 @@ def send(results, msg, value_index):
         fields = list(msg)
         fields[value_index] = RuntimeError(f"cannot send {len(raw)} bytes of results: {exc}")
         fields[value_index - 1] = False
-        fields[value_index + 2 :] = [""] * len(fields[value_index + 2 :])  # the output may be why
+        output = slice(value_index + 2, value_index + 4)  # stdout and stderr, maybe the reason
+        fields[output] = [""] * len(fields[output])
         put_waiting(results, pack(tuple(fields), value_index))
 
 
@@ -214,7 +215,8 @@ def worker_main(wid, inbox, results):
     Each inbox item is a pickled ``(uid, body)``, where ``body`` is a pickled
     ``(token, fn, args, kwargs, out_path, err_path, inline)``: a body that cannot be unpickled here
     (say, its function's module is missing on this node) still fails only its own task. Each result
-    is a pickled ``(DONE, wid, uid, ok, value, traceback, stdout, stderr)``.
+    is a pickled ``(DONE, wid, uid, ok, value, traceback, stdout, stderr, seconds)``, where
+    ``seconds`` is how long the task ran here, without the time its messages took.
     """
     import socket
 
@@ -227,11 +229,12 @@ def worker_main(wid, inbox, results):
         try:
             token, fn, args, kwargs, out_path, err_path, inline = cloudpickle.loads(body)
         except BaseException as exc:  # noqa: BLE001 - the error goes back to the client
-            send(results, (DONE, wid, uid, False, exc, traceback.format_exc(), "", ""), 4)
+            send(results, (DONE, wid, uid, False, exc, traceback.format_exc(), "", "", 0.0), 4)
             continue
         del body
+        start = time.monotonic()
         ok, value, tb, out, err = run_task(token, fn, args, kwargs, out_path, err_path, inline)
-        send(results, (DONE, wid, uid, ok, value, tb, out, err), 4)
+        send(results, (DONE, wid, uid, ok, value, tb, out, err, time.monotonic() - start), 4)
 
 
 def _redirect_for_good(out_path, err_path):
