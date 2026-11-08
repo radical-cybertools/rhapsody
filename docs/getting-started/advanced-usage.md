@@ -390,7 +390,8 @@ ComputeTask(
     executable='/bin/bash',
     arguments=['-c', 'echo $HOSTNAME'],
     task_backend_specific_kwargs={
-        "process_templates": [(2, {}), (2, {})]
+        "process_templates": [(2, {}), (2, {})],
+        "pmi": "none",  # not MPI, so no PMI
     },
 )
 
@@ -398,10 +399,13 @@ ComputeTask(
 ComputeTask(
     function=parallel_function,
     task_backend_specific_kwargs={
-        "process_templates": [(2, {}), (2, {})]
+        "process_templates": [(2, {}), (2, {})],
+        "pmi": "none",  # not MPI, so no PMI
     },
 )
 ```
+
+`"pmi": "none"` runs a job without a PMI. Use it for jobs that aren't MPI. For MPI jobs, see [MPI jobs: PMI and timeout](resource-specification.md#mpi-jobs-pmi-and-timeout).
 
 ### GPU Affinity with Policies
 
@@ -475,7 +479,8 @@ async def main():
             "process_templates": [
                 (2, {"policy": policies[0]}),
                 (2, {"policy": policies[1]}),
-            ]
+            ],
+            "pmi": "none",  # not MPI, so no PMI
         },
     )
 
@@ -538,7 +543,8 @@ async def main():
             executable='/bin/bash',
             arguments=['-c', 'echo $HOSTNAME'],
             task_backend_specific_kwargs={
-                "process_templates": [(2, {}), (2, {})]
+                "process_templates": [(2, {}), (2, {})],
+                "pmi": "none",  # not MPI, so no PMI
             },
         ),
 
@@ -554,7 +560,8 @@ async def main():
         ComputeTask(
             function=parallel_function,
             task_backend_specific_kwargs={
-                "process_templates": [(2, {}), (2, {})]
+                "process_templates": [(2, {}), (2, {})],
+                "pmi": "none",  # not MPI, so no PMI
             },
         ),
     ]
