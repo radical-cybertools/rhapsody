@@ -42,6 +42,9 @@ async def run_tasks_with_rhapsody(
         )
 
     if isinstance(backend, DragonExecutionBackend):
+        # the backend's monitor thread may still be reading results from the DDict that
+        # clear_results() clears: wait until the Session has every result first
+        await session.wait_tasks(tasks)
         backend.batch.clear_results()
 
 
