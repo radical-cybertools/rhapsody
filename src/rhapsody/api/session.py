@@ -94,6 +94,8 @@ class TaskStateManager:
                     )
                 else:
                     self._task_futures[uid].set_result(task)
+                # update_task() will never see this task again to release it
+                return self._task_futures.pop(uid)
 
         return self._task_futures[uid]
 
@@ -127,7 +129,6 @@ class Session:
         """
         self.uid = uid or f"rhapsody.session.{uuid.uuid4().hex[:8]}"
         self.work_dir = work_dir or os.getcwd()
-        self._tasks: dict[str, BaseTask | dict] = {}
         self._state_manager = TaskStateManager()
         self._telemetry: TelemetryManager | None = None
         # Scheduled ResourceLayout emissions (keeps task references alive), and the
@@ -212,7 +213,6 @@ class Session:
         futures = []
         for task in tasks:
             uid = task["uid"]
-            self._tasks[uid] = task
 
             # Create and bind future
             fut = self._state_manager.get_wait_future(uid, task)

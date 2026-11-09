@@ -350,3 +350,44 @@ async def test_concurrent_command_empty_output_stdout_is_string():
     assert state == "DONE"
     assert isinstance(result_task["stdout"], str)
     assert isinstance(result_task["stderr"], str)
+
+
+@pytest.mark.asyncio
+async def test_finished_and_cancelled_tasks_are_released():
+    """The backend forgets a task once it finished, failed or was cancelled, so a long-lived backend
+    stays bounded; cancelling a running task still works."""
+    import asyncio
+    import threading
+
+    backend = await ConcurrentExecutionBackend(ThreadPoolExecutor(max_workers=4))
+    states = {}
+    backend.register_callback(lambda t, s: states.__setitem__(t["uid"], s))
+
+    def ok():
+        return 1
+
+    def boom():
+        raise RuntimeError("boom")
+
+    tasks = [ComputeTask(function=ok) for _ in range(50)]
+    tasks += [ComputeTask(function=boom) for _ in range(10)]
+    await backend.submit_tasks(tasks)
+    while len([s for s in states.values() if s in ("DONE", "FAILED")]) < 60:
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0)
+    assert backend.tasks == {}
+
+    release = threading.Event()
+    slow = ComputeTask(function=release.wait)
+    await backend.submit_tasks([slow])
+    while states.get(slow.uid) != "RUNNING":
+        await asyncio.sleep(0.01)
+    assert await backend.cancel_task(slow.uid)
+    release.set()
+    for _ in range(100):
+        if not backend.tasks:
+            break
+        await asyncio.sleep(0.01)
+    assert backend.tasks == {}
+    assert states[slow.uid] == "CANCELED"
+    await backend.shutdown()
