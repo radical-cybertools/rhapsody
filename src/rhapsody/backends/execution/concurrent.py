@@ -335,7 +335,8 @@ class ConcurrentExecutionBackend(BaseBackend):
         finally:
             # finished, failed or cancelled: release it, so a long-lived
             # backend does not keep every task it ever ran
-            if self.tasks.get(task["uid"]) is task:
+            entry = self.tasks.get(task["uid"])
+            if entry is not None and entry.get("future") is asyncio.current_task():
                 del self.tasks[task["uid"]]
 
     async def submit_tasks(self, tasks: list[dict[str, Any]]) -> list[asyncio.Task]:
@@ -378,6 +379,9 @@ class ConcurrentExecutionBackend(BaseBackend):
                 await asyncio.wait([future])
                 # Set state on the task object itself before callback
                 self._callback_func(task, "CANCELED")
+                # a task cancelled before it started never runs its own cleanup
+                if self.tasks.get(uid) is task and task["future"] is future:
+                    del self.tasks[uid]
                 return True
         return False
 
