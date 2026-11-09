@@ -1516,6 +1516,39 @@ async def test_cancel_timeout_and_death_make_room_under_the_cap(capped, dragon):
     assert capped._busy["n1"] == 0
 
 
+async def test_workers_paused_by_a_full_pool_do_not_count_as_busy(capped, pool_full, monkeypatch):
+    rec = Recorder(capped)
+    make_short(capped, "n1")
+    failures = iter(range(8))
+    for w in [w for w in capped._workers.values() if w.host == "n1"]:
+        monkeypatch.setattr(
+            w.inbox, "put", full_until(w.inbox, lambda: next(failures, None) is not None)
+        )
+    tasks = [fn_task(square, i, placement={"host": "n1"}) for i in range(6)]
+    await capped.submit_tasks(tasks)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert capped._busy["n1"] == 0
+    assert all(w.state == "idle" for w in capped._workers.values() if w.host == "n1")
+
+
+async def test_fill_keeps_a_worker_whose_task_failed_to_send(capped, pool_full, monkeypatch):
+    """The task waited out the full pool; its worker stays idle for the next one."""
+    rec = Recorder(capped)
+    task = fn_task(square, 2, placement={"host": "n1"})
+    record = capped.build_task(task)
+    record.put_deadline = time.monotonic()
+    idle = capped._idle[("n1", ())]
+    w = idle[0]
+    monkeypatch.setattr(w.inbox, "put", full_until(w.inbox, lambda: True))
+    with capped._lock:
+        capped._tasks[record.uid] = record
+        capped._pending[record.key].append(record)
+        capped._fill("n1")
+    assert await rec.wait(task["uid"]) == ["FAILED"]
+    assert w in idle and w.state == "idle"
+
+
 # ============================================================================
 # Cancel, timeout, dead workers, shutdown
 # ============================================================================
