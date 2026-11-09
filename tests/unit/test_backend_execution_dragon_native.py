@@ -10,6 +10,7 @@ Real-runtime tests are at the end of the module; they need ``dragon python -m py
 """
 
 import asyncio
+import ctypes
 import enum
 import itertools
 import os
@@ -192,6 +193,10 @@ class FakeDragon:
                 self.kwargs = kwargs
 
         class FakeProcessGroup:
+            # Dragon raises either on a timeout, and its manager error at once when it fails.
+            timeout_error: type = TimeoutError
+            join_error: Exception | None = None
+
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
                 self.templates = []
@@ -216,11 +221,13 @@ class FakeDragon:
                 return [p.puid for p in self.members]
 
             def join(self, timeout=None):
+                if self.join_error is not None:
+                    raise self.join_error
                 deadline = None if timeout is None else time.monotonic() + timeout
                 for p in self.members:
                     left = None if deadline is None else max(0.0, deadline - time.monotonic())
                     if p.join(left) is None:
-                        raise TimeoutError()
+                        raise self.timeout_error("timed out")
 
             @property
             def exit_status(self):
@@ -247,12 +254,13 @@ class FakeDragon:
                 self.destroyed = True
 
         def multi_join(puids, timeout=None, join_all=False):
-            deadline = time.monotonic() + (timeout or 0)
+            # As in Dragon, None waits for good and 0 checks once.
+            deadline = None if timeout is None else time.monotonic() + timeout
             while True:
                 exited = [(p, dragon.procs[p].code) for p in puids if dragon.procs[p].done.is_set()]
                 if (len(exited) == len(puids)) if join_all else exited:
                     return exited, {}
-                if time.monotonic() >= deadline:
+                if deadline is not None and time.monotonic() >= deadline:
                     return None, {}
                 time.sleep(0.01)
 
@@ -755,22 +763,124 @@ async def test_bad_placement_fails_only_its_task_before_dragon_sees_it(
     assert len(dragon.started) == started
 
 
-async def test_failed_send_fails_only_its_task(backend, monkeypatch):
+def broken_put(obj, block=True, timeout=None):
+    raise RuntimeError("inbox is gone")
+
+
+async def test_failed_send_replaces_the_worker_not_the_task(backend, dragon, monkeypatch):
+    """With every inbox broken, the task waits for a new worker and runs there."""
     rec = Recorder(backend)
+    for w in backend._workers.values():
+        monkeypatch.setattr(w.inbox, "put", broken_put)
+    task = fn_task(square, 3)
+    await backend.submit_tasks([task])
+    assert await rec.wait(task["uid"]) == ["DONE"]
+    assert task["return_value"] == 9
+    assert len(dragon.workers()) == 5
 
-    def broken_put(obj, block=True, timeout=None):
-        raise RuntimeError("inbox is gone")
 
-    with monkeypatch.context() as patch:
-        for w in backend._workers.values():
-            patch.setattr(w.inbox, "put", broken_put)
-        bad = fn_task(square, 1)
-        await backend.submit_tasks([bad])
-        assert await rec.wait(bad["uid"]) == ["FAILED"]
-    assert "inbox is gone" in bad["stderr"]
-    good = fn_task(square, 2)
-    await backend.submit_tasks([good])
-    assert await rec.wait(good["uid"]) == ["DONE"]
+async def test_broken_inbox_with_a_long_queue_behind_it(dragon, tmp_path, monkeypatch):
+    """A failed send used to fail its task and send the next one, recursively.
+
+    Past about 490 tasks that raised RecursionError: the worker stayed busy for good and the
+    rest of the queue got no state. Now the queue waits for the worker's replacement.
+    """
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False)
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        rec = Recorder(be)
+        first = fn_task(blocked, placement={"host": "n0"})
+        await be.submit_tasks([first])
+        waiting = [fn_task(square, i, placement={"host": "n0"}) for i in range(700)]
+        await be.submit_tasks(waiting)
+        w = be._tasks[first["uid"]].worker
+        monkeypatch.setattr(w.inbox, "put", broken_put)
+        GATE.set()
+        for task in [first, *waiting]:
+            assert await rec.wait(task["uid"]) == ["DONE"]
+        assert [t["return_value"] for t in waiting] == [i * i for i in range(700)]
+        assert not be._tasks and w.state == "dead" and w.wid not in be._workers
+        await until(lambda: [x.state for x in be._workers.values() if x.host == "n0"] == ["idle"])
+    finally:
+        await be.shutdown()
+
+
+async def test_task_no_inbox_takes_fails_after_two_workers(backend, dragon, monkeypatch):
+    """The task itself cannot be sent: it fails, and the tasks after it in the list still run."""
+    rec = Recorder(backend)
+    bad, good = fn_task(square, 1), [fn_task(square, i) for i in range(2, 7)]
+    put = dragon.Queue.put
+
+    def put_all_but_bad(self, obj, block=True, timeout=None):
+        if isinstance(obj, bytes) and cloudpickle.loads(obj)[0] == bad["uid"]:
+            raise RuntimeError("cannot send this one")
+        put(self, obj, block, timeout)
+
+    monkeypatch.setattr(dragon.Queue, "put", put_all_but_bad)
+    await backend.submit_tasks([bad, *good])
+    assert await rec.wait(bad["uid"]) == ["FAILED"]
+    assert "cannot send this one" in bad["stderr"]
+    for task in good:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    await until(lambda: len(dragon.workers()) == 6)
+
+
+@pytest.fixture
+async def one_worker(dragon, tmp_path):
+    """A started backend with one worker per node, and the inbox of n0's."""
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False)
+    be._work_dir = str(tmp_path)
+    await be
+    yield be, next(w for w in be._workers.values() if w.host == "n0")
+    await be.shutdown()
+
+
+def full_until(inbox, full):
+    """A put that raises the full-pool error while ``full()`` is true."""
+    put = inbox.put
+
+    def full_put(obj, block=True, timeout=None):
+        if full():
+            raise PoolFullError("pool is full")
+        put(obj, block, timeout)
+
+    return full_put
+
+
+async def test_full_pool_holds_tasks_and_sends_them_in_order(one_worker, pool_full, monkeypatch):
+    be, w = one_worker
+    rec = Recorder(be)
+    failures = iter(range(3))
+    monkeypatch.setattr(
+        w.inbox, "put", full_until(w.inbox, lambda: next(failures, None) is not None)
+    )
+    tasks = [fn_task(square, i, placement={"host": "n0"}) for i in range(20)]
+    await be.submit_tasks(tasks)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert [u for u, s, _ in rec.records if s == "DONE"] == [t["uid"] for t in tasks]
+    assert (w.state, w.backoff) == ("idle", dragon_native._RETRY_FIRST)
+
+
+async def test_task_fails_once_the_pool_stays_full_for_put_patience(
+    one_worker, pool_full, monkeypatch
+):
+    """The worker is kept: when the pool has room again, the tasks after it run."""
+    be, w = one_worker
+    monkeypatch.setattr(worker_module, "PUT_PATIENCE", 0.3)
+    rec = Recorder(be)
+    full = [True]
+    monkeypatch.setattr(w.inbox, "put", full_until(w.inbox, lambda: full[0]))
+    tasks = [fn_task(square, i, placement={"host": "n0"}) for i in range(3)]
+    t0 = time.monotonic()
+    await be.submit_tasks(tasks)
+    assert await rec.wait(tasks[0]["uid"]) == ["FAILED"]
+    assert time.monotonic() - t0 >= 0.3 and "pool is full" in tasks[0]["stderr"]
+    full[0] = False
+    for task in tasks[1:]:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert w.wid in be._workers
 
 
 async def test_function_with_no_pool_fails_at_once(dragon, tmp_path):
@@ -934,6 +1044,23 @@ async def test_function_process_that_exits_non_zero_after_its_result_fails(backe
     assert fields["exception"].exit_code == 139
 
 
+async def test_function_process_that_raised_reports_its_error_when_the_result_is_late(
+    backend, monkeypatch
+):
+    """Under load the result can arrive well after the process exited with 1."""
+    send = worker_module.send
+
+    def late_send(results, msg, value_index):
+        threading.Timer(1.5, send, (results, msg, value_index)).start()
+
+    monkeypatch.setattr(worker_module, "send", late_send)
+    rec = Recorder(backend)
+    task = fn_task(boom, task_backend_specific_kwargs={"process_template": {}})
+    await backend.submit_tasks([task])
+    assert await rec.wait(task["uid"]) == ["FAILED"]
+    assert isinstance(task["exception"], ValueError)
+
+
 async def test_function_with_process_template_returns_its_value(backend):
     rec = Recorder(backend)
     ok = fn_task(square, 9, task_backend_specific_kwargs={"process_template": {}})
@@ -981,6 +1108,61 @@ async def test_group_timeout_and_cancel(backend):
     await until(lambda: backend._tasks[cancelled["uid"]].puids)
     assert await backend.cancel_task(cancelled["uid"]) is True
     assert await rec.wait(cancelled["uid"]) == ["CANCELED"]
+
+
+class FakeProcessGroupError(Exception):
+    """Stands for Dragon's ``DragonProcessGroupError``."""
+
+
+async def test_group_timeout_raised_as_a_manager_error(backend, dragon, monkeypatch):
+    monkeypatch.setattr(dragon.ProcessGroup, "timeout_error", FakeProcessGroupError)
+    rec = Recorder(backend)
+    task = exe_task(
+        "/bin/sleep",
+        "30",
+        task_backend_specific_kwargs={"process_templates": [(2, {})], "timeout": 0.3},
+    )
+    await backend.submit_tasks([task])
+    assert await rec.wait(task["uid"]) == ["FAILED"]
+    assert isinstance(task["exception"], TimeoutError)
+    assert task["return_value"] == [-signal.SIGTERM, -signal.SIGTERM]
+
+
+async def test_group_whose_join_fails_fails_its_task_and_closes(backend, dragon, monkeypatch):
+    closed = []
+    monkeypatch.setattr(dragon.ProcessGroup, "join_error", FakeProcessGroupError("manager died"))
+    monkeypatch.setattr(dragon.ProcessGroup, "close", lambda self: closed.append(self))
+    rec = Recorder(backend)
+    task = exe_task("true", task_backend_specific_kwargs={"process_templates": [(2, {})]})
+    await backend.submit_tasks([task])
+    assert await rec.wait(task["uid"]) == ["FAILED"]
+    assert isinstance(task["exception"], FakeProcessGroupError)
+    assert closed == [dragon.groups[-1]]
+
+
+async def test_process_task_is_signalled_before_its_hosts_are_looked_up(
+    backend, dragon, monkeypatch
+):
+    """Each lookup is a request to Global Services: the signal must not wait behind them."""
+    calls = []
+    process, kill = dragon_native.Process, dragon_native.process_kill
+
+    def looked_up(*args, ident=None, **kwargs):
+        if ident is not None:
+            calls.append("lookup")
+        return process(*args, ident=ident, **kwargs)
+
+    def killed(puid, sig=signal.SIGKILL):
+        calls.append(f"kill {sig}")
+        kill(puid, sig=sig)
+
+    monkeypatch.setattr(dragon_native, "Process", looked_up)
+    monkeypatch.setattr(dragon_native, "process_kill", killed)
+    rec = Recorder(backend)
+    task = exe_task("/bin/sleep", "30", task_backend_specific_kwargs={"timeout": 0.2})
+    await backend.submit_tasks([task])
+    assert await rec.wait(task["uid"]) == ["FAILED"]
+    assert calls[:2] == ["kill 15", "lookup"]
 
 
 async def test_process_that_ignores_sigterm_gets_sigkill(backend):
@@ -1235,7 +1417,7 @@ async def test_timer_heap_does_not_keep_finished_tasks(backend):
     for task in tasks:
         await rec.wait(task["uid"])
     assert len(backend._timers) == 4
-    assert all(isinstance(uid, str) for _, _, uid in backend._timers)
+    assert all(isinstance(uid, str) for *_, uid in backend._timers)
 
 
 async def test_old_timer_does_not_time_out_a_new_task_of_that_uid(backend):
@@ -1243,7 +1425,7 @@ async def test_old_timer_does_not_time_out_a_new_task_of_that_uid(backend):
     first = fn_task(square, 2, task_backend_specific_kwargs={"timeout": 3600})
     await backend.submit_tasks([first])
     await rec.wait(first["uid"])
-    _, timer, uid = backend._timers[0]
+    _, timer, _, uid = backend._timers[0]
     await backend.submit_tasks([{**fn_task(blocked), "uid": uid}])
     backend._timeout_pool_task(uid, timer)
     assert backend._tasks[uid].state == "running"
@@ -1264,6 +1446,20 @@ async def test_executable_cancel_and_timeout(backend, tmp_path):
     assert isinstance(timed_out["exception"], TimeoutError)
     assert timed_out["exit_code"] == -signal.SIGTERM
     assert time.monotonic() - t0 < 5
+
+
+async def test_worker_death_racing_a_cancel_is_handled_once(backend, dragon):
+    """The watcher can find the worker dead after the cancel took it: one replacement, not two."""
+    rec = Recorder(backend)
+    task = fn_task(blocked)
+    await backend.submit_tasks([task])
+    w = backend._tasks[task["uid"]].worker
+    assert await backend.cancel_task(task["uid"]) is True
+    backend._worker_died(w, "exited with code -9")
+    await until(lambda: len(dragon.workers()) == 5)
+    await asyncio.sleep(0.3)
+    assert len(dragon.workers()) == 5 and backend._live_by_key[w.key] == 2
+    assert await rec.wait(task["uid"]) == ["CANCELED"]
 
 
 async def test_dead_worker_fails_its_task_and_is_replaced(backend, dragon):
@@ -1348,6 +1544,15 @@ async def test_shutdown_cancels_running_and_queued_tasks_and_stops_the_pool(drag
         await be.submit_tasks([fn_task(square, 1)])
 
 
+async def test_worker_launch_after_shutdown_starts_nothing(backend, dragon):
+    """A launch still queued when the pool stops must not leave a process behind."""
+    await backend.shutdown()
+    started = len(dragon.started)
+    w = backend._new_worker("n0", (0,), (), initial=False)
+    backend._launch_worker(w)
+    assert len(dragon.started) == started and w.inbox is None
+
+
 async def test_worker_that_never_starts_fails_the_start(dragon, monkeypatch):
     def broken_start(self):
         raise RuntimeError("no such policy")
@@ -1393,6 +1598,27 @@ def test_state_for_a_closed_loop_reaches_the_next_loop(dragon, tmp_path):
     asyncio.run(be._async_init())
     held = fn_task(square, 1)
     be._emit(dragon_native._Task(held["uid"], held, "pool", None, "t"), "DONE", {"return_value": 1})
+
+    async def main():
+        rec = Recorder(be)
+        task = fn_task(square, 2)
+        await be.submit_tasks([task])
+        assert await rec.wait(task["uid"]) == ["DONE"]
+        assert await rec.wait(held["uid"]) == ["DONE"]
+        await be.shutdown()
+
+    asyncio.run(main())
+
+
+def test_flush_left_on_a_loop_that_closed_does_not_hold_later_states(dragon, tmp_path):
+    """The flush was scheduled while the loop was open, and the loop closed before it ran."""
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False)
+    be._work_dir = str(tmp_path)
+    first = asyncio.new_event_loop()
+    first.run_until_complete(be._async_init())
+    held = fn_task(square, 1)
+    be._emit(dragon_native._Task(held["uid"], held, "pool", None, "t"), "DONE", {"return_value": 1})
+    first.close()
 
     async def main():
         rec = Recorder(be)
@@ -1475,6 +1701,27 @@ def test_worker_run_task_captures_output_inline():
     ok, value, tb, out, err = worker_module.run_task("tok", chatty, (), {}, None, None, True)
     assert (ok, value, out, err) == (True, 5, "to stdout\n", "from-a-child\n")
     assert worker_module.TOKEN_ENV not in os.environ
+
+
+def test_worker_run_task_captures_what_c_code_left_in_its_buffer():
+    """C's stdout is fully buffered on a file: unflushed, it would go out with the next task."""
+    libc = ctypes.CDLL(None)
+
+    def from_c():
+        libc.puts(b"from C")
+
+    ok, _, _, out, _ = worker_module.run_task("tok", from_c, (), {}, None, None, True)
+    assert (ok, out) == (True, "from C\n")
+
+
+def test_exec_script_makes_missing_output_directories(tmp_path):
+    """The work directory may exist only on the client's node."""
+    out, err = tmp_path / "a" / "b" / "t.stdout", tmp_path / "c" / "t.stderr"
+    code = subprocess.call(
+        ["/bin/sh", "-c", worker_module.EXEC_SCRIPT, "sh", str(out), str(err)]
+        + ["/bin/sh", "-c", "echo out; echo err >&2"]
+    )
+    assert (code, out.read_text(), err.read_text()) == (0, "out\n", "err\n")
 
 
 class PoolFullError(Exception):
@@ -1639,6 +1886,76 @@ async def test_real_runtime_mixed_tasks(tmp_path):
         assert [t["return_value"] for t in tasks[:3]] == [49, 64, 9]
         assert tasks[3]["stdout"] == "hello\n"
         assert len(tasks[4]["stdout"].split()) == 2
+    finally:
+        await be.shutdown()
+        cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
+
+
+def starts_a_child(pidfile):
+    """Start a child that outlives the task unless it is reaped, then wait for good."""
+    child = subprocess.Popen(["/bin/sleep", "300"])
+    with open(pidfile, "w") as f:
+        f.write(str(child.pid))
+    time.sleep(300)
+
+
+def read_pid(pidfile):
+    try:
+        with open(pidfile) as f:
+            return int(f.read())
+    except (OSError, ValueError):
+        return None
+
+
+def alive(pid):
+    """Whether ``pid`` runs; a zombie counts as gone."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+@needs_runtime
+async def test_real_runtime_cancel_timeout_and_reaper(tmp_path):
+    """Cancel and time out pool, process and group tasks; the children they left die too."""
+    cloudpickle.register_pickle_by_value(sys.modules[__name__])
+    be = await DragonNativeExecutionBackend(workers_per_node=2, kill_grace=1.0)
+    be._work_dir = str(tmp_path)
+    rec = Recorder(be)
+    pidfiles = [str(tmp_path / f"{name}.pid") for name in ("cancel", "timeout", "exe")]
+    timeout = {"timeout": 5}
+    cancelled = fn_task(starts_a_child, pidfiles[0])
+    timed_out = fn_task(starts_a_child, pidfiles[1], task_backend_specific_kwargs=timeout)
+    exe = exe_task(
+        "/bin/sh",
+        "-c",
+        f"sleep 300 & echo $! > {pidfiles[2]}; wait",
+        task_backend_specific_kwargs=timeout,
+    )
+    exe_cancelled = exe_task("/bin/sleep", "300")
+    group = exe_task(
+        "/bin/sleep",
+        "300",
+        task_backend_specific_kwargs={"process_templates": [(2, {})], "pmi": "none", **timeout},
+    )
+    try:
+        await be.submit_tasks([cancelled, timed_out, exe, exe_cancelled, group])
+        await until(lambda: read_pid(pidfiles[0]), 60)
+        await until(lambda: be._tasks[exe_cancelled["uid"]].puids, 60)
+        assert await be.cancel_task(cancelled["uid"]) is True
+        assert await be.cancel_task(exe_cancelled["uid"]) is True
+        for task in (timed_out, exe, group):
+            assert await rec.wait(task["uid"], 120) == ["FAILED"]
+            assert isinstance(task["exception"], TimeoutError), task["exception"]
+        assert await rec.wait(cancelled["uid"]) == ["CANCELED"]
+        assert await rec.wait(exe_cancelled["uid"]) == ["CANCELED"]
+        children = [read_pid(path) for path in pidfiles]
+        assert None not in children
+        await until(lambda: not any(alive(pid) for pid in children), 30)
+        after = fn_task(square, 5)
+        await be.submit_tasks([after])
+        assert await rec.wait(after["uid"], 60) == ["DONE"]
     finally:
         await be.shutdown()
         cloudpickle.unregister_pickle_by_value(sys.modules[__name__])

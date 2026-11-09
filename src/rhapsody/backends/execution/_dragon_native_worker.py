@@ -11,6 +11,7 @@ on its own inside its message, so a value the client cannot load fails only that
 
 import asyncio
 import contextlib
+import ctypes
 import inspect
 import os
 import sys
@@ -123,25 +124,31 @@ def _open_append(path):
     return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
 
 
+def flush_all():
+    """Flush Python's ``sys.stdout`` and ``sys.stderr``, and every stdio stream of C code."""
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.flush()
+    with contextlib.suppress(Exception):
+        ctypes.CDLL(None).fflush(None)
+
+
 @contextlib.contextmanager
 def redirected(out_fd, err_fd):
     """Point file descriptors 1 and 2 at ``out_fd`` and ``err_fd`` for the duration.
 
     Redirecting the descriptors, not only ``sys.stdout``, also catches output from C code and from
-    child processes. The saved descriptors are not inheritable, so a child keeps none of them.
+    child processes. Buffers are flushed at each switch, C's too, so output goes with the task that
+    wrote it. The saved descriptors are not inheritable, so a child keeps none of them.
     """
-    for stream in (sys.stdout, sys.stderr):
-        with contextlib.suppress(Exception):
-            stream.flush()
+    flush_all()
     saved = os.dup(1), os.dup(2)
     os.dup2(out_fd, 1)
     os.dup2(err_fd, 2)
     try:
         yield
     finally:
-        for stream in (sys.stdout, sys.stderr):
-            with contextlib.suppress(Exception):
-                stream.flush()
+        flush_all()
         os.dup2(saved[0], 1)
         os.dup2(saved[1], 2)
         os.close(saved[0])
@@ -264,8 +271,12 @@ def run_group_member(fn, args, kwargs, out_path, err_path):
 
 
 # Runs an executable with its output appended to two files. Local Services gets no pipe from the
-# task, so a background child holding the task's output cannot stall it.
-EXEC_SCRIPT = 'o=$1; e=$2; shift 2; exec "$@" >>"$o" 2>>"$e"'
+# task, so a background child holding the task's output cannot stall it. The files' directories
+# are made first, when missing: the work directory need not exist on the task's node.
+EXEC_SCRIPT = (
+    'o=$1; e=$2; shift 2; for f in "$o" "$e"; do [ -d "${f%/*}" ] || mkdir -p "${f%/*}"; done; '
+    'exec "$@" >>"$o" 2>>"$e"'
+)
 
 # Sends signal $2 to every process whose initial environment holds the line $1, i.e. a task's
 # leftover children: Dragon 0.15.0 signals only the task's own process.
