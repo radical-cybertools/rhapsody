@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING
 from typing import Callable
 
 from rhapsody.api.errors import TaskExecutionError
-from rhapsody.telemetry.manager import RETAINED
 
 if TYPE_CHECKING:
     from rhapsody.api.task import BaseTask
@@ -318,7 +317,7 @@ class Session:
         metric_readers: list | None = None,
         resource: object | None = None,
         drain_on_stop: bool = True,
-        retained: int | None = RETAINED,
+        retained: int | None = None,
     ) -> TelemetryManager:
         """Enable and start telemetry collection for this session in one call.
 
@@ -358,10 +357,11 @@ class Session:
                                     however long that takes. When False, events still
                                     queued at close are discarded with a warning, so
                                     shutdown is fast (e.g. close to a job walltime).
-            retained:               Events and finished spans kept in memory for
-                                    ``summary()``, ``task_spans()`` and ``read_traces()``:
-                                    the most recent ones (default ``RETAINED``, 100k).
-                                    None keeps all.
+            retained:               Keep only the most recent ``retained`` events and
+                                    finished spans in memory (for long-lived sessions);
+                                    ``summary()`` durations, ``task_spans()`` and
+                                    ``read_traces()`` then cover only those.
+                                    None (default) keeps all.
 
         Returns:
             The active :class:`~rhapsody.telemetry.manager.TelemetryManager`.
