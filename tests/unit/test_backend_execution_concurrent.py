@@ -391,3 +391,15 @@ async def test_finished_and_cancelled_tasks_are_released():
     assert backend.tasks == {}
     assert states[slow.uid] == "CANCELED"
     await backend.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_task_cancelled_before_it_starts_is_released():
+    """A task cancelled before its coroutine ever ran never reaches its own cleanup:
+    cancel_task() releases it."""
+    backend = await ConcurrentExecutionBackend(ThreadPoolExecutor(max_workers=1))
+    task = ComputeTask(function=lambda: 1)
+    await backend.submit_tasks([task])
+    assert await backend.cancel_task(task.uid)  # no await in between: not started
+    assert backend.tasks == {}
+    await backend.shutdown()

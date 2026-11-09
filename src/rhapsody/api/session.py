@@ -317,6 +317,7 @@ class Session:
         metric_readers: list | None = None,
         resource: object | None = None,
         drain_on_stop: bool = True,
+        retained: int | None = 100_000,
     ) -> TelemetryManager:
         """Enable and start telemetry collection for this session in one call.
 
@@ -356,6 +357,9 @@ class Session:
                                     however long that takes. When False, events still
                                     queued at close are discarded with a warning, so
                                     shutdown is fast (e.g. close to a job walltime).
+            retained:               Events and finished spans kept in memory for
+                                    ``summary()``, ``task_spans()`` and ``read_traces()``:
+                                    the most recent ones (default 100k). None keeps all.
 
         Returns:
             The active :class:`~rhapsody.telemetry.manager.TelemetryManager`.
@@ -374,6 +378,7 @@ class Session:
             metric_readers=metric_readers,
             resource=resource,
             drain_on_stop=drain_on_stop,
+            retained=retained,
         )
         self._state_manager._telemetry_observer = self._telemetry._on_task_state_change
 

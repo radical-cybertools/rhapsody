@@ -59,7 +59,7 @@ class SpanBuffer:
 
     InMemorySpanExporter (an OTel test utility) does `_finished_spans += tuple(spans)` on every
     export call — O(n) per call, O(n²) total for n spans. For 40K spans that costs ~4 seconds inside
-    the dispatch loop. list.extend() keeps append at O(1) amortized.
+    the dispatch loop. deque.extend() keeps append at O(1), and a full deque drops the oldest.
 
     Implements the SpanExporter interface so it can be passed to any SpanProcessor.
     Keeps the most recent ``maxlen`` spans (all of them if ``None``).
@@ -711,7 +711,8 @@ class TelemetryManager:
         """Return a plain-dict summary — no OTel knowledge required.
 
         Includes task counts, duration statistics, session duration, and latest resource utilization
-        per node/backend.
+        per node/backend.  Task counts cover every task; duration statistics cover the tasks of
+        the retained spans (the most recent ``retained``).
         """
         self.read_metrics()
         spans = self.task_spans()
@@ -773,6 +774,7 @@ class TelemetryManager:
 
         Each dict contains: task_id, backend, executable, task_type, status,
         duration_seconds, error_type (failed tasks only), span_id, trace_id.
+        Covers the retained spans: the most recent ``retained`` tasks.
         """
         raw = self.read_traces()
         result = []
@@ -1152,11 +1154,12 @@ class TelemetryManager:
 
         if self._checkpoint_file is not None:
             self._write_batch(batch)
-        # the checkpoint write consumes a terminal event's span context; without
-        # a checkpoint file nothing does
-        for event in batch:
-            if event.event_type in ("TaskCompleted", "TaskFailed", "TaskCanceled"):
-                self._completed_span_ctx.pop(event.task_id, None)
+        else:
+            # the checkpoint write consumes a terminal event's span context;
+            # without a checkpoint file nothing does
+            for event in batch:
+                if event.event_type in ("TaskCompleted", "TaskFailed", "TaskCanceled"):
+                    self._completed_span_ctx.pop(event.task_id, None)
 
         if self._subscribers:
             for event in batch:
