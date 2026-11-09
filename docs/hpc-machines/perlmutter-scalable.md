@@ -113,7 +113,11 @@ async def main():
         tasks.append(ComputeTask(
             function=mpi_f,
             args=[i, sleepsecs],
-            task_backend_specific_kwargs={'process_templates': [(nranks, {})]}
+            task_backend_specific_kwargs={
+                'process_templates': [(nranks, {})],
+                'pmi': 'cray',   # Cray MPICH
+                'timeout': 120,  # seconds; Dragon does not end a job when a rank dies
+            }
         ))
 
     async with session:
