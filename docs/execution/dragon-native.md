@@ -5,9 +5,10 @@ beside `DragonExecutionBackend`, which goes through `dragon.workflows.batch`, an
 it. It drives Dragon's `Process`, `ProcessGroup`, `Policy` and `Queue` directly, on `dragonhpc`
 0.15.0.
 
-Both take the same task descriptions, so a workflow switches by changing only the backend. The one
-exception is MPI on Cray MPICH, where a job needs `pmi="cray"` here: see
-[MPI jobs](#mpi-jobs-pmi-and-timeout).
+Both take the same task descriptions, so a workflow switches by changing only the backend. Some
+results and behaviour differ, though: a function with a `process_template` returns its value, not
+its exit code, and MPI on Cray MPICH needs `pmi="cray"` here, among others. See
+[How it differs from `DragonExecutionBackend`](#how-it-differs-from-dragonexecutionbackend).
 
 ```python
 from rhapsody.backends import DragonNativeExecutionBackend
@@ -56,7 +57,10 @@ Install it with the `dragon` extra, and start your script with the Dragon launch
   lock, and hands the batch to the asyncio loop with `loop.call_soon_threadsafe`. The backend calls
   the callback only on the loop. Results travel inline on the queue, so they use Dragon's memory
   pool until the client takes them: on a full pool a worker waits up to 60 s for room, and a result
-  that does not fit then, or could never fit, fails its task with Dragon's error. The pool is 4 GiB
+  that does not fit then, or could never fit, fails its task with Dragon's error. Sending a task
+  waits the same way: on a full pool the client holds the task and its worker, tries again with a
+  backoff, and fails the task only after 60 s. A send that fails for any other reason replaces the
+  worker, and the task goes to another; it fails only if that send fails too. The pool is 4 GiB
   per node by default (`DRAGON_DEFAULT_SEG_SZ`), so workers that finish together should return much
   less than that between them; write larger results to files.
 - **Process tasks.** One thread per running process or group task starts it and joins it. At most
@@ -65,7 +69,9 @@ Install it with the `dragon` extra, and start your script with the Dragon launch
   A task that needs more than the limit runs alone. The limit counts only these tasks, over all
   nodes, not the pool: a node can hold its pool and as many ranks again.
 - **Output.** With `capture_stdio`, output goes to `<work_dir>/<uid>.stdout` and `.stderr`, and
-  those paths come back, as with `DragonExecutionBackend`. Without it, the text comes back in
+  those paths come back, as with `DragonExecutionBackend`. The files are written on the task's
+  node, and the directory is made there if it is missing, so on a work directory the nodes don't
+  share, the paths name files on that node. Without `capture_stdio`, the text comes back in
   `stdout` and `stderr`:
     - a pool worker points descriptors 1 and 2 at two unnamed files on its node for the task, and
       sends their text with the result;
@@ -210,6 +216,9 @@ MPI, so set `"pmi": "none"` for jobs that don't: it logs neither warning.
   `DragonExecutionBackend` defaults to half the CPUs, unpinned.
 - **Functions with a `process_template` return their value**, through the result queue, and a
   failing one sets `exception` to its own exception. `DragonExecutionBackend` returns the exit code.
+- **Groups have no PMI by default.** A `process_templates` group starts with the task's or the
+  backend's `pmi`, and with none when neither sets one, where a Batch job has a default of its own.
+  MPI on Cray MPICH needs `pmi="cray"`: see [MPI jobs](#mpi-jobs-pmi-and-timeout).
 - **Executables start one process, not two.** A Batch process task builds a `ProcessGroup`, whose
   manager is a Python process that imports Dragon. Here an executable is one native `Process`,
   started through `sh -c 'exec "$@" >>out 2>>err'`.

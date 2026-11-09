@@ -164,6 +164,8 @@ if __name__ == "__main__":
 
     if args.workers_per_node is not None and not args.with_rhapsody_dragon_native:
         parser.error("--workers_per_node needs --with-rhapsody-dragon-native")
+    if args.workers_per_node is not None and args.workers_per_node < 1:
+        parser.error("--workers_per_node must be at least 1")
 
     if args.max_tasks < args.min_tasks:
         args.max_tasks = args.min_tasks
