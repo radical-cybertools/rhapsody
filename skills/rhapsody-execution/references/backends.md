@@ -34,7 +34,9 @@ Per-task keys (executable tasks):
 | `env` | Environment dict; it **replaces** the inherited environment |
 | `shell` | `True` joins executable and arguments and runs them through the shell |
 
-The backend has no resource or GPU scheduling. To pin work, do it inside the task, for example with `CUDA_VISIBLE_DEVICES` in `env` or `os.sched_setaffinity`.
+The backend has no resource or GPU scheduling. To pin work, do it in the task:
+- **GPU for an executable:** `env={**os.environ, "CUDA_VISIBLE_DEVICES": "1"}`. Merge with `os.environ`, because `env` replaces the whole environment.
+- **CPU:** `os.sched_setaffinity` inside a function.
 
 Install: included in `pip install rhapsody-py`. Example: `$RHAPSODY_REPO/examples/00-workload-native-api.py`.
 
@@ -66,6 +68,9 @@ Per-task keys:
 | other `client.submit` kwargs | e.g. `retries`, `priority`, `workers` |
 
 Function tasks may be sync or `async def`.
+
+**GPUs:** `{"resources": {"GPU": n}}` schedules the task onto a worker that advertises GPUs. It
+does not choose a device; a worker with several GPUs must set the device inside the task.
 
 Install: `pip install "rhapsody-py[dask]"`. A batch-scheduler cluster also needs `dask-jobqueue`.
 
@@ -123,6 +128,18 @@ Launch the whole script with `dragon app.py`, not `python`.
 - `policy`: placement and GPU affinity through `dragon.infrastructure.policy.Policy`.
 
 There is no backend-level working directory; set `cwd` per task.
+
+**Affinity and placement.** A `Policy` in `process_template` (one process), or in each
+`process_templates` group (a job), places processes. The fields:
+- `placement=Policy.Placement.HOST_NAME` with `host_name=`: run on a given node.
+- `cpu_affinity=[core ids]`: pin to cores.
+- `gpu_affinity=[gpu ids]`: bind GPUs; Dragon sets `CUDA_VISIBLE_DEVICES`.
+
+Take hostnames, core ids and GPU ids from `dragon.native.machine.System().nodes` and
+`Node(huid)` (`.hostname`, `.cpus`, `.gpus`), and spread tasks round-robin over nodes, then
+cores or GPUs. Pinned functions run as processes, so `return_value` is the exit code. Snippet:
+"CPU and GPU affinity" in `SKILL.md`. Walkthrough:
+`$RHAPSODY_REPO/tutorials/dragon-resource-placement.ipynb`.
 
 Install: `pip install "rhapsody-py[dragon]"`.
 

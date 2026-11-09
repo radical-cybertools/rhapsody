@@ -23,6 +23,8 @@ Before debugging anything else:
 | `TaskValidationError` at task creation | Both or neither of `executable`/`function`; `arguments` not a list; non-callable `function` | One of `executable=` or `function=`; `arguments=[...]` (list of str); `args=` tuple, `kwargs=` dict |
 | `RuntimeError: Task ... has no bound future` on `await task` | Awaited before `submit_tasks` | Submit first, then await |
 | Executable task `FAILED`, `exit_code` 127 / `FileNotFoundError` | Executable or input path does not exist on the worker host | Absolute paths valid on workers; set `cwd`; check the worker environment (`env` replaces it on Concurrent/Dask) |
+| Executable picks up the wrong `python`, cannot import packages, or misses libraries/`HOME` only when `env` is set | `env` replaces the whole environment (Concurrent/Dask): `HOME`, the venv/conda/module `PATH` and `LD_LIBRARY_PATH` are dropped | `env={**os.environ, "VAR": "value"}` |
+| Dragon: task ignores the requested cores/GPUs | `Policy` not passed through `process_template` / `process_templates`, or ids not from the node's topology | Put the policy in the template; take ids from `System().nodes` / `Node(...)` |
 | `PicklingError` / `Can't pickle <lambda>` / `AttributeError: Can't get attribute` | Lambda, closure or `__main__`-only object sent to processes / Dask / Dragon | Define functions at module level in an importable module; guard the entry point with `if __name__ == "__main__":` |
 | `ImportError: ProcessPoolExecutor requires 'cloudpickle'` | Missing dependency | `pip install cloudpickle` |
 | CPU-bound function tasks don't speed up with more workers | Thread pool and the GIL | `ProcessPoolExecutor`, Dask workers, or Dragon |

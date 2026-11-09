@@ -1,23 +1,26 @@
 ---
 name: rhapsody-execution
 description: >-
-  Build, configure, run and debug task workloads with RHAPSODY, the Python runtime for
-  heterogeneous HPC and AI workloads. Covers choosing and initializing an execution backend
-  (Concurrent for one machine, Dask for a Dask cluster, Dragon for multi-node HPC
-  allocations), defining ComputeTasks (executables or Python functions), submitting them
-  through a Session, ordering stages, handling failures and retries, reading results, and
-  passing per-task resources. Use when the user wants to run, scale out, port or troubleshoot
-  a workload with RHAPSODY, or mentions rhapsody, ComputeTask, Session.submit_tasks or a
-  RHAPSODY backend.
+  Build, configure, run and debug workloads (sets of independent tasks) with RHAPSODY, the
+  Python workload manager for heterogeneous HPC and AI tasks. Covers choosing and initializing
+  an execution backend (Concurrent for one machine, Dask for a Dask cluster, Dragon for
+  multi-node HPC allocations), defining ComputeTasks (executables or Python functions),
+  per-task resources and CPU/GPU affinity, submitting through a Session, monitoring and
+  collecting results, and handling failures and retries. Use when the user wants to run,
+  scale out, port or troubleshoot a workload with RHAPSODY, or mentions rhapsody,
+  ComputeTask, Session.submit_tasks or a RHAPSODY backend. For tasks that depend on other
+  tasks (workflows, DAGs) use AsyncFlow instead.
 metadata:
   rhapsody-version: "0.6.0"
 ---
 
 # RHAPSODY Execution
 
-RHAPSODY runs many tasks, such as executables, Python functions and AI inference requests,
-on one or more **backends** through one asyncio **Session** API. This skill takes an agent
-from "here is my workload" to a running, debuggable RHAPSODY program.
+RHAPSODY is a **workload manager**. It runs and tracks many heterogeneous tasks, such as
+executables, Python functions and AI inference requests, on one or more **backends** through
+one asyncio **Session** API. Workflow logic (which task feeds which) sits above it, in
+AsyncFlow. This skill takes an agent from "here is my workload" to a running, debuggable
+RHAPSODY program.
 
 ## Sources of truth
 
@@ -37,7 +40,7 @@ Use this skill to:
 - debug failed or hanging tasks.
 
 Do not use it for:
-- **Workflow graphs** with implicit dependencies, decorators or many concurrent pipelines. Use AsyncFlow and its skills.
+- **Tasks that depend on other tasks' outputs:** pipelines, multi-stage runs and DAGs are workflows. Use AsyncFlow and its skills; AsyncFlow runs on these same backends.
 - **AI inference configuration** (`AITask` with the vLLM backend), **telemetry analysis**, or **performance experiments**. Separate RHAPSODY skills cover these. This skill only notes where they plug in.
 
 ## Execution model
@@ -54,7 +57,7 @@ Tasks are dicts **and** awaitables:
 - After a task finishes, its `state`, `stdout`, `stderr`, `exit_code`, `return_value` and `exception` are filled in place.
 - Terminal states are `DONE`, `FAILED` and `CANCELED`.
 
-## Workflow
+## Steps
 
 ### 1. Check the environment
 
@@ -128,7 +131,7 @@ ComputeTask(executable="./sim", task_backend_specific_kwargs={...}) # per-task r
 |---|---|---|
 | `await session.wait_tasks(tasks, timeout=s)` | Never raises; inspect `task.state`. Raises `asyncio.TimeoutError` on timeout. | Batches, fire-and-inspect |
 | `await asyncio.gather(*tasks)` | Raises the first failure | Fail-fast |
-| `await task` | Raises that task's failure | Sequential steps |
+| `await task` | Raises that task's failure | Waiting on one specific task |
 
 Exceptions:
 - An executable that exits non-zero raises `rhapsody.TaskExecutionError`, with `exit_code` set.
@@ -136,21 +139,12 @@ Exceptions:
 
 Details: `$RHAPSODY_REPO/docs/getting-started/advanced-usage.md` ("Wait Modes").
 
-### 6. Order stages (dependencies)
+### 6. Independent tasks only
 
-A Session runs everything it is given concurrently. To make B depend on A, wait for A, then build
-B from A's results:
-
-```python
-await session.submit_tasks(stage_a)
-await session.wait_tasks(stage_a)
-inputs = [t.return_value for t in stage_a if t.state == "DONE"]
-stage_b = [ComputeTask(function=analyze, args=(inputs,))]
-await session.submit_tasks(stage_b)
-```
-
-Independent stages can run at the same time: submit both, then wait on both. For
-workflow graphs, use AsyncFlow.
+Every task in a submission is independent: it starts as soon as the backend has capacity,
+and RHAPSODY does not order tasks. Submit the whole workload at once and let the backend
+schedule it. If a task needs another task's output, that is a workflow. Use AsyncFlow,
+which runs on these same backends.
 
 ### 7. Handle failures and retry
 
@@ -184,7 +178,7 @@ Rules for retries:
 | Function | `task.return_value` |
 | Executable | `task.stdout`, `task.stderr`, `task.exit_code` |
 | `capture_stdio=True` | `task.stdout` and `task.stderr` are **file paths** under `<work_dir>/<session.uid>/` |
-| Dragon `function=` + `process_template(s)` | `return_value` is the process exit code. Use a plain `function=` task to get the Python return value. |
+| Dragon `function=` + `process_template` / `process_templates` | `return_value` is the exit code (a list of per-rank codes for jobs). Print or write results from the function, or use a plain `function=` task to get the Python value. |
 
 ### 9. Pass per-task resources
 
@@ -203,6 +197,51 @@ Values such as node counts, GPU indices, paths, PMI flavour and environment come
 target machine. Ask the user or read the machine's documentation; do not invent them. Full
 tables: `$RHAPSODY_REPO/docs/getting-started/resource-specification.md`.
 
+#### CPU and GPU affinity (Dragon)
+
+Dragon places each process with a `Policy`, passed in `process_template`, or per rank group
+in `process_templates`. Take hostnames, core ids and GPU ids from the allocation's real
+topology:
+
+```python
+from dragon.infrastructure.policy import Policy
+from dragon.native.machine import Node, System
+
+nodes = [Node(h) for h in System().nodes]          # .hostname, .cpus (core ids), .gpus (GPU ids or None)
+host, cores, gpus = nodes[0].hostname, nodes[0].cpus, nodes[0].gpus or []
+
+# One process on a given node, pinned to two cores
+pinned = Policy(placement=Policy.Placement.HOST_NAME, host_name=host, cpu_affinity=cores[:2])
+ComputeTask(function=work, task_backend_specific_kwargs={"process_template": {"policy": pinned}})
+
+# One process bound to one GPU of that node (Dragon sets CUDA_VISIBLE_DEVICES)
+if gpus:
+    on_gpu = Policy(placement=Policy.Placement.HOST_NAME, host_name=host, gpu_affinity=gpus[:1])
+    ComputeTask(function=work, task_backend_specific_kwargs={"process_template": {"policy": on_gpu}})
+
+# Parallel job: each rank group gets its own cores
+ComputeTask(
+    function=work,
+    task_backend_specific_kwargs={
+        "process_templates": [
+            (2, {"policy": Policy(cpu_affinity=cores[0:2])}),
+            (2, {"policy": Policy(cpu_affinity=cores[2:4])}),
+        ],
+        "pmi": "none",
+        "timeout": 600,
+    },
+)
+```
+
+Things to know:
+- **Results of pinned functions:** a function run with a policy runs as a process, so its `return_value` is the exit code. Print or write its results.
+- **Spreading many tasks:** assign policies round-robin over nodes, then cores or GPUs. The template's `--pin-cpus` and `--gpus-per-task` do exactly this.
+- **Other backends:**
+  - Dask: `{"resources": {"GPU": n}}` only *schedules* onto GPU workers; it does not pick a device.
+  - Concurrent: has no placement. For executables, set `env={**os.environ, "CUDA_VISIBLE_DEVICES": "0"}`; `env` replaces the whole environment.
+  - Pin CPUs inside the task with `os.sched_setaffinity`.
+- **More detail:** "GPU affinity with `Policy`" in `$RHAPSODY_REPO/docs/getting-started/resource-specification.md` and `$RHAPSODY_REPO/tutorials/dragon-resource-placement.ipynb`.
+
 ## Launching on a specific machine
 
 - **Concurrent and Dask:** these run anywhere Python runs.
@@ -215,24 +254,27 @@ tables: `$RHAPSODY_REPO/docs/getting-started/resource-specification.md`.
 
 ## Template
 
-[assets/workflow_template.py](assets/workflow_template.py) is a complete, tested program. It runs
-three stages: prepare (an executable), fan-out (N function tasks), then fan-in (one analysis
-task). It also covers:
-- a per-stage timeout;
-- retrying failures with new task objects;
-- optional telemetry;
-- one switch between Concurrent, Dask and Dragon.
+[assets/workload_template.py](assets/workload_template.py) is a complete, tested program. It
+submits one heterogeneous workload in a single call: executable tasks, Python-function tasks
+and, on Dragon, a multi-rank job. Each task carries its own resources. It then waits without
+raising, prints a per-task report (state, exit code, host, cores, GPUs), retries failures once
+as new task objects, and writes results. Optional flags add CPU/GPU placement and telemetry.
 
 ```bash
-python assets/workflow_template.py                       # Concurrent, threads
-python assets/workflow_template.py --process -w 8        # Concurrent, processes
-python assets/workflow_template.py --backend dask -w 4
-dragon assets/workflow_template.py --backend dragon
-python assets/workflow_template.py --fail-member 2       # exercise the failure path
+python assets/workload_template.py                          # Concurrent, threads
+python assets/workload_template.py --process -w 8           # Concurrent, processes
+python assets/workload_template.py --backend dask -w 4
+dragon assets/workload_template.py --backend dragon --pin-cpus     # one core per process
+dragon assets/workload_template.py --backend dragon --gpus-per-task 1
+python assets/workload_template.py --telemetry ./tel --out results.json
+python assets/workload_template.py --fail-task 2            # exercise the failure path
 ```
 
-To adapt it, copy it next to the user's code and replace `simulate` and `analyze` and the prepare
-command. Keep the stage structure.
+The report shows whether the requested placement actually took effect (`[placement ok]`).
+
+To adapt it, copy it next to the user's code and replace `run_case` and `exec_command` with
+the real task code, and `task_options` with the real resources. Keep the structure: build all
+tasks, submit once, wait, report, retry.
 
 ## Existing examples (read before writing new code)
 
