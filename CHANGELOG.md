@@ -104,6 +104,13 @@
   `ModuleNotFoundError: No module named 'requests'`. The `dragon` extra now
   requires `dragonhpc[requests]==0.15.0`.
 
+- **`discover_backends()` reports real availability** — a backend is available only when its
+  runtime dependencies are importable (new `BaseBackend.is_available()`); Dragon,
+  RADICAL-Pilot and Orbit were reported available without them.
+- **`OrbitExecutionBackend` is exported from `rhapsody.backends`**, like the other backends.
+- **Docs**: real `DragonExecutionBackend` constructor, no `Session.get_statistics()`, correct
+  default session uid, removed never-implemented `RHAPSODY_LOG_LEVEL` / `RHAPSODY_WORK_DIR`.
+
 ### Removed
 
 - **Python 3.9 and 3.10 support** — RHAPSODY now requires Python 3.11 or
@@ -111,6 +118,11 @@
   October 2025 and 3.10 in October 2026, and CI no longer tests them. The 3.8,
   3.9 and 3.10 classifiers are gone, and the install, contributing and AI
   backend docs say 3.11.
+
+### Added
+
+- **Agent Skills** — `skills/rhapsody-execution/` teaches AI coding agents to run RHAPSODY
+  workloads (backends, tasks, resources, CPU/GPU affinity, failures, multi-node Dragon).
 
 ## [0.6.0] 2026-10-19
 
