@@ -263,3 +263,29 @@ async def test_session_future_set_result_on_successful_function_task():
     assert result is task
     assert task.state == "DONE"
     assert task["return_value"] == 3
+
+
+@pytest.mark.asyncio
+async def test_session_keeps_no_per_task_state_after_completion():
+    """A long-lived session must not grow with every task it ran: after the tasks
+    finish, neither the session's state manager nor the backend holds them."""
+    backend = await ConcurrentExecutionBackend()
+    session = Session(backends=[backend])
+
+    def one():
+        return 1
+
+    async with session:
+        for _ in range(5):
+            tasks = [ComputeTask(function=one) for _ in range(40)]
+            await session.submit_tasks(tasks)
+            await session.wait_tasks(tasks, timeout=10.0)
+            assert all(t.state == "DONE" for t in tasks)
+
+        # the backend's task bodies finish just after their futures resolve
+        for _ in range(100):
+            if not backend.tasks:
+                break
+            await asyncio.sleep(0.01)
+        assert session._state_manager._task_futures == {}
+        assert backend.tasks == {}  # before close(), which would clear it anyway

@@ -332,6 +332,11 @@ class ConcurrentExecutionBackend(BaseBackend):
         except Exception as e:
             self.logger.exception(f"Error handling task {task.get('uid')}: {e}")
             raise
+        finally:
+            # finished, failed or cancelled: release it, so a long-lived
+            # backend does not keep every task it ever ran
+            if self.tasks.get(task["uid"]) is task:
+                del self.tasks[task["uid"]]
 
     async def submit_tasks(self, tasks: list[dict[str, Any]]) -> list[asyncio.Task]:
         """Submit tasks for execution."""

@@ -11,6 +11,7 @@ in opentelemetry at startup unless telemetry is explicitly enabled.
 from __future__ import annotations
 
 import asyncio
+import collections
 import dataclasses
 import functools
 import json
@@ -47,6 +48,12 @@ logger = logging.getLogger(__name__)
 # Queued by stop() behind the backlog: the dispatch loop exits when it reaches it.
 _STOP_SENTINEL = object()
 
+# Events and finished spans kept in memory for the convenience methods
+# (summary(), task_spans(), read_traces()).  Older ones are dropped, so a
+# long-lived session stays bounded; the checkpoint file and any configured
+# span processor still see every one.
+RETAINED = 100_000
+
 
 class SpanBuffer:
     """O(1)-append in-process span store.
@@ -56,12 +63,13 @@ class SpanBuffer:
     the dispatch loop. list.extend() keeps append at O(1) amortized.
 
     Implements the SpanExporter interface so it can be passed to any SpanProcessor.
+    Keeps the most recent ``maxlen`` spans (all of them if ``None``).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, maxlen: int | None = None) -> None:
         import threading
 
-        self._spans: list = []
+        self._spans: collections.deque = collections.deque(maxlen=maxlen)
         self._lock = threading.Lock()
 
     def export(self, spans) -> None:
@@ -121,6 +129,7 @@ class TelemetryManager:
         metric_readers: list[MetricReader] | None = None,
         resource: OtelResource | None = None,
         drain_on_stop: bool = True,
+        retained: int | None = RETAINED,
     ) -> None:
         self._session_id = session_id
         # stop(): process the event backlog (True) or discard it for a fast shutdown.
@@ -145,8 +154,10 @@ class TelemetryManager:
         self._checkpoint_path = checkpoint_path
         self._checkpoint_file: Any | None = None  # open file handle
 
-        # Raw event log (in-memory, for convenience methods)
-        self._event_log: list[BaseEvent] = []
+        # Raw event log (in-memory, for convenience methods): the most recent
+        # `retained` events, and as many finished spans in the span buffer
+        self._retained = retained
+        self._event_log: collections.deque[BaseEvent] = collections.deque(maxlen=retained)
 
         # OTel objects — set in start()
         self._meter_provider: Any = None
@@ -246,7 +257,7 @@ class TelemetryManager:
         )
 
         self._metric_reader = InMemoryMetricReader()
-        self._span_exporter = SpanBuffer()
+        self._span_exporter = SpanBuffer(self._retained)
 
         self._meter_provider = MeterProvider(
             metric_readers=[self._metric_reader] + self._extra_metric_readers,
@@ -612,7 +623,7 @@ class TelemetryManager:
         return self._metric_reader.get_metrics_data()
 
     def read_traces(self) -> tuple:
-        """Return all finished OTel ReadableSpan objects (InMemorySpanExporter)."""
+        """Return the finished OTel ReadableSpan objects, the most recent ``retained``."""
         if self._span_exporter is None:
             return ()
         return self._span_exporter.get_finished_spans()
@@ -1159,6 +1170,11 @@ class TelemetryManager:
 
         if self._checkpoint_file is not None:
             self._write_batch(batch)
+        # the checkpoint write consumes a terminal event's span context; without
+        # a checkpoint file nothing does
+        for event in batch:
+            if event.event_type in ("TaskCompleted", "TaskFailed", "TaskCanceled"):
+                self._completed_span_ctx.pop(event.task_id, None)
 
         if self._subscribers:
             for event in batch:
