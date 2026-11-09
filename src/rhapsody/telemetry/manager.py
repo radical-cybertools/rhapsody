@@ -48,10 +48,12 @@ logger = logging.getLogger(__name__)
 # Queued by stop() behind the backlog: the dispatch loop exits when it reaches it.
 _STOP_SENTINEL = object()
 
-# Events and finished spans kept in memory for the convenience methods
-# (summary(), task_spans(), read_traces()).  Older ones are dropped, so a
-# long-lived session stays bounded; the checkpoint file and any configured
-# span processor still see every one.
+# Events and finished spans kept in memory, each: the most recent RETAINED
+# events (about five per task) and as many finished spans (one per task).
+# summary() durations, task_spans(), read_traces(), export_as_otlp() and the
+# checkpoint's span snapshot cover the retained spans; task counts (metrics),
+# the checkpoint's event lines and any configured span processor see every
+# one.  Older ones are dropped, so a long-lived session stays bounded.
 RETAINED = 100_000
 
 
@@ -158,6 +160,8 @@ class TelemetryManager:
         # `retained` events, and as many finished spans in the span buffer
         self._retained = retained
         self._event_log: collections.deque[BaseEvent] = collections.deque(maxlen=retained)
+        # latest ResourceUpdate per backend/node, which the bounded log may have dropped
+        self._latest_resource: dict[str, BaseEvent] = {}
 
         # OTel objects — set in start()
         self._meter_provider: Any = None
@@ -752,10 +756,8 @@ class TelemetryManager:
             }
 
         # Latest resource reading per (backend, node_id)
-        resource_events = [e for e in self._event_log if e.event_type == "ResourceUpdate"]
         nodes: dict = {}
-        for ev in resource_events:
-            key = f"{ev.backend}/{ev.node_id}"
+        for key, ev in self._latest_resource.items():
             nodes[key] = {
                 "backend": ev.backend,
                 "node_id": ev.node_id,
@@ -792,7 +794,7 @@ class TelemetryManager:
 
         Each dict contains: task_id, backend, executable, task_type, status,
         duration_seconds, error_type (failed tasks only), span_id, trace_id.
-        Covers the retained spans: the most recent ``retained`` tasks.
+        Covers the retained spans: those of the most recent ``retained`` tasks.
         """
         raw = self.read_traces()
         result = []
@@ -1172,12 +1174,13 @@ class TelemetryManager:
 
         if self._checkpoint_file is not None:
             self._write_batch(batch)
-        else:
-            # the checkpoint write consumes a terminal event's span context;
-            # without a checkpoint file nothing does
-            for event in batch:
-                if event.event_type in ("TaskCompleted", "TaskFailed", "TaskCanceled"):
-                    self._completed_span_ctx.pop(event.task_id, None)
+        # a terminal event's span context is only needed by the checkpoint write
+        # above; release it here whether or not that ran (or failed)
+        for event in batch:
+            if event.event_type in ("TaskCompleted", "TaskFailed", "TaskCanceled"):
+                self._completed_span_ctx.pop(event.task_id, None)
+            elif event.event_type == "ResourceUpdate":
+                self._latest_resource[f"{event.backend}/{event.node_id}"] = event
 
         if self._subscribers:
             for event in batch:
