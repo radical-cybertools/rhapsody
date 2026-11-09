@@ -174,6 +174,11 @@ class DragonExecutionBackend(BaseBackend):
     # Hygiene backstop: max wall-clock seconds a tuid can stay pending before it's dropped.
     PENDING_TUID_TIMEOUT = 30.0
 
+    @classmethod
+    def is_available(cls) -> bool:
+        """Return True if the Dragon runtime (dragon.workflows.batch) is importable."""
+        return Batch is not None
+
     def __init__(
         self,
         batch_kwargs: Optional[dict] = None,
