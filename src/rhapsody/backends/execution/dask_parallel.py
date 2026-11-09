@@ -133,6 +133,11 @@ class DaskExecutionBackend(BaseBackend):
             await backend.submit_tasks(tasks)
     """
 
+    @classmethod
+    def is_available(cls) -> bool:
+        """Return True if Dask (dask.distributed) is importable."""
+        return dask is not None
+
     def __init__(
         self,
         resources: dict | None = None,
