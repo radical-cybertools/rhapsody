@@ -9,6 +9,24 @@ import pytest
 import rhapsody
 
 
+@pytest.fixture(autouse=True)
+def fresh_backend_registry():
+    """Run each test against a freshly discovered BackendRegistry, then restore it.
+
+    Several tests below snapshot and restore ``BackendRegistry._backends``. A snapshot taken
+    before the first discovery in a process is empty, and restoring it while ``_initialized``
+    stays True left the registry empty for every later test in that process (seen under
+    pytest-xdist). Resetting both fields around each test keeps the tests order-independent.
+    """
+    from rhapsody.backends.discovery import BackendRegistry
+
+    saved = (BackendRegistry._backends.copy(), BackendRegistry._initialized)
+    BackendRegistry._backends = {}
+    BackendRegistry._initialized = False
+    yield
+    BackendRegistry._backends, BackendRegistry._initialized = saved
+
+
 def test_discover_backends():
     """Test backend discovery."""
     available = rhapsody.discover_backends()
@@ -257,3 +275,79 @@ def test_backend_registry_backend_path_parsing():
         assert hasattr(backend_class, "__abstractmethods__")
     finally:
         registry._backends = original_backends
+
+
+# discover_backends() must report whether a backend's runtime dependencies are importable,
+# not only whether its class imports (the backend modules import even without their runtime).
+_RUNTIME_SENTINELS = [
+    ("dask", "rhapsody.backends.execution.dask_parallel", "dask"),
+    ("dragon", "rhapsody.backends.execution.dragon", "Batch"),
+    ("radical_pilot", "rhapsody.backends.execution.radical_pilot", "rp"),
+    ("orbit", "rhapsody.backends.execution.orbit", "EndpointRuntime"),
+]
+
+
+@pytest.mark.parametrize(("name", "module", "attr"), _RUNTIME_SENTINELS)
+def test_discover_backends_reports_missing_runtime(monkeypatch, name, module, attr):
+    """A backend whose runtime dependency is missing is reported as unavailable."""
+    import importlib
+
+    monkeypatch.setattr(importlib.import_module(module), attr, None)
+
+    assert rhapsody.discover_backends()[name] is False
+
+
+@pytest.mark.parametrize(("name", "module", "attr"), _RUNTIME_SENTINELS)
+def test_discover_backends_reports_present_runtime(monkeypatch, name, module, attr):
+    """A backend whose runtime dependency is importable is reported as available."""
+    import importlib
+
+    mod = importlib.import_module(module)
+    monkeypatch.setattr(mod, attr, object())
+    if name == "radical_pilot":
+        monkeypatch.setattr(mod, "ru", object())
+
+    assert rhapsody.discover_backends()[name] is True
+
+
+def test_discover_backends_dragon_v3_alias_follows_dragon(monkeypatch):
+    """The deprecated dragon_v3 alias reports the same availability as dragon."""
+    import importlib
+
+    monkeypatch.setattr(
+        importlib.import_module("rhapsody.backends.execution.dragon"), "Batch", None
+    )
+    available = rhapsody.discover_backends()
+
+    assert available["dragon"] is False
+    assert available.get("dragon_v3", False) is False
+
+
+def test_discover_backends_registered_backend_without_override_is_available():
+    """Backends that do not override is_available() are available once their class imports."""
+    from rhapsody.backends.discovery import BackendRegistry
+
+    original_backends = BackendRegistry._backends.copy()
+    try:
+        BackendRegistry.register_backend("plain_test_backend", "rhapsody.backends.base.BaseBackend")
+        assert rhapsody.discover_backends()["plain_test_backend"] is True
+    finally:
+        BackendRegistry._backends = original_backends
+
+
+def test_discover_backends_failing_availability_check_is_unavailable():
+    """An is_available() that raises is reported as unavailable, not as an error."""
+    from rhapsody.backends.base import BaseBackend
+    from rhapsody.backends.discovery import BackendRegistry
+
+    class BrokenCheckBackend(BaseBackend):
+        @classmethod
+        def is_available(cls) -> bool:
+            raise RuntimeError("probe failed")
+
+    original_backends = BackendRegistry._backends.copy()
+    try:
+        BackendRegistry.register_backend("broken_check_backend", BrokenCheckBackend)
+        assert rhapsody.discover_backends()["broken_check_backend"] is False
+    finally:
+        BackendRegistry._backends = original_backends
