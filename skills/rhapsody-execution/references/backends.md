@@ -92,17 +92,25 @@ backend = await DragonExecutionBackend(batch_kwargs={"num_nodes": 4}, pmi="pmix"
 Create the Dragon backend once and shut it down with the session (`async with Session(...)`). A
 backend that is never shut down keeps the Dragon runtime from exiting.
 
-Launch the whole script with `dragon app.py`, not `python`.
+Launch the whole script with `dragon app.py`, not `python`. On multiple nodes the launcher also takes:
+- `-w`: native scheduler launcher, or `ssh` plus `--network-config`;
+- `-t`: `hsta` or `tcp`;
+- `--network-prefix`: which interfaces to use.
+
+See [multi-node.md](multi-node.md).
 
 **Constructor:**
 - `batch_kwargs`: forwarded to `dragon.workflows.batch.Batch(...)`. Common keys:
   - `num_nodes`, which defaults to the whole allocation;
+  - `workers_per_node`: worker pool size on each node (see `size_pool_to_affinity`);
   - `scheduler_workers`;
   - `results_ddict_mem`;
   - `results_ddict_managers_per_pool`;
   - `disable_telem`;
   - `task_logs`: RHAPSODY sets `True`. `False` speeds up very large runs but leaves `stdout`/`stderr` empty.
 - `pmi`: default PMI for MPI jobs (`"pmix"`, `"cray"`, `"none"`).
+- `size_pool_to_affinity`: default `True`. When the job may use only part of a node (partial-node allocations), the worker pool on each node is sized to the cores the job may use, and a warning is logged. `False` keeps Dragon's own sizing, which is half the node's CPUs. A `workers_per_node` in `batch_kwargs` takes precedence.
+  - Process and MPI jobs are still placed as if the job had whole nodes. Keep their ranks within the CPUs the job holds.
 - `name`: default `"dragon"`.
 
 **How a task runs:**

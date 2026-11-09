@@ -247,10 +247,21 @@ Things to know:
 - **Concurrent and Dask:** these run anywhere Python runs.
 - **Dragon:** needs the `dragon` launcher (`dragon app.py`) and
   `multiprocessing.set_start_method("dragon")` before the backend is created.
-- **Multi-node runs:** usually need machine-specific modules, network configuration and an
-  allocation. Before writing job scripts, check `$RHAPSODY_REPO/docs/hpc-machines/` for a
-  verified guide for the target machine, and adapt it. For machines without a guide, ask the
-  user for their scheduler, modules and allocation.
+- **Multi-node runs (Dragon):** the RHAPSODY code is the same; what changes is the setup and the
+  launch.
+  1. Identify the target machine: ask the user, or check the hostname and scheduler.
+  2. If `$RHAPSODY_REPO/docs/hpc-machines/` has a guide for it, follow that guide.
+  3. Otherwise follow [references/multi-node.md](references/multi-node.md):
+     - allocation;
+     - environment;
+     - interconnect;
+     - network interfaces;
+     - launcher (`-w`) and transport (`-t`);
+     - MPI/PMI.
+
+     Ask the user only for the site values it lists.
+  4. Verify that the run spans the nodes: run the template with `--pin-cpus` and check the
+     report's host column.
 
 ## Template
 

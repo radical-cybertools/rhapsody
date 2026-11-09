@@ -40,6 +40,22 @@ Before debugging anything else:
 | `task.stdout` is a path, not text | `capture_stdio=True` | `open(task.stdout).read()` |
 | `session.get_telemetry()` raises after the run | The session was closed | Keep the manager returned by `session.start_telemetry(...)` |
 
+## Multi-node Dragon
+
+The full setup procedure is in [multi-node.md](multi-node.md).
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `dragon` or `dragon-network-config` hangs with no output, in an interactive Slurm shell (`srun --pty bash`) | Both start helpers with `srun`; the outer interactive step holds the job's CPUs, so the inner `srun` waits forever | `export SLURM_OVERLAP=1` in that shell, or launch from an `sbatch` script |
+| Runtime starts but nodes cannot connect, or hangs at start-up | Compute-node interface names are not matched by Dragon's default `--network-prefix` (`^(hsn\|ipogif\|ib)\d+$`) | List them with `dragon-network-ifaddrs --ip --no-loopback --up --running` on a compute node; pass a matching `--network-prefix` to **both** `dragon-network-config` and `dragon` |
+| Everything runs on one node, or the network config is empty | `dragon-network-config` was run on the login node | Run it inside the allocation |
+| Unknown or unreachable hostnames at start-up | Network config left over from a previous allocation | Regenerate it for every new allocation |
+| Transport fails to start across nodes, or inter-node traffic is slow | High-speed fabric library not configured | `dragon-config add --ofi-runtime-lib=<dir>` (plus build/include where needed) with `-t hsta`, or use `-t tcp` |
+| Native launcher (`-w <scheduler>`) fails | The scheduler does not expose what Dragon's native launcher needs | Use `-w ssh --network-config <file>.yaml` |
+| Tasks run very slowly on a partial-node allocation | Worker pool larger than the cores the job holds (`size_pool_to_affinity=False`, or an oversized `workers_per_node`) | Keep the default pool sizing, or set `workers_per_node` to the cores per node you hold; request whole nodes where possible |
+| MPI job hangs or crashes when its ranks exceed the cores held | Process/MPI placement assumes whole nodes, even on partial allocations | Keep ranks per node within the CPUs the job holds |
+| Open MPI job runs each rank as its own job, or fails at start | Wrong PMI, or PMIx library not found | `"pmi": "pmix"`; load the site's Open MPI; put the directory with its `libpmix.so` on `LD_LIBRARY_PATH` |
+
 ## Where to look next
 
 - **Wait modes and exception types:** `$RHAPSODY_REPO/docs/getting-started/advanced-usage.md`.

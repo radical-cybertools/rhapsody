@@ -20,6 +20,7 @@ rhapsody-execution/
 ├── SKILL.md                      # instructions the agent loads
 ├── references/backends.md        # per-backend constructor and per-task options
 ├── references/troubleshooting.md # symptom → cause → fix
+├── references/multi-node.md      # machine-agnostic multi-node Dragon setup and launch
 ├── scripts/rhapsody_env.py       # environment report + live API signatures
 └── assets/workload_template.py   # runnable heterogeneous workload (executables, functions, Dragon job)
 ```
@@ -114,7 +115,8 @@ pre-commit run --files $(find skills -type f)
 - **Repository pre-commit hooks** pass on `skills/`: ruff, ruff-format, docformatter, typos, detect-secrets.
 
 **Static only** (checked against code and installed signatures, not run)
-- Multi-node Dragon, and MPI jobs with `pmi="pmix"`/`"cray"`.
+- **Multi-node Dragon** (`references/multi-node.md`). The steps are distilled from the machine guides in `docs/hpc-machines/` and from field notes on a non-Cray Slurm cluster. Every `dragon`, `dragon-network-config` and `dragon-config` flag was checked against the dragonhpc 0.15.0 `--help`, and the interface-check command was run locally. It was not run on multiple nodes.
+- MPI jobs with `pmi="pmix"`/`"cray"`.
 - GPU affinity with `Policy(gpu_affinity=...)` and Dask GPU scheduling: there were no GPUs, so placement was never observed.
 - Dask on a batch-scheduler cluster.
 - RADICAL-Pilot and Orbit, which were not installed.
