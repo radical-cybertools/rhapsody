@@ -302,8 +302,9 @@ class ConcurrentExecutionBackend(BaseBackend):
             if future and future.cancel():
                 # Set state on the task object itself before callback
                 self._callback_func(task, "CANCELED")
-                # a task cancelled before it started never runs its own cleanup
-                del self.tasks[uid]
+                # a task cancelled before it started never runs its own cleanup;
+                # one that started may have released itself already
+                self.tasks.pop(uid, None)
                 return True
         return False
 
