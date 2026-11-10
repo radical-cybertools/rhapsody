@@ -59,11 +59,12 @@ async def _run() -> int:
         return 2
     backend_name = cfg["backend"]
     resources = cfg.get("resources") or {}
+    kwargs = cfg.get("kwargs") or {}
 
     backend = None
     try:
         # Construct + init the real backend (verified facts 7, 9).
-        backend = get_backend(backend_name, resources=resources)
+        backend = get_backend(backend_name, resources=resources, **kwargs)
         backend = await backend  # backends are awaitable for init
 
         # Terminal states are needed by both sides — driver to know when to
@@ -103,7 +104,19 @@ async def _run() -> int:
         # READY: tells the driver the child is up and what its terminal states
         # are.  Sending ``terminal_states`` here is the minimal subset of the
         # state-map handshake; full StateMapper registration is D4.
-        _safe_send({"op": OP_READY, "terminal_states": list(terminal_states)})
+        # ``telemetry_info`` lets the driver attach a resource adapter for
+        # the hosted backend (see BaseBackend.telemetry_info).
+        try:
+            telemetry_info = backend.telemetry_info()
+        except Exception:  # optional hook: never fail the handshake over it
+            telemetry_info = None
+        _safe_send(
+            {
+                "op": OP_READY,
+                "terminal_states": list(terminal_states),
+                "telemetry_info": telemetry_info,
+            }
+        )
 
         # Command reader thread: blocking recv on conn, dispatch to the loop.
         def _reader() -> None:

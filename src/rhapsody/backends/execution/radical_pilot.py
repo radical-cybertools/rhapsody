@@ -134,6 +134,11 @@ class RadicalExecutionBackend(BaseBackend):
     supports_implicit_data_linking = True
     supports_explicit_data_linking = True
 
+    @classmethod
+    def is_available(cls) -> bool:
+        """Return True if RADICAL-Pilot (radical.pilot and radical.utils) is importable."""
+        return rp is not None and ru is not None
+
     @typeguard.typechecked
     def __init__(
         self,

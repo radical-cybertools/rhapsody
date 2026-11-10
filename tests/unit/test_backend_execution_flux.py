@@ -2,6 +2,7 @@
 
 import inspect
 import sys
+from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -210,3 +211,129 @@ async def test_flux_callbacks_delivered_on_loop(mock_flux_module):
     await asyncio.sleep(0.05)
 
     assert seen == [("DONE", threading.main_thread())]
+
+
+@pytest.mark.asyncio
+async def test_flux_exception_then_finish_fires_once(mock_flux_module):
+    """A flux exception (e.g. timeout) is followed by finish; only one terminal callback."""
+    from types import SimpleNamespace
+
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    backend = FluxExecutionBackend(uri="local:///x")
+    seen = []
+    backend.register_callback(lambda t, s: seen.append(s))
+    backend.tasks["t1"] = {"uid": "t1"}
+
+    backend._flux_event_cb("t1", SimpleNamespace(name="exception", context={}, jobid=1))
+    backend._flux_event_cb("t1", SimpleNamespace(name="finish", context={"status": 9}, jobid=1))
+
+    assert seen == ["FAILED"]
+    assert backend.tasks["t1"]["exit_code"] == 1
+
+
+@pytest.mark.asyncio
+async def test_flux_finish_after_sysmon_pool_shutdown_still_delivered(mock_flux_module):
+    """A finish racing shutdown() of the sysmon pool is delivered without usage."""
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    backend = FluxExecutionBackend(uri="local:///x")
+    seen = []
+    backend.register_callback(lambda t, s: seen.append(s))
+    backend.tasks["t1"] = {"uid": "t1"}
+    backend._sysmon_pool = ThreadPoolExecutor(max_workers=1)
+    backend._sysmon_pool.shutdown()
+
+    backend._flux_event_cb("t1", SimpleNamespace(name="finish", context={"status": 0}, jobid=1))
+
+    assert seen == ["DONE"]
+    assert "resource_usage" not in backend.tasks["t1"]
+
+
+@pytest.mark.asyncio
+async def test_flux_nonfatal_exception_is_not_terminal(mock_flux_module):
+    """A severity > 0 exception leaves the job running; finish decides the state."""
+    from types import SimpleNamespace
+
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    backend = FluxExecutionBackend(uri="local:///x")
+    seen = []
+    backend.register_callback(lambda t, s: seen.append(s))
+    backend.tasks["t1"] = {"uid": "t1"}
+
+    backend._flux_event_cb(
+        "t1", SimpleNamespace(name="exception", context={"severity": 1}, jobid=1)
+    )
+    backend._flux_event_cb("t1", SimpleNamespace(name="finish", context={"status": 0}, jobid=1))
+
+    assert seen == ["DONE"]
+
+
+@pytest.mark.asyncio
+async def test_flux_cancel_reported_by_journal(mock_flux_module):
+    """cancel_task only requests the cancel; the journal's cancel exception reports CANCELED."""
+    from types import SimpleNamespace
+
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    backend = FluxExecutionBackend(uri="local:///x")
+    backend._flux_helper = MagicMock()
+    seen = []
+    backend.register_callback(lambda t, s: seen.append(s))
+    backend.tasks["t1"] = {"uid": "t1"}
+
+    assert await backend.cancel_task("t1")
+    assert seen == []
+    backend._flux_event_cb(
+        "t1", SimpleNamespace(name="exception", context={"type": "cancel", "severity": 0}, jobid=1)
+    )
+    backend._flux_event_cb("t1", SimpleNamespace(name="finish", context={"status": 15}, jobid=1))
+
+    assert seen == ["CANCELED"]
+
+
+@pytest.mark.asyncio
+async def test_flux_resubmitted_uid_gets_events_again(mock_flux_module):
+    """Resubmitting a finished uid clears its terminal mark."""
+    from types import SimpleNamespace
+
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    backend = FluxExecutionBackend(uri="local:///x")
+    backend._flux_helper = MagicMock()
+    seen = []
+    backend.register_callback(lambda t, s: seen.append(s))
+    task = {"uid": "t1", "executable": "/bin/true", "resource_usage": {"memory_peak_bytes": 1}}
+    backend.tasks["t1"] = task
+    backend._flux_event_cb("t1", SimpleNamespace(name="finish", context={"status": 0}, jobid=1))
+
+    with patch("rhapsody.backends.execution.flux.flux_backend.asyncio.to_thread", new=AsyncMock()):
+        await backend.submit_tasks([task])
+    backend._flux_event_cb("t1", SimpleNamespace(name="finish", context={"status": 0}, jobid=2))
+
+    assert seen.count("DONE") == 2
+    assert "resource_usage" not in task  # stale usage of the first run is dropped
+
+
+@pytest.mark.asyncio
+async def test_flux_job_finishing_before_cancel_reports_its_state(mock_flux_module):
+    """A job that finishes before the cancel takes effect reports DONE, not CANCELED."""
+    from types import SimpleNamespace
+
+    from rhapsody.backends.execution.flux.flux_backend import FluxExecutionBackend
+
+    backend = FluxExecutionBackend(uri="local:///x")
+    backend._flux_helper = MagicMock()
+    seen = []
+    backend.register_callback(lambda t, s: seen.append(s))
+    backend.tasks["t1"] = {"uid": "t1"}
+
+    assert await backend.cancel_task("t1")
+    backend._flux_event_cb("t1", SimpleNamespace(name="finish", context={"status": 0}, jobid=1))
+
+    assert seen == ["DONE"]
+    assert not await backend.cancel_task("t1")  # already terminal

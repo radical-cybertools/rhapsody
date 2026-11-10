@@ -13,6 +13,7 @@ wait, batch notifications) are inherited automatically.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from typing import Any
 from typing import Callable
@@ -39,6 +40,24 @@ try:
     import radical.prof as rprof
 except ImportError:
     rprof = None
+
+_TASK_TOPICS = ("task_status", "task_status_batch")
+
+
+def _has_session_param(func) -> bool:
+    """True if *func* takes a named ``session`` parameter.
+
+    A ``**kwargs``-only signature (e.g. a ``MagicMock``) does not count: it would accept
+    ``session=`` without scoping anything.
+    """
+    try:
+        param = inspect.signature(func).parameters.get("session")
+    except (TypeError, ValueError):
+        return False
+    return param is not None and param.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
 
 
 class OrbitExecutionBackend(BaseBackend):
@@ -104,6 +123,11 @@ class OrbitExecutionBackend(BaseBackend):
     _PLUGIN_NAME = "rhapsody"
     _TERMINAL_STATES = frozenset({"DONE", "FAILED", "CANCELED", "COMPLETED"})
 
+    @classmethod
+    def is_available(cls) -> bool:
+        """Return True if ORBIT (radical.orbit) is importable."""
+        return EndpointRuntime is not None
+
     def __init__(
         self,
         broker_url: str | None = None,
@@ -127,6 +151,8 @@ class OrbitExecutionBackend(BaseBackend):
             ) from _radical_orbit_import_error
 
         self.logger = logging.getLogger(__name__)
+        self._session_sid: str | None = None
+        self._warned_no_sid = False
         self._broker_url = broker_url
         self._participant_name = participant_name
         self._endpoint_name = endpoint_name
@@ -141,6 +167,9 @@ class OrbitExecutionBackend(BaseBackend):
 
         self._runtime = None  # EndpointRuntime
         self._rh = None  # RhapsodyClient (from get_rhapsody_handle)
+        # session id the task callbacks are scoped to on the runtime, or None
+        # when they were registered unscoped through the client
+        self._scoped_sid: str | None = None
         self._tasks: dict[str, dict] = {}
         # uids for which a terminal state callback has already fired, so the
         # notification and local-cancel paths don't double-fire the same
@@ -208,12 +237,46 @@ class OrbitExecutionBackend(BaseBackend):
         # block up to ``start_timeout + init_timeout`` — all connection and
         # session waiting is paid here, never on the submit path.
         self._rh = await asyncio.to_thread(self._get_rhapsody_handle)
+        # the plugin session's id, cached: the notification filter must not
+        # depend on ``self._rh`` (cleared on shutdown) or its live ``sid``
+        # (cleared on close) while late notifications still arrive
+        self._session_sid = self._rh.sid
+        if self._session_sid is None:
+            self.logger.warning(
+                "ORBIT plugin session id unknown: task notifications of other "
+                "sessions cannot be filtered"
+            )
 
-        # Register persistent notification callback for task completions
-        self._rh.register_notification_callback(self._on_task_notification, topic="task_status")
-        self._rh.register_notification_callback(
-            self._on_task_notification, topic="task_status_batch"
-        )
+        # Register persistent notification callbacks for task completions.
+        # Invariant: this backend owns exactly one plugin session and never
+        # re-registers it, so callbacks scoped to that session never need to
+        # move.  Scoped callbacks would NOT follow a re-registration; the sid
+        # filter (``_is_foreign``) stays as defense in depth, and its live-sid
+        # part only matters on the unscoped fallback path.
+        rt = self._runtime
+        if (
+            self._session_sid
+            and rt is not None
+            and _has_session_param(getattr(rt, "register_callback", None))
+            and _has_session_param(getattr(rt, "unregister_callback", None))
+        ):
+            for topic in _TASK_TOPICS:
+                rt.register_callback(
+                    endpoint_id=self._endpoint_name,
+                    plugin_name=self._plugin_name,
+                    topic=topic,
+                    callback=self._on_task_notification,
+                    session=self._session_sid,
+                )
+            self._scoped_sid = self._session_sid
+            self.logger.info("ORBIT task callbacks scoped to session %s", self._scoped_sid)
+        else:
+            for topic in _TASK_TOPICS:
+                self._rh.register_notification_callback(self._on_task_notification, topic=topic)
+            self.logger.info(
+                "ORBIT task callbacks unscoped (runtime without session scoping, "
+                "or session id unknown)"
+            )
 
         self._initialized = True
         self.logger.info(
@@ -235,12 +298,53 @@ class OrbitExecutionBackend(BaseBackend):
         ``self._tasks`` and the task dicts happens single-threaded there, never
         racing loop-side writers (submit / cancel / flush-error).
         """
+        if self._is_foreign(data):
+            return  # another session's: drop before waking the loop
         loop = self._loop
         if loop is not None and not loop.is_closed():
             loop.call_soon_threadsafe(self._handle_notification, topic, data)
 
+    def _is_foreign(self, data) -> bool:
+        """True for a notification stamped with another session's ``sid``.
+
+        A notification without ``sid`` is accepted (older endpoint, or a
+        producer that does not stamp, such as the pool task dispatcher), and
+        so is everything while our own session id is unknown.
+        """
+        if not isinstance(data, dict):
+            return False
+        sid = data.get("sid")
+        if not sid:
+            # the pool task dispatcher never stamps sid: no warning in pool mode
+            if not self._warned_no_sid and self._pool is None:
+                self._warned_no_sid = True
+                self.logger.warning(
+                    "ORBIT task notifications without a session id (older "
+                    "endpoint, or pool mode): results of other clients with the "
+                    "same task uids cannot be told apart"
+                )
+            return False
+        own = self._own_sids()
+        return bool(own) and str(sid) not in own
+
+    def _own_sids(self) -> set:
+        """The plugin session ids that count as ours: the one cached at init
+        (completions of tasks submitted under it may still arrive) and the
+        client's live one (it changes if the client re-registers)."""
+        rh = self._rh
+        sids = {self._session_sid, rh.sid if rh is not None else None}
+        return {str(x) for x in sids if x}
+
     def _handle_notification(self, topic, data):
-        """Dispatch a notification on the event-loop thread."""
+        """Dispatch a notification on the event-loop thread.
+
+        Task notifications are broadcast to every client of the endpoint's
+        rhapsody plugin, and task uids are only unique per client, so a
+        notification stamped with another session's ``sid`` is ignored.  One
+        without ``sid`` (older endpoint) is accepted.
+        """
+        if self._is_foreign(data):
+            return
         if topic == "task_status_batch":
             for t in data.get("tasks", []):
                 self._apply_task_update(t)
@@ -731,6 +835,23 @@ class OrbitExecutionBackend(BaseBackend):
             except Exception as e:
                 self.logger.warning("Failed to close session: %s", e)
             self._rh = None
+
+        # after close(), so task events sent while the session closes still
+        # arrive; scoped path only -- the fallback runtime may not take session=
+        if self._runtime and self._scoped_sid:
+            try:
+                for topic in _TASK_TOPICS:
+                    await asyncio.to_thread(
+                        self._runtime.unregister_callback,
+                        endpoint_id=self._endpoint_name,
+                        plugin_name=self._plugin_name,
+                        topic=topic,
+                        callback=self._on_task_notification,
+                        session=self._scoped_sid,
+                    )
+            except Exception as e:
+                self.logger.warning("Failed to unregister task callbacks: %s", e)
+            self._scoped_sid = None
 
         # stop() joins the runtime's threads and does blocking teardown calls.
         if self._runtime:
