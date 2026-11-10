@@ -11,7 +11,7 @@ description: >-
   ComputeTask, Session.submit_tasks or a RHAPSODY backend. For tasks that depend on other
   tasks (workflows, DAGs) use AsyncFlow instead.
 metadata:
-  rhapsody-version: "0.6.0"
+  rhapsody-version: "0.7.0"
 ---
 
 # RHAPSODY Execution

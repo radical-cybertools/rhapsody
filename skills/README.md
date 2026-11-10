@@ -8,7 +8,7 @@ The skills guide the agent and point it to RHAPSODY's own documentation, example
 
 | Skill | Use it for | Status |
 |---|---|---|
-| [`rhapsody-execution`](rhapsody-execution/SKILL.md) | Choose and configure a backend (Concurrent, Dask, Dragon, RADICAL-Pilot, Orbit), define and submit workloads of `ComputeTask`s, set per-task resources and CPU/GPU affinity, monitor and collect results, handle failures and retries | Released (RHAPSODY 0.6.0) |
+| [`rhapsody-execution`](rhapsody-execution/SKILL.md) | Choose and configure a backend (Concurrent, Dask, Dragon, RADICAL-Pilot, Orbit), define and submit workloads of `ComputeTask`s, set per-task resources and CPU/GPU affinity, monitor and collect results, handle failures and retries | Released (RHAPSODY 0.7.0) |
 | `rhapsody-telemetry` | Enable, monitor and export telemetry; diagnose runs | Planned |
 | `rhapsody-performance` | Throughput and overhead experiments, strong/weak scaling, comparing configurations | Planned |
 | `rhapsody-ai-hpc` | `AITask` and inference backends, coupling simulation with inference | Planned |
@@ -80,9 +80,9 @@ pre-commit run --files $(find skills -type f)
 - **Links:** every link stays inside the skill.
 - **Repo paths:** every `$RHAPSODY_REPO/...` path still exists. When docs or examples move, the check fails and names the file to update.
 
-## Validation (RHAPSODY 0.6.0)
+## Validation (RHAPSODY 0.7.0)
 
-**Environment:** Linux, single node. Python 3.12.3 with `rhapsody-py` 0.6.0 installed editable from this checkout, plus `[dask,telemetry,dev,dragon]` (dragonhpc 0.15.0). There were no GPUs.
+**Environment:** Linux, single node. Python 3.12.3 with `rhapsody-py` 0.7.0 installed editable from this checkout, plus `[dask,telemetry,dev,dragon]` (dragonhpc 0.15.0). There were no GPUs.
 
 **Executed and passing**
 

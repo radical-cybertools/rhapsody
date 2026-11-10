@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+
+## [0.7.0] 2026-11-09
+
 ### Changed
 
 - **HPC test suite restructured into groups** — `tests/integration/test-hpc/run_suite.py`
