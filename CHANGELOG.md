@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`OrbitDataBackend`** — the data-infrastructure counterpart of
+  `OrbitExecutionBackend`: starts a data backend (`redis`, `dragon`, ...) inside
+  the remote rhapsody session of an `OrbitExecutionBackend`, so the store runs on
+  the endpoint next to (and for Dragon in the same runtime as) the session's
+  tasks; `endpoints` returns the remote descriptors. Only the lifecycle crosses
+  ORBIT; local data backends are unchanged. Needs the radical.orbit
+  `data_start`/`data_endpoints`/`data_shutdown` routes.
+- **`DataBackendRegistry` / `get_data_backend(name, ...)`** — data backends by
+  name (`redis`, `dragon`), discovered from `rhapsody.backends.data` plus the
+  `rhapsody.data_backends` entry-point group for external packages.
+
+## [0.7.0] 2026-11-09
+
 ### Changed
 
 - **HPC test suite restructured into groups** — `tests/integration/test-hpc/run_suite.py`
@@ -44,6 +59,17 @@
   RUNNING decremented the gauge without a matching increment, and its -1 could
   land on a different label set than its +1. Each task now counts once, and its
   -1 uses the labels of its +1.
+- **`DragonExecutionBackend` oversubscribed partial-node Slurm allocations** (#95) —
+  Dragon's `Batch` starts `os.cpu_count() // 2` workers per node, even when the job may use
+  only part of the node: a 4-CPU job on a 512-CPU node got 256 workers on those 4 CPUs, and
+  every task took minutes. When the job may use fewer physical cores than that on the nodes
+  Batch uses, the backend now passes `workers_per_node` (one per allowed core on the smallest
+  node) and logs a warning. Batch's placement capacity for process and MPI jobs is unchanged,
+  so those jobs still place ranks as if the job had whole nodes. A `workers_per_node` in
+  `batch_kwargs` takes precedence; `size_pool_to_affinity=False` keeps Batch's sizing and only
+  warns. Whole-node allocations are unchanged. Supersedes the `Node.num_cpus` patch first
+  proposed in #106, which also shrank the placement capacity and hung process jobs with more
+  ranks than `allowed // 2`.
 
 - **Dragon process/job exit codes reported like the other backends** — a
   non-zero exit code from a `process()`/`job()` task (executables, and functions
@@ -93,18 +119,12 @@
   `ModuleNotFoundError: No module named 'requests'`. The `dragon` extra now
   requires `dragonhpc[requests]==0.15.0`.
 
-### Added
-
-- **`OrbitDataBackend`** — the data-infrastructure counterpart of
-  `OrbitExecutionBackend`: starts a data backend (`redis`, `dragon`, ...) inside
-  the remote rhapsody session of an `OrbitExecutionBackend`, so the store runs on
-  the endpoint next to (and for Dragon in the same runtime as) the session's
-  tasks; `endpoints` returns the remote descriptors. Only the lifecycle crosses
-  ORBIT; local data backends are unchanged. Needs the radical.orbit
-  `data_start`/`data_endpoints`/`data_shutdown` routes.
-- **`DataBackendRegistry` / `get_data_backend(name, ...)`** — data backends by
-  name (`redis`, `dragon`), discovered from `rhapsody.backends.data` plus the
-  `rhapsody.data_backends` entry-point group for external packages.
+- **`discover_backends()` reports real availability** — a backend is available only when its
+  runtime dependencies are importable (new `BaseBackend.is_available()`); Dragon,
+  RADICAL-Pilot and Orbit were reported available without them.
+- **`OrbitExecutionBackend` is exported from `rhapsody.backends`**, like the other backends.
+- **Docs**: real `DragonExecutionBackend` constructor, no `Session.get_statistics()`, correct
+  default session uid, removed never-implemented `RHAPSODY_LOG_LEVEL` / `RHAPSODY_WORK_DIR`.
 
 ### Removed
 
@@ -113,6 +133,11 @@
   October 2025 and 3.10 in October 2026, and CI no longer tests them. The 3.8,
   3.9 and 3.10 classifiers are gone, and the install, contributing and AI
   backend docs say 3.11.
+
+### Added
+
+- **Agent Skills** — `skills/rhapsody-execution/` teaches AI coding agents to run RHAPSODY
+  workloads (backends, tasks, resources, CPU/GPU affinity, failures, multi-node Dragon).
 
 ## [0.6.0] 2026-10-19
 

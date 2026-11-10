@@ -55,6 +55,13 @@ try:
 except ImportError:
     pass
 
+try:
+    from .execution import OrbitExecutionBackend  # noqa: F401
+
+    __all__.append("OrbitExecutionBackend")
+except ImportError:
+    pass
+
 # Try to import optional AI (inference) backends
 try:
     from .ai.vllm import DragonVllmInferenceBackend  # noqa: F401
