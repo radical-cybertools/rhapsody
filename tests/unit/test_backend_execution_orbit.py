@@ -1394,3 +1394,12 @@ async def test_shutdown_waits_for_output_fetch():
     await backend.shutdown()
 
     assert fired == ["late"]
+
+
+def test_orbit_backend_exported_from_rhapsody_backends():
+    """OrbitExecutionBackend is importable from rhapsody.backends like the other backends."""
+    import rhapsody.backends as backends
+    from rhapsody.backends import OrbitExecutionBackend as Exported
+
+    assert Exported is OrbitExecutionBackend
+    assert "OrbitExecutionBackend" in backends.__all__

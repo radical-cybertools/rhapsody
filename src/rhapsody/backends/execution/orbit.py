@@ -123,6 +123,11 @@ class OrbitExecutionBackend(BaseBackend):
     _PLUGIN_NAME = "rhapsody"
     _TERMINAL_STATES = frozenset({"DONE", "FAILED", "CANCELED", "COMPLETED"})
 
+    @classmethod
+    def is_available(cls) -> bool:
+        """Return True if ORBIT (radical.orbit) is importable."""
+        return EndpointRuntime is not None
+
     def __init__(
         self,
         broker_url: str | None = None,
