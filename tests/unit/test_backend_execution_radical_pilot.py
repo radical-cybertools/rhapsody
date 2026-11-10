@@ -4,6 +4,7 @@ This module tests the RADICAL-Pilot execution backend defined in
 rhapsody.backends.execution.radical_pilot.
 """
 
+import multiprocessing as mp
 from unittest.mock import Mock
 from unittest.mock import patch
 
@@ -150,6 +151,102 @@ async def test_radical_pilot_backend_context_manager_failure():
 
     except ImportError:
         pytest.skip("RADICAL-Pilot dependencies not available")
+
+
+@pytest.mark.parametrize("registered", [True, False])
+@pytest.mark.asyncio
+async def test_radical_pilot_backend_failed_session_start_is_released(registered):
+    """A session whose constructor raises is released: proxy unregistered, services stopped."""
+    rp = pytest.importorskip("radical.pilot")
+    from rhapsody.backends import RadicalExecutionBackend
+
+    started = {}
+
+    def failing_init(self, **kwargs):
+        # What rp.Session.__init__ has started when _start_components() raises.
+        self._uid = kwargs["uid"]
+        self._closed = False
+        self._cmgr = None
+        self._proxy_client = started["client"] = Mock()
+        self._proxy_cfg = {"proxy_task_queue": {}} if registered else None
+        self._proxy = started["proxy"] = Mock()
+        self._reg_service = started["registry"] = Mock()
+        raise FileNotFoundError("radical-pilot-bridge")
+
+    with patch.object(rp.Session, "__init__", failing_init):
+        backend = RadicalExecutionBackend({"resource": "local.localhost"})
+        with pytest.raises(FileNotFoundError):
+            await backend
+
+    if registered:
+        started["client"].request.assert_called_once()
+        assert started["client"].request.call_args.args[0] == "unregister"
+    else:
+        # No registration to undo, and the request would have no timeout.
+        started["client"].request.assert_not_called()
+    started["client"].close.assert_called_once_with()
+    started["proxy"].stop.assert_called_once_with()
+    started["registry"].stop.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_radical_pilot_backend_failure_after_session_start_closes_session():
+    """If a step after the session start fails, the session is closed."""
+    rp = pytest.importorskip("radical.pilot")
+    from rhapsody.backends import RadicalExecutionBackend
+
+    session = Mock()
+    module = "rhapsody.backends.execution.radical_pilot"
+    with patch(f"{module}._start_session", return_value=session):
+        with patch.object(rp, "TaskManager", side_effect=RuntimeError("tmgr failed")):
+            backend = RadicalExecutionBackend({"resource": "local.localhost"})
+            with pytest.raises(RuntimeError, match="tmgr failed"):
+                await backend
+
+    session.close.assert_called_once_with()
+
+
+def _default_start_method():
+    return mp.get_start_method(allow_none=True) or mp.get_all_start_methods()[0]
+
+
+@pytest.mark.skipif(
+    _default_start_method() != "fork",
+    reason="RP's embedded proxy forks a worker per session; under spawn it fails before that",
+)
+@pytest.mark.asyncio
+async def test_radical_pilot_backend_failed_session_start_leaves_no_proxy_worker(
+    tmp_path, monkeypatch
+):
+    """A real session start that fails after the proxy forked its worker leaves no child.
+
+    A leftover worker waits forever for "unregister", and multiprocessing joins it at interpreter
+    exit, so pytest would print its summary and never exit.
+    """
+    rp = pytest.importorskip("radical.pilot")
+    from rhapsody.backends import RadicalExecutionBackend
+
+    monkeypatch.chdir(tmp_path)  # RP writes the session directory to the cwd
+    before = set(mp.active_children())
+    try:
+        with patch.object(
+            rp.Session, "_start_components", side_effect=RuntimeError("bridge startup failed")
+        ):
+            backend = RadicalExecutionBackend({"resource": "local.localhost", "cores": 1})
+            with pytest.raises(RuntimeError, match="bridge startup failed"):
+                await backend
+
+        leftover = [p for p in mp.active_children() if p not in before]
+        for p in leftover:
+            p.join(timeout=10)
+        assert not [p for p in leftover if p.is_alive()]
+
+    finally:
+        # Don't let a failure here hang the whole run at exit.
+        for p in mp.active_children():
+            if p not in before:
+                p.terminate()
+                p.join(timeout=10)
 
 
 def test_radical_pilot_backend_callback_registration():

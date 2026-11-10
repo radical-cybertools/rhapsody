@@ -62,6 +62,67 @@ def service_ready_callback(future: asyncio.Future, task: Any, state: str) -> Non
     threading.Thread(target=wait_and_set, daemon=True).start()
 
 
+def _start_session(uid: str) -> Any:
+    """Create an ``rp.Session``, releasing what it started if its constructor fails.
+
+    ``rp.Session.__init__`` starts a registry, an embedded proxy and, through the
+    proxy, a forked non-daemon worker for this session before it starts the bridges
+    and components. If a later step raises (for example, ``radical-pilot-bridge`` is
+    not on PATH), RADICAL-Pilot does not undo the earlier steps, and the caller never
+    gets a handle to do it. The worker then waits for an "unregister" that never
+    comes, and ``multiprocessing`` joins it at interpreter exit, so the process never
+    exits. Allocating the object before calling ``__init__`` keeps a handle we can
+    clean up.
+    """
+    session = rp.Session.__new__(rp.Session)
+    try:
+        session.__init__(uid=uid)
+    except BaseException:
+        _release_failed_session(session)
+        raise
+    return session
+
+
+def _release_failed_session(session: Any) -> None:
+    """Best-effort release of what a failed ``rp.Session.__init__`` started.
+
+    Mirrors the relevant steps of ``rp.Session.close()``, which can't run on a
+    partly-built session. Relies on RADICAL-Pilot private attributes; a missing
+    attribute or a failing step is skipped, never raised.
+    """
+    if getattr(session, "_closed", False):
+        return
+
+    log = _get_logger()
+
+    def attempt(step: str, fn: Callable, *args: Any) -> None:
+        try:
+            fn(*args)
+        except Exception as e:
+            log.debug(f"Cleanup of failed RADICAL-Pilot session: {step} failed: {e!r}")
+
+    # Bridges and components that already started.
+    cmgr = getattr(session, "_cmgr", None)
+    if cmgr is not None:
+        attempt("closing the component manager", cmgr.close)
+
+    # The proxy worker forked for this session. Unregister only after a successful
+    # register: the request has no timeout, but the proxy just answered the register.
+    client = getattr(session, "_proxy_client", None)
+    if client is not None:
+        if getattr(session, "_proxy_cfg", None):
+            attempt(
+                "unregistering from the proxy", client.request, "unregister", {"sid": session._uid}
+            )
+        attempt("closing the proxy client", client.close)
+
+    # The embedded proxy and registry services (threads); stop() only sets an event.
+    for attr in ("_proxy", "_reg_service"):
+        service = getattr(session, attr, None)
+        if service is not None:
+            attempt(f"stopping {attr}", service.stop)
+
+
 class RadicalExecutionBackend(BaseBackend):
     """Radical Pilot-based execution backend for large-scale HPC task execution.
 
@@ -246,10 +307,12 @@ class RadicalExecutionBackend(BaseBackend):
 
     async def _initialize(self) -> None:
         """Initialize Radical Pilot components."""
+        session = None
         try:
             self.tasks = {}
             self.raptor_mode = False
-            self.session = rp.Session(uid=ru.generate_id("rhapsody.session", mode=ru.ID_PRIVATE))
+            session = _start_session(ru.generate_id("rhapsody.session", mode=ru.ID_PRIVATE))
+            self.session = session
             self.task_manager = rp.TaskManager(self.session)
             self.pilot_manager = rp.PilotManager(self.session)
             self.resource_pilot = self.pilot_manager.submit_pilots(
@@ -269,6 +332,17 @@ class RadicalExecutionBackend(BaseBackend):
 
         except Exception as e:
             self.logger.exception(f"RadicalPilot execution backend failed: {e}, terminating")
+            # Callers never get a working backend to shut down (``__aexit__`` doesn't run
+            # when ``__aenter__`` raises), so close the session here. An unclosed session
+            # keeps its proxy worker, which blocks interpreter exit.
+            if session is not None:
+                try:
+                    session.close()
+                except Exception as close_error:
+                    self.logger.warning(
+                        f"Closing the RADICAL-Pilot session after a failed start failed: "
+                        f"{close_error}"
+                    )
             raise
 
         except (KeyboardInterrupt, SystemExit) as e:

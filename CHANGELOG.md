@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **A failed RADICAL-Pilot start no longer hangs the process at exit**: when
+  `rp.Session()` raised partway through, for example because `radical-pilot-bridge` is not on
+  `PATH`, its proxy worker kept waiting for an "unregister" that never came, and
+  `multiprocessing` joined it at interpreter exit forever. `RadicalExecutionBackend` now
+  releases a session whose constructor fails, and closes the session when a later startup
+  step fails. The root cause is in radical.pilot's `Session.__init__`, which doesn't clean
+  up after itself. This is a workaround until that is fixed upstream.
 
 ## [0.7.0] 2026-11-09
 
