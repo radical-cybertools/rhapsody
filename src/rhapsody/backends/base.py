@@ -193,6 +193,16 @@ class BaseBackend(ABC):
         """
         raise NotImplementedError("Not implemented in the base backend")
 
+    @classmethod
+    def is_available(cls) -> bool:
+        """Return True if this backend's runtime dependencies are importable.
+
+        Used by :func:`rhapsody.backends.discover_backends`. A backend module imports even when
+        its optional runtime (Dragon, Dask, RADICAL-Pilot, ...) is missing, so backends with
+        optional dependencies override this to report whether they can actually be created.
+        """
+        return True
+
     def topology(self) -> list[dict[str, Any]]:
         """Best-effort description of the resources this backend has access to.
 
