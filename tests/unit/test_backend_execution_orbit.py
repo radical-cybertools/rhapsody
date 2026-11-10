@@ -1353,3 +1353,12 @@ async def test_real_runtime_drops_foreign_session_events():
     await backend.shutdown()
     with rt._cb_lock:
         assert not rt._callbacks  # scoped registrations removed
+
+
+def test_orbit_backend_exported_from_rhapsody_backends():
+    """OrbitExecutionBackend is importable from rhapsody.backends like the other backends."""
+    import rhapsody.backends as backends
+    from rhapsody.backends import OrbitExecutionBackend as Exported
+
+    assert Exported is OrbitExecutionBackend
+    assert "OrbitExecutionBackend" in backends.__all__
