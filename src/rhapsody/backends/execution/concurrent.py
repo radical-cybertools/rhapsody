@@ -267,6 +267,9 @@ class ConcurrentExecutionBackend(BaseBackend):
             entry = self.tasks.get(task["uid"])
             if entry is not None and entry.get("future") is asyncio.current_task():
                 del self.tasks[task["uid"]]
+                # the caller keeps the task dict (the ORBIT plugin for an hour):
+                # without this it keeps the finished asyncio Task alive too
+                task.pop("future", None)
 
     async def submit_tasks(self, tasks: list[dict[str, Any]]) -> list[asyncio.Task]:
         """Submit tasks for execution."""
