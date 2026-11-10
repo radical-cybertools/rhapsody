@@ -376,6 +376,8 @@ async def test_finished_and_cancelled_tasks_are_released():
         await asyncio.sleep(0.01)
     await asyncio.sleep(0)
     assert backend.tasks == {}
+    # a caller that keeps its task dicts does not keep the finished asyncio Tasks
+    assert not any("future" in t for t in tasks)
 
     release = threading.Event()
     slow = ComputeTask(function=release.wait)
