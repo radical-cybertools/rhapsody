@@ -572,9 +572,16 @@ def test_constructor_batch_kwargs_forwarded_verbatim():
 
     kwargs = {"num_nodes": 4, "pool_nodes": 2, "disable_telem": True, "scheduler_workers": 2}
 
-    with patch(
-        "rhapsody.backends.execution.dragon.Batch", return_value=mock_batch
-    ) as mock_batch_cls:
+    # As on a whole node: on part of a node the backend adds workers_per_node (see
+    # test_backend_execution_dragon_affinity.py).
+    with (
+        patch(
+            "rhapsody.backends.execution.dragon.Batch", return_value=mock_batch
+        ) as mock_batch_cls,
+        patch(
+            "rhapsody.backends.execution.dragon._workers_per_node_for_affinity", return_value=None
+        ),
+    ):
         backend = DragonExecutionBackend(batch_kwargs=kwargs)
 
     mock_batch_cls.assert_called_once_with(task_logs=True, **kwargs)
@@ -589,9 +596,14 @@ def test_constructor_no_batch_kwargs_calls_batch_with_no_args():
     mock_batch.num_workers = 4
     mock_batch.num_managers = 1
 
-    with patch(
-        "rhapsody.backends.execution.dragon.Batch", return_value=mock_batch
-    ) as mock_batch_cls:
+    with (
+        patch(
+            "rhapsody.backends.execution.dragon.Batch", return_value=mock_batch
+        ) as mock_batch_cls,
+        patch(
+            "rhapsody.backends.execution.dragon._workers_per_node_for_affinity", return_value=None
+        ),
+    ):
         DragonExecutionBackend()
 
     mock_batch_cls.assert_called_once_with(task_logs=True)

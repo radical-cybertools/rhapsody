@@ -59,25 +59,26 @@ ComputeTask(
     If both `cluster` and `client` are omitted, Rhapsody creates a new `LocalCluster` using the provided `resources`. Pass `cluster=` to use SLURM, Kubernetes, or any other Dask cluster type — construct it with `asynchronous=True` (entered via `async with`); see [Cluster injection](advanced-usage.md#cluster-injection) for why this matters and a full example.
 
 ### Dragon Backend
-High-performance execution using the Dragon runtime.
+High-performance execution using the Dragon runtime. Scripts that use it must be started with the
+`dragon` launcher (`dragon my_script.py`).
 
 ```python
+import multiprocessing as mp
 from rhapsody.backends import DragonExecutionBackend
 
-backend = DragonExecutionBackend(
+mp.set_start_method("dragon")
+backend = await DragonExecutionBackend(
+    batch_kwargs={"num_nodes": 4},  # forwarded to dragon.workflows.batch.Batch (optional)
+    pmi="pmix",                     # default PMI for MPI jobs (optional)
     name="dragon",
-    num_nodes=4,            # Total nodes for the worker pool (optional)
-    pool_nodes=2,           # Nodes per worker pool (optional)
-    disable_telemetry=False,  # Enable/disable Dragon telemetry
 )
 ```
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
+| `batch_kwargs` | `dict` | `None` | Forwarded to `dragon.workflows.batch.Batch(...)`, e.g. `num_nodes`, `scheduler_workers`, `results_ddict_mem`, `disable_telem`, `task_logs`. See [Backend-level configuration](resource-specification.md#backend-level-configuration-batch_kwargs). |
 | `name` | `str` | `"dragon"` | Backend identifier used for task routing |
-| `num_nodes` | `int` | `None` | Total number of nodes; forwarded to `Batch(num_nodes=...)` |
-| `pool_nodes` | `int` | `None` | Nodes per worker pool; forwarded to `Batch(pool_nodes=...)` |
-| `disable_telemetry` | `bool` | `False` | Disable Dragon internal telemetry |
+| `pmi` | `str` or `PMIBackend` | `None` | PMI for multi-rank (`process_templates`) jobs: `"pmix"`, `"cray"` or `"none"`; a task's own `pmi` takes precedence. See [MPI jobs: PMI and timeout](resource-specification.md#mpi-jobs-pmi-and-timeout). |
 
 !!! note "Streaming pipeline"
     `DragonExecutionBackend` uses Dragon's streaming batch pipeline — tasks submitted via
@@ -174,16 +175,16 @@ RadicalExecutionBackend(
 )
 ```
 
-## Environment Variables
+## Logging and Working Directory
 
-RHAPSODY respects the following environment variables:
+Enable RHAPSODY's logging programmatically, before creating backends:
 
-- `RHAPSODY_LOG_LEVEL`: Set to `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`.
-- `RHAPSODY_WORK_DIR`: Base directory for job artifacts.
+```python
+import logging
+from rhapsody import enable_logging
 
-!!! note "Logging"
-    You can also enable logging programmatically:
-    ```python
-    from rhapsody import enable_logging
-    enable_logging(level="DEBUG")
-    ```
+enable_logging(level=logging.DEBUG)
+```
+
+Task files (for example `capture_stdio` output) go under `<work_dir>/<session uid>/`; set the
+base directory with `Session(work_dir=...)` (default: the current directory).

@@ -372,6 +372,11 @@ class DragonNativeExecutionBackend(BaseBackend):
         name: Backend name.
     """
 
+    @classmethod
+    def is_available(cls) -> bool:
+        """Return True if Dragon's native API (dragon.native) is importable."""
+        return Process is not None
+
     def __init__(
         self,
         workers_per_node: int | None = None,
