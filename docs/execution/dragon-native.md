@@ -212,8 +212,9 @@ MPI, so set `"pmi": "none"` for jobs that don't: it logs neither warning.
 - **Placement is the caller's.** A task's `placement` is honoured: placed functions run in the pool,
   on a worker of that host. `DragonExecutionBackend` ignores it.
 - **Sized from the job.** The pool and the process limit come from `Node.cpus`, so a partial-node
-  job is not oversubscribed. The default pool has one pinned worker per physical core;
-  `DragonExecutionBackend` defaults to half the CPUs, unpinned.
+  job is not oversubscribed. The default pool has one pinned worker per physical core.
+  `DragonExecutionBackend` starts half the CPUs, unpinned, or one worker per allowed core when the
+  job has fewer, and places process and MPI jobs as if the job had whole nodes.
 - **Functions with a `process_template` return their value**, through the result queue, and a
   failing one sets `exception` to its own exception. `DragonExecutionBackend` returns the exit code.
 - **Groups have no PMI by default.** A `process_templates` group starts with the task's or the
