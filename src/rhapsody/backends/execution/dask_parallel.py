@@ -572,12 +572,12 @@ class DaskExecutionBackend(BaseBackend):
     ) -> None:
         """Intentional no-op: Dask has no file-staging directive analogous to this hook.
 
-        RHAPSODY's other backends that implement this (e.g. RADICAL-Pilot) use
-        backend-native staging/transfer directives executed before a task runs. Dask
-        has no equivalent at the flat `submit_tasks(list)` batch-submission level used
-        here; Dask's native dependency mechanism is instead passing one task's Future
-        as an argument to another `client.submit()` call, which requires a task-graph
-        API this module doesn't currently expose. Should RHAPSODY grow an explicit
+        Backends that implement this hook use backend-native staging/transfer
+        directives executed before a task runs. Dask has no equivalent at the flat
+        `submit_tasks(list)` batch-submission level used here; Dask's native dependency
+        mechanism is instead passing one task's Future as an argument to another
+        `client.submit()` call, which requires a task-graph API this module doesn't
+        currently expose. Should RHAPSODY grow an explicit
         dependency-graph API, this backend should wire dependencies that way rather
         than via file staging.
 
@@ -624,7 +624,7 @@ class DaskExecutionBackend(BaseBackend):
 
         Task construction happens inline during `submit_tasks`/`_submit_function`/
         `_submit_executable` — there is no intermediate native task-description object
-        to build ahead of time the way e.g. RADICAL-Pilot's `TaskDescription` requires.
+        to build ahead of time.
 
         Args:
             task: Dictionary containing task definition, parameters, and metadata

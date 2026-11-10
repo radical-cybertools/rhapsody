@@ -60,7 +60,6 @@ class BackendRegistry:
                 # Derive backend name from class name
                 # ConcurrentExecutionBackend -> concurrent
                 # DaskExecutionBackend -> dask
-                # RadicalExecutionBackend -> radical_pilot
                 # DragonExecutionBackend -> dragon
                 backend_name = cls._derive_backend_name(class_name)
 
@@ -79,11 +78,9 @@ class BackendRegistry:
     def _derive_backend_name(cls, class_name: str) -> str:
         """Derive backend name from class name.
 
-        Converts CamelCase class names to snake_case backend names.
-        Special handling for known patterns:
+        Converts CamelCase class names to snake_case backend names, for example:
         - ConcurrentExecutionBackend -> concurrent
         - DaskExecutionBackend -> dask
-        - RadicalExecutionBackend -> radical_pilot
         - DragonExecutionBackend -> dragon
 
         Args:
@@ -104,10 +101,6 @@ class BackendRegistry:
         # Convert CamelCase to snake_case
         # Insert underscore before uppercase letters (except first)
         name = re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
-
-        # Special case: "radical" should become "radical_pilot"
-        if name == "radical":
-            name = "radical_pilot"
 
         return name
 
@@ -180,9 +173,6 @@ def get_backend(backend_name: str, *args: Any, **kwargs: Any) -> BaseBackend:
     Example:
         # Dask backend
         backend = get_backend('dask', resources={'threads': 4})
-
-        # RADICAL-Pilot backend
-        backend = get_backend('radical_pilot')
     """
     backend_class = BackendRegistry.get_backend_class(backend_name)
     return backend_class(*args, **kwargs)

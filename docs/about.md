@@ -47,7 +47,7 @@ The system supports multiple execution backends, each optimized for different sc
 
 - **Concurrent Backend**: For shared-memory parallel execution
 - **Dask Backend**: For distributed Python workloads
-- **RADICAL-Pilot Backend**: For large-scale HPC execution
+- **Dragon Backend**: For large-scale HPC execution
 
 ### AsyncFlow Integration
 

@@ -177,7 +177,7 @@ class BaseBackend(ABC):
             data-dependency descriptor containing at least ``"target"``: the
             file's name or path at the destination. Callers such as AsyncFlow
             use it to avoid staging the same file twice. Backends may add their
-            own keys (e.g. RADICAL-Pilot's ``"source"`` and ``"action"``).
+            own keys (e.g. a staging ``"source"`` or ``"action"``).
         """
         pass
 
@@ -198,7 +198,7 @@ class BaseBackend(ABC):
         """Return True if this backend's runtime dependencies are importable.
 
         Used by :func:`rhapsody.backends.discover_backends`. A backend module imports even when
-        its optional runtime (Dragon, Dask, RADICAL-Pilot, ...) is missing, so backends with
+        its optional runtime (Dragon, Dask, Orbit, ...) is missing, so backends with
         optional dependencies override this to report whether they can actually be created.
         """
         return True

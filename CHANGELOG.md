@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Removed
+
+- **RADICAL-Pilot backend** — `RadicalExecutionBackend`
+  (`rhapsody.backends.execution.radical_pilot`) and its tests are removed, along with the
+  `radical_pilot` extra, its `rhapsody.backends` entry point, the `radical_pilot` pytest
+  marker, the `make test-rp` target and the RADICAL-Pilot sections of the docs and skills.
+  `discover_backends()` and `BackendRegistry` no longer report a `radical_pilot` backend.
+  For HPC execution, use `DragonExecutionBackend`. The data-linking hooks on `BaseBackend`
+  (`supports_implicit_data_linking`, `supports_explicit_data_linking`,
+  `link_implicit_data_deps`, `link_explicit_data_deps`) stay as a backend-neutral extension
+  point; no built-in backend declares them now.
+
+- **`radical.prof` profiling in `OrbitExecutionBackend`** — the optional, undeclared
+  `radical.prof` import (the radical.utils-style `Profiler`) and its `task_submit`,
+  `task_batch_flush` and `task_complete` events are removed. Orbit task execution is
+  unchanged.
+
 
 ## [0.7.0] 2026-11-09
 
