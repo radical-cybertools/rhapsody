@@ -160,19 +160,6 @@ The broker bearer token is resolved the same way as the URL, from
     fast on a mismatch). Executable and import-path tasks are unaffected.
     The `orbit` extra itself requires Python >= 3.10.
 
-### RADICAL-Pilot Backend
-Large-scale HPC execution using RADICAL-Pilot.
-
-```python
-RadicalExecutionBackend(
-    resources={
-        "resource": "local.localhost",
-        "runtime": 30, # minutes
-        "cores": 128
-    }
-)
-```
-
 ## Logging and Working Directory
 
 Enable RHAPSODY's logging programmatically, before creating backends:

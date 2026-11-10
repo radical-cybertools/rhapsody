@@ -32,7 +32,6 @@ EXTRAS = {
     "noop": None,
     "dask": "dask",
     "dragon": "dragon",
-    "radical_pilot": "radical_pilot",
     "orbit": "orbit",
 }
 
@@ -56,11 +55,6 @@ API = {
     "DragonExecutionBackend": (
         "rhapsody.backends.execution.dragon",
         "DragonExecutionBackend",
-        "__init__",
-    ),
-    "RadicalExecutionBackend": (
-        "rhapsody.backends.execution.radical_pilot",
-        "RadicalExecutionBackend",
         "__init__",
     ),
     "OrbitExecutionBackend": (

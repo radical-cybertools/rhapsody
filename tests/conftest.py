@@ -145,13 +145,6 @@ def skip_if_no_dask(backend_availability):
 
 
 @pytest.fixture
-def skip_if_no_radical_pilot(backend_availability):
-    """Fixture that skips test if RADICAL-Pilot backend is not available."""
-    if not backend_availability.get("radical_pilot", False):
-        pytest.skip("RADICAL-Pilot backend not available")
-
-
-@pytest.fixture
 async def test_backend(skip_if_no_backends, mock_task_callback):
     """Fixture providing a configured backend for testing.
 
@@ -162,10 +155,7 @@ async def test_backend(skip_if_no_backends, mock_task_callback):
 
     try:
         # Initialize backend
-        if backend_name == "radical_pilot":
-            backend = rhapsody.get_backend(backend_name, resources={})
-        else:
-            backend = rhapsody.get_backend(backend_name)
+        backend = rhapsody.get_backend(backend_name)
 
         # Handle async initialization
         if hasattr(backend, "__await__"):

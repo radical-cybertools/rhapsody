@@ -36,11 +36,6 @@ except ImportError as exc:
     EndpointRuntime = None
     _radical_orbit_import_error = exc
 
-try:
-    import radical.prof as rprof
-except ImportError:
-    rprof = None
-
 _TASK_TOPICS = ("task_status", "task_status_batch")
 
 
@@ -202,9 +197,6 @@ class OrbitExecutionBackend(BaseBackend):
         # Background (timer-triggered) flush tasks, awaited on shutdown so a
         # batch that is mid-send is never dropped.
         self._inflight_flushes: set[asyncio.Task] = set()
-
-        # -- profiling --
-        self._prof = rprof.Profiler("client.task", ns="radical.orbit") if rprof else None
 
     # ------------------------------------------------------------------
     # Async init
@@ -397,10 +389,6 @@ class OrbitExecutionBackend(BaseBackend):
             if key in body:
                 task[key] = body[key]
 
-        # Profile task completion on client side
-        if self._prof:
-            self._prof.prof("task_complete", uid=uid, state=state)
-
         # Already on the event-loop thread (dispatched from
         # _on_task_notification via call_soon_threadsafe), so fire directly.
         self._fire_callback(task, state)
@@ -478,8 +466,8 @@ class OrbitExecutionBackend(BaseBackend):
             self._broker_url = rt.broker_url
 
             # pool mode: the dispatcher lives on the broker participant, so
-            # there is no endpoint to select -- the pool's pilots pick the
-            # executing endpoints, not this backend
+            # there is no endpoint to select -- the pool picks the executing
+            # endpoints, not this backend
             if self._pool and not self._endpoint_name:
                 self._endpoint_name = "broker"
 
@@ -636,10 +624,9 @@ class OrbitExecutionBackend(BaseBackend):
         # orphaned ``ensure_future`` task and never reach the awaiter.
         await self._check_python_compat(tasks)
 
-        # Assign UIDs, register locally, emit submit prof events — single pass
+        # Assign UIDs and register locally — single pass
         import uuid
 
-        prof = self._prof
         for task in tasks:
             task.setdefault("uid", f"task.{uuid.uuid4().hex[:8]}")
             # pool mode: route every task into this backend's pool; a task
@@ -647,8 +634,6 @@ class OrbitExecutionBackend(BaseBackend):
             if self._pool:
                 task.setdefault("pool", self._pool)
             self._tasks[task["uid"]] = task
-            if prof:
-                prof.prof("task_submit", uid=task["uid"])
 
         # No batching — submit immediately
         if self._batch_window <= 0:
@@ -731,11 +716,6 @@ class OrbitExecutionBackend(BaseBackend):
 
         # NOTE: compat is validated up front in submit_tasks(); buffered tasks
         # are already known-good by the time they reach the flush.
-
-        prof = self._prof
-        if prof:
-            for t in batch:
-                prof.prof("task_batch_flush", uid=t.get("uid", "?"))
 
         self.logger.debug("Flushing batch of %d tasks", len(batch))
         async with self._send_lock:
@@ -855,9 +835,6 @@ class OrbitExecutionBackend(BaseBackend):
             except Exception as e:
                 self.logger.warning("Failed to stop endpoint runtime: %s", e)
             self._runtime = None
-
-        if self._prof:
-            self._prof.close()
 
         self.logger.info("Orbit execution backend shutdown complete")
 

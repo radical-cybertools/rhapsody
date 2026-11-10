@@ -8,7 +8,7 @@ The skills guide the agent and point it to RHAPSODY's own documentation, example
 
 | Skill | Use it for | Status |
 |---|---|---|
-| [`rhapsody-execution`](rhapsody-execution/SKILL.md) | Choose and configure a backend (Concurrent, Dask, Dragon, RADICAL-Pilot, Orbit), define and submit workloads of `ComputeTask`s, set per-task resources and CPU/GPU affinity, monitor and collect results, handle failures and retries | Released (RHAPSODY 0.7.0) |
+| [`rhapsody-execution`](rhapsody-execution/SKILL.md) | Choose and configure a backend (Concurrent, Dask, Dragon, Orbit), define and submit workloads of `ComputeTask`s, set per-task resources and CPU/GPU affinity, monitor and collect results, handle failures and retries | Released (RHAPSODY 0.7.0) |
 | `rhapsody-telemetry` | Enable, monitor and export telemetry; diagnose runs | Planned |
 | `rhapsody-performance` | Throughput and overhead experiments, strong/weak scaling, comparing configurations | Planned |
 | `rhapsody-ai-hpc` | `AITask` and inference backends, coupling simulation with inference | Planned |
@@ -119,4 +119,4 @@ pre-commit run --files $(find skills -type f)
 - MPI jobs with `pmi="pmix"`/`"cray"`.
 - GPU affinity with `Policy(gpu_affinity=...)` and Dask GPU scheduling: there were no GPUs, so placement was never observed.
 - Dask on a batch-scheduler cluster.
-- RADICAL-Pilot and Orbit, which were not installed.
+- Orbit, which was not installed.

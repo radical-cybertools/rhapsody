@@ -103,10 +103,6 @@ test-dask:  ## Run Dask backend tests only
 	@echo "Running Dask tests..."
 	@$(PYTHON) -m pytest tests/unit/test_backend_execution_dask_parallel.py -xvs
 
-test-rp:  ## Run RADICAL-Pilot backend tests only
-	@echo "Running RADICAL-Pilot tests..."
-	@$(PYTHON) -m pytest tests/unit/test_backend_execution_radical_pilot.py -xvs
-
 test-concurrent:  ## Run Concurrent backend tests only
 	@echo "Running Concurrent tests..."
 	@$(PYTHON) -m pytest tests/unit/test_backend_base.py -xvs

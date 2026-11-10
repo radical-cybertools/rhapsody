@@ -32,8 +32,8 @@ def test_discover_backends():
     available = rhapsody.discover_backends()
 
     # These should always be available
+    assert "concurrent" in available
     assert "dask" in available  # May be True or False
-    assert "radical_pilot" in available  # May be True or False
 
     print(f"Available backends: {available}")
 
@@ -43,7 +43,7 @@ def test_backend_registry():
     registry = rhapsody.BackendRegistry
 
     backends = registry.list_backends()
-    assert len(backends) >= 2  # At least dask and radical_pilot
+    assert len(backends) >= 2  # At least concurrent and dask
 
     # Test getting a backend class for each available backend
     for backend_name in backends:
@@ -62,8 +62,8 @@ def test_backend_registry_list_backends():
     backends = registry.list_backends()
     assert isinstance(backends, list)
     assert len(backends) >= 2
+    assert "concurrent" in backends
     assert "dask" in backends
-    assert "radical_pilot" in backends
 
 
 def test_backend_registry_get_backend_class():
@@ -71,7 +71,7 @@ def test_backend_registry_get_backend_class():
     registry = rhapsody.BackendRegistry
 
     # Test successful retrieval for known backends
-    for backend_name in ["dask", "radical_pilot"]:
+    for backend_name in ["concurrent", "dask"]:
         try:
             backend_class = registry.get_backend_class(backend_name)
             assert backend_class is not None
@@ -145,17 +145,7 @@ def test_get_backend_with_arguments():
         pytest.skip("No backends available for testing")
 
     try:
-        if available_backend == "radical_pilot":
-            # RADICAL-Pilot requires resources
-            test_resources = {
-                "resource": "local.localhost",
-                "runtime": 1,
-                "cores": 1,
-            }
-            backend = get_backend(available_backend, test_resources)
-        else:
-            # Other backends (like dask)
-            backend = get_backend(available_backend)
+        backend = get_backend(available_backend)
 
         assert backend is not None
 
@@ -190,7 +180,7 @@ def test_discover_backends_return_format():
     assert isinstance(available, dict)
 
     # Should contain expected backends
-    expected_backends = ["dask", "radical_pilot"]
+    expected_backends = ["concurrent", "dask"]
     for backend in expected_backends:
         assert backend in available
         assert isinstance(available[backend], bool)
@@ -282,7 +272,6 @@ def test_backend_registry_backend_path_parsing():
 _RUNTIME_SENTINELS = [
     ("dask", "rhapsody.backends.execution.dask_parallel", "dask"),
     ("dragon", "rhapsody.backends.execution.dragon", "Batch"),
-    ("radical_pilot", "rhapsody.backends.execution.radical_pilot", "rp"),
     ("orbit", "rhapsody.backends.execution.orbit", "EndpointRuntime"),
 ]
 
@@ -304,8 +293,6 @@ def test_discover_backends_reports_present_runtime(monkeypatch, name, module, at
 
     mod = importlib.import_module(module)
     monkeypatch.setattr(mod, attr, object())
-    if name == "radical_pilot":
-        monkeypatch.setattr(mod, "ru", object())
 
     assert rhapsody.discover_backends()[name] is True
 

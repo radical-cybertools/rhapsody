@@ -17,7 +17,7 @@ pip install rhapsody-py
 
 ## Complete Installation (Recommended)
 
-To install RHAPSODY with all optional backends and dependencies (Dragon, Dask, RADICAL-Pilot, etc.):
+To install RHAPSODY with all optional backends and dependencies (Dragon, Dask, Orbit, etc.):
 
 ```bash
 pip install "rhapsody-py[all]"
@@ -31,7 +31,6 @@ pip install "rhapsody-py[all]"
 You can also install specific backend supports individually:
 
 - **Dask**: `pip install "rhapsody-py[dask]"`
-- **RADICAL-Pilot**: `pip install "rhapsody-py[radical_pilot]"`
 - **Dragon**: `pip install "rhapsody-py[dragon]"`
 - **Orbit**: `pip install "rhapsody-py[orbit]"` (requires Python >= 3.10)
 - **Dragon AI (vLLM) Inference**: `pip install "rhapsody-py[ai]"`
