@@ -249,6 +249,83 @@ async def test_shutdown_waits_for_a_blocked_immediate_send():
 
 
 @pytest.mark.asyncio
+async def test_immediate_submits_during_a_send_go_out_together():
+    """With batch_window=0, tasks submitted while a send is in flight are sent in one following
+    request, in order, instead of one request each: one request per round trip would cap the backend
+    at one task per round trip."""
+    backend = await _init_backend(batch_window=0)
+    release = threading.Event()
+    batches = []
+
+    def send(batch):
+        release.wait(5)
+        batches.append([t["uid"] for t in batch])
+
+    backend._mock_rh.submit_tasks.side_effect = send
+    await backend.submit_tasks([{"uid": "t.0", "executable": "/bin/true"}])
+    await asyncio.sleep(0.05)  # t.0's send is in flight
+    for i in range(1, 5):
+        await backend.submit_tasks([{"uid": f"t.{i}", "executable": "/bin/true"}])
+    release.set()
+    await backend.shutdown()
+    assert batches == [["t.0"], ["t.1", "t.2", "t.3", "t.4"]]
+
+
+@pytest.mark.asyncio
+async def test_immediate_sends_never_overlap():
+    backend = await _init_backend(batch_window=0)
+    active, peak, guard = [0], [0], threading.Lock()
+
+    def send(batch):
+        with guard:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        time.sleep(0.01)
+        with guard:
+            active[0] -= 1
+
+    backend._mock_rh.submit_tasks.side_effect = send
+    for i in range(20):
+        await backend.submit_tasks([{"uid": f"t.{i}", "executable": "/bin/true"}])
+        await asyncio.sleep(0.003)
+    await backend.shutdown()
+    assert peak[0] == 1
+    sent = [t["uid"] for c in backend._mock_rh.submit_tasks.call_args_list for t in c[0][0]]
+    assert sent == [f"t.{i}" for i in range(20)]
+
+
+@pytest.mark.asyncio
+async def test_immediate_submit_at_low_load_is_sent_at_once():
+    backend = await _init_backend(batch_window=0)
+    for i in range(2):
+        await backend.submit_tasks([{"uid": f"t.{i}", "executable": "/bin/true"}])
+        await _sent(backend)  # nothing in flight before the next submit
+    calls = backend._mock_rh.submit_tasks.call_args_list
+    assert [[t["uid"] for t in c[0][0]] for c in calls] == [["t.0"], ["t.1"]]
+    await backend.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_sends_waiting_immediate_submits():
+    """Tasks waiting behind a send in flight are sent before shutdown closes the client."""
+    backend = await _init_backend(batch_window=0)
+    release = threading.Event()
+    order = []
+
+    def send(batch):
+        release.wait(5)
+        order.extend(t["uid"] for t in batch)
+
+    backend._mock_rh.submit_tasks.side_effect = send
+    backend._mock_rh.close.side_effect = lambda: order.append("close")
+    for i in range(3):
+        await backend.submit_tasks([{"uid": f"t.{i}", "executable": "/bin/true"}])
+    threading.Timer(0.2, release.set).start()
+    await backend.shutdown()
+    assert order == ["t.0", "t.1", "t.2", "close"]
+
+
+@pytest.mark.asyncio
 async def test_submit_tasks_sets_running_state():
     backend = await _init_backend()
     assert await backend.state() == "INITIALIZED"
@@ -649,7 +726,8 @@ async def test_python_compat_caches_first_lookup():
         )
 
     await _sent(backend)
-    assert backend._mock_rh.submit_tasks.call_count == 3
+    sent = [t["uid"] for c in backend._mock_rh.submit_tasks.call_args_list for t in c[0][0]]
+    assert sent == ["t.0", "t.1", "t.2"]  # sends may coalesce
     backend._mock_sysinfo.host_role.assert_called_once()
 
 
