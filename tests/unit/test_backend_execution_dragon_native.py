@@ -173,7 +173,10 @@ class FakeDragon:
                     with_suppress(lambda: self.popen.send_signal(sig))
                 else:
                     if self.target is worker_module.worker_main:
-                        self.args[1].put(None)  # let the worker thread end after its task
+                        try:
+                            self.args[1].put(None)  # let the worker thread end after its task
+                        except Exception:  # noqa: BLE001 - a test broke the inbox; a kill still kills
+                            pass
                     self._exit(-sig)
 
             def join(self, timeout=None):
@@ -242,7 +245,7 @@ class FakeDragon:
                 self.policy = policy
                 self.destroyed = False
 
-            def put(self, obj, block=True, timeout=None):
+            def put(self, obj, block=True, timeout=None, flush=False):
                 self.q.put(obj)
 
             def get(self, block=True, timeout=None):
@@ -587,6 +590,28 @@ async def test_failing_function_reports_exception_and_traceback(backend):
     assert "boom-from-task" in task["stderr"] and "Traceback" in task["stderr"]
 
 
+async def test_task_with_the_uid_of_an_unfinished_task_fails(backend):
+    """The second task used to replace the first in the backend: the first never ended."""
+    rec = Recorder(backend)
+    first = fn_task(blocked)
+    second = dict(fn_task(square, 2), uid=first["uid"])
+    third = dict(fn_task(square, 3), uid=first["uid"])
+    await backend.submit_tasks([first, second])
+    await backend.submit_tasks([third])
+    for task in (second, third):
+        assert isinstance(task["exception"], ValueError)
+        assert "has not finished" in task["stderr"]
+    GATE.set()
+    await until(lambda: "return_value" in first)
+    assert first["return_value"] == "released"
+    states = [s for u, s, _ in rec.records if u == first["uid"]]
+    assert states == ["RUNNING", "FAILED", "FAILED", "DONE"]
+    again = dict(fn_task(square, 4), uid=first["uid"])
+    await backend.submit_tasks([again])
+    await until(lambda: "return_value" in again)
+    assert again["return_value"] == 16
+
+
 async def test_unpicklable_result_fails_only_its_task(backend):
     rec = Recorder(backend)
     bad, good = fn_task(lambda: threading.Lock()), fn_task(square, 2)
@@ -767,16 +792,79 @@ def broken_put(obj, block=True, timeout=None):
     raise RuntimeError("inbox is gone")
 
 
-async def test_failed_send_replaces_the_worker_not_the_task(backend, dragon, monkeypatch):
-    """With every inbox broken, the task waits for a new worker and runs there."""
+async def test_failed_send_replaces_the_worker_and_moves_the_task_to_another_host(
+    backend, dragon, monkeypatch
+):
+    """The task does not wait for the replacement while a worker on another node is idle."""
+    rec = Recorder(backend)
+    n0 = [w for w in backend._workers.values() if w.host == "n0"]
+    for w in n0:
+        monkeypatch.setattr(w.inbox, "put", broken_put)
+    first = backend._idle[("n0", ())][0]
+    task = fn_task(square, 3)
+    await backend.submit_tasks([task])
+    assert await rec.wait(task["uid"]) == ["DONE"]
+    assert task["return_value"] == 9
+    assert first.state == "dead" and [w.state for w in n0 if w is not first] == ["idle"]
+    await until(lambda: len(dragon.workers()) == 5)
+
+
+async def test_failed_send_goes_to_an_idle_worker_when_the_replacement_cannot_start(
+    backend, dragon, monkeypatch
+):
+    """A task used to wait for its broken worker's replacement while another worker sat idle.
+
+    When that replacement failed to start, nothing was left to run the task, and it never ended.
+    """
+    rec = Recorder(backend)
+    broken, healthy = backend._idle[("n0", ())]
+    monkeypatch.setattr(broken.inbox, "put", broken_put)
+
+    def no_inbox(*args, **kwargs):
+        raise RuntimeError("cannot make a channel on n0")
+
+    monkeypatch.setattr(dragon_native, "Queue", no_inbox)
+    task = fn_task(square, 4, placement={"host": "n0"})
+    await backend.submit_tasks([task])
+    assert await rec.wait(task["uid"]) == ["DONE"]
+    assert task["return_value"] == 16
+    assert (broken.state, healthy.state) == ("dead", "idle")
+
+
+async def test_a_stalled_send_times_out_and_the_task_runs_elsewhere(backend, monkeypatch):
+    """A put that never returned used to hold the backend's lock, and so the backend, for good."""
+    monkeypatch.setattr(dragon_native, "_SEND_TIMEOUT", 0.2)
+    rec = Recorder(backend)
+    stalled, healthy = backend._idle[("n0", ())]
+    timeouts = []
+
+    def stalled_put(obj, block=True, timeout=None):
+        if obj is not None:  # not the fake kill's stop message
+            timeouts.append(timeout)
+            threading.Event().wait(5.0 if timeout is None else timeout)
+        raise queue.Full
+
+    monkeypatch.setattr(stalled.inbox, "put", stalled_put)
+    task = fn_task(square, 5, placement={"host": "n0"})
+    t0 = time.monotonic()
+    await backend.submit_tasks([task])
+    assert time.monotonic() - t0 < 2.0
+    assert await rec.wait(task["uid"]) == ["DONE"]
+    assert timeouts == [0.2]
+    assert (stalled.state, healthy.state) == ("dead", "idle")
+
+
+async def test_a_task_whose_send_fails_on_two_hosts_fails(backend, dragon, monkeypatch):
+    """Each of the two workers is replaced, and the task tries no third."""
     rec = Recorder(backend)
     for w in backend._workers.values():
         monkeypatch.setattr(w.inbox, "put", broken_put)
     task = fn_task(square, 3)
     await backend.submit_tasks([task])
-    assert await rec.wait(task["uid"]) == ["DONE"]
-    assert task["return_value"] == 9
-    assert len(dragon.workers()) == 5
+    assert await rec.wait(task["uid"]) == ["FAILED"]
+    assert "inbox is gone" in task["stderr"]
+    await until(lambda: len(dragon.workers()) == 6)
+    assert sorted(w.host for w in dragon.workers()[4:]) == ["n0", "n1"]
 
 
 async def test_broken_inbox_with_a_long_queue_behind_it(dragon, tmp_path, monkeypatch):
@@ -812,10 +900,10 @@ async def test_task_no_inbox_takes_fails_after_two_workers(backend, dragon, monk
     bad, good = fn_task(square, 1), [fn_task(square, i) for i in range(2, 7)]
     put = dragon.Queue.put
 
-    def put_all_but_bad(self, obj, block=True, timeout=None):
+    def put_all_but_bad(self, obj, block=True, timeout=None, flush=False):
         if isinstance(obj, bytes) and cloudpickle.loads(obj)[0] == bad["uid"]:
             raise RuntimeError("cannot send this one")
-        put(self, obj, block, timeout)
+        put(self, obj, block, timeout, flush)
 
     monkeypatch.setattr(dragon.Queue, "put", put_all_but_bad)
     await backend.submit_tasks([bad, *good])
@@ -1044,21 +1132,44 @@ async def test_function_process_that_exits_non_zero_after_its_result_fails(backe
     assert fields["exception"].exit_code == 139
 
 
-async def test_function_process_that_raised_reports_its_error_when_the_result_is_late(
+@pytest.mark.parametrize("fn, args, state", [(square, (6,), "DONE"), (boom, (), "FAILED")])
+async def test_function_process_result_behind_a_backlog_is_kept(
+    backend, monkeypatch, fn, args, state
+):
+    """The result thread takes a while to apply the batch that holds the result: the task waits.
+
+    The wait used to end 30 s after the exit, and dropped a result that came later.
+    """
+    handle = backend._handle_messages
+
+    def slow(items):
+        if any(raw and cloudpickle.loads(raw)[0] == worker_module.RESULT for raw in items):
+            time.sleep(1.5)
+        return handle(items)
+
+    monkeypatch.setattr(backend, "_handle_messages", slow)
+    rec = Recorder(backend)
+    task = fn_task(fn, *args, task_backend_specific_kwargs={"process_template": {}})
+    await backend.submit_tasks([task])
+    assert await rec.wait(task["uid"]) == [state]
+    if state == "DONE":
+        assert task["return_value"] == 36
+    else:
+        assert isinstance(task["exception"], ValueError)
+
+
+async def test_function_process_that_sent_no_result_fails_once_the_queue_is_drained(
     backend, monkeypatch
 ):
-    """Under load the result can arrive well after the process exited with 1."""
-    send = worker_module.send
-
-    def late_send(results, msg, value_index):
-        threading.Timer(1.5, send, (results, msg, value_index)).start()
-
-    monkeypatch.setattr(worker_module, "send", late_send)
+    """It exited with 0 and sent nothing: it fails within seconds, and does not wait for good."""
+    monkeypatch.setattr(worker_module, "send", lambda *args, **kwargs: None)
     rec = Recorder(backend)
-    task = fn_task(boom, task_backend_specific_kwargs={"process_template": {}})
+    task = fn_task(square, 2, task_backend_specific_kwargs={"process_template": {}})
+    t0 = time.monotonic()
     await backend.submit_tasks([task])
     assert await rec.wait(task["uid"]) == ["FAILED"]
-    assert isinstance(task["exception"], ValueError)
+    assert time.monotonic() - t0 < 5.0
+    assert task["exit_code"] == 0 and "without a result" in task["stderr"]
 
 
 async def test_function_with_process_template_returns_its_value(backend):
@@ -1930,12 +2041,14 @@ class FullPool:
 
     def __init__(self, error, failures=0, limit=10**6):
         self.error, self.failures, self.limit, self.items = error, failures, limit, []
+        self.flushed = None
 
-    def put(self, raw):
+    def put(self, raw, flush=False):
         if self.failures > 0 or len(raw) > self.limit:
             self.failures -= 1
             raise self.error
         self.items.append(cloudpickle.loads(raw))
+        self.flushed = flush
 
 
 def done_message(value):
@@ -1962,6 +2075,17 @@ def test_worker_reports_a_pool_that_stays_full(pool_full, monkeypatch):
     msg = dragon_native._load_value(results.items[0])
     assert msg[3] is False and "pool is full" in str(msg[4])
     assert msg[6:] == ("", "", 0.0)
+
+
+def test_function_process_flushes_its_result_before_it_exits():
+    """A remote put returns once Dragon's transport has the result, unless it is flushed.
+
+    Without the flush, the client could not tell a late result from a missing one.
+    """
+    results = FullPool(RuntimeError("unused"))
+    worker_module.run_function_process(results, "u", square, (3,), {}, None, None)
+    assert dragon_native._load_value(results.items[0]) == (worker_module.RESULT, "u", True, 9, None)
+    assert results.flushed is True
 
 
 def test_worker_reports_a_result_that_can_never_fit_at_once(pool_full):

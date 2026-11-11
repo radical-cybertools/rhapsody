@@ -87,17 +87,18 @@ def pack(msg, value_index):
     return cloudpickle.dumps(tuple(msg))
 
 
-def put_waiting(results, raw):
+def put_waiting(results, raw, flush=False):
     """Put ``raw`` on ``results``, waiting for room: on a full pool, Dragon raises and does not
     wait.
 
-    The room comes back as the client takes earlier results off the queue.
+    The room comes back as the client takes earlier results off the queue. With ``flush``, the
+    put returns only once the queue holds ``raw``, not when Dragon's transport has taken it.
     """
     deadline = time.monotonic() + PUT_PATIENCE
     delay = 0.01
     while True:
         try:
-            results.put(raw)
+            results.put(raw, flush=flush)
             return
         except PoolFull:
             if time.monotonic() >= deadline:
@@ -106,18 +107,18 @@ def put_waiting(results, raw):
             delay = min(delay * 2, 1.0)
 
 
-def send(results, msg, value_index):
+def send(results, msg, value_index, flush=False):
     """Send a result message; one that Dragon cannot take fails its task, not the worker."""
     raw = pack(msg, value_index)
     try:
-        put_waiting(results, raw)
+        put_waiting(results, raw, flush)
     except Exception as exc:  # noqa: BLE001 - the error goes back to the client
         fields = list(msg)
         fields[value_index] = RuntimeError(f"cannot send {len(raw)} bytes of results: {exc}")
         fields[value_index - 1] = False
         output = slice(value_index + 2, value_index + 4)  # stdout and stderr, maybe the reason
         fields[output] = [""] * len(fields[output])
-        put_waiting(results, pack(tuple(fields), value_index))
+        put_waiting(results, pack(tuple(fields), value_index), flush)
 
 
 def _open_append(path):
@@ -256,12 +257,13 @@ def run_function_process(results, uid, fn, args, kwargs, out_path, err_path):
     """Run a function task in its own Dragon process and send its return value to ``results``.
 
     Output is appended to ``out_path``/``err_path`` when they are set. A raised exception is sent,
-    then re-raised, so Dragon prints its traceback to stderr and the process exits with 1.
+    then re-raised, so Dragon prints its traceback to stderr and the process exits with 1. The
+    result is flushed, so it is on the queue before the process exits.
     """
     if out_path:
         _redirect_for_good(out_path, err_path)
     ok, value, tb = outcome(fn, args, kwargs)
-    send(results, (RESULT, uid, ok, value, tb), 3)
+    send(results, (RESULT, uid, ok, value, tb), 3, flush=True)
     if not ok:
         raise value
 

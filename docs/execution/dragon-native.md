@@ -59,8 +59,10 @@ Install it with the `dragon` extra, and start your script with the Dragon launch
   pool until the client takes them: on a full pool a worker waits up to 60 s for room, and a result
   that does not fit then, or could never fit, fails its task with Dragon's error. Sending a task
   waits the same way: on a full pool the client holds the task and its worker, tries again with a
-  backoff, and fails the task only after 60 s. A send that fails for any other reason replaces the
-  worker, and the task goes to another; it fails only if that send fails too. The pool is 4 GiB
+  backoff, and fails the task only after 60 s. A send that fails for any other reason, or takes
+  more than 10 s, replaces the worker, and the task goes to the next idle worker, or waits for one;
+  it fails only if that send fails too. A function with a `process_template` flushes its result
+  onto the queue before it exits, so the client knows when one is missing. The pool is 4 GiB
   per node by default (`DRAGON_DEFAULT_SEG_SZ`), so workers that finish together should return much
   less than that between them; write larger results to files.
 - **Process tasks.** One thread per running process or group task starts it and joins it. At most
@@ -243,6 +245,8 @@ MPI, so set `"pmi": "none"` for jobs that don't: it logs neither warning.
 - **Bad placements fail only their task.** Hosts and GPU ids in a `placement` or a `policy` are
   checked against Dragon's nodes before anything is submitted: Dragon aborts the whole runtime on
   an unknown host and silently drops unknown GPU ids.
+- **A uid in use fails its task.** A task submitted while another task with its uid has not
+  finished fails with `ValueError`, and the first runs on.
 - **Dead workers are noticed.** A worker that dies on its own fails its task with the exit code,
   and is replaced (once: a replacement that dies before it is ready is not replaced again).
 - **The garbage collector.** Dragon's `gs_request` turns Python's garbage collector off at the start
@@ -264,8 +268,9 @@ group on the runtime's nodes and does not use Batch. See [Telemetry](../telemetr
 
 - **A result store.** Results travel inline on the queue; there is no DDict for large values.
 - **Per-task isolation in the pool.** As with Batch's workers, tasks in one worker share its
-  interpreter: imported modules and global state persist between tasks. The backend restores the
-  working directory and its token variable after each task, nothing else.
+  interpreter: imported modules, global state, environment variables, threads and signal handlers
+  persist between tasks. The backend restores the working directory and its token variable after
+  each task, nothing else.
 - **Data linking.** `link_implicit_data_deps` and `link_explicit_data_deps` are not implemented, as
   in `DragonExecutionBackend`.
 - **Resource usage per task** (peak memory, CPU time).
