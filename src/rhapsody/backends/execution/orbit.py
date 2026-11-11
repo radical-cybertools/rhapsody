@@ -13,6 +13,7 @@ wait, batch notifications) are inherited automatically.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 from typing import Any
@@ -108,9 +109,11 @@ class OrbitExecutionBackend(BaseBackend):
                        this backend should see, or ``pools`` to declare
                        them.
         batch_window:  Seconds to collect tasks before flushing
-                       (default 0.25).  Set to 0 to disable batching.
+                       (default 0.25).  Set to 0 to send each call at
+                       once; calls made while a send is in flight then go
+                       out together in the next request.
         batch_limit:   Max tasks per batch — triggers an immediate flush
-                       when reached (default 1024).
+                       when reached (default 1024; batching mode only).
         start_timeout: Seconds to wait for broker registration and the
                        first topology frame (default 30).
         init_timeout:  Seconds to wait for the remote session to become
@@ -201,6 +204,9 @@ class OrbitExecutionBackend(BaseBackend):
         # submits), awaited on shutdown so a batch that is mid-send is never
         # dropped.
         self._inflight_flushes: set[asyncio.Task] = set()
+        # With batch_window <= 0, the one task that sends `_batch_buffer`
+        # (see _drain_immediate).
+        self._drainer: asyncio.Task | None = None
 
         # -- profiling --
         self._prof = rprof.Profiler("client.task", ns="radical.orbit") if rprof else None
@@ -663,10 +669,12 @@ class OrbitExecutionBackend(BaseBackend):
         buffer reaches ``batch_limit``.  This turns many small individual
         submissions into fewer bulk HTTP requests.
 
-        When batching is disabled (batch_window == 0), each call is sent
-        right away, but as a background task: this returns once the tasks are
-        registered, and a failed send reports the tasks FAILED through the
-        callback instead of raising here.  A slow or lost endpoint therefore
+        When batching is disabled (batch_window <= 0), each call is sent
+        right away, and calls made while a send is in flight go out
+        together in the next request.  Sending runs as a background task:
+        this returns once the tasks are registered, and a failed send
+        reports the tasks FAILED through the callback instead of raising
+        here.  A slow or lost endpoint therefore
         never holds the caller (asyncflow's run loop awaits this method).
         """
         if not self._initialized:
@@ -700,7 +708,10 @@ class OrbitExecutionBackend(BaseBackend):
         # must not wait while a slow or lost endpoint holds the request.  A
         # failed send marks the tasks FAILED (see _send_batch).
         if self._batch_window <= 0:
-            self._spawn_send(self._send_batch([dict(t) for t in tasks]))
+            async with self._batch_lock:
+                self._batch_buffer.extend(dict(t) for t in tasks)
+            if self._drainer is None or self._drainer.done():
+                self._drainer = self._spawn_send(self._drain_immediate())
             return
 
         # Batching — collect and, if the buffer is now full, flush inline.
@@ -729,7 +740,7 @@ class OrbitExecutionBackend(BaseBackend):
         """
         self._spawn_send(self._locked_flush())
 
-    def _spawn_send(self, coro) -> None:
+    def _spawn_send(self, coro) -> asyncio.Task:
         """Run a send as a tracked background task.
 
         Tracked in ``_inflight_flushes`` so ``shutdown`` can await it.  Sends
@@ -738,6 +749,7 @@ class OrbitExecutionBackend(BaseBackend):
         task = asyncio.ensure_future(coro)
         self._inflight_flushes.add(task)
         task.add_done_callback(self._on_flush_done)
+        return task
 
     def _on_flush_done(self, task: asyncio.Task) -> None:
         """Untrack a finished background send and retrieve its exception.
@@ -751,6 +763,19 @@ class OrbitExecutionBackend(BaseBackend):
             exc = task.exception()
             if exc is not None:
                 self.logger.debug("background send failed: %s", exc)
+
+    async def _drain_immediate(self):
+        """Send the buffer until it is empty (batch_window <= 0).
+
+        The first call is sent at once; tasks submitted while a send is in flight go out together in
+        the next request instead of one request each, so a backend is not capped at one task per
+        round trip.  One drainer at a time keeps the order; the buffer keeps cancel, cancel-all and
+        shutdown working as in batching mode.
+        """
+        while self._batch_buffer:
+            # a failed send is logged and its tasks failed by _send_batch
+            with contextlib.suppress(Exception):
+                await self._locked_flush()
 
     async def _locked_flush(self):
         """Detach the buffered batch under the batch lock, then send it unlocked."""
