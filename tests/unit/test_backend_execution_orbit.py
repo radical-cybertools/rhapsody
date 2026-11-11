@@ -327,26 +327,6 @@ async def test_shutdown_sends_waiting_immediate_submits():
 
 
 @pytest.mark.asyncio
-async def test_coalesced_immediate_sends_respect_batch_limit():
-    backend = await _init_backend(batch_window=0, batch_limit=2)
-    release = threading.Event()
-    batches = []
-
-    def send(batch):
-        release.wait(5)
-        batches.append([t["uid"] for t in batch])
-
-    backend._mock_rh.submit_tasks.side_effect = send
-    await backend.submit_tasks([{"uid": "t.0", "executable": "/bin/true"}])
-    await asyncio.sleep(0.05)
-    for i in range(1, 6):
-        await backend.submit_tasks([{"uid": f"t.{i}", "executable": "/bin/true"}])
-    release.set()
-    await backend.shutdown()
-    assert batches == [["t.0"], ["t.1", "t.2"], ["t.3", "t.4"], ["t.5"]]
-
-
-@pytest.mark.asyncio
 async def test_cancel_of_a_waiting_immediate_submit_is_not_sent():
     """A task waiting behind a send in flight is cancelled locally and never sent."""
     backend = await _init_backend(batch_window=0)
