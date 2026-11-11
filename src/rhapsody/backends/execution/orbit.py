@@ -13,7 +13,6 @@ wait, batch notifications) are inherited automatically.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import inspect
 import logging
 from typing import Any
@@ -202,10 +201,9 @@ class OrbitExecutionBackend(BaseBackend):
         # submits), awaited on shutdown so a batch that is mid-send is never
         # dropped.
         self._inflight_flushes: set[asyncio.Task] = set()
-        # Immediate submits (batch_window <= 0) that wait for the send in
-        # flight; one drainer sends them together (see _drain_immediate).
-        self._immediate: list[dict] = []
-        self._draining = False
+        # With batch_window <= 0, the one task that sends `_batch_buffer`
+        # (see _drain_immediate).
+        self._drainer: asyncio.Task | None = None
 
         # -- profiling --
         self._prof = rprof.Profiler("client.task", ns="radical.orbit") if rprof else None
@@ -706,10 +704,10 @@ class OrbitExecutionBackend(BaseBackend):
         # must not wait while a slow or lost endpoint holds the request.  A
         # failed send marks the tasks FAILED (see _send_batch).
         if self._batch_window <= 0:
-            self._immediate.extend(dict(t) for t in tasks)
-            if not self._draining:
-                self._draining = True
-                self._spawn_send(self._drain_immediate())
+            async with self._batch_lock:
+                self._batch_buffer.extend(dict(t) for t in tasks)
+            if self._drainer is None or self._drainer.done():
+                self._drainer = self._spawn_send(self._drain_immediate())
             return
 
         # Batching — collect and, if the buffer is now full, flush inline.
@@ -738,7 +736,7 @@ class OrbitExecutionBackend(BaseBackend):
         """
         self._spawn_send(self._locked_flush())
 
-    def _spawn_send(self, coro) -> None:
+    def _spawn_send(self, coro) -> asyncio.Task:
         """Run a send as a tracked background task.
 
         Tracked in ``_inflight_flushes`` so ``shutdown`` can await it.  Sends
@@ -747,6 +745,7 @@ class OrbitExecutionBackend(BaseBackend):
         task = asyncio.ensure_future(coro)
         self._inflight_flushes.add(task)
         task.add_done_callback(self._on_flush_done)
+        return task
 
     def _on_flush_done(self, task: asyncio.Task) -> None:
         """Untrack a finished background send and retrieve its exception.
@@ -762,21 +761,24 @@ class OrbitExecutionBackend(BaseBackend):
                 self.logger.debug("background send failed: %s", exc)
 
     async def _drain_immediate(self):
-        """Send immediate submits until none are left.
+        """Send the buffer, up to ``batch_limit`` tasks per request, until it is empty.
 
-        The first call is sent at once; tasks submitted while a send is in
-        flight go out together in the next request instead of one request
-        each, so a backend is not capped at one task per round trip.  One
-        drainer at a time keeps the order; ``_send_batch`` already failed a
-        batch whose send raised, so the drainer moves on to the next.
+        With batch_window <= 0 the first call is sent at once; tasks
+        submitted while a send is in flight go out together in the next
+        request instead of one request each, so a backend is not capped at
+        one task per round trip.  One drainer at a time keeps the order; the
+        buffer keeps cancel, cancel-all and shutdown working as in batching
+        mode.  A failed batch is already failed by ``_send_batch``; the
+        drainer moves on to the next.
         """
-        try:
-            while self._immediate:
-                batch, self._immediate = self._immediate, []
-                with contextlib.suppress(Exception):
-                    await self._send_batch(batch)
-        finally:
-            self._draining = False
+        while self._batch_buffer:
+            async with self._batch_lock:
+                batch = self._batch_buffer[: self._batch_limit]
+                del self._batch_buffer[: self._batch_limit]
+            try:
+                await self._send_batch(batch)
+            except Exception:
+                self.logger.debug("immediate send failed", exc_info=True)
 
     async def _locked_flush(self):
         """Detach the buffered batch under the batch lock, then send it unlocked."""
@@ -897,7 +899,12 @@ class OrbitExecutionBackend(BaseBackend):
     async def shutdown(self) -> None:
         """Flush pending tasks, close session and EndpointRuntime."""
         try:
-            await self._locked_flush()
+            # with batch_window <= 0 the drainer owns the buffer (awaited
+            # below); restart it if it was cancelled with tasks left
+            if self._batch_window > 0:
+                await self._locked_flush()
+            elif self._batch_buffer and (self._drainer is None or self._drainer.done()):
+                self._drainer = self._spawn_send(self._drain_immediate())
         except Exception as e:
             # Never let a flush failure skip client cleanup below.
             self.logger.warning("Failed to flush pending tasks during shutdown: %s", e)

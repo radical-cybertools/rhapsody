@@ -210,6 +210,7 @@ async def test_immediate_sends_stay_in_order():
     backend._mock_rh.submit_tasks.side_effect = send
     for i in range(5):
         await backend.submit_tasks([{"uid": f"t.{i}", "executable": "/bin/true"}])
+        await asyncio.sleep(0.02)  # the first send is in flight for the rest
     release.set()
     await _sent(backend)
     assert seen == [f"t.{i}" for i in range(5)]
@@ -320,9 +321,52 @@ async def test_shutdown_sends_waiting_immediate_submits():
     backend._mock_rh.close.side_effect = lambda: order.append("close")
     for i in range(3):
         await backend.submit_tasks([{"uid": f"t.{i}", "executable": "/bin/true"}])
+        await asyncio.sleep(0.02)  # t.1 and t.2 wait behind t.0's send
     threading.Timer(0.2, release.set).start()
     await backend.shutdown()
     assert order == ["t.0", "t.1", "t.2", "close"]
+
+
+@pytest.mark.asyncio
+async def test_coalesced_immediate_sends_respect_batch_limit():
+    backend = await _init_backend(batch_window=0, batch_limit=2)
+    release = threading.Event()
+    batches = []
+
+    def send(batch):
+        release.wait(5)
+        batches.append([t["uid"] for t in batch])
+
+    backend._mock_rh.submit_tasks.side_effect = send
+    await backend.submit_tasks([{"uid": "t.0", "executable": "/bin/true"}])
+    await asyncio.sleep(0.05)
+    for i in range(1, 6):
+        await backend.submit_tasks([{"uid": f"t.{i}", "executable": "/bin/true"}])
+    release.set()
+    await backend.shutdown()
+    assert batches == [["t.0"], ["t.1", "t.2"], ["t.3", "t.4"], ["t.5"]]
+
+
+@pytest.mark.asyncio
+async def test_cancel_of_a_waiting_immediate_submit_is_not_sent():
+    """A task waiting behind a send in flight is cancelled locally and never sent."""
+    backend = await _init_backend(batch_window=0)
+    release = threading.Event()
+    sent = []
+
+    def send(batch):
+        release.wait(5)
+        sent.extend(t["uid"] for t in batch)
+
+    backend._mock_rh.submit_tasks.side_effect = send
+    await backend.submit_tasks([{"uid": "t.0", "executable": "/bin/true"}])
+    await asyncio.sleep(0.05)
+    await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/true"}])
+    assert await backend.cancel_task("t.1")
+    release.set()
+    await backend.shutdown()
+    assert sent == ["t.0"]
+    backend._mock_rh.cancel_task.assert_not_called()
 
 
 @pytest.mark.asyncio
