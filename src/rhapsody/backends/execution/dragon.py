@@ -478,9 +478,13 @@ class DragonExecutionBackend(BaseBackend):
                 continue
             task_desc = task_info["description"]
             if raised:
-                # surface the remote traceback in the endpoint log -- the
-                # consumer side only ever sees the exception message
-                self.logger.error(f"task {uid} failed: {result}\n{tb or '(no traceback captured)'}")
+                # The worker's traceback travels with the exception the user gets (as a note,
+                # like ProcessPoolExecutor does) and as "traceback", which ORBIT forwards.
+                if tb:
+                    if isinstance(result, BaseException):
+                        result.add_note(f"Remote traceback:\n{tb}")
+                    task_desc["traceback"] = tb
+                self.logger.debug(f"task {uid} failed: {result}\n{tb or '(no traceback captured)'}")
                 task_desc["exception"] = result
                 task_desc["stderr"] = stderr if stderr else (tb if tb else str(result))
                 task_desc["stdout"] = stdout

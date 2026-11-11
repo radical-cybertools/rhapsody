@@ -381,7 +381,11 @@ class OrbitExecutionBackend(BaseBackend):
         if exc is None:
             exc = body.get("error")
         if exc is not None and not isinstance(exc, BaseException):
-            body["exception"] = RuntimeError(str(exc))
+            exc = RuntimeError(str(exc))
+            # The remote frames reach the user on the exception it already gets.
+            if body.get("traceback"):
+                exc.add_note(f"Remote traceback:\n{body['traceback']}")
+            body["exception"] = exc
 
         # Update local task dict with remote results
         for key in (

@@ -3,7 +3,7 @@
 The full dragon test module skips when the runtime is absent, so the
 contracts fixed for the remote DT demo are pinned here on a bare
 instance: cancel of an untracked task is idempotent, and a failed
-delivery logs the remote traceback endpoint-side.
+delivery attaches the remote traceback to the exception the user gets.
 """
 
 import logging
@@ -40,32 +40,38 @@ async def test_cancel_of_an_untracked_task_is_a_noop():
     assert delivered == []
 
 
-def test_a_failed_delivery_logs_the_remote_traceback(caplog):
-    """The worker captures the traceback and the consumer side only ever sees the exception message
-    -- the endpoint log is where it must surface."""
+def test_a_failed_delivery_attaches_the_remote_traceback(caplog):
+    """The worker's traceback reaches the user as a note on the task's exception, and as "traceback"
+    for ORBIT to forward.
+
+    A failure is the user's to report: nothing above DEBUG.
+    """
 
     backend, delivered = bare_backend()
     backend._task_registry["task.000001"] = {"description": {"uid": "task.000001"}}
+    tb = "Traceback (most recent call last):\n  ...\nValueError: boom happened\n"
 
-    with caplog.at_level(logging.ERROR, logger="test.dragon.unit"):
-        backend._deliver_batch(
-            [
-                (
-                    "task.000001",
-                    "boom happened",
-                    "Traceback (most recent call last):\n  ...",
-                    True,
-                    "",
-                    "",
-                ),
-            ]
-        )
+    with caplog.at_level(logging.INFO, logger="test.dragon.unit"):
+        backend._deliver_batch([("task.000001", ValueError("boom happened"), tb, True, "", "")])
 
     assert len(delivered) == 1
     task, state = delivered[0]
     assert state == "FAILED"
-    assert task["exception"] == "boom happened"
+    exc = task["exception"]
+    assert isinstance(exc, ValueError) and str(exc) == "boom happened"
+    assert exc.__notes__ == [f"Remote traceback:\n{tb}"]
+    assert task["traceback"] == tb
     assert "Traceback" in task["stderr"]
+    assert caplog.records == []
 
-    assert "task.000001 failed: boom happened" in caplog.text
-    assert "Traceback (most recent call last):" in caplog.text
+
+def test_a_failed_delivery_without_traceback_adds_no_note():
+    backend, delivered = bare_backend()
+    backend._task_registry["task.000002"] = {"description": {"uid": "task.000002"}}
+
+    backend._deliver_batch([("task.000002", ValueError("boom"), None, True, "", "")])
+
+    task, state = delivered[0]
+    assert state == "FAILED"
+    assert not getattr(task["exception"], "__notes__", None)
+    assert "traceback" not in task
