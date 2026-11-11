@@ -12,8 +12,10 @@ from .base import BaseBackend
 from .constants import StateMapper
 from .constants import TasksMainStates
 from .discovery import BackendRegistry
+from .discovery import DataBackendRegistry
 from .discovery import discover_backends
 from .discovery import get_backend
+from .discovery import get_data_backend
 
 # Import all execution backends for convenient access
 from .execution import ConcurrentExecutionBackend
@@ -21,6 +23,8 @@ from .execution import ConcurrentExecutionBackend
 __all__ = [
     "BackendRegistry",
     "get_backend",
+    "get_data_backend",
+    "DataBackendRegistry",
     "discover_backends",
     "BaseBackend",
     "Session",
