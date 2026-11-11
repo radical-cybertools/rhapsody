@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Telemetry: `Failed to detach context` error at shutdown, and task spans without a parent** —
+  `TelemetryManager.start()` attached the session span as the ambient OTel context of the
+  asyncio task that called it. When `stop()` ran in another task, OTel logged
+  `ERROR Failed to detach context` (`ValueError: ... was created in a different Context`). Task
+  events emitted from a context the session never touched, e.g. ORBIT callbacks, gave task spans
+  without a parent. The ambient session span also leaked into the caller's OTel context. The
+  session span is now never attached: it is the explicit parent of task and scope spans that
+  have no caller span.
 
 ## [0.7.0] 2026-11-09
 
