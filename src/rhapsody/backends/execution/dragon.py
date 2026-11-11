@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import os
 import shutil
@@ -1006,45 +1005,25 @@ def _observed_from_rusage(rusage) -> Optional[dict]:
     """``task["observed"]`` from a Batch task's ``rusage``: a dict, or a job's list of them.
 
     A job's processes add up (an upper bound: their peaks need not coincide). None unless every
-    process reported. Dragon reports no GPU memory.
+    process reported. Dragon reports no GPU memory. ``cpu_seconds`` sums ``utime`` and ``stime``;
+    a Dragon that also reports each process's ``start`` and ``end`` (wall clock, from Local
+    Services) gives ``started`` (the earliest) and ``ended`` (the latest).
     """
     entries = rusage if isinstance(rusage, list) else [rusage]
     if not entries or any(not isinstance(e, dict) or e.get("max_rss") is None for e in entries):
         return None
-    return {"host_mem": sum(e["max_rss"] for e in entries) / _peak.GIB, "gpu_mem": None}
+    observed = {"host_mem": sum(e["max_rss"] for e in entries) / _peak.GIB, "gpu_mem": None}
+    if all(e.get("utime") is not None and e.get("stime") is not None for e in entries):
+        observed["cpu_seconds"] = sum(e["utime"] + e["stime"] for e in entries)
+    if all(e.get("start") is not None for e in entries):
+        observed["started"] = min(e["start"] for e in entries)
+    if all(e.get("end") is not None for e in entries):
+        observed["ended"] = max(e["end"] for e in entries)
+    return observed
 
 
-def _read_peaks(peak_dir: str, ranks: int) -> Optional[dict]:
-    """Combine the peak launcher's records in ``peak_dir`` into ``task["observed"]``; remove it.
-
-    A job's ranks add up, on the host (an upper bound: their peaks need not coincide) and on each
-    GPU they share; ``gpu_mem`` is the busiest GPU's. None unless all ``ranks`` reported, since a
-    partial sum would understate the demand.
-    """
-    records = []
-    try:
-        names = os.listdir(peak_dir)
-    except OSError:
-        return None
-    for name in names:
-        if name.startswith(".") or not name.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(peak_dir, name)) as f:
-                records.append(json.load(f))
-        except (OSError, ValueError):
-            continue
-    shutil.rmtree(peak_dir, ignore_errors=True)
-    if not records or len(records) < ranks:
-        return None
-    gpu: dict[str, float] = {}
-    for rec in records:
-        for device, gib in (rec.get("gpu_mem_devices") or {}).items():
-            gpu[device] = gpu.get(device, 0.0) + gib
-    return {
-        "host_mem": sum(rec["host_mem"] for rec in records),
-        "gpu_mem": max(gpu.values()) if gpu else None,
-    }
+# The launcher's records are read the same way by every backend that runs it.
+_read_peaks = _peak.read_peaks
 
 
 def __getattr__(name: str):

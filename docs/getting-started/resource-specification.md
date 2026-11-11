@@ -59,6 +59,23 @@ task = ComputeTask(
     inside your task function — for example, call `torch.cuda.set_device(gpu_id)` at
     the start of your callable, or use `os.sched_setaffinity` for CPU pinning.
 
+### What a task used (`observe_peaks`)
+
+`ConcurrentExecutionBackend(executor, observe_peaks=True)` reports what each task used as
+`task["observed"]` before its DONE or FAILED callback, with the same keys as the Dragon backend
+(see [Peak memory](#peak-memory-observe_peaks)):
+
+| Task | `host_mem` | `gpu_mem` | `started`, `ended`, `host` | `cpu_seconds` |
+|------|------------|-----------|----------------------------|---------------|
+| Executable | peak RSS from `wait4`, under the peak launcher | with `pynvml` | the command's | yes |
+| Function, `ProcessPoolExecutor` | worker RSS growth during the call, `"approximate": True` (Linux only) | not measured | the call's, in the worker | no |
+| Function, `ThreadPoolExecutor` | not measured (threads share one process) | not measured | the call's, in the worker | no |
+
+`started` and `ended` are wall-clock times taken where the task ran, so they show when it really
+ran. The backend reports RUNNING when it hands the task to the executor or starts the launcher,
+which can be earlier when the executor is busy. Each executable starts one extra Python process,
+the launcher. A command that is not found then exits with code 127 instead of raising.
+
 ---
 
 ## Dask Backend
@@ -356,7 +373,18 @@ task = ComputeTask(
 
 With `observe_peaks=True`, the backend reports each task's peak memory as
 `task["observed"] = {"host_mem": GiB, "gpu_mem": GiB per GPU}` when the task is DONE or
-FAILED. AsyncFlow's `ResourcePolicy` learns the memory demand of a kind of task from it.
+FAILED. AsyncFlow's `ResourcePolicy` learns the memory demand of a kind of task from it, and
+AsyncFlow's policy telemetry carries it in `asyncflow.TaskReleased`.
+
+When known, `observed` also has the task's execution window and CPU time:
+
+- `started`, `ended`: wall-clock seconds, from where the task ran. The launcher stamps them
+  around the command; a native function's wrapper, around the call. A job gives its earliest
+  start and latest end. Dragon's `Task.rusage` gives them only when Dragon reports each
+  process's `start` and `end`. RUNNING is reported when the task is handed to Batch, so these
+  are the times to use for when a task really ran.
+- `host` (or `hosts`, for a job on several nodes) and `cpu_seconds` (user plus system time,
+  summed over a job's ranks; not for functions).
 
 ```python
 backend = await DragonExecutionBackend(observe_peaks=True)  # peak_source="auto"

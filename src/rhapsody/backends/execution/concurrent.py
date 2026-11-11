@@ -6,6 +6,9 @@ This module provides a backend that executes tasks on local or single node HPC r
 import asyncio
 import logging
 import os
+import shutil
+import sys
+import uuid
 from concurrent.futures import Executor
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import ThreadPoolExecutor
@@ -15,6 +18,10 @@ from typing import Callable
 from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
+from . import _peak
+
+# Run by path, as DragonExecutionBackend does: a launch does not import rhapsody.
+PEAK_LAUNCHER = os.path.abspath(_peak.__file__)
 
 try:
     import cloudpickle
@@ -32,9 +39,32 @@ def _get_logger() -> logging.Logger:
 
 
 class ConcurrentExecutionBackend(BaseBackend):
-    """Simple async-only concurrent execution backend."""
+    """Simple async-only concurrent execution backend.
 
-    def __init__(self, executor: Executor = None, name: str = "concurrent"):
+    Args:
+        executor: A ``ThreadPoolExecutor`` (the default) or ``ProcessPoolExecutor`` for
+            function tasks.
+        name: The backend's name.
+        observe_peaks: Report what each task used as ``task["observed"]`` before its DONE or
+            FAILED callback, for AsyncFlow's ``ResourcePolicy`` and telemetry. Off by default.
+
+            - Executable tasks run under the peak launcher
+              (:mod:`rhapsody.backends.execution._peak`): ``host_mem`` (peak RSS, GiB, from
+              ``wait4``), ``gpu_mem`` (with ``pynvml``), ``cpu_seconds``, and the command's
+              ``started``/``ended`` wall-clock times and ``host``. A command that is not found
+              exits 127 instead of raising.
+            - Function tasks report the call's ``started``/``ended`` times in the worker and
+              ``host``; in a ``ProcessPoolExecutor`` on Linux also ``host_mem``, the worker's RSS
+              growth during the call, marked ``"approximate": True``. Threads share one process,
+              so they report no memory.
+    """
+
+    def __init__(
+        self,
+        executor: Executor = None,
+        name: str = "concurrent",
+        observe_peaks: bool = False,
+    ):
         super().__init__(name=name)
 
         self.logger = _get_logger()
@@ -54,6 +84,11 @@ class ConcurrentExecutionBackend(BaseBackend):
             )
 
         self.executor = executor
+        self._observe_peaks = observe_peaks
+        # Launcher output goes to <work_dir>/rhapsody-peaks.<tag>/<uid>/; shutdown removes the
+        # roots with what cancelled tasks left there.
+        self._peak_tag = uuid.uuid4().hex[:8]
+        self._peak_roots: set[str] = set()
         self.tasks: dict[str, asyncio.Task] = {}
         self._callback_func: Callable = lambda t, s: None
         self._initialized = False
@@ -160,14 +195,27 @@ class ConcurrentExecutionBackend(BaseBackend):
 
         loop = asyncio.get_running_loop()
 
-        # Submit to the executor
-        result = await loop.run_in_executor(
-            self.executor,
-            exec_wrapper,
-            func,
-            args,
-            kwargs,
-        )
+        if self._observe_peaks:
+            # Times always; memory only where the worker runs one call at a time
+            measured = await loop.run_in_executor(
+                self.executor,
+                _peak.measured_call,
+                exec_wrapper,
+                (func, args, kwargs),
+                {},
+                isinstance(self.executor, ProcessPoolExecutor),
+            )
+            result = measured.value
+            task["observed"] = measured.observed
+        else:
+            # Submit to the executor
+            result = await loop.run_in_executor(
+                self.executor,
+                exec_wrapper,
+                func,
+                args,
+                kwargs,
+            )
 
         task.update({"return_value": result, "stdout": str(result), "exit_code": 0})
         return task, "DONE"
@@ -182,6 +230,11 @@ class ConcurrentExecutionBackend(BaseBackend):
         env = backend_kwargs.get("env")  # None inherits the parent process environment
 
         redirect = task.get("capture_stdio")
+        peak_dir = None
+        if self._observe_peaks:
+            peak_root = os.path.join(self._work_dir, f"rhapsody-peaks.{self._peak_tag}")
+            self._peak_roots.add(peak_root)
+            peak_dir = os.path.join(peak_root, task["uid"])
         stdout_f = stderr_f = process = None
         stdout_val = stderr_val = None
         exit_code = 1
@@ -203,7 +256,26 @@ class ConcurrentExecutionBackend(BaseBackend):
                 stdout_arg = asyncio.subprocess.PIPE
                 stderr_arg = asyncio.subprocess.PIPE
 
-            if execute_in_shell:
+            if peak_dir is not None:
+                # The launcher runs the command (or the shell) and records its peaks
+                command = (
+                    ["/bin/sh", "-c", " ".join([executable] + arguments)]
+                    if execute_in_shell
+                    else [executable, *arguments]
+                )
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    PEAK_LAUNCHER,
+                    "--out-dir",
+                    peak_dir,
+                    "--",
+                    *command,
+                    stdout=stdout_arg,
+                    stderr=stderr_arg,
+                    cwd=cwd,
+                    env=env,
+                )
+            elif execute_in_shell:
                 # Shell mode: join executable and arguments into single command string
                 cmd = " ".join([executable] + arguments)
                 process = await asyncio.create_subprocess_shell(
@@ -247,6 +319,10 @@ class ConcurrentExecutionBackend(BaseBackend):
                 "exit_code": exit_code,
             }
         )
+        if peak_dir is not None:
+            observed = _peak.read_peaks(peak_dir, 1)
+            if observed is not None:
+                task["observed"] = observed
 
         state = "DONE" if task["exit_code"] == 0 else "FAILED"
         return task, state
@@ -317,6 +393,9 @@ class ConcurrentExecutionBackend(BaseBackend):
 
         await self.cancel_all_tasks()
         self.executor.shutdown(wait=True)
+        for peak_root in self._peak_roots:
+            shutil.rmtree(peak_root, ignore_errors=True)
+        self._peak_roots.clear()
         self.logger.info("Concurrent execution backend shutdown complete")
 
     def build_task(self, uid, task_desc, task_specific_kwargs):
@@ -350,15 +429,18 @@ class ConcurrentExecutionBackend(BaseBackend):
         await self.shutdown()
 
     @classmethod
-    async def create(cls, executor: Executor) -> "ConcurrentExecutionBackend":
+    async def create(
+        cls, executor: Executor, observe_peaks: bool = False
+    ) -> "ConcurrentExecutionBackend":
         """Alternative factory method for creating initialized backend.
 
         Args:
             executor: A concurrent.Executor instance (ThreadPoolExecutor
                       or ProcessPoolExecutor).
+            observe_peaks: Report each task's usage as ``task["observed"]`` (see the class).
 
         Returns:
             Fully initialized ConcurrentExecutionBackend instance.
         """
-        backend = cls(executor)
+        backend = cls(executor, observe_peaks=observe_peaks)
         return await backend

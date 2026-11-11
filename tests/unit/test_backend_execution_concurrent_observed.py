@@ -1,0 +1,124 @@
+"""ConcurrentExecutionBackend(observe_peaks=True): each task's usage as task["observed"]."""
+
+import asyncio
+import os
+import socket
+import sys
+import time
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+
+from rhapsody.backends.execution.concurrent import ConcurrentExecutionBackend
+
+MIB = 1 << 20
+SLACK = 16 * MIB  # Linux >= 6.2 keeps RSS in per-CPU counters, which can read a few MiB low
+LINUX = sys.platform.startswith("linux")
+
+
+async def _run(backend, tasks, timeout=60.0):
+    """Submit tasks; return {uid: (final state, task)}."""
+    finals = {}
+    done = asyncio.Event()
+
+    def callback(task, state):
+        if state in ("DONE", "FAILED", "CANCELED"):
+            finals[task["uid"]] = (state, task)
+            if len(finals) == len(tasks):
+                done.set()
+
+    backend.register_callback(callback)
+    await backend.submit_tasks(tasks)
+    await asyncio.wait_for(done.wait(), timeout)
+    return finals
+
+
+def _alloc(uid, mib, code=0, **extra):
+    script = f"import sys; b = b'x' * ({mib} << 20); sys.exit({code})"
+    return {"uid": uid, "executable": sys.executable, "arguments": ["-c", script], **extra}
+
+
+async def _hold(mib):
+    return len(b"x" * (mib * MIB))
+
+
+@pytest.mark.asyncio
+async def test_executables_report_peak_window_and_exit(tmp_path):
+    backend = await ConcurrentExecutionBackend(ThreadPoolExecutor(2), observe_peaks=True)
+    backend._work_dir = str(tmp_path)
+    before = time.time()
+    try:
+        finals = await _run(
+            backend,
+            [
+                _alloc("ok", 200),
+                _alloc("bad", 100, code=3),
+                {
+                    "uid": "sh",
+                    "executable": "exit",
+                    "arguments": ["5"],
+                    "task_backend_specific_kwargs": {"shell": True},
+                },
+            ],
+        )
+    finally:
+        await backend.shutdown()
+
+    state, task = finals["ok"]
+    assert state == "DONE" and task["exit_code"] == 0
+    observed = task["observed"]
+    assert 200 * MIB - SLACK <= observed["host_mem"] * (1 << 30) <= 264 * MIB
+    assert before <= observed["started"] <= observed["ended"] <= time.time()
+    assert observed["host"] == socket.gethostname()
+    state, task = finals["bad"]
+    assert state == "FAILED" and task["exit_code"] == 3
+    assert task["observed"]["host_mem"] * (1 << 30) >= 100 * MIB - SLACK
+    state, task = finals["sh"]
+    assert state == "FAILED" and task["exit_code"] == 5  # through /bin/sh -c
+    assert task["observed"]["started"] <= task["observed"]["ended"]
+    assert os.listdir(tmp_path) == []  # records read, roots removed
+
+
+@pytest.mark.asyncio
+async def test_functions_in_threads_report_times_only():
+    backend = await ConcurrentExecutionBackend(ThreadPoolExecutor(2), observe_peaks=True)
+    try:
+        finals = await _run(backend, [{"uid": "f", "function": _hold, "args": [64]}])
+    finally:
+        await backend.shutdown()
+    state, task = finals["f"]
+    assert state == "DONE" and task["return_value"] == 64 * MIB
+    assert task["observed"]["host_mem"] is None
+    assert task["observed"]["started"] <= task["observed"]["ended"]
+
+
+@pytest.mark.asyncio
+async def test_functions_in_processes_report_times_and_linux_memory():
+    pytest.importorskip("cloudpickle")
+    backend = await ConcurrentExecutionBackend(ProcessPoolExecutor(1), observe_peaks=True)
+    try:
+        finals = await _run(backend, [{"uid": "f", "function": _hold, "args": [256]}])
+    finally:
+        await backend.shutdown()
+    state, task = finals["f"]
+    assert state == "DONE" and task["return_value"] == 256 * MIB
+    observed = task["observed"]
+    assert observed["started"] <= observed["ended"]
+    if LINUX:
+        assert observed["approximate"] is True
+        assert observed["host_mem"] * (1 << 30) >= 256 * MIB - SLACK
+    else:
+        assert observed["host_mem"] is None
+
+
+@pytest.mark.asyncio
+async def test_off_by_default_nothing_observed(tmp_path):
+    backend = await ConcurrentExecutionBackend(ThreadPoolExecutor(2))
+    backend._work_dir = str(tmp_path)
+    try:
+        finals = await _run(backend, [_alloc("x", 8), {"uid": "f", "function": _hold, "args": [1]}])
+    finally:
+        await backend.shutdown()
+    assert all("observed" not in task for _, task in finals.values())
+    assert os.listdir(tmp_path) == []

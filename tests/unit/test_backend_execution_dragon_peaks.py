@@ -285,6 +285,21 @@ def test_read_peaks_job_sums_ranks_and_shared_gpus(tmp_path):
     assert _read_peaks(d, 3) == {"host_mem": 3.5, "gpu_mem": 5.0}
 
 
+def test_read_peaks_combines_the_ranks_windows_and_hosts(tmp_path):
+    d = str(tmp_path / "t1")
+    _write(d, "a.1.json", host_mem=1.0, started=5.0, ended=9.0, cpu_seconds=3.0, host="a")
+    _write(d, "b.1.json", host_mem=1.0, started=4.5, ended=8.0, cpu_seconds=2.5, host="b")
+    observed = _read_peaks(d, 2)
+    assert (observed["started"], observed["ended"]) == (4.5, 9.0)
+    assert observed["cpu_seconds"] == 5.5
+    assert observed["hosts"] == ["a", "b"] and "host" not in observed
+    d = str(tmp_path / "t2")
+    _write(d, "a.1.json", host_mem=1.0, started=5.0, host="a")
+    _write(d, "a.2.json", host_mem=1.0, host="a")  # an older launcher's record
+    observed = _read_peaks(d, 2)
+    assert "started" not in observed and observed["host"] == "a"
+
+
 def test_read_peaks_incomplete_or_missing_is_none(tmp_path):
     d = str(tmp_path / "t1")
     assert _read_peaks(d, 1) is None
@@ -378,11 +393,12 @@ async def test_measured_function_value_is_unwrapped(tmp_path):
 
     state, task = finals["ok"]
     assert state == "DONE" and task["return_value"] == 256 * MIB
+    assert task["observed"]["started"] <= task["observed"]["ended"]
     if sys.platform.startswith("linux"):
         assert task["observed"]["approximate"] is True
         assert task["observed"]["host_mem"] * (1 << 30) >= 256 * MIB - SLACK
     else:
-        assert "observed" not in task
+        assert task["observed"]["host_mem"] is None
     state, task = finals["bad"]
     assert state == "FAILED" and isinstance(task["exception"], RuntimeError)
     assert "observed" not in task
@@ -442,8 +458,18 @@ def test_peak_source_is_checked(tmp_path):
 
 def test_observed_from_rusage():
     one = {"max_rss": 1 << 30, "utime": 0.1, "stime": 0.0}
-    assert _observed_from_rusage(one) == {"host_mem": 1.0, "gpu_mem": None}
-    assert _observed_from_rusage([one, one, one]) == {"host_mem": 3.0, "gpu_mem": None}
+    assert _observed_from_rusage(one) == {
+        "host_mem": 1.0,
+        "gpu_mem": None,
+        "cpu_seconds": 0.1,
+    }
+    three = _observed_from_rusage([one, one, one])
+    assert three["host_mem"] == 3.0 and three["cpu_seconds"] == pytest.approx(0.3)
+    # A Dragon that reports when Local Services spawned and reaped each process
+    timed = [{**one, "start": 10.0, "end": 12.0}, {**one, "start": 9.5, "end": 11.0}]
+    assert _observed_from_rusage(timed)["started"] == 9.5
+    assert _observed_from_rusage(timed)["ended"] == 12.0
+    assert "started" not in _observed_from_rusage([one, timed[0]])
     assert _observed_from_rusage(None) is None
     assert _observed_from_rusage([]) is None
     assert _observed_from_rusage([one, None]) is None

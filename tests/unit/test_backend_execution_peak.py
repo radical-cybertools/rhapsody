@@ -12,6 +12,7 @@ NVML for the GPU sampler.
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -65,6 +66,18 @@ def test_peak_rss_of_child_that_allocates(tmp_path, mib):
     assert mib * MIB - SLACK <= rec["host_mem"] * (1 << 30) <= (mib + 64) * MIB
     assert rec["exit_code"] == 0
     assert rec["gpu_mem"] is None or rec["nvml"]
+
+
+def test_record_has_the_execution_window_cpu_time_and_host(tmp_path):
+    before = time.time()
+    proc = _launch(tmp_path, sys.executable, "-c", "import time; time.sleep(0.3)")
+    after = time.time()
+    assert proc.returncode == 0, proc.stderr
+    rec = _record(tmp_path)
+    assert before <= rec["started"] <= rec["ended"] <= after
+    assert rec["ended"] - rec["started"] >= 0.3
+    assert rec["cpu_seconds"] >= 0
+    assert rec["host"] == socket.gethostname()
 
 
 def test_peak_rss_tracks_allocation_size(tmp_path):
@@ -305,15 +318,25 @@ def _hold(mib):
 
 
 def test_measured_call_returns_value_and_growth():
+    before = time.time()
     result = _peak.measured_call(_hold, (256,), {})
     assert isinstance(result, _peak.MeasuredResult)
     assert result.value == 256 * MIB
+    assert before <= result.observed["started"] <= result.observed["ended"] <= time.time()
+    assert result.observed["host"] == socket.gethostname()
     if not LINUX:
-        assert result.observed is None
+        assert result.observed["host_mem"] is None
+        assert "approximate" not in result.observed
         return
     assert result.observed["approximate"] is True
     assert result.observed["gpu_mem"] is None
     assert 256 * MIB - SLACK <= result.observed["host_mem"] * (1 << 30) <= 300 * MIB
+
+
+def test_measured_call_without_memory_reports_only_times():
+    result = _peak.measured_call(_hold, (8,), {}, False)
+    assert result.observed["host_mem"] is None and "approximate" not in result.observed
+    assert result.observed["started"] <= result.observed["ended"]
 
 
 def test_measured_call_propagates_exceptions():

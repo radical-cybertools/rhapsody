@@ -15,6 +15,14 @@
   there instead of running the launcher; `peak_source` (`"auto"`, `"dragon"`, `"launcher"`)
   chooses. See
   `docs/getting-started/resource-specification.md#peak-memory-observe_peaks`.
+- **`ConcurrentExecutionBackend(observe_peaks=True)`** reports `task["observed"]` with the
+  same keys: executables run under the same launcher (peak RSS, GPU memory with `pynvml`);
+  functions report the call's times, and in a `ProcessPoolExecutor` on Linux the worker's
+  RSS growth (`"approximate": True`). Off by default.
+- **`observed` carries the task's execution window** — `started` and `ended` (wall clock, where
+  the task ran), `host`/`hosts` and `cpu_seconds`, from the launcher, from a native function's
+  wrapper, and from Dragon's rusage when Dragon reports them. Backends report RUNNING when they
+  hand a task over, which can be well before it runs; these times say when it ran.
 
 ## [0.7.0] 2026-11-09
 

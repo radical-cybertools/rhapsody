@@ -11,7 +11,11 @@ across ``exec``, so that is the smallest peak reported. When ``pynvml`` is impor
 NVML reports for the command's processes on each GPU. This process then writes
 ``DIR/<host>.<pid>.json``::
 
-    {"host_mem": GiB, "gpu_mem": GiB per GPU or null, "gpu_mem_devices": {uuid: GiB}, ...}
+    {"host_mem": GiB, "gpu_mem": GiB per GPU or null, "gpu_mem_devices": {uuid: GiB},
+     "started": wall s, "ended": wall s, "cpu_seconds": s, "host": name, ...}
+
+``started`` and ``ended`` are this process's wall-clock time just before it forks the command
+and just after it reaped it: the command's execution window, as seen on its node.
 
 and exits the way the command did: the same exit code, or the same signal. Signals sent to this
 process are forwarded to the command; on Linux the command is also killed if this process dies.
@@ -27,10 +31,12 @@ import errno
 import json
 import os
 import resource
+import shutil
 import signal
 import socket
 import sys
 import threading
+import time
 from typing import Any
 from typing import Callable
 from typing import NamedTuple
@@ -185,10 +191,19 @@ class GpuSampler(threading.Thread):
             self.join()
 
 
-def report(rusage, gpu: Optional[GpuSampler], exit_code: int) -> dict:
+def report(
+    rusage,
+    gpu: Optional[GpuSampler],
+    exit_code: int,
+    started: Optional[float] = None,
+    ended: Optional[float] = None,
+) -> dict:
     """Build the peaks record from the child's rusage and, if any, the GPU sampler."""
     devices = {u: b / GIB for u, b in gpu.peak.items()} if gpu else {}
     return {
+        "started": started,
+        "ended": ended,
+        "cpu_seconds": _cpu_seconds(rusage),
         "host_mem": rusage.ru_maxrss * MAXRSS_UNIT / GIB,
         # None when GPUs were not sampled or the tree never showed up on one: "not observed"
         # keeps asyncflow from learning a zero for a GPU task it could not see.
@@ -199,6 +214,13 @@ def report(rusage, gpu: Optional[GpuSampler], exit_code: int) -> dict:
         "exit_code": exit_code,
         "host": socket.gethostname(),
     }
+
+
+def _cpu_seconds(rusage) -> Optional[float]:
+    try:
+        return rusage.ru_utime + rusage.ru_stime
+    except AttributeError:
+        return None
 
 
 def write_report(out_dir: str, record: dict) -> None:
@@ -234,6 +256,7 @@ def exit_like(exit_code: int) -> None:
 
 def run(cmd: list[str], out_dir: str, interval: float = 0.2) -> int:
     """Run ``cmd``, write its peaks to ``out_dir``, and return its exit code (negative: signal)."""
+    started = time.time()
     pid = spawn(cmd)
 
     def forward(sig, _frame):
@@ -255,6 +278,7 @@ def run(cmd: list[str], out_dir: str, interval: float = 0.2) -> int:
             gpu = None
 
     _, status, rusage = os.wait4(pid, 0)  # retried on EINTR (PEP 475)
+    ended = time.time()
     exit_code = os.waitstatus_to_exitcode(status)
 
     if gpu is not None:
@@ -264,8 +288,55 @@ def run(cmd: list[str], out_dir: str, interval: float = 0.2) -> int:
             nvml.nvmlShutdown()
         except Exception:  # noqa: S110
             pass
-    write_report(out_dir, report(rusage, gpu, exit_code))
+    write_report(out_dir, report(rusage, gpu, exit_code, started, ended))
     return exit_code
+
+
+def read_peaks(peak_dir: str, ranks: int) -> Optional[dict]:
+    """Combine the records in ``peak_dir`` into ``task["observed"]``, then remove the directory.
+
+    A job's ranks add up, on the host (an upper bound: their peaks need not coincide) and on each
+    GPU they share; ``gpu_mem`` is the busiest GPU's. None unless all ``ranks`` reported, since a
+    partial sum would understate the demand. When every record has them, ``started`` is the
+    earliest start, ``ended`` the latest end, ``cpu_seconds`` the sum, and ``host`` the node (or
+    ``hosts``, sorted, for a job on several).
+    """
+    records = []
+    try:
+        names = os.listdir(peak_dir)
+    except OSError:
+        return None
+    for name in names:
+        if name.startswith(".") or not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(peak_dir, name)) as f:
+                records.append(json.load(f))
+        except (OSError, ValueError):
+            continue
+    shutil.rmtree(peak_dir, ignore_errors=True)
+    if not records or len(records) < ranks:
+        return None
+    gpu: dict[str, float] = {}
+    for rec in records:
+        for device, gib in (rec.get("gpu_mem_devices") or {}).items():
+            gpu[device] = gpu.get(device, 0.0) + gib
+    observed = {
+        "host_mem": sum(rec["host_mem"] for rec in records),
+        "gpu_mem": max(gpu.values()) if gpu else None,
+    }
+    if all(rec.get("started") is not None for rec in records):
+        observed["started"] = min(rec["started"] for rec in records)
+    if all(rec.get("ended") is not None for rec in records):
+        observed["ended"] = max(rec["ended"] for rec in records)
+    if all(rec.get("cpu_seconds") is not None for rec in records):
+        observed["cpu_seconds"] = sum(rec["cpu_seconds"] for rec in records)
+    hosts = sorted({rec["host"] for rec in records if rec.get("host")})
+    if len(hosts) == 1:
+        observed["host"] = hosts[0]
+    elif hosts:
+        observed["hosts"] = hosts
+    return observed
 
 
 class MeasuredResult(NamedTuple):
@@ -297,7 +368,7 @@ def _reset_peak_rss() -> Optional[int]:
     return _status_bytes("VmRSS")
 
 
-def measured_call(fn: Callable, args: tuple, kwargs: dict) -> MeasuredResult:
+def measured_call(fn: Callable, args: tuple, kwargs: dict, memory: bool = True) -> MeasuredResult:
     """Call ``fn`` and return its value with the host-memory growth of this process during the call.
 
     For function tasks, which Dragon's Batch runs one at a time in long-lived pool workers, where the
@@ -305,15 +376,25 @@ def measured_call(fn: Callable, args: tuple, kwargs: dict) -> MeasuredResult:
     ``host_mem`` is the worker's peak during the call minus its RSS before. It is approximate:
     memory the allocator kept from earlier calls is reused without counting, and other threads of
     the worker count. ``gpu_mem`` is not measured: CUDA contexts and caching allocators outlive a
-    call. ``observed`` is None off Linux. Exceptions from ``fn`` propagate unchanged, without a
-    measurement.
+    call. ``host_mem`` is None off Linux, and with ``memory=False``, for workers that run several
+    calls at once (threads), where the process's peak is not the call's. ``observed`` always has
+    the call's wall-clock ``started`` and ``ended`` and the ``host``. Exceptions from ``fn``
+    propagate unchanged, without a measurement.
     """
-    base = _reset_peak_rss()
+    base = _reset_peak_rss() if memory else None
+    started = time.time()
     value = fn(*args, **kwargs)
+    ended = time.time()
     peak = _status_bytes("VmHWM") if base is not None else None
-    if peak is None:
-        return MeasuredResult(value, None)
-    observed = {"host_mem": max(peak - base, 0) / GIB, "gpu_mem": None, "approximate": True}
+    observed = {
+        "host_mem": None if peak is None else max(peak - base, 0) / GIB,
+        "gpu_mem": None,
+        "started": started,
+        "ended": ended,
+        "host": socket.gethostname(),
+    }
+    if peak is not None:
+        observed["approximate"] = True
     return MeasuredResult(value, observed)
 
 
