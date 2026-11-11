@@ -71,6 +71,7 @@ async def test_executables_report_peak_window_and_exit(tmp_path):
     assert 200 * MIB - SLACK <= observed["host_mem"] * (1 << 30) <= 264 * MIB
     assert before <= observed["started"] <= observed["ended"] <= time.time()
     assert observed["host"] == socket.gethostname()
+    assert observed["cpu_seconds"] >= 0
     state, task = finals["bad"]
     assert state == "FAILED" and task["exit_code"] == 3
     assert task["observed"]["host_mem"] * (1 << 30) >= 100 * MIB - SLACK
@@ -91,6 +92,7 @@ async def test_functions_in_threads_report_times_only():
     assert state == "DONE" and task["return_value"] == 64 * MIB
     assert task["observed"]["host_mem"] is None
     assert task["observed"]["started"] <= task["observed"]["ended"]
+    assert task["observed"]["cpu_seconds"] >= 0
 
 
 @pytest.mark.asyncio
@@ -105,11 +107,40 @@ async def test_functions_in_processes_report_times_and_linux_memory():
     assert state == "DONE" and task["return_value"] == 256 * MIB
     observed = task["observed"]
     assert observed["started"] <= observed["ended"]
+    assert observed["cpu_seconds"] >= 0
     if LINUX:
         assert observed["approximate"] is True
         assert observed["host_mem"] * (1 << 30) >= 256 * MIB - SLACK
     else:
         assert observed["host_mem"] is None
+
+
+async def _spin_then_fail(seconds):
+    end = time.thread_time() + seconds  # this thread's CPU time
+    while time.thread_time() < end:
+        pass
+    raise ValueError("failed after spinning")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pool", ["threads", "processes"])
+async def test_a_function_that_raises_still_reports_its_window(pool):
+    if pool == "processes":
+        pytest.importorskip("cloudpickle")
+        executor = ProcessPoolExecutor(1)
+    else:
+        executor = ThreadPoolExecutor(1)
+    backend = await ConcurrentExecutionBackend(executor, observe_peaks=True)
+    try:
+        finals = await _run(backend, [{"uid": "f", "function": _spin_then_fail, "args": [0.2]}])
+    finally:
+        await backend.shutdown()
+    state, task = finals["f"]
+    assert state == "FAILED" and isinstance(task["exception"], ValueError)
+    observed = task["observed"]
+    assert observed["ended"] - observed["started"] >= 0.2
+    assert observed["cpu_seconds"] >= 0.2  # the worker process's, or the thread's
+    assert observed["host"] == socket.gethostname()
 
 
 @pytest.mark.asyncio

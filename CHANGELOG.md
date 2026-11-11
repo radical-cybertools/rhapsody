@@ -22,7 +22,9 @@
 - **`observed` carries the task's execution window** — `started` and `ended` (wall clock, where
   the task ran), `host`/`hosts` and `cpu_seconds`, from the launcher, from a native function's
   wrapper, and from Dragon's rusage when Dragon reports them. Backends report RUNNING when they
-  hand a task over, which can be well before it runs; these times say when it ran.
+  hand a task over, which can be well before it runs; these times say when it ran. A function
+  task that raises reports what was measured until it raised, so FAILED tasks carry
+  `observed` too.
 
 ## [0.7.0] 2026-11-09
 

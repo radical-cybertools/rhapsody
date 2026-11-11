@@ -399,9 +399,12 @@ async def test_measured_function_value_is_unwrapped(tmp_path):
         assert task["observed"]["host_mem"] * (1 << 30) >= 256 * MIB - SLACK
     else:
         assert task["observed"]["host_mem"] is None
+    assert task["observed"]["cpu_seconds"] >= 0
     state, task = finals["bad"]
     assert state == "FAILED" and isinstance(task["exception"], RuntimeError)
-    assert "observed" not in task
+    # The call raised: its measurement came with the exception
+    assert task["observed"]["started"] <= task["observed"]["ended"]
+    assert task["observed"]["cpu_seconds"] >= 0
 
 
 # ============================================================================

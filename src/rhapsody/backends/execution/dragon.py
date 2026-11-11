@@ -549,6 +549,10 @@ class DragonExecutionBackend(BaseBackend):
         elif task_reg.get("measured") and not raised and isinstance(result, _peak.MeasuredResult):
             task_reg["observed"] = result.observed
             result = result.value
+        elif task_reg.get("measured") and raised:
+            observed = getattr(result, _peak.OBSERVED_ATTR, None)  # the call raised
+            if isinstance(observed, dict):
+                task_reg["observed"] = observed
         return result
 
     def _deliver_batch(self, completions: list) -> None:

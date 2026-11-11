@@ -53,10 +53,12 @@ class ConcurrentExecutionBackend(BaseBackend):
               ``wait4``), ``gpu_mem`` (with ``pynvml``), ``cpu_seconds``, and the command's
               ``started``/``ended`` wall-clock times and ``host``. A command that is not found
               exits 127 instead of raising.
-            - Function tasks report the call's ``started``/``ended`` times in the worker and
-              ``host``; in a ``ProcessPoolExecutor`` on Linux also ``host_mem``, the worker's RSS
-              growth during the call, marked ``"approximate": True``. Threads share one process,
-              so they report no memory.
+            - Function tasks report the call's ``started``/``ended`` times in the worker,
+              ``host`` and ``cpu_seconds`` (the worker process's, or in a thread the thread's);
+              in a ``ProcessPoolExecutor`` on Linux also ``host_mem``, the worker's RSS growth
+              during the call, marked ``"approximate": True``. Threads share one process, so
+              they report no memory. A function that raises reports what was measured until
+              then.
     """
 
     def __init__(
@@ -163,6 +165,9 @@ class ConcurrentExecutionBackend(BaseBackend):
                     "return_value": None,
                 }
             )
+            observed = getattr(e, _peak.OBSERVED_ATTR, None)
+            if self._observe_peaks and isinstance(observed, dict):
+                task["observed"] = observed  # a measured function that raised
             return task, "FAILED"
 
     @staticmethod

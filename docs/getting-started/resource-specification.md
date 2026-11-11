@@ -68,13 +68,15 @@ task = ComputeTask(
 | Task | `host_mem` | `gpu_mem` | `started`, `ended`, `host` | `cpu_seconds` |
 |------|------------|-----------|----------------------------|---------------|
 | Executable | peak RSS from `wait4`, under the peak launcher | with `pynvml` | the command's | yes |
-| Function, `ProcessPoolExecutor` | worker RSS growth during the call, `"approximate": True` (Linux only) | not measured | the call's, in the worker | no |
-| Function, `ThreadPoolExecutor` | not measured (threads share one process) | not measured | the call's, in the worker | no |
+| Function, `ProcessPoolExecutor` | worker RSS growth during the call, `"approximate": True` (Linux only) | not measured | the call's, in the worker | the worker process's, during the call |
+| Function, `ThreadPoolExecutor` | not measured (threads share one process) | not measured | the call's, in the worker | the calling thread's (not threads the function starts) |
 
 `started` and `ended` are wall-clock times taken where the task ran, so they show when it really
 ran. The backend reports RUNNING when it hands the task to the executor or starts the launcher,
-which can be earlier when the executor is busy. Each executable starts one extra Python process,
-the launcher. A command that is not found then exits with code 127 instead of raising.
+which can be earlier when the executor is busy. A FAILED task reports `observed` too: an
+executable through its launcher, and a function that raised with what was measured until it
+raised. Each executable starts one extra Python process, the launcher. A command that is not
+found then exits with code 127 instead of raising.
 
 ---
 
@@ -384,7 +386,8 @@ When known, `observed` also has the task's execution window and CPU time:
   process's `start` and `end`. RUNNING is reported when the task is handed to Batch, so these
   are the times to use for when a task really ran.
 - `host` (or `hosts`, for a job on several nodes) and `cpu_seconds` (user plus system time,
-  summed over a job's ranks; not for functions).
+  summed over a job's ranks; for a native function, the pool worker's during the call).
+- A native function that raises still reports what was measured until it raised.
 
 ```python
 backend = await DragonExecutionBackend(observe_peaks=True)  # peak_source="auto"

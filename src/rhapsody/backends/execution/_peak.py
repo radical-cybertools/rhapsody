@@ -27,6 +27,7 @@ Function tasks have no process of their own; :func:`measured_call` gives them an
 """
 
 import argparse
+import contextlib
 import errno
 import json
 import os
@@ -368,6 +369,10 @@ def _reset_peak_rss() -> Optional[int]:
     return _status_bytes("VmRSS")
 
 
+# The attribute under which an exception raised by a measured call carries its measurement
+OBSERVED_ATTR = "rhapsody_observed"
+
+
 def measured_call(fn: Callable, args: tuple, kwargs: dict, memory: bool = True) -> MeasuredResult:
     """Call ``fn`` and return its value with the host-memory growth of this process during the call.
 
@@ -378,12 +383,27 @@ def measured_call(fn: Callable, args: tuple, kwargs: dict, memory: bool = True) 
     the worker count. ``gpu_mem`` is not measured: CUDA contexts and caching allocators outlive a
     call. ``host_mem`` is None off Linux, and with ``memory=False``, for workers that run several
     calls at once (threads), where the process's peak is not the call's. ``observed`` always has
-    the call's wall-clock ``started`` and ``ended`` and the ``host``. Exceptions from ``fn``
-    propagate unchanged, without a measurement.
+    the call's wall-clock ``started`` and ``ended``, the ``host``, and ``cpu_seconds``: the CPU time
+    of this process during the call, or with ``memory=False`` of the calling thread (threads the
+    function starts are then not counted). An exception from ``fn`` propagates with the
+    measurement as its ``rhapsody_observed`` attribute (:data:`OBSERVED_ATTR`), which pickling
+    keeps across a process pool.
     """
     base = _reset_peak_rss() if memory else None
+    cpu_clock = time.process_time if memory else time.thread_time
     started = time.time()
-    value = fn(*args, **kwargs)
+    cpu_start = cpu_clock()
+    try:
+        value = fn(*args, **kwargs)
+    except Exception as e:
+        # An exception that takes no attributes goes without
+        with contextlib.suppress(Exception):
+            setattr(e, OBSERVED_ATTR, _call_observed(base, started, cpu_clock() - cpu_start))
+        raise
+    return MeasuredResult(value, _call_observed(base, started, cpu_clock() - cpu_start))
+
+
+def _call_observed(base: Optional[int], started: float, cpu_seconds: float) -> dict:
     ended = time.time()
     peak = _status_bytes("VmHWM") if base is not None else None
     observed = {
@@ -391,11 +411,12 @@ def measured_call(fn: Callable, args: tuple, kwargs: dict, memory: bool = True) 
         "gpu_mem": None,
         "started": started,
         "ended": ended,
+        "cpu_seconds": cpu_seconds,
         "host": socket.gethostname(),
     }
     if peak is not None:
         observed["approximate"] = True
-    return MeasuredResult(value, observed)
+    return observed
 
 
 def main(argv: Optional[list[str]] = None) -> None:

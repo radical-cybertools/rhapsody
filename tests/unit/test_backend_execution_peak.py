@@ -11,6 +11,7 @@ NVML for the GPU sampler.
 
 import json
 import os
+import pickle
 import signal
 import socket
 import subprocess
@@ -339,9 +340,31 @@ def test_measured_call_without_memory_reports_only_times():
     assert result.observed["started"] <= result.observed["ended"]
 
 
-def test_measured_call_propagates_exceptions():
+def _spin(seconds):
+    end = time.thread_time() + seconds  # this thread's CPU time
+    while time.thread_time() < end:
+        pass
+
+
+def test_measured_call_reports_cpu_time_of_the_process_or_the_thread():
+    busy = _peak.measured_call(_spin, (0.2,), {})
+    window = busy.observed["ended"] - busy.observed["started"]
+    assert 0.2 <= busy.observed["cpu_seconds"] <= window + 0.05
+    idle = _peak.measured_call(time.sleep, (0.2,), {}, False)  # the calling thread's
+    assert idle.observed["ended"] - idle.observed["started"] >= 0.2
+    assert 0 <= idle.observed["cpu_seconds"] < 0.05
+
+
+def test_measured_call_propagates_exceptions_with_the_measurement():
     def boom(x, y=0):
+        time.sleep(0.05)
         raise ValueError(x + y)
 
-    with pytest.raises(ValueError, match="3"):
+    with pytest.raises(ValueError, match="3") as excinfo:
         _peak.measured_call(boom, (1,), {"y": 2})
+    observed = getattr(excinfo.value, _peak.OBSERVED_ATTR)
+    assert observed["ended"] - observed["started"] >= 0.05
+    assert observed["cpu_seconds"] >= 0 and observed["host"] == socket.gethostname()
+    # It survives the pickling that carries it back from a pool worker
+    again = pickle.loads(pickle.dumps(excinfo.value))
+    assert getattr(again, _peak.OBSERVED_ATTR) == observed
