@@ -27,7 +27,7 @@ pip install "rhapsody-py[ai]"
 !!! warning "Prerequisites"
     The Dragon-VLLM backend requires:
 
-    - Python >= 3.10
+    - Python >= 3.11
     - GPU nodes with CUDA support
 
 ### Basic Usage

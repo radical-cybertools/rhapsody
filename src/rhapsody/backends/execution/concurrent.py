@@ -101,6 +101,16 @@ class ConcurrentExecutionBackend(BaseBackend):
     def get_task_states_map(self):
         return StateMapper(backend=self)
 
+    def topology(self):
+        """Single node: local GPU count, cores capped at the executor's worker count."""
+        import socket
+
+        cores, gpus = self._probe_local_resources()
+        max_workers = getattr(self.executor, "_max_workers", None)
+        if max_workers:
+            cores = min(cores, max_workers) if cores else max_workers
+        return [{"id": socket.gethostname(), "cores": cores, "gpus": gpus}]
+
     async def _execute_task(self, task: dict) -> tuple[dict, str]:
         """Execute a single task."""
         try:

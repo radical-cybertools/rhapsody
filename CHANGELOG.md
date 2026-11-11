@@ -16,6 +16,130 @@
   chooses. See
   `docs/getting-started/resource-specification.md#peak-memory-observe_peaks`.
 
+## [0.7.0] 2026-11-09
+
+### Changed
+
+- **HPC test suite restructured into groups** — `tests/integration/test-hpc/run_suite.py`
+  runs `tasks`, `placement`, `scale`, and `mpi` as separate `dragon` launches in one
+  allocation, each with a time budget, and merges the results into one JUnit file. A crash
+  or hang costs that group, not the whole run, and appears as a failed `<group>.launcher`
+  test. Duplicate tests were merged, leaving 19 tests instead of 24, and GPU tests now check
+  the exact GPU assigned. `RHAPSODY_RUN_SCALE` is removed: use `-m scale`. The new
+  `RHAPSODY_HPC_REQUIRE` turns a missing capability into a failure instead of a skip. The
+  throughput benchmark moved to `tests/integration/test-hpc/benchmarks/dragon_throughput.py`.
+
+- **Task metrics no longer carry `task_id`** — `tasks_*` and
+  `task_duration_seconds` aggregate per (session, backend, executable,
+  task_type). The `task_id` attribute opened a new metric series for every task:
+  memory grew with the task count, and it was the most expensive part of
+  per-event processing. Per-task identity stays on the task spans; dashboards
+  that grouped these metrics by `task_id` need to use the spans. Event ids are
+  built without a `UUID` object (still UUID4 hex).
+  Together about 30% less telemetry cost per task and per dependent step.
+- **Dragon pin raised to `dragonhpc==0.15.0`** in the `dragon` extra (was
+  `==0.14.1`). radex needs `DDict.wait_for_keys()` (first in 0.14.2), and 0.15.0
+  supports co-located attach to a running Dragon runtime, which 0.14.1 lacks.
+  Dragon start-up and teardown are noticeably slower on 0.15.0 (35-60% longer
+  Dragon test suites on Perlmutter). Because the `backends`/`all` extras also
+  include `dragon`, they now resolve `dragonhpc[ai]` at 0.15.0 (vLLM
+  `>=0.11,<0.20`); the `ai` extra on its own stays unpinned.
+
+### Fixed
+
+- **Telemetry dropped events on `stop()`** — `stop()` gave the event backlog a
+  fixed 5 s to drain and then dropped the rest, logging only that the drain had
+  not finished: a 100k-task session lost 59% of its task events. It now queues
+  the stop sentinel behind the backlog and waits for the dispatch loop to reach
+  it, as long as the backlog shrinks (logging progress). A crashed dispatch loop
+  is reported at once, a stalled one is cancelled after one stall window, and
+  both warnings give the number of events not processed.
+  `start_telemetry(drain_on_stop=False)` skips the backlog instead (discarded
+  with a warning) for a fast shutdown, e.g. close to a job walltime.
+- **`tasks_running` counted tasks that never ran** — a task that ended before
+  RUNNING decremented the gauge without a matching increment, and its -1 could
+  land on a different label set than its +1. Each task now counts once, and its
+  -1 uses the labels of its +1.
+- **`DragonExecutionBackend` oversubscribed partial-node Slurm allocations** (#95) —
+  Dragon's `Batch` starts `os.cpu_count() // 2` workers per node, even when the job may use
+  only part of the node: a 4-CPU job on a 512-CPU node got 256 workers on those 4 CPUs, and
+  every task took minutes. When the job may use fewer physical cores than that on the nodes
+  Batch uses, the backend now passes `workers_per_node` (one per allowed core on the smallest
+  node) and logs a warning. Batch's placement capacity for process and MPI jobs is unchanged,
+  so those jobs still place ranks as if the job had whole nodes. A `workers_per_node` in
+  `batch_kwargs` takes precedence; `size_pool_to_affinity=False` keeps Batch's sizing and only
+  warns. Whole-node allocations are unchanged. Supersedes the `Node.num_cpus` patch first
+  proposed in #106, which also shrank the placement capacity and hung process jobs with more
+  ranks than `allowed // 2`.
+
+- **Dragon process/job exit codes reported like the other backends** — a
+  non-zero exit code from a `process()`/`job()` task (executables, and functions
+  run via `process_template`/`process_templates`) no longer becomes a
+  `SystemExit` in `task["exception"]`, which exited the caller when the task was
+  awaited. `task["exit_code"]` is now set (`0` on success; for a job, a non-zero
+  code from Dragon's per-rank list, whose order is not guaranteed — all codes
+  stay in `task["return_value"]`), and awaiting a failed task raises
+  `TaskExecutionError(uid, stderr, exit_code)` with the task's stderr (for
+  templated functions, the rank's traceback), as documented and as the
+  concurrent and dask backends do.
+  `task["exception"]` stays `None` for these failures.
+- **Dragon-side cancellations reported off the event loop** — when Dragon
+  cancelled a task itself (a timeout or an upstream cancel, surfacing as
+  `TaskCancelledError` from `get()`), `DragonExecutionBackend` called the
+  registered callback with `CANCELED` directly on its `dragon_monitor_loop`
+  thread, while `DONE`/`FAILED` were handed to the event loop with
+  `call_soon_threadsafe`. Consumers that touch asyncio from the callback had
+  those calls rejected (and the error swallowed by the monitor loop), so
+  dependents waited on their own periodic scans. Cancellations now take the
+  same `call_soon_threadsafe` path; a task already reported by `cancel_task()`
+  is still reported only once.
+- **Dragon MPI jobs launched with Cray's PMI everywhere** — `DragonExecutionBackend`
+  passed no PMI to `Batch.options()`, so every `process_templates` job got Batch's
+  default, `PMIBackend.CRAY`. That is right for Cray MPICH, but with Open MPI each
+  rank ran as a one-rank job with no error (Open MPI 5), or every rank exited 1
+  (Open MPI 4.1). A new `pmi` argument (`"pmix"`, `"cray"`, `"none"` or a
+  `PMIBackend`) sets the PMI for every job, and `"pmi"` in a task's
+  `task_backend_specific_kwargs` overrides it; only job submissions get it, and an
+  unknown name fails any task. With neither, Batch's default is kept, and a warning
+  is logged once for each kind of job it can break: an executable with several ranks,
+  and a Python function with one rank or with several. Under Cray MPICH
+  (`CRAY_MPICH_DIR` or `CRAY_MPICH_VERSION` set), where that default is right, a debug
+  line takes its place. The first multi-rank job without a `timeout`, or with `None`,
+  which now means the default, logs a warning too: when a rank dies, Dragon does not
+  end the job, and the other ranks wait until the timeout (`1e9` s by default).
+  `"pmi": "none"` declares a job's processes non-MPI: they run without a PMI, and
+  neither warning is logged. No job is refused.
+- **Example 02's and the tutorials' parallel function jobs crashed on a non-Cray
+  node** — with Batch's default PMI, every rank of a 2+2 Python function job aborted
+  with "double free or corruption" (exit code -6) under Dragon 0.14.1 and 0.15.0.
+  Their parallel jobs now set `"pmi": "none"`.
+
+- **`pip install rhapsody-py[dragon]` could not import Dragon's `Batch`** —
+  dragonhpc 0.15.0 imports `requests` in `dragon.workflows.batch`, but lists it
+  only under its own extras, so a plain install failed with
+  `ModuleNotFoundError: No module named 'requests'`. The `dragon` extra now
+  requires `dragonhpc[requests]==0.15.0`.
+
+- **`discover_backends()` reports real availability** — a backend is available only when its
+  runtime dependencies are importable (new `BaseBackend.is_available()`); Dragon,
+  RADICAL-Pilot and Orbit were reported available without them.
+- **`OrbitExecutionBackend` is exported from `rhapsody.backends`**, like the other backends.
+- **Docs**: real `DragonExecutionBackend` constructor, no `Session.get_statistics()`, correct
+  default session uid, removed never-implemented `RHAPSODY_LOG_LEVEL` / `RHAPSODY_WORK_DIR`.
+
+### Removed
+
+- **Python 3.9 and 3.10 support** — RHAPSODY now requires Python 3.11 or
+  newer (`requires-python = ">=3.11"`). Python 3.9 reached end of life in
+  October 2025 and 3.10 in October 2026, and CI no longer tests them. The 3.8,
+  3.9 and 3.10 classifiers are gone, and the install, contributing and AI
+  backend docs say 3.11.
+
+### Added
+
+- **Agent Skills** — `skills/rhapsody-execution/` teaches AI coding agents to run RHAPSODY
+  workloads (backends, tasks, resources, CPU/GPU affinity, failures, multi-node Dragon).
+
 ## [0.6.0] 2026-10-19
 
 ### Fixed

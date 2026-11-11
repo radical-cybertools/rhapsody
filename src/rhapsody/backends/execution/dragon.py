@@ -7,9 +7,11 @@ import sys
 import threading
 import time
 import uuid
+from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
 from typing import Optional
+from typing import Union
 
 from ..base import BaseBackend
 from ..constants import BackendMainStates
@@ -24,12 +26,16 @@ DRAGON_BATCH_INIT_ERROR = None
 
 try:
     import dragon
+    from dragon.native.machine import Node
+    from dragon.native.machine import System
     from dragon.native.process import ProcessTemplate
     from dragon.workflows.batch import Batch
     from dragon.workflows.batch import TaskCancelledError
 
 except ImportError as e:  # pragma: no cover - environment without Dragon
     dragon = None
+    Node = None
+    System = None
     ProcessTemplate = None
     Batch = None
     TaskCancelledError = None
@@ -58,6 +64,77 @@ def _get_logger() -> logging.Logger:
     return logging.getLogger(__name__)
 
 
+_SYSFS_CPU = "/sys/devices/system/cpu"
+
+
+def _physical_cores(cpus: list[int]) -> int:
+    """Count the physical cores that ``cpus`` belong to, from this node's sysfs topology.
+
+    Without sysfs, assume two hardware threads per core, as Batch does. Other nodes are read with
+    this node's topology, so this assumes homogeneous nodes.
+    """
+    cores = set()
+    try:
+        for cpu in cpus:
+            topology = f"{_SYSFS_CPU}/cpu{cpu}/topology"
+            with open(f"{topology}/physical_package_id") as f:
+                package = f.read().strip()
+            with open(f"{topology}/core_id") as f:
+                core = f.read().strip()
+            cores.add((package, core))
+    except OSError:
+        return max(1, len(cpus) // 2)
+    return max(1, len(cores))
+
+
+def _workers_per_node_for_affinity(
+    batch_kwargs: dict, enabled: bool, logger: logging.Logger
+) -> Optional[int]:
+    """Return a ``workers_per_node`` that fits the CPUs Dragon may use, or None to keep Batch's.
+
+    Batch starts ``Node.num_cpus // 2`` workers per node, and ``Node.num_cpus`` is the node's
+    ``os.cpu_count()``. When the job may use only part of a node (``Node.cpus``, the affinity of
+    Dragon's Local Services there), that puts every worker on the few CPUs the job holds: 256
+    workers on 4 CPUs of a 512-CPU node (#95). Batch uses the first ``num_nodes`` nodes of the
+    allocation and one worker count for all of them, so the smallest node sets it.
+    """
+    if "workers_per_node" in batch_kwargs:
+        return None
+    try:
+        h_uids = list(System().nodes)
+        num_nodes = batch_kwargs.get("num_nodes") or len(h_uids)
+        nodes = [Node(h_uid) for h_uid in h_uids[: max(1, num_nodes)]]
+        default = max(1, nodes[0].num_cpus // 2)
+        restricted = []
+        for node in nodes:
+            cpus = list(node.cpus)
+            cores = _physical_cores(cpus) if cpus else default
+            if cores < default:
+                restricted.append((node.hostname, cores))
+    except Exception as e:  # never let the probe block Batch creation
+        logger.debug(f"Could not compare Dragon nodes' CPUs with their affinity: {e}")
+        return None
+    if not restricted:
+        return None
+
+    workers = min(cores for _, cores in restricted)
+    nodes_text = ", ".join(f"{host} {cores}" for host, cores in restricted)
+    if not enabled:
+        logger.warning(
+            f"Dragon may use only part of some nodes (physical cores allowed: {nodes_text}), "
+            f"but Batch will start {default} workers per node, oversubscribing them. Request "
+            "whole nodes, or pass size_pool_to_affinity=True or workers_per_node in batch_kwargs."
+        )
+        return None
+    logger.warning(
+        f"Dragon may use only part of some nodes (physical cores allowed: {nodes_text}); "
+        f"starting {workers} workers per node instead of {default}. Batch still places process "
+        "and MPI jobs as if the job had whole nodes, so keep their ranks within the CPUs the job "
+        "holds. Request whole nodes to use all CPUs."
+    )
+    return workers
+
+
 # ============================================================================
 # Backend Helper Classes
 # ============================================================================
@@ -70,6 +147,33 @@ class TaskStateMapper:
     FAILED = "FAILED"
     CANCELED = "CANCELED"
     terminal_states = {DONE, FAILED, CANCELED}
+
+
+if TYPE_CHECKING:
+    from dragon.infrastructure.facts import PMIBackend
+
+# The Cray MPICH module sets these; Batch's default PMI, cray, is the right one there.
+CRAY_MPICH_ENV = ("CRAY_MPICH_DIR", "CRAY_MPICH_VERSION")
+
+
+def _pmi_options(pmi: Optional[Union[str, "PMIBackend"]]) -> dict[str, Any]:
+    """Return the ``Batch.options()`` kwargs that launch a job with ``pmi``.
+
+    ``pmi`` is ``"pmix"``, ``"cray"``, ``"none"`` (no PMI) or a Dragon ``PMIBackend``. None is no
+    choice: no kwargs, so Batch's default (``PMIBackend.CRAY``) applies.
+    """
+    if pmi is None:
+        return {}
+    if isinstance(pmi, str) and pmi.lower() == "none":
+        return {"pmi": None}
+    from dragon.infrastructure.facts import PMIBackend
+
+    try:
+        return {"pmi": PMIBackend(pmi.lower() if isinstance(pmi, str) else pmi)}
+    except ValueError:
+        raise ValueError(
+            f"Unknown pmi {pmi!r}: use 'pmix', 'cray', 'none' or a Dragon PMIBackend"
+        ) from None
 
 
 # ============================================================================
@@ -87,7 +191,7 @@ class DragonExecutionBackend(BaseBackend):
     Args:
         batch_kwargs: Forwarded verbatim to ``dragon.workflows.batch.Batch()``.
 
-            Supported keys (Dragon 0.14.1+):
+            Supported keys (Dragon 0.15.0+):
 
             - ``num_nodes`` *(int, optional)* — nodes to use; defaults to the full
               allocation.
@@ -103,6 +207,9 @@ class DragonExecutionBackend(BaseBackend):
               per worker pool (default: 4). At large scale (64K+ tasks), increasing this
               reduces DDict write contention. Valid range: ``[1, workers_per_node]``;
               Dragon clamps automatically.
+            - ``workers_per_node`` *(int, optional)* — workers in each node's pool, from 1
+              to ``os.cpu_count() // 2`` of the first node. Set it to override the sizing
+              below.
             - ``pool_nodes`` — **no-op in Dragon 0.14.0+**, kept for API compatibility.
 
         observe_peaks: Report each task's peak memory as ``task["observed"] = {"host_mem": GiB,
@@ -128,6 +235,13 @@ class DragonExecutionBackend(BaseBackend):
         peak_source: Where ``observe_peaks`` takes executable tasks' peaks from: ``"auto"`` (the
             default; Dragon's rusage if it reports it, otherwise the launcher), ``"dragon"`` (raise
             ``ValueError`` if it does not), or ``"launcher"`` (also samples GPU memory).
+        size_pool_to_affinity: Batch starts ``os.cpu_count() // 2`` workers on each node,
+            even when the job may use only part of the node, as on a Slurm allocation of a few
+            CPUs. When True (the default) and ``batch_kwargs`` sets no ``workers_per_node``, the
+            backend passes one worker per physical core the job may use on its smallest node,
+            and logs a warning. When False, Batch's sizing is kept and only the warning is
+            logged. Either way, Batch still places process and MPI jobs as if the job had whole
+            nodes.
 
     Note on working directory:
         DragonExecutionBackend does not support a backend-level working directory.
@@ -148,10 +262,51 @@ class DragonExecutionBackend(BaseBackend):
                     "process_templates": [(nranks, {"cwd": "/path/to/dir"})]
                 },
             )
+
+    Note on MPI jobs:
+        A task with ``process_templates`` runs as one Batch job, which Dragon launches with a
+        PMI. Batch's default is ``PMIBackend.CRAY``, right for Cray MPICH. With Open MPI it is
+        wrong, often silently: each rank may run as a one-rank job, or every rank may fail.
+        Choose the PMI with ``pmi``: ``"pmix"`` (Open MPI and other PMIx-based MPIs),
+        ``"cray"``, ``"none"`` (no PMI, for jobs of non-MPI processes) or a Dragon
+        ``PMIBackend``. Set it for every job with ``DragonExecutionBackend(pmi=...)``, or per
+        task with ``"pmi"`` in ``task_backend_specific_kwargs``, which takes precedence. With
+        neither, Batch's default applies, and a warning is logged once for each kind of job it
+        can break: an executable with several ranks, and a Python function with one rank or
+        with several. Under Cray MPICH (``CRAY_MPICH_DIR`` or ``CRAY_MPICH_VERSION`` set),
+        where that default is right, a debug line takes its place. Use ``"none"`` for jobs of
+        non-MPI processes: Batch's default can break them too (on a non-Cray node, every rank
+        of a Python function job crashed with it, one rank alone included). Tasks with
+        ``process_template`` or no template run without a PMI: a ``pmi`` has no effect there,
+        but an unknown name still fails the task.
+
+        Give MPI jobs a ``timeout`` (seconds) too: when a rank dies, Dragon does not end the
+        job, and the other ranks can wait for it until the timeout, 1e9 s by default. The
+        first multi-rank job without one, or with ``None``, logs a warning, unless its ``pmi``
+        is ``"none"``::
+
+            ComputeTask(
+                executable="./mpi_app",
+                task_backend_specific_kwargs={
+                    "process_templates": [(16, {})],
+                    "pmi": "pmix",
+                    "timeout": 600,
+                },
+            )
+
+        Dragon loads PMIx with ``dlopen("libpmix.so")``, so a directory holding
+        ``libpmix.so`` must be on ``LD_LIBRARY_PATH``; some distributions ship that name only
+        in their PMIx development package. When it can't be loaded, the whole Dragon runtime
+        aborts.
     """
 
     # Hygiene backstop: max wall-clock seconds a tuid can stay pending before it's dropped.
     PENDING_TUID_TIMEOUT = 30.0
+
+    @classmethod
+    def is_available(cls) -> bool:
+        """Return True if the Dragon runtime (dragon.workflows.batch) is importable."""
+        return Batch is not None
 
     def __init__(
         self,
@@ -159,6 +314,8 @@ class DragonExecutionBackend(BaseBackend):
         name: Optional[str] = "dragon",
         observe_peaks: bool = False,
         peak_source: str = "auto",
+        size_pool_to_affinity: bool = True,
+        pmi: Optional[Union[str, "PMIBackend"]] = None,
     ):
         if not Batch:
             raise RuntimeError(DRAGON_BATCH_INIT_ERROR)
@@ -170,6 +327,9 @@ class DragonExecutionBackend(BaseBackend):
                 "peak_source='dragon' needs a Dragon whose Batch tasks report rusage; "
                 "use 'auto' or 'launcher' with this one"
             )
+
+        # PMI kwargs for Batch.options() of MPI jobs, checked before Batch starts.
+        self._job_pmi_options = _pmi_options(pmi)
 
         super().__init__(name=name)
 
@@ -190,7 +350,17 @@ class DragonExecutionBackend(BaseBackend):
                 "task_logs is disabled: task['stdout']/task['stderr'] will be empty "
                 "for capture_stdio=False tasks; output goes directly to the console."
             )
+        workers = _workers_per_node_for_affinity(
+            effective_kwargs, size_pool_to_affinity, self.logger
+        )
+        if workers is not None:
+            effective_kwargs["workers_per_node"] = workers
         self.batch = Batch(**effective_kwargs)
+        if workers is not None and getattr(self.batch, "num_workers", workers) != workers:
+            self.logger.warning(
+                f"Asked Batch for {workers} workers per node but it reports "
+                f"{self.batch.num_workers}: the pools may oversubscribe the allowed CPUs."
+            )
 
         self._backend_state = BackendMainStates.INITIALIZED
         self._callback_func: Callable = lambda t, s: None
@@ -205,6 +375,9 @@ class DragonExecutionBackend(BaseBackend):
         self._cancelled_tuids: set[str] = set()
         self._batch_monitor_thread = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Job warnings: no PMI, once per kind of job (see _job_options); no timeout, once.
+        self._warned_job_pmi: set[tuple[bool, bool]] = set()
+        self._warned_job_timeout = False
 
         self._shutdown_event = threading.Event()
 
@@ -212,6 +385,24 @@ class DragonExecutionBackend(BaseBackend):
             f"DragonExecutionBackend: {self.batch.num_workers} workers, "
             f"{self.batch.num_managers} managers"
         )
+
+    def topology(self) -> list[dict[str, Any]]:
+        """Node layout from Dragon's ``Batch.topology()``: one entry per pool node.
+
+        Cores are the pool's workers per node. Batch reports no GPU count, so GPUs come from a probe
+        of the local node (assumes homogeneous nodes).
+        """
+        try:
+            batch_topology = self.batch.topology()
+        except Exception:
+            self.logger.debug("Batch.topology() failed", exc_info=True)
+            return []
+        _, gpus = self._probe_local_resources()
+        nodes = []
+        for hosts, workers in zip(batch_topology.pool_hostnames, batch_topology.workers_per_pool):
+            cores = workers // len(hosts) if hosts else 0
+            nodes.extend({"id": host, "cores": cores, "gpus": gpus} for host in hosts)
+        return nodes
 
     def __await__(self):
         return self._async_init().__await__()
@@ -277,71 +468,63 @@ class DragonExecutionBackend(BaseBackend):
                     continue
 
                 completed = []
-                for t in tuids:
-                    entry = self._monitored_batches.pop(t, None)
-                    if entry is None:
-                        if t in self._cancelled_tuids:
-                            self._cancelled_tuids.discard(t)
-                            self._pending_tuids.pop(t, None)
+                cancelled = []
+                # Deliver what this sweep resolved even if a later tuid raises below.
+                try:
+                    for t in tuids:
+                        entry = self._monitored_batches.pop(t, None)
+                        if entry is None:
+                            if t in self._cancelled_tuids:
+                                self._cancelled_tuids.discard(t)
+                                self._pending_tuids.pop(t, None)
+                                continue
+                            # Not registered yet; keep retrying instead of assuming cancellation.
+                            first_seen = self._pending_tuids.setdefault(t, time.monotonic())
+                            if time.monotonic() - first_seen > self.PENDING_TUID_TIMEOUT:
+                                self.logger.warning(f"Dragon tuid {t} never registered; dropping")
+                                self._pending_tuids.pop(t, None)
                             continue
-                        # Not registered yet; keep retrying instead of assuming cancellation.
-                        first_seen = self._pending_tuids.setdefault(t, time.monotonic())
-                        if time.monotonic() - first_seen > self.PENDING_TUID_TIMEOUT:
-                            self.logger.warning(f"Dragon tuid {t} never registered; dropping")
-                            self._pending_tuids.pop(t, None)
-                        continue
-                    self._pending_tuids.pop(t, None)
-                    batch_task, uid = entry
+                        self._pending_tuids.pop(t, None)
+                        batch_task, uid = entry
 
-                    try:
-                        # Block until the result is fully committed to the DDict.
-                        # poll() and the DDict write are not atomic; block=True here
-                        # ensures get_stdout(block=False) is safe afterward.
-                        result = batch_task.get(block=True)
-                        raised, tb = False, None
-                    except TaskCancelledError:
-                        # Dragon-side timeout / upstream cancel (not a user cancel_task call)
-                        task_info = self._task_registry.pop(uid, None)
-                        if task_info:
-                            self._callback_func(task_info["description"], "CANCELED")
-                        continue
-                    except Exception as exc:
-                        result, raised, tb = exc, True, batch_task.traceback
-
-                    task_reg = self._task_registry.get(uid)
-                    is_native_function = (
-                        task_reg.get("is_native_function", False) if task_reg else False
-                    )
-                    if task_reg:
-                        result = self._collect_observed(task_reg, result, raised, batch_task)
-                    if not is_native_function:
-                        # Dragon returns exit codes as int/list[int] for process/job tasks.
-                        # Normalize non-zero to raised=True so Rhapsody delivers FAILED.
-                        if isinstance(result, int) and result != 0:
-                            result = SystemExit(result)
-                            raised = True
-                        elif isinstance(result, list) and any(
-                            c != 0 for c in result if isinstance(c, int)
-                        ):
-                            result = SystemExit(result)
-                            raised = True
-
-                    capture_stdio = (
-                        task_reg.get("description", {}).get("capture_stdio") if task_reg else False
-                    )
-                    if capture_stdio:
-                        stdout = batch_task.stdout_path or ""
-                        stderr = batch_task.stderr_path or ""
-                    else:
                         try:
-                            stdout = batch_task.get_stdout(block=False) or ""
-                            stderr = batch_task.get_stderr(block=False) or ""
-                        except OSError:
-                            stdout, stderr = "", ""
-                    completed.append((uid, result, tb, raised, stdout, stderr))
+                            # Block until the result is fully committed to the DDict.
+                            # poll() and the DDict write are not atomic; block=True here
+                            # ensures get_stdout(block=False) is safe afterward.
+                            result = batch_task.get(block=True)
+                            raised, tb = False, None
+                        except TaskCancelledError:
+                            # Dragon-side timeout / upstream cancel (not a user cancel_task call)
+                            cancelled.append(uid)
+                            continue
+                        except Exception as exc:
+                            result, raised, tb = exc, True, batch_task.traceback
 
-                if completed:
-                    self._loop.call_soon_threadsafe(self._deliver_batch, completed)
+                        # Exit codes of process/job tasks pass through unchanged;
+                        # _deliver_batch maps them to exit_code and DONE/FAILED.
+                        task_reg = self._task_registry.get(uid)
+                        if task_reg:
+                            result = self._collect_observed(task_reg, result, raised, batch_task)
+                        capture_stdio = (
+                            task_reg.get("description", {}).get("capture_stdio")
+                            if task_reg
+                            else False
+                        )
+                        if capture_stdio:
+                            stdout = batch_task.stdout_path or ""
+                            stderr = batch_task.stderr_path or ""
+                        else:
+                            try:
+                                stdout = batch_task.get_stdout(block=False) or ""
+                                stderr = batch_task.get_stderr(block=False) or ""
+                            except OSError:
+                                stdout, stderr = "", ""
+                        completed.append((uid, result, tb, raised, stdout, stderr))
+                finally:
+                    if completed:
+                        self._loop.call_soon_threadsafe(self._deliver_batch, completed)
+                    if cancelled:
+                        self._loop.call_soon_threadsafe(self._deliver_cancelled, cancelled)
 
             except Exception as e:
                 self.logger.exception(f"Critical error in monitor loop: {e}")
@@ -395,7 +578,28 @@ class DragonExecutionBackend(BaseBackend):
                 task_desc["return_value"] = result
                 task_desc["stdout"] = stdout
                 task_desc["stderr"] = stderr
-                self._callback_func(task_desc, "DONE")
+                state = "DONE"
+                if not task_info.get("is_native_function", False):
+                    # Process/job tasks return exit code(s) as int/list[int]. Report the
+                    # first non-zero one like the other backends; the session then raises
+                    # TaskExecutionError(uid, stderr, exit_code) for FAILED tasks.
+                    codes = result if isinstance(result, list) else [result]
+                    exit_code = next((c for c in codes if isinstance(c, int) and c != 0), 0)
+                    task_desc["exit_code"] = exit_code
+                    if exit_code != 0:
+                        state = "FAILED"
+                self._callback_func(task_desc, state)
+
+    def _deliver_cancelled(self, uids: list) -> None:
+        """Deliver CANCELED for tasks Dragon cancelled itself (timeout / upstream cancel). Runs on
+        the asyncio event loop (via call_soon_threadsafe), like _deliver_batch.
+
+        A task cancel_task() already reported is no longer in _task_registry and is skipped.
+        """
+        for uid in uids:
+            task_info = self._task_registry.pop(uid, None)
+            if task_info:
+                self._callback_func(task_info["description"], "CANCELED")
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
         """Submit tasks to the backend.
@@ -487,7 +691,9 @@ class DragonExecutionBackend(BaseBackend):
             task_args = tuple(task.get("arguments", []))
             task_kwargs = None
 
-        timeout = backend_kwargs.get("timeout", 1000000000.0)
+        timeout = backend_kwargs.get("timeout")
+        if timeout is None:
+            timeout = 1000000000.0
 
         # Handle async functions
         if is_function and asyncio.iscoroutinefunction(target):
@@ -502,6 +708,15 @@ class DragonExecutionBackend(BaseBackend):
         is_native_function = (
             is_function and process_templates_config is None and process_template_config is None
         )
+        # Batch launches only job() tasks with a PMI.
+        job_options: dict[str, Any] = {}
+        if process_templates_config is not None:
+            job_options = self._job_options(
+                uid, backend_kwargs, process_templates_config, is_function
+            )
+        else:
+            # No PMI here, but an unknown name fails as it does on a job.
+            _pmi_options(backend_kwargs.get("pmi"))
 
         # Compute per-task stdio paths when capture is requested.
         # Dragon creates parent directories automatically.
@@ -541,6 +756,7 @@ class DragonExecutionBackend(BaseBackend):
             timeout=timeout,
             stdout=stdout_path,
             stderr=stderr_path,
+            **job_options,
         )
 
         # Single decision tree - no redundant checks
@@ -592,6 +808,59 @@ class DragonExecutionBackend(BaseBackend):
         )
 
         return batch_task
+
+    def _job_options(
+        self, uid: str, backend_kwargs: dict, process_templates_config: list, is_function: bool
+    ) -> dict:
+        """Return the PMI kwargs for an MPI job's ``Batch.options()``.
+
+        The task's ``pmi`` takes precedence over the backend's. With neither, a warning is logged
+        once for each kind of job Batch's default PMI can break: an executable with several
+        ranks, and a Python function with one rank or with several, which can crash under it on
+        a non-Cray node. The kinds are kept apart so that a one-rank function job does not use
+        up the warning a later Open MPI job needs. The first multi-rank job with no timeout logs
+        a warning too; neither is refused. Under Cray MPICH (``CRAY_MPICH_ENV``) that default is
+        right, so no PMI warning. ``pmi="none"`` declares the processes non-MPI, so neither
+        warning applies.
+        """
+        pmi = backend_kwargs.get("pmi")
+        options = self._job_pmi_options if pmi is None else _pmi_options(pmi)
+        if options == {"pmi": None}:
+            return options
+        nranks = sum(n for n, _ in process_templates_config)
+        ranks = f"{nranks} rank{'' if nranks == 1 else 's'}"
+
+        kind = (is_function, nranks > 1)
+        if not options and (nranks > 1 or is_function) and kind not in self._warned_job_pmi:
+            self._warned_job_pmi.add(kind)
+            cray_mpich = [v for v in CRAY_MPICH_ENV if os.environ.get(v)]
+            if cray_mpich:
+                self.logger.debug(
+                    f"Cray MPICH environment detected ({', '.join(cray_mpich)}), keeping Batch's "
+                    f"default PMI, cray, for job {uid} and the jobs like it."
+                )
+            else:
+                self.logger.warning(
+                    f"Job {uid} has {ranks} and no PMI, so Dragon launches it with Batch's "
+                    "default, cray. That suits Cray MPICH. Elsewhere it can break the job: with "
+                    "Open MPI each rank may run as a one-rank job, or every rank may fail, and a "
+                    "job of Python functions may crash, even with one rank. Set pmi ('pmix' or "
+                    "'cray', or 'none' if the processes are not MPI) on DragonExecutionBackend or "
+                    "in the task's task_backend_specific_kwargs. Logged once per kind of job "
+                    "(executable or Python function, one rank or several)."
+                )
+        # A rank alone has no other rank to wait for it in a collective when it dies.
+        no_timeout = backend_kwargs.get("timeout") is None
+        if nranks > 1 and no_timeout and not self._warned_job_timeout:
+            self._warned_job_timeout = True
+            self.logger.warning(
+                f"Job {uid} has {nranks} ranks and no timeout. If it is an MPI job and a rank "
+                "dies, Dragon does not end it, and the other ranks can wait for that rank until "
+                "the timeout, 1e9 s by default. Set timeout (seconds) in the task's "
+                "task_backend_specific_kwargs, or pmi 'none' if the processes are not MPI. "
+                "Logged once."
+            )
+        return options
 
     def link_implicit_data_deps(self, src_task, dst_task):
         pass
@@ -721,10 +990,14 @@ class DragonExecutionBackend(BaseBackend):
         batch_kwargs: Optional[dict] = None,
         observe_peaks: bool = False,
         peak_source: str = "auto",
+        pmi: Optional[Union[str, "PMIBackend"]] = None,
     ):
         """Create and initialize a DragonExecutionBackend."""
         backend = cls(
-            batch_kwargs=batch_kwargs, observe_peaks=observe_peaks, peak_source=peak_source
+            batch_kwargs=batch_kwargs,
+            observe_peaks=observe_peaks,
+            peak_source=peak_source,
+            pmi=pmi,
         )
         return await backend
 

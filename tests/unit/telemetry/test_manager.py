@@ -62,6 +62,255 @@ class TestEmit:
 
 
 class TestOtelInstruments:
+    async def test_task_metrics_have_no_task_id(self, manager):
+        """Task metrics aggregate across tasks: no per-task series, task_id only on spans."""
+        for tid in ("t1", "t2", "t3"):
+            manager.emit(
+                make_event(
+                    TaskSubmitted, session_id="test-session", backend="concurrent", task_id=tid
+                )
+            )
+            manager.emit(
+                make_event(
+                    TaskCompleted,
+                    session_id="test-session",
+                    backend="concurrent",
+                    task_id=tid,
+                    duration_seconds=0.1,
+                    attributes={"executable": "/bin/true", "task_type": "ComputeTask"},
+                )
+            )
+        await asyncio.sleep(0.1)
+        metrics = manager.read_metrics()
+        for name in ("tasks_submitted", "tasks_completed"):
+            points = [
+                dp
+                for rm in metrics.resource_metrics
+                for sm in rm.scope_metrics
+                for metric in sm.metrics
+                if metric.name == name
+                for dp in metric.data.data_points
+            ]
+            assert len(points) == 1, name
+            assert points[0].value == 3
+            assert "task_id" not in points[0].attributes
+        spans = {s.attributes.get("task_id") for s in manager.read_traces() if s.name == "task"}
+        assert spans == {"t1", "t2", "t3"}
+
+    async def test_stop_drains_a_backlog_slower_than_the_stall_timeout(
+        self, manager, monkeypatch, caplog
+    ):
+        """Stop() keeps draining while the backlog shrinks instead of dropping events.
+
+        1500 events take three 500-event dispatch batches of ~0.15 s each; the loop yields between
+        batches, so several 0.05 s stall windows expire while progress continues.
+        """
+        monkeypatch.setattr(TelemetryManager, "_DRAIN_STALL_TIMEOUT", 0.05)
+        process = manager._process_event
+
+        def slow_process(event, *args):
+            time.sleep(0.0003)
+            process(event, *args)
+
+        monkeypatch.setattr(manager, "_process_event", slow_process)
+        n = 1500
+        for i in range(n):
+            manager.emit(
+                make_event(
+                    TaskSubmitted, session_id="test-session", backend="concurrent", task_id=f"t{i}"
+                )
+            )
+        with caplog.at_level("INFO", logger="rhapsody.telemetry.manager"):
+            await manager.stop()
+        submitted = [e for e in manager._event_log if e.event_type == "TaskSubmitted"]
+        assert len(submitted) == n
+        own = [r for r in caplog.records if r.name == "rhapsody.telemetry.manager"]
+        assert not [r for r in own if r.levelname == "WARNING"]
+        assert any("draining" in r.getMessage() for r in own)
+
+    async def test_stop_without_drain_discards_the_backlog(self, monkeypatch, caplog):
+        """drain_on_stop=False: stop() skips the backlog, warns with the count, ends the session."""
+        m = TelemetryManager(session_id="test-session", drain_on_stop=False)
+        await m.start()
+        process = m._process_event
+
+        def slow_process(event, *args):
+            time.sleep(0.01)
+            process(event, *args)
+
+        monkeypatch.setattr(m, "_process_event", slow_process)
+        for i in range(1000):  # ~10 s if processed
+            m.emit(
+                make_event(
+                    TaskSubmitted, session_id="test-session", backend="concurrent", task_id=f"t{i}"
+                )
+            )
+        t0 = time.perf_counter()
+        with caplog.at_level("WARNING", logger="rhapsody.telemetry.manager"):
+            await m.stop()
+        assert time.perf_counter() - t0 < 2.0
+        assert any("drain disabled" in r.getMessage() for r in caplog.records)
+        assert any(e.event_type == "SessionEnded" for e in m._event_log)
+        assert sum(1 for e in m._event_log if e.event_type == "TaskSubmitted") < 1000
+
+    async def test_stop_does_not_wait_for_a_dead_dispatch_loop(self, manager, monkeypatch, caplog):
+        """With the dispatch task gone, stop() does not wait and warns about the backlog."""
+        manager._dispatch_task.cancel()
+        await asyncio.sleep(0)
+        for i in range(10):
+            manager.emit(
+                make_event(
+                    TaskSubmitted, session_id="test-session", backend="concurrent", task_id=f"t{i}"
+                )
+            )
+        t0 = time.perf_counter()
+        with caplog.at_level("WARNING", logger="rhapsody.telemetry.manager"):
+            await manager.stop()
+        assert time.perf_counter() - t0 < 2.0  # one stall window would be 5 s
+        assert any("not processed" in r.getMessage() for r in caplog.records)
+
+    async def test_stop_returns_at_once_when_the_dispatch_loop_crashes(
+        self, manager, monkeypatch, caplog
+    ):
+        """A crashing dispatch loop is noticed when it ends, not after a stall window."""
+
+        class FailingLog(list):
+            def append(self, event):  # _flush_batch's first step, outside its per-event try
+                raise RuntimeError("flush failed")
+
+        monkeypatch.setattr(manager, "_event_log", FailingLog())
+        for i in range(10):
+            manager.emit(
+                make_event(
+                    TaskSubmitted, session_id="test-session", backend="concurrent", task_id=f"t{i}"
+                )
+            )
+        t0 = time.perf_counter()
+        with caplog.at_level("WARNING", logger="rhapsody.telemetry.manager"):
+            await manager.stop()
+        assert time.perf_counter() - t0 < 1.0  # the stall window is 5 s
+        assert any("dispatch loop failed" in r.getMessage() for r in caplog.records)
+        # the batch the loop was flushing when it crashed is counted as not processed
+        lost = [r.getMessage() for r in caplog.records if "not processed" in r.getMessage()]
+        assert len(lost) == 1
+        assert "plus up to" in lost[0], lost
+        # SessionEnded was in the lost batch: stop() still ends the session span
+        assert any(s.name == "session" for s in manager.read_traces())
+
+    async def test_stop_cancels_a_stalled_dispatch_loop(self, manager, monkeypatch, caplog):
+        """A dispatch loop that makes no progress is cancelled after one stall window."""
+        monkeypatch.setattr(TelemetryManager, "_DRAIN_STALL_TIMEOUT", 0.05)
+        manager._dispatch_task.cancel()
+        await asyncio.sleep(0)
+        hung = asyncio.create_task(asyncio.sleep(3600))
+        manager._dispatch_task = hung
+        manager.emit(
+            make_event(TaskSubmitted, session_id="test-session", backend="concurrent", task_id="t1")
+        )
+        t0 = time.perf_counter()
+        with caplog.at_level("WARNING", logger="rhapsody.telemetry.manager"):
+            await manager.stop()
+        assert time.perf_counter() - t0 < 1.0
+        assert hung.cancelled()
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1, warnings  # reported once
+        assert "stalled" in warnings[0]
+        assert "not processed" in warnings[0]
+        assert manager._queue.qsize() == 0  # no stale events for a later start()
+
+    async def test_cancelling_stop_during_a_stalled_drain_propagates(self, manager):
+        """Stop() must not swallow a cancellation aimed at itself (e.g. an outer timeout)."""
+        manager._dispatch_task.cancel()
+        await asyncio.sleep(0)
+        hung = asyncio.create_task(asyncio.sleep(3600))
+        manager._dispatch_task = hung
+        try:
+            with pytest.raises(asyncio.TimeoutError):  # the stall window is 5 s
+                await asyncio.wait_for(manager.stop(), timeout=0.1)
+        finally:
+            hung.cancel()
+
+    async def test_second_stop_is_a_no_op(self, caplog):
+        """A repeated stop() neither queues a stale sentinel nor reports phantom losses."""
+        m = TelemetryManager(session_id="test-session", drain_on_stop=False)
+        await m.start()
+        await m.stop()
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="rhapsody.telemetry.manager"):
+            await m.stop()
+        assert m._queue.qsize() == 0
+        assert not caplog.records
+
+    async def test_retried_stop_after_a_cancelled_one_cleans_up(self, monkeypatch):
+        """A stop() cancelled mid-drain leaves cleanup to the next stop(), which must run it."""
+        monkeypatch.setattr(TelemetryManager, "_DRAIN_STALL_TIMEOUT", 0.05)
+        m = TelemetryManager(session_id="test-session")
+        await m.start()
+        m._dispatch_task.cancel()
+        await asyncio.sleep(0)
+        hung = asyncio.create_task(asyncio.sleep(3600))
+        m._dispatch_task = hung
+        try:
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(m.stop(), timeout=0.01)
+            assert not m._stopped
+            await m.stop()  # retried: stall, cancel, cleanup
+            assert m._stopped
+            assert hung.cancelled()
+        finally:
+            hung.cancel()
+
+    async def test_stop_after_a_failed_start_still_cleans_up(self, monkeypatch):
+        """Stop() after start() failed partway shuts down what start() created."""
+        m = TelemetryManager(session_id="test-session")
+
+        def fail():
+            raise OSError("cannot open checkpoint file")
+
+        monkeypatch.setattr(m, "_open_checkpoint_file", fail)
+        m._checkpoint_path = "/nonexistent"
+        with pytest.raises(OSError):
+            await m.start()
+        await m.stop()
+        assert m._stopped
+
+    async def test_second_start_is_a_no_op(self, manager):
+        first = manager._dispatch_task
+        await manager.start()
+        assert manager._dispatch_task is first
+
+    async def test_tasks_running_ignores_tasks_ended_before_start(self, manager):
+        """A task created and canceled before RUNNING must not decrement tasks_running."""
+        base = {"session_id": "test-session", "backend": "concurrent"}
+        manager.emit(make_event(TaskCreated, task_id="c1", **base))
+        manager.emit(make_event(TaskCanceled, task_id="c1", duration_seconds=0.0, **base))
+        manager.emit(make_event(TaskStarted, task_id="r1", **base))
+        manager.emit(make_event(TaskStarted, task_id="r1", **base))  # duplicate report
+        # a task whose labels differ between start and end still returns to zero
+        manager.emit(make_event(TaskStarted, task_id="r2", attributes={"executable": "a"}, **base))
+        manager.emit(
+            make_event(
+                TaskCompleted,
+                task_id="r2",
+                duration_seconds=0.1,
+                attributes={"executable": "b"},
+                **base,
+            )
+        )
+        await asyncio.sleep(0.1)
+        metrics = manager.read_metrics()
+        assert _sum_counter(metrics, "tasks_running") == 1
+        assert _sum_counter(metrics, "tasks_started") == 2
+        running = [
+            dp.value
+            for rm in metrics.resource_metrics
+            for sm in rm.scope_metrics
+            for metric in sm.metrics
+            if metric.name == "tasks_running"
+            for dp in metric.data.data_points
+        ]
+        assert min(running) >= 0, running
+
     async def test_task_submitted_counter(self, manager):
         manager.emit(
             make_event(TaskSubmitted, session_id="test-session", backend="concurrent", task_id="t1")
@@ -865,6 +1114,92 @@ class TestExportAsOtlp:
         assert [v["stringValue"] for v in values] == ["alpha", "beta", "gamma"]
 
 
+class TestResourceLayout:
+    async def test_resource_layout_event_round_trips(self, manager):
+        """ResourceLayout emitted via the public API survives the dispatch loop."""
+        from rhapsody.telemetry.events import ResourceLayout
+
+        received = []
+        manager.subscribe(received.append)
+        manager.emit(
+            make_event(
+                ResourceLayout,
+                session_id="test-session",
+                backend="concurrent",
+                attributes={
+                    "nodes": [
+                        {"id": "n0", "cores": 64, "gpus": 4},
+                        {"id": "n1", "cores": 64, "gpus": 4},
+                    ]
+                },
+            )
+        )
+        await asyncio.sleep(0.1)
+
+        layouts = [e for e in received if e.event_type == "ResourceLayout"]
+        assert len(layouts) == 1
+        assert layouts[0].attributes["nodes"][0]["cores"] == 64
+        assert layouts[0].attributes["nodes"][1]["gpus"] == 4
+
+    async def test_resource_layout_written_to_checkpoint(self):
+        """ResourceLayout shows up in the JSONL checkpoint as a normal event."""
+        from rhapsody.telemetry.events import ResourceLayout
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            m = TelemetryManager(session_id="rl-cp", checkpoint_path=tmpdir)
+            await m.start()
+            m.emit(
+                make_event(
+                    ResourceLayout,
+                    session_id="rl-cp",
+                    backend="concurrent",
+                    attributes={"nodes": [{"id": "host-a", "cores": 8, "gpus": 0}]},
+                )
+            )
+            await asyncio.sleep(0.1)
+            await m.stop()
+
+            filepath = os.path.join(tmpdir, os.listdir(tmpdir)[0])
+            rows = [json.loads(l) for l in open(filepath)]
+            layouts = [r for r in rows if r.get("event_type") == "ResourceLayout"]
+            assert len(layouts) == 1
+            assert layouts[0]["attributes"]["nodes"][0]["id"] == "host-a"
+
+
+class TestTaskPlacementPropagation:
+    async def test_placement_in_task_dict_forwarded_to_started_event(self, manager):
+        """Task['placement'] (set by a backend) must surface on TaskStarted.attributes."""
+        received = []
+        manager.subscribe(received.append)
+        task = {
+            "uid": "t-place",
+            "backend": "dragon",
+            "task_type": "ComputeTask",
+            "placement": {"node_id": "worker-3", "cores": 4, "gpu_ids": [0, 1]},
+        }
+        manager._on_task_state_change(task, "RUNNING")
+        await asyncio.sleep(0.1)
+
+        started = [e for e in received if e.event_type == "TaskStarted"]
+        assert len(started) == 1
+        assert started[0].node_id == "worker-3"
+        placement = started[0].attributes.get("placement")
+        assert placement == {"node_id": "worker-3", "cores": 4, "gpu_ids": [0, 1]}
+
+    async def test_missing_placement_does_not_break(self, manager):
+        """Backends that don't populate placement still produce a valid TaskStarted."""
+        received = []
+        manager.subscribe(received.append)
+        task = {"uid": "t-no-place", "backend": "dragon", "task_type": "ComputeTask"}
+        manager._on_task_state_change(task, "RUNNING")
+        await asyncio.sleep(0.1)
+
+        started = [e for e in received if e.event_type == "TaskStarted"]
+        assert len(started) == 1
+        assert started[0].node_id is None
+        assert "placement" not in started[0].attributes
+
+
 class TestTaskQueuedSpanEvent:
     async def test_task_queued_adds_span_event(self, manager):
         manager.emit(
@@ -932,3 +1267,22 @@ def _sum_gauge(metrics_data, name: str) -> float:
                     for dp in metric.data.data_points:
                         total += dp.value
     return total
+
+
+def test_task_executable_label_is_stable_per_callable():
+    """Function labels must not embed per-object addresses (they are metric attributes)."""
+    import functools
+
+    from rhapsody.telemetry.manager import _task_executable
+
+    def work(i):
+        return i
+
+    class Job:
+        def __call__(self):
+            pass
+
+    assert _task_executable({"function": work}) == "work"
+    assert _task_executable({"function": functools.partial(work, 1)}) == "work"
+    assert _task_executable({"function": functools.partial(functools.partial(work), 2)}) == "work"
+    assert _task_executable({"function": Job()}) == "Job"

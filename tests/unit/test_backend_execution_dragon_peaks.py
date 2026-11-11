@@ -346,7 +346,8 @@ async def test_observed_reaches_callback_for_done_and_failed(tmp_path):
     assert state == "DONE" and task["return_value"] == 0
     assert 200 * MIB - SLACK <= task["observed"]["host_mem"] * (1 << 30) <= 264 * MIB
     state, task = finals["bad"]
-    assert state == "FAILED" and isinstance(task["exception"], SystemExit)
+    # Exit codes pass through to _deliver_batch, which reports FAILED with exit_code
+    assert state == "FAILED" and task["exit_code"] == 4
     assert 100 * MIB - SLACK <= task["observed"]["host_mem"] * (1 << 30) <= 164 * MIB
     # Records are read and removed; shutdown removes the root.
     assert os.listdir(tmp_path) == []

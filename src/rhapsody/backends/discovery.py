@@ -191,6 +191,10 @@ def get_backend(backend_name: str, *args: Any, **kwargs: Any) -> BaseBackend:
 def discover_backends() -> dict[str, bool]:
     """Discover which backends are available based on optional dependencies.
 
+    A backend is available when its class can be imported **and** its runtime dependencies are
+    importable (``BaseBackend.is_available()``). Backend modules import even when their optional
+    runtime is missing, so importing the class alone does not mean the backend can be created.
+
     Returns:
         Dictionary mapping backend names to availability status
     """
@@ -200,10 +204,16 @@ def discover_backends() -> dict[str, bool]:
     for name in BackendRegistry.list_backends():
         try:
             # Try to get the backend class - this will import if it's a string path
-            BackendRegistry.get_backend_class(name)
-            available_backends[name] = True
+            backend_class = BackendRegistry.get_backend_class(name)
         except (ImportError, ValueError, AttributeError):
             # Backend registered but can't be imported
+            available_backends[name] = False
+            continue
+
+        is_available = getattr(backend_class, "is_available", None)
+        try:
+            available_backends[name] = bool(is_available()) if callable(is_available) else True
+        except Exception:  # noqa: BLE001 - a failing check means "not available"
             available_backends[name] = False
 
     return available_backends
