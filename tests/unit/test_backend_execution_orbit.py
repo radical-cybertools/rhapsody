@@ -210,6 +210,46 @@ async def test_cancel_unknown_task():
     assert result is False
 
 
+@pytest.mark.asyncio
+async def test_cancel_racing_a_completion_is_a_noop():
+    """The task completes while the remote cancel is in flight: its
+    terminal callback already fired via the notification and it left the
+    registry -- the cancel must answer False, not KeyError (observed as
+    teardown noise on every twin_close under load)."""
+
+    backend = await _init_backend()
+    backend._tasks["t.001"] = {"uid": "t.001", "state": "RUNNING"}
+    cb = MagicMock()
+    backend.register_callback(cb)
+
+    def completes_meanwhile(uid):
+        backend._tasks.pop(uid, None)
+
+    backend._mock_rh.cancel_task.side_effect = completes_meanwhile
+
+    assert await backend.cancel_task("t.001") is False
+    cb.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_failed_notification_attaches_remote_traceback():
+    """A FAILED notification's traceback becomes a note on the exception the user gets."""
+    backend = await _init_backend(batch_window=0)
+    fired = []
+    backend.register_callback(lambda task, state: fired.append((task.get("exception"), state)))
+    await backend.submit_tasks([{"uid": "t.1", "function": "cloudpickle::X"}])
+
+    tb = "Traceback (most recent call last):\n  ...\nValueError: boom\n"
+    backend._handle_notification(
+        "task_status", {"uid": "t.1", "state": "FAILED", "exception": "boom", "traceback": tb}
+    )
+
+    exc, state = fired[0]
+    assert state == "FAILED"
+    assert isinstance(exc, RuntimeError) and str(exc) == "boom"
+    assert exc.__notes__ == [f"Remote traceback:\n{tb}"]
+
+
 # ---------------------------------------------------------------------------
 # cancel_all_tasks
 # ---------------------------------------------------------------------------

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **`DragonExecutionBackend.cancel_task()` of an unknown task returns `False`** instead of
+  raising `ValueError`, like the other backends. A cancel can race a task that already finished
+  or was never dispatched (ROSE cancels its losing candidate branch this way). On
+  `OrbitExecutionBackend`, a cancel racing the task's completion also returns `False` instead of
+  raising `KeyError`.
+- **A failed Dragon function task carries the worker's traceback** — as a note on the exception
+  the session raises (shown by `traceback` and an uncaught raise, like `ProcessPoolExecutor`), and
+  as the task's `traceback`, which ORBIT forwards. `OrbitExecutionBackend` adds a forwarded
+  `traceback` as a note to the task's exception too. Before, the frames were lost to the
+  consumer.
 
 ## [0.7.0] 2026-11-09
 
