@@ -437,19 +437,29 @@ class OrbitExecutionBackend(BaseBackend):
             if not isinstance(full, dict):
                 raise TypeError(f"get_task returned {type(full).__name__}, not a dict")
         except Exception as e:
-            self.logger.warning("Task %s is DONE but its output could not be fetched: %s", uid, e)
-            task["state"] = "FAILED"
-            task["exception"] = RuntimeError(
-                f"task {uid} finished, but its stdout could not be fetched: {e}"
-            )
-            self._fire_callback(task, "FAILED")
+            if uid in self._tasks:  # else a terminal state fired meanwhile
+                self._fail_fetch(task, uid, e)
             return
 
+        if uid not in self._tasks:
+            return  # a terminal state fired meanwhile
+        # A pool dispatcher's TaskRecord has no stdout: fail rather than resolve with "".
+        if "stdout" not in full:
+            self._fail_fetch(task, uid, "the fetched task carries no stdout")
+            return
         for key in ("stdout", "stderr", "exit_code"):
             if key in full:
                 task[key] = full[key]
-        task.setdefault("stdout", "")
         self._fire_callback(task, state)
+
+    def _fail_fetch(self, task: dict, uid: str, reason: Any) -> None:
+        """Report a DONE executable whose output could not be fetched as FAILED."""
+        self.logger.warning("Task %s is DONE but its output could not be fetched: %s", uid, reason)
+        task["state"] = "FAILED"
+        task["exception"] = RuntimeError(
+            f"task {uid} finished, but its stdout could not be fetched: {reason}"
+        )
+        self._fire_callback(task, "FAILED")
 
     def _fire_callback(self, task: dict, state: str) -> None:
         """Invoke the Rhapsody state callback, at most once per terminal state.
@@ -806,7 +816,8 @@ class OrbitExecutionBackend(BaseBackend):
         if not self._initialized:
             await self._async_init()
 
-        if uid not in self._tasks:
+        # Unknown, or already DONE with its output being fetched.
+        if uid not in self._tasks or uid in self._output_fetches:
             return False
 
         # If the task is still buffered locally (not yet flushed), the endpoint

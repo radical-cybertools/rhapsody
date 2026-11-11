@@ -1396,6 +1396,51 @@ async def test_shutdown_waits_for_output_fetch():
     assert fired == ["late"]
 
 
+@pytest.mark.asyncio
+async def test_cancel_during_output_fetch_is_a_noop():
+    """A task whose output is being fetched is already DONE: cancel neither reaches the endpoint
+    nor fires CANCELED, and DONE fires once with the result."""
+    backend = await _init_backend(batch_window=0)
+
+    def slow_get_task(uid):
+        time.sleep(0.2)
+        return {"uid": uid, "stdout": "result"}
+
+    backend._mock_rh.get_task = MagicMock(side_effect=slow_get_task)
+    backend._mock_rh.cancel_task = MagicMock()
+    fired = []
+    backend.register_callback(lambda task, state: fired.append((state, task.get("stdout"))))
+    await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/true"}])
+
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "DONE"})
+    assert await backend.cancel_task("t.1") is False
+    await _settle()
+    await asyncio.sleep(0.3)
+
+    backend._mock_rh.cancel_task.assert_not_called()
+    assert fired == [("DONE", "result")]
+
+
+@pytest.mark.asyncio
+async def test_fetched_task_without_stdout_reports_failed():
+    """A fetched task without stdout (a pool dispatcher's TaskRecord) fails instead of resolving
+    DONE with an empty result."""
+    backend = await _init_backend(batch_window=0)
+    backend._mock_rh.get_task = MagicMock(return_value={"uid": "t.1", "state": "DONE"})
+    fired = []
+    backend.register_callback(lambda task, state: fired.append((state, task.get("exception"))))
+    await backend.submit_tasks([{"uid": "t.1", "executable": "/bin/true"}])
+
+    backend._handle_notification("task_status", {"uid": "t.1", "state": "DONE"})
+    await _settle()
+
+    assert len(fired) == 1
+    state, exc = fired[0]
+    assert state == "FAILED"
+    assert isinstance(exc, RuntimeError) and "no stdout" in str(exc)
+    assert "t.1" not in backend._tasks
+
+
 def test_orbit_backend_exported_from_rhapsody_backends():
     """OrbitExecutionBackend is importable from rhapsody.backends like the other backends."""
     import rhapsody.backends as backends
