@@ -109,9 +109,11 @@ class OrbitExecutionBackend(BaseBackend):
                        this backend should see, or ``pools`` to declare
                        them.
         batch_window:  Seconds to collect tasks before flushing
-                       (default 0.25).  Set to 0 to disable batching.
+                       (default 0.25).  Set to 0 to send each call at
+                       once; calls made while a send is in flight then go
+                       out together in the next request.
         batch_limit:   Max tasks per batch — triggers an immediate flush
-                       when reached (default 1024).
+                       when reached (default 1024; batching mode only).
         start_timeout: Seconds to wait for broker registration and the
                        first topology frame (default 30).
         init_timeout:  Seconds to wait for the remote session to become
@@ -667,7 +669,7 @@ class OrbitExecutionBackend(BaseBackend):
         buffer reaches ``batch_limit``.  This turns many small individual
         submissions into fewer bulk HTTP requests.
 
-        When batching is disabled (batch_window == 0), each call is sent
+        When batching is disabled (batch_window <= 0), each call is sent
         right away, and calls made while a send is in flight go out
         together in the next request.  Sending runs as a background task:
         this returns once the tasks are registered, and a failed send
