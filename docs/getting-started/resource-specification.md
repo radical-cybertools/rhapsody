@@ -377,7 +377,9 @@ task = ComputeTask(
 With `observe_peaks=True`, the backend reports each task's peak memory as
 `task["observed"] = {"host_mem": GiB, "gpu_mem": GiB per GPU}` when the task is DONE or
 FAILED. AsyncFlow's `ResourcePolicy` learns the memory demand of a kind of task from it, and
-AsyncFlow's policy telemetry carries it in `asyncflow.TaskReleased`.
+AsyncFlow's policy telemetry carries it in `asyncflow.TaskReleased`. `DragonNativeExecutionBackend`
+takes the same option and reports the same keys, always through the launcher for executables
+(see its [guide](../execution/dragon-native.md#what-a-task-used-observe_peaks)).
 
 When known, `observed` also has the task's execution window and CPU time:
 

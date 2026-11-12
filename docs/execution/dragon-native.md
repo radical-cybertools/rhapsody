@@ -240,6 +240,40 @@ Task events, metrics and spans come from the `Session`, as for every backend. No
 from the same `DragonTelemetryAdapter` as for `DragonExecutionBackend`: it starts its own process
 group on the runtime's nodes and does not use Batch. See [Telemetry](../telemetry/index.md).
 
+## What a task used (`observe_peaks`)
+
+With `observe_peaks=True`, the backend reports what each task used as `task["observed"]` before
+its DONE or FAILED callback, with the keys of `DragonExecutionBackend` and
+`ConcurrentExecutionBackend` (see
+[Peak memory](../getting-started/resource-specification.md#peak-memory-observe_peaks)): AsyncFlow's
+`ResourcePolicy` learns memory demand from `host_mem` and `gpu_mem`. Off by default; with it off,
+nothing changes.
+
+| Task | How | `host_mem` | `gpu_mem` |
+|------|-----|------------|-----------|
+| Function in the pool | the worker measures the call | the worker's RSS growth during the call, `"approximate": True` (Linux only) | not measured |
+| Executable (one `Process`) | the peak launcher reaps it with `wait4` | `ru_maxrss`: the largest single process of the command's tree | with `pynvml`: largest per-GPU sum over the tree's processes |
+| `process_templates` of executables | the launcher, per rank | the ranks' sum (an upper bound) | per GPU, summed over the ranks that share it |
+| Function with a `process_template`, or in `process_templates` | the process writes its own record | its own or its children's peak RSS, the larger; a group sums its members | not measured |
+
+Every task also reports `started` and `ended` (wall clock, where it ran: around the call, or from
+just before the launcher starts the command to just after it reaped it), `cpu_seconds`, and
+`host` (or `hosts` for a group on several nodes). The backend reports RUNNING when it accepts a
+task, which can be well before a worker or process runs it; `started` says when it did.
+
+- **The launcher is the only source.** Batch can read a Dragon's per-task `rusage` instead of
+  launching; the native API reports none, so `peak_source="auto"` (the default) and `"launcher"`
+  both use the launcher, and `"dragon"` raises `ValueError`.
+- **A FAILED task reports too**: a command through its launcher, a function with what was measured
+  until it raised. A task killed for a timeout reports what its launcher saw; a cancelled task
+  reports nothing.
+- **The launcher costs one Python process per executable.** It runs with the client's Python, the
+  same path on every node, and writes its records to `<work_dir>/rhapsody-peaks.<tag>/<uid>/`,
+  which must be on a file system the nodes share, as inline output already must. A command that
+  is not found exits 127.
+- **Placement, environment, working directory and output** are the launcher's, and its command
+  inherits them.
+
 ## What it does not do yet
 
 - **A result store.** Results travel inline on the queue; there is no DDict for large values.
@@ -249,7 +283,6 @@ group on the runtime's nodes and does not use Batch. See [Telemetry](../telemetr
   each task, nothing else.
 - **Data linking.** `link_implicit_data_deps` and `link_explicit_data_deps` are not implemented, as
   in `DragonExecutionBackend`.
-- **Resource usage per task** (peak memory, CPU time).
 - **Scheduling beyond "a free worker of this host".** No priorities, no per-node limit for process
   tasks (the limit is global), no worker recycling, no memory limits.
 - **A CPU layout per node.** Physical cores are read from the client's node. A node numbered
@@ -267,6 +300,8 @@ group on the runtime's nodes and does not use Batch. See [Telemetry](../telemetr
 | `kill_grace` | 2.0 s | SIGTERM to SIGKILL for process tasks |
 | `worker_start_timeout` | 300 s | time allowed for the pool to start |
 | `pmi` | `None` | PMI of every `process_templates` group whose task sets none |
+| `observe_peaks` | `False` | report what each task used as `task["observed"]` |
+| `peak_source` | `"auto"` | `"auto"` or `"launcher"`, the same here; `"dragon"` raises |
 
 `num_workers` is the pool's size over all nodes. `topology()` lists each node's CPUs and GPUs.
 

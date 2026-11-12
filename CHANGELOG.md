@@ -39,6 +39,13 @@
   Batch job, a group has no PMI by default. See `docs/execution/dragon-native.md`.
   `tests/integration/test-hpc/benchmarks/dragon_throughput.py` measures it with
   `--with-rhapsody-dragon-native`, and `--workers_per_node` sets its pool size.
+- **`DragonNativeExecutionBackend(observe_peaks=True)`** reports `task["observed"]` with the
+  keys and rules of the other backends: pool functions measure their call in the worker (RSS
+  growth, `"approximate": True`); executables run under the peak launcher, per rank in a
+  `process_templates` group; functions that run as their own process, or as group members,
+  write the launcher's record from inside. Every task reports `started`, `ended`, `host` and
+  `cpu_seconds`, also when FAILED. Dragon's native API has no per-task `rusage`, so
+  `peak_source="auto"` means the launcher. Off by default.
 
 ### Fixed
 

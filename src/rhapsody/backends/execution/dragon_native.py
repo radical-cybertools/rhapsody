@@ -26,6 +26,7 @@ import os
 import queue
 import resource
 import shutil
+import sys
 import threading
 import time
 import uuid
@@ -43,7 +44,10 @@ from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
 from . import _dragon_native_worker as _worker
+from . import _peak
 from .dragon import CRAY_MPICH_ENV
+from .dragon import PEAK_LAUNCHER
+from .dragon import PEAK_SOURCES
 from .dragon import _pmi_options
 
 DRAGON_NATIVE_INIT_ERROR = None
@@ -191,6 +195,8 @@ class _Task:
         "timer",
         "put_deadline",
         "put_failed_on",
+        "measured",
+        "peak_dir",
     )
 
     def __init__(self, uid: str, desc: dict, kind: str, timeout: float | None, token: str):
@@ -222,6 +228,10 @@ class _Task:
         # failed once with another error.
         self.put_deadline: float | None = None
         self.put_failed_on: str | None = None
+        # observe_peaks: a pool task's value comes back with its measurement; a process or group
+        # task's processes write their records to peak_dir, read when it ends.
+        self.measured = False
+        self.peak_dir: str | None = None
 
 
 def _read_siblings(cpu: int) -> str:
@@ -294,6 +304,19 @@ def _load_value(msg: tuple) -> tuple:
     return tuple(fields)
 
 
+def _launch_under_peak(kwargs: dict, peak_dir: str) -> None:
+    """Make an executable's Process or ProcessTemplate kwargs run it under the peak launcher.
+
+    The launcher (this Python running ``_peak.py``) starts the target as its child, reaps it with
+    ``wait4``, writes its record to ``peak_dir`` and exits as the target did. The target's
+    environment, directory, policy and output settings are the launcher's, and its child inherits
+    them.
+    """
+    target = kwargs["target"]
+    kwargs["args"] = [PEAK_LAUNCHER, "--out-dir", peak_dir, "--", target, *kwargs.get("args", ())]
+    kwargs["target"] = sys.executable
+
+
 def _read_and_remove(path: str | None) -> str:
     if not path:
         return ""
@@ -361,6 +384,28 @@ class DragonNativeExecutionBackend(BaseBackend):
             ``"cray"``, ``"none"`` or a Dragon ``PMIBackend``. An unknown name raises
             ``ValueError`` before anything starts.
         name: Backend name.
+        observe_peaks: Report what each task used as ``task["observed"]`` when it is DONE or
+            FAILED, with the keys of ``DragonExecutionBackend``'s: ``host_mem`` (GiB),
+            ``gpu_mem`` (GiB per GPU, or None), ``started`` and ``ended`` (wall clock, where the
+            task ran), ``host`` (or ``hosts``) and ``cpu_seconds``. For AsyncFlow's
+            ``ResourcePolicy`` to learn memory from, and for when a task really ran: the backend
+            reports RUNNING when it accepts a task. Off by default.
+
+            - Pool function tasks: the worker measures the call. ``host_mem`` is the worker's RSS
+              growth during the call, marked ``"approximate": True`` (Linux only); no
+              ``gpu_mem``. A function that raises reports what was measured until it raised.
+            - Executables, as one process or as the ranks of ``process_templates``, run under the
+              peak launcher (:mod:`rhapsody.backends.execution._peak`), which reaps the command
+              with ``wait4`` (``ru_maxrss``: the largest single process of its tree) and, with
+              ``pynvml``, samples its GPU memory. A group sums its ranks.
+            - Function tasks that run as their own process, or as group members, write the same
+              record from inside the process: its own and its children's peak RSS and CPU time;
+              no ``gpu_mem``.
+            - The records go to ``<work_dir>/rhapsody-peaks.<tag>/<uid>/``, which must be on a
+              file system the nodes share, and the launcher runs with this Python.
+        peak_source: ``"auto"`` (the default) or ``"launcher"``: both use the launcher. Dragon's
+            native API reports no per-process resource usage (``Task.rusage`` is Batch's), so
+            ``"dragon"`` raises ``ValueError`` with ``observe_peaks``.
     """
 
     @classmethod
@@ -378,9 +423,18 @@ class DragonNativeExecutionBackend(BaseBackend):
         worker_start_timeout: float = 300.0,
         pmi: str | PMIBackend | None = None,
         name: str | None = "dragon_native",
+        observe_peaks: bool = False,
+        peak_source: str = "auto",
     ):
         if Process is None:
             raise RuntimeError(DRAGON_NATIVE_INIT_ERROR)
+        if peak_source not in PEAK_SOURCES:
+            raise ValueError(f"peak_source must be one of {PEAK_SOURCES}, not {peak_source!r}")
+        if observe_peaks and peak_source == "dragon":
+            raise ValueError(
+                "peak_source='dragon' needs Batch's per-task rusage, which Dragon's native API "
+                "does not report; use 'auto' or 'launcher'"
+            )
         if workers_per_node is not None and workers_per_node < 0:
             raise ValueError("workers_per_node must be >= 0")
         if gpu_workers_per_set < 1:
@@ -399,6 +453,11 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._pmi = pmi
         self._warned_job_pmi = False
         self._warned_job_timeout = False
+        self._observe_peaks = observe_peaks
+        # Records go to <work_dir>/rhapsody-peaks.<tag>/<uid>/: the tag keeps a reused work dir's
+        # leftovers out of the sums; shutdown removes the roots with what cancelled tasks left.
+        self._peak_tag = uuid.uuid4().hex[:8]
+        self._peak_roots: set[str] = set()
 
         self._id = uuid.uuid4().hex[:12]
         self._backend_state = BackendMainStates.INITIALIZED
@@ -723,12 +782,20 @@ class DragonNativeExecutionBackend(BaseBackend):
         if rec is not None and rec.uid == uid and self._tasks.get(uid) is rec:
             del self._tasks[uid]
             rec.state = "done"
+            observed = None
+            if rec.measured:
+                if not ok:
+                    observed = getattr(value, _worker.OBSERVED_ATTR, None)
+                elif isinstance(value, tuple) and len(value) == 2:
+                    value, observed = value
             if ok:
                 fields = {"return_value": value, "stdout": out, "stderr": err}
                 completions.append((rec, "DONE", fields))
             else:
                 fields = {"exception": value, "stdout": out, "stderr": err or tb or str(value)}
                 completions.append((rec, "FAILED", fields))
+            if isinstance(observed, dict):
+                fields["observed"] = observed
         self._feed(w)
 
     def _watch_timers(self) -> None:
@@ -1083,7 +1150,22 @@ class DragonNativeExecutionBackend(BaseBackend):
         if rec.inline_files and (rec.cancelled or "stdout" not in fields):
             for path in rec.stdio:
                 _read_and_remove(path)
+        if rec.peak_dir is not None:
+            self._collect_observed(rec, state, fields)
         self._finish(rec, state, fields)
+
+    def _collect_observed(self, rec: _Task, state: str, fields: dict) -> None:
+        """Combine the records a process or group task's processes wrote into ``observed``.
+
+        Removes the task's record directory either way. A task that did not get a record from each
+        of its processes (killed, or never started) reports none.
+        """
+        observed = _peak.read_peaks(rec.peak_dir, rec.ranks)  # type: ignore[arg-type]
+        if observed is None:
+            if state in ("DONE", "FAILED"):
+                self.logger.debug(f"No complete peaks for {rec.uid} in {rec.peak_dir}")
+        elif state in ("DONE", "FAILED"):
+            fields["observed"] = observed
 
     def _stdio_of(self, rec: _Task) -> tuple[str, str]:
         if rec.inline_files:
@@ -1384,6 +1466,12 @@ class DragonNativeExecutionBackend(BaseBackend):
             host = next(h for h in self._host_order if set(gpus) <= set(self._nodes[h]["gpus"]))
         return (host, gpus)
 
+    def _peak_dir(self, uid: str) -> str:
+        """Where a process or group task's processes write their peak records."""
+        root = os.path.join(self._work_dir, f"rhapsody-peaks.{self._peak_tag}")
+        self._peak_roots.add(root)
+        return os.path.join(root, uid)
+
     def _stdio_paths(self, uid: str, capture: bool) -> tuple[str | None, str | None, bool]:
         """Output files for a process task, and whether they are inline (read back, removed)."""
         if capture:
@@ -1481,24 +1569,32 @@ class DragonNativeExecutionBackend(BaseBackend):
                 if capture:
                     out = os.path.join(self._work_dir, f"{uid}.stdout")
                     err = os.path.join(self._work_dir, f"{uid}.stderr")
-                body = cloudpickle.dumps((token, fn, args, kwargs, out, err, self._inline_stdio))
+                body = cloudpickle.dumps(
+                    (token, fn, args, kwargs, out, err, self._inline_stdio, self._observe_peaks)
+                )
                 rec.payload = cloudpickle.dumps((uid, body))
+                rec.measured = self._observe_peaks
                 return rec
 
+        peak_dir = self._peak_dir(uid) if self._observe_peaks else None
         if templates is None:
             rec = _Task(uid, task, "process", timeout, token)
             rec.is_function = is_function
+            rec.peak_dir = peak_dir
             template = dict(template or {})
             policy = self._choose_policy(template.get("policy"), placement_policy, uid)
             proc_kwargs, out, err = self._process_kwargs(rec, template, policy, fn, args, capture)
             if is_function:
                 proc_kwargs["target"] = _worker.run_function_process
-                proc_kwargs["args"] = (self._results, uid, fn, args, kwargs, out, err)
+                proc_kwargs["args"] = (self._results, uid, fn, args, kwargs, out, err, peak_dir)
+            elif peak_dir is not None:
+                _launch_under_peak(proc_kwargs, peak_dir)
             rec.proc = Process(**proc_kwargs)
             return rec
 
         rec = _Task(uid, task, "group", timeout, token)
         rec.is_function = is_function
+        rec.peak_dir = peak_dir
         rec.ranks = 0
         for nranks, cfg in templates:
             nranks = int(nranks)
@@ -1511,7 +1607,9 @@ class DragonNativeExecutionBackend(BaseBackend):
             tmpl_kwargs, out, err = self._process_kwargs(rec, cfg, policy, fn, args, capture)
             if is_function:
                 tmpl_kwargs["target"] = _worker.run_group_member
-                tmpl_kwargs["args"] = (fn, args, kwargs, out, err)
+                tmpl_kwargs["args"] = (fn, args, kwargs, out, err, peak_dir)
+            elif peak_dir is not None:
+                _launch_under_peak(tmpl_kwargs, peak_dir)
             rec.templates.append((nranks, ProcessTemplate(**tmpl_kwargs)))
             rec.ranks += nranks
         # Dragon 0.15.0's ProcessGroup.start() never returns for a group with no members.
@@ -1714,6 +1812,9 @@ class DragonNativeExecutionBackend(BaseBackend):
                 self._results.destroy()
         for directory in self._stdio_dirs:
             shutil.rmtree(directory, ignore_errors=True)
+        for directory in self._peak_roots:
+            shutil.rmtree(directory, ignore_errors=True)
+        self._peak_roots.clear()
         self._ops.shutdown(wait=False, cancel_futures=True)
 
     def _kill_worker_now(self, w: _Worker, token: str) -> None:
