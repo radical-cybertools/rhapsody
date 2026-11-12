@@ -11,6 +11,7 @@ in opentelemetry at startup unless telemetry is explicitly enabled.
 from __future__ import annotations
 
 import asyncio
+import collections
 import dataclasses
 import functools
 import json
@@ -52,15 +53,16 @@ class SpanBuffer:
 
     InMemorySpanExporter (an OTel test utility) does `_finished_spans += tuple(spans)` on every
     export call — O(n) per call, O(n²) total for n spans. For 40K spans that costs ~4 seconds inside
-    the dispatch loop. list.extend() keeps append at O(1) amortized.
+    the dispatch loop. deque.extend() keeps append at O(1), and a full deque drops the oldest.
 
     Implements the SpanExporter interface so it can be passed to any SpanProcessor.
+    Keeps the most recent ``maxlen`` spans (all of them if ``None``).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, maxlen: int | None = None) -> None:
         import threading
 
-        self._spans: list = []
+        self._spans: collections.deque = collections.deque(maxlen=maxlen)
         self._lock = threading.Lock()
 
     def export(self, spans) -> None:
@@ -120,6 +122,7 @@ class TelemetryManager:
         metric_readers: list[MetricReader] | None = None,
         resource: OtelResource | None = None,
         drain_on_stop: bool = True,
+        retained: int | None = None,
     ) -> None:
         self._session_id = session_id
         # stop(): process the event backlog (True) or discard it for a fast shutdown.
@@ -144,8 +147,17 @@ class TelemetryManager:
         self._checkpoint_path = checkpoint_path
         self._checkpoint_file: Any | None = None  # open file handle
 
-        # Raw event log (in-memory, for convenience methods)
-        self._event_log: list[BaseEvent] = []
+        # Raw event log (in-memory, for convenience methods).  With `retained`
+        # set, only the most recent `retained` events (about five per task) and
+        # as many finished spans are kept, so a long-lived session stays
+        # bounded: summary() durations, task_spans(), read_traces(),
+        # export_as_otlp() and the checkpoint's span snapshot then cover only
+        # those.  Task counts (metrics), the checkpoint's event lines and any
+        # configured span processor still see every one.  None keeps all.
+        self._retained = retained
+        self._event_log: collections.deque[BaseEvent] = collections.deque(maxlen=retained)
+        # latest ResourceUpdate per backend/node, which the bounded log may have dropped
+        self._latest_resource: dict[str, BaseEvent] = {}
 
         # OTel objects — set in start()
         self._meter_provider: Any = None
@@ -239,7 +251,7 @@ class TelemetryManager:
         )
 
         self._metric_reader = InMemoryMetricReader()
-        self._span_exporter = SpanBuffer()
+        self._span_exporter = SpanBuffer(self._retained)
 
         self._meter_provider = MeterProvider(
             metric_readers=[self._metric_reader] + self._extra_metric_readers,
@@ -594,7 +606,7 @@ class TelemetryManager:
         return self._metric_reader.get_metrics_data()
 
     def read_traces(self) -> tuple:
-        """Return all finished OTel ReadableSpan objects (InMemorySpanExporter)."""
+        """Return the finished OTel ReadableSpan objects (the most recent ``retained`` if set)."""
         if self._span_exporter is None:
             return ()
         return self._span_exporter.get_finished_spans()
@@ -700,7 +712,8 @@ class TelemetryManager:
         """Return a plain-dict summary — no OTel knowledge required.
 
         Includes task counts, duration statistics, session duration, and latest resource utilization
-        per node/backend.
+        per node/backend.  With ``retained`` set, duration statistics cover only the retained
+        spans; task counts always cover every task.
         """
         self.read_metrics()
         spans = self.task_spans()
@@ -722,10 +735,8 @@ class TelemetryManager:
             }
 
         # Latest resource reading per (backend, node_id)
-        resource_events = [e for e in self._event_log if e.event_type == "ResourceUpdate"]
         nodes: dict = {}
-        for ev in resource_events:
-            key = f"{ev.backend}/{ev.node_id}"
+        for key, ev in self._latest_resource.items():
             nodes[key] = {
                 "backend": ev.backend,
                 "node_id": ev.node_id,
@@ -762,6 +773,7 @@ class TelemetryManager:
 
         Each dict contains: task_id, backend, executable, task_type, status,
         duration_seconds, error_type (failed tasks only), span_id, trace_id.
+        With ``retained`` set, covers only the retained spans.
         """
         raw = self.read_traces()
         result = []
@@ -1139,8 +1151,17 @@ class TelemetryManager:
             except Exception:
                 logger.exception("Error processing telemetry event %s", event.event_type)
 
-        if self._checkpoint_file is not None:
-            self._write_batch(batch)
+        try:
+            if self._checkpoint_file is not None:
+                self._write_batch(batch)
+        finally:
+            # a terminal event's span context is only needed by the checkpoint
+            # write above; release it whether or not that ran (or failed)
+            for event in batch:
+                if event.event_type in ("TaskCompleted", "TaskFailed", "TaskCanceled"):
+                    self._completed_span_ctx.pop(event.task_id, None)
+                elif event.event_type == "ResourceUpdate":
+                    self._latest_resource[f"{event.backend}/{event.node_id}"] = event
 
         if self._subscribers:
             for event in batch:

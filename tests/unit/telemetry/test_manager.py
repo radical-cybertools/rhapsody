@@ -1286,3 +1286,44 @@ def test_task_executable_label_is_stable_per_callable():
     assert _task_executable({"function": functools.partial(work, 1)}) == "work"
     assert _task_executable({"function": functools.partial(functools.partial(work), 2)}) == "work"
     assert _task_executable({"function": Job()}) == "Job"
+
+
+class TestRetention:
+    async def test_event_log_spans_and_span_contexts_stay_bounded(self):
+        """A long-lived session keeps at most `retained` events and finished spans in memory, and no
+        per-task span context once the task ended."""
+        from rhapsody.telemetry.events import ResourceUpdate
+
+        m = TelemetryManager(session_id="test-session", retained=50)
+        await m.start()
+        m.emit(
+            make_event(
+                ResourceUpdate,
+                session_id="test-session",
+                backend="concurrent",
+                node_id="n1",
+                cpu_percent=5.0,
+                memory_percent=10.0,
+            )
+        )
+        for i in range(300):
+            m.emit(
+                make_event(
+                    TaskCompleted,
+                    session_id="test-session",
+                    backend="concurrent",
+                    task_id=f"task.{i:06d}",
+                    duration_seconds=0.01,
+                    attributes={"executable": "f", "task_type": "ComputeTask"},
+                )
+            )
+        await m.stop()
+
+        assert len(m._event_log) <= 50
+        assert m._completed_span_ctx == {}
+        spans = m.task_spans()
+        assert 0 < len(spans) <= 50
+        assert spans[-1]["task_id"] == "task.000299"  # the most recent are kept
+        assert m.task_count()["completed"] == 300  # metrics still count every task
+        # the node's last reading outlives the bounded event log
+        assert m.summary()["resources"]["concurrent/n1"]["cpu_percent"] == 5.0

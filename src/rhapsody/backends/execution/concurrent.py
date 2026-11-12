@@ -261,6 +261,15 @@ class ConcurrentExecutionBackend(BaseBackend):
         except Exception as e:
             self.logger.exception(f"Error handling task {task.get('uid')}: {e}")
             raise
+        finally:
+            # finished, failed or cancelled: release it, so a long-lived
+            # backend does not keep every task it ever ran
+            entry = self.tasks.get(task["uid"])
+            if entry is not None and entry.get("future") is asyncio.current_task():
+                del self.tasks[task["uid"]]
+                # the caller keeps the task dict (the ORBIT plugin for an hour):
+                # without this it keeps the finished asyncio Task alive too
+                task.pop("future", None)
 
     async def submit_tasks(self, tasks: list[dict[str, Any]]) -> list[asyncio.Task]:
         """Submit tasks for execution."""
@@ -296,6 +305,9 @@ class ConcurrentExecutionBackend(BaseBackend):
             if future and future.cancel():
                 # Set state on the task object itself before callback
                 self._callback_func(task, "CANCELED")
+                # a task cancelled before it started never runs its own cleanup;
+                # one that started may have released itself already
+                self.tasks.pop(uid, None)
                 return True
         return False
 
