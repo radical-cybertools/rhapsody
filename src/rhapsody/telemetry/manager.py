@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import json
 import logging
 import time
@@ -42,7 +43,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Pushed onto the queue by stop() after queue.join() to unblock the dispatch loop cleanly.
+# Queued by stop() behind the backlog: the dispatch loop exits when it reaches it.
 _STOP_SENTINEL = object()
 
 
@@ -107,6 +108,9 @@ class TelemetryManager:
         print(telemetry.task_spans())
     """
 
+    # stop() keeps waiting while the event backlog shrinks within this many seconds.
+    _DRAIN_STALL_TIMEOUT = 5.0
+
     def __init__(
         self,
         session_id: str,
@@ -115,12 +119,22 @@ class TelemetryManager:
         span_processors: list[SpanProcessor] | None = None,
         metric_readers: list[MetricReader] | None = None,
         resource: OtelResource | None = None,
+        drain_on_stop: bool = True,
     ) -> None:
         self._session_id = session_id
+        # stop(): process the event backlog (True) or discard it for a fast shutdown.
+        self._drain_on_stop = drain_on_stop
         self._queue: asyncio.Queue = asyncio.Queue()
+        # Events of the batch the dispatch loop is flushing: lost if the loop dies mid-batch.
+        self._inflight = 0
         self._subscribers: list[Callable[[BaseEvent], Any]] = []
         self._adapters: list[TelemetryAdapter] = []
+        # Backends that already have an adapter (by id), and whether the one
+        # runtime-wide Dragon node poller exists — see attach_backend().
+        self._attached_backends: set[int] = set()
+        self._dragon_adapter_attached = False
         self._running = False
+        self._stopped = False  # set once stop() has completed its cleanup
         self._dispatch_task: asyncio.Task | None = None
         self._checkpoint_task: asyncio.Task | None = None
         self._session_start_time: float = 0.0
@@ -159,6 +173,11 @@ class TelemetryManager:
 
         # Wall-clock time recorded when RUNNING is first seen for each task.
         self._task_start_times: dict[str, float] = {}
+
+        # Tasks counted in tasks_running (TaskStarted seen, no terminal event yet), with
+        # the metric attributes of their +1: a task that ends before RUNNING must not
+        # decrement the shared series, and the -1 must hit the series the +1 went to.
+        self._running_tasks: dict[str, dict] = {}
 
         # Temporary span context store: task_id → SpanContext, populated in
         # _process_event() on TaskCompleted/Failed, consumed in _span_ids_for_event().
@@ -204,6 +223,9 @@ class TelemetryManager:
 
     async def start(self) -> None:
         """Start the telemetry manager: set up OTel SDK, open checkpoint file, start loops."""
+        if self._running:
+            return  # already started: a second dispatch loop would be orphaned
+        self._stopped = False
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import InMemoryMetricReader
         from opentelemetry.sdk.resources import Resource
@@ -252,8 +274,12 @@ class TelemetryManager:
             trace_mod.set_span_in_context(self._session_span)
         )
 
+        # A fresh queue: nothing left by an earlier stop() (e.g. a sentinel) reaches this loop.
+        self._queue = asyncio.Queue()
         self._running = True
-        self._dispatch_task = asyncio.create_task(self._dispatch_loop(), name="telemetry-dispatch")
+        self._dispatch_task = asyncio.create_task(
+            self._dispatch_loop(self._queue), name="telemetry-dispatch"
+        )
 
         if self._checkpoint_interval is not None and self._checkpoint_file is not None:
             self._checkpoint_task = asyncio.create_task(
@@ -273,6 +299,15 @@ class TelemetryManager:
 
     async def stop(self) -> None:
         """Stop: emit SessionEnded, drain queue, flush file, stop adapters, shutdown OTel."""
+        if self._stopped:
+            return  # a completed stop() already cleaned up; a cancelled one is retried
+        if not self._drain_on_stop:
+            # Discard before SessionEnded is queued, so the session span still ends.
+            discarded = self._discard_queue()
+            if discarded:
+                logger.warning(
+                    "Telemetry drain disabled: %d queued events not processed", discarded
+                )
         duration = time.time() - self._session_start_time
         self.emit(
             make_event(
@@ -284,13 +319,53 @@ class TelemetryManager:
         )
 
         self._running = False
-        # Drain all in-flight events before signalling the dispatch loop to exit.
-        # emit() is now a no-op (guard on _running), so no new events can arrive.
-        try:
-            await asyncio.wait_for(self._queue.join(), timeout=5.0)
-        except asyncio.TimeoutError:
-            logger.warning("Telemetry queue did not drain cleanly within timeout")
+        # Drain: queue the sentinel behind the backlog and wait for the dispatch loop to
+        # reach it. The queue is FIFO, so the loop ending at the sentinel means every event
+        # before it was processed. emit() is now a no-op (guard on _running). Keep waiting
+        # while the backlog shrinks; on a stall, cancel the loop so nothing runs while the
+        # checkpoint file and the OTel providers are closed below.
         self._queue.put_nowait(_STOP_SENTINEL)
+        task = self._dispatch_task
+        stalled = False
+        last = self._queue.qsize()
+        while task is not None and not task.done():
+            await asyncio.wait({task}, timeout=self._DRAIN_STALL_TIMEOUT)
+            if task.done():
+                break
+            now = self._queue.qsize()
+            if now >= last:
+                stalled = True
+                task.cancel()
+                # Bounded; asyncio.wait() also lets a cancellation of stop() itself propagate.
+                await asyncio.wait({task}, timeout=self._DRAIN_STALL_TIMEOUT)
+                if not task.done():
+                    logger.warning("Telemetry dispatch loop did not stop after cancel")
+                break
+            logger.info("Telemetry: draining %d events before shutdown", now - 1)
+            last = now
+        exc = (
+            task.exception() if task is not None and task.done() and not task.cancelled() else None
+        )
+        if exc is not None:
+            logger.error("Telemetry dispatch loop failed", exc_info=exc)
+        ended_early = task is None or not task.done() or task.cancelled() or exc is not None
+        if ended_early:
+            # SessionEnded may be among the unprocessed events: end the session span here.
+            if self._session_span is not None:
+                self._completed_session_ctx = self._session_span.get_span_context()
+                self._session_span.end()
+                self._session_span = None
+            # Not processed: what is still queued (the sentinel aside), and possibly part of
+            # the batch the loop was handling when it ended.
+            queued = self._discard_queue()
+            inflight, self._inflight = self._inflight, 0
+            if queued or inflight:
+                logger.warning(
+                    "Telemetry dispatch loop %s; %d queued events not processed%s",
+                    "stalled" if stalled else "is not running",
+                    queued,
+                    f", plus up to {inflight} in the batch it was handling" if inflight else "",
+                )
 
         for adapter in self._adapters:
             try:
@@ -304,12 +379,6 @@ class TelemetryManager:
                 await self._checkpoint_task
             except asyncio.CancelledError:
                 pass
-
-        if self._dispatch_task and not self._dispatch_task.done():
-            try:
-                await asyncio.wait_for(self._dispatch_task, timeout=5.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                logger.warning("Telemetry dispatch loop did not drain cleanly within timeout")
 
         # Final flush of metrics + spans to file
         if self._checkpoint_file is not None:
@@ -329,6 +398,19 @@ class TelemetryManager:
             self._meter_provider.shutdown()
         if self._tracer_provider:
             self._tracer_provider.shutdown()
+        self._stopped = True
+
+    def _discard_queue(self) -> int:
+        """Empty the event queue without processing it; return the number of events dropped."""
+        dropped = 0
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return dropped
+            self._queue.task_done()
+            if item is not _STOP_SENTINEL:
+                dropped += 1
 
     # ------------------------------------------------------------------
     # Public API
@@ -434,9 +516,16 @@ class TelemetryManager:
         """Detect backend type and register the appropriate telemetry adapter.
 
         Silently skips backends with no adapter (LocalExecutionBackend, NoopExecutionBackend,
-        unknown types). Safe to call before or after start(); if already running the adapter is
-        started immediately.
+        unknown types) and data backends (no ``submit_tasks``). Safe to call before or after
+        start(); if already running the adapter is started immediately. Attaching the same backend
+        again is a no-op, and all Dragon backends of a session share one node poller.
         """
+        if not hasattr(backend, "submit_tasks"):
+            return  # data backend: no task execution, no resource adapter
+        if id(backend) in self._attached_backends:
+            return
+        self._attached_backends.add(id(backend))
+
         try:
             from rhapsody.backends.execution.concurrent import ConcurrentExecutionBackend
             from rhapsody.telemetry.adapters.concurrent import ConcurrentTelemetryAdapter
@@ -475,7 +564,11 @@ class TelemetryManager:
                 logger.warning("Could not attach DaskTelemetryAdapter", exc_info=True)
             return
 
-        if "Dragon" in backend_cls:
+        if backend_cls.startswith("Dragon"):
+            # Dragon node metrics are runtime-wide: a second Dragon backend in the
+            # session (e.g. an inference backend) would poll the same nodes again.
+            if self._dragon_adapter_attached:
+                return
             try:
                 from rhapsody.telemetry.adapters.dragon import DragonTelemetryAdapter
 
@@ -485,6 +578,7 @@ class TelemetryManager:
                     interval=interval,
                 )
                 self.register_adapter(adapter)
+                self._dragon_adapter_attached = True
                 if self._running:
                     adapter.start()
             except Exception:
@@ -765,6 +859,18 @@ class TelemetryManager:
             # Record the wall-clock time we first see RUNNING so we can compute
             # duration in DONE/FAILED.
             self._task_start_times[task_id] = now_wall
+            attrs: dict = {"executable": executable, "task_type": task_type}
+            # Optional placement info — populated by backends that know it.
+            # Schema: {node_id: str, cores: int, gpu_ids: list[int]}.
+            # When future placement APIs land they should write the same key.
+            placement = task.get("placement")
+            node_id_for_event = None
+            if isinstance(placement, dict):
+                # Snapshot without deepcopy: a placement may hold uncopyable objects.
+                attrs["placement"] = {
+                    k: list(v) if isinstance(v, list) else v for k, v in placement.items()
+                }
+                node_id_for_event = placement.get("node_id")
             self.emit(
                 make_event(
                     TaskStarted,
@@ -772,10 +878,8 @@ class TelemetryManager:
                     backend=backend,
                     task_id=task_id,
                     event_time=now_wall,
-                    attributes={
-                        "executable": executable,
-                        "task_type": task_type,
-                    },
+                    node_id=node_id_for_event,
+                    attributes=attrs,
                 )
             )
 
@@ -784,7 +888,7 @@ class TelemetryManager:
             ended = now_wall
             if running_ts is not None:
                 duration = max(ended - running_ts, 0.0)
-                attrs: dict = {"executable": executable, "task_type": task_type}
+                attrs = {"executable": executable, "task_type": task_type}
             else:
                 # NOTE: RUNNING was never seen for this task (backend did not emit
                 # a RUNNING callback, or the task completed before telemetry started).
@@ -978,8 +1082,12 @@ class TelemetryManager:
     # Internal: dispatch loop
     # ------------------------------------------------------------------
 
-    async def _dispatch_loop(self) -> None:
-        """Background task: drain queue in batches, update OTel instruments, notify subscribers."""
+    async def _dispatch_loop(self, queue: asyncio.Queue) -> None:
+        """Background task: drain ``queue`` in batches, update OTel instruments, notify subscribers.
+
+        The queue is passed in, not read from ``self._queue``: a loop only ever serves the queue
+        it was started with, even if a later start() creates a new one.
+        """
         from opentelemetry import context as otel_context
         from opentelemetry import trace
 
@@ -991,13 +1099,13 @@ class TelemetryManager:
             batch: list[BaseEvent] = []
             try:
                 while len(batch) < _batch_size:
-                    item = self._queue.get_nowait()
+                    item = queue.get_nowait()
                     if item is _STOP_SENTINEL:
-                        self._queue.task_done()
+                        queue.task_done()
                         if batch:
                             self._flush_batch(batch, trace, otel_context)
                             for _ in batch:
-                                self._queue.task_done()
+                                queue.task_done()
                         return
                     batch.append(item)
             except asyncio.QueueEmpty:
@@ -1006,15 +1114,15 @@ class TelemetryManager:
             if not batch:
                 # Slow path: queue was empty — wait without a timeout.
                 # Plain queue.get(), no wait_for(), no timer handle, no Task allocation.
-                item = await self._queue.get()
+                item = await queue.get()
                 if item is _STOP_SENTINEL:
-                    self._queue.task_done()
+                    queue.task_done()
                     return
                 batch.append(item)
 
             self._flush_batch(batch, trace, otel_context)
             for _ in batch:
-                self._queue.task_done()  # task_done AFTER processing (Fix 1)
+                queue.task_done()  # task_done AFTER processing (Fix 1)
 
             # Yield only when a full batch was drained — queue likely has more items.
             # Partial batch means queue is exhausted; await queue.get() yields naturally.
@@ -1023,6 +1131,7 @@ class TelemetryManager:
 
     def _flush_batch(self, batch: list[BaseEvent], trace_mod: Any, otel_context: Any) -> None:
         """Process a collected batch: OTel instruments, JSONL write, subscribers."""
+        self._inflight = len(batch)  # reported by stop() if the loop dies in this batch
         for event in batch:
             self._event_log.append(event)
             try:
@@ -1043,6 +1152,7 @@ class TelemetryManager:
                             sub(event)
                     except Exception:
                         logger.debug("Subscriber raised exception", exc_info=True)
+        self._inflight = 0
 
     def _write_batch(self, events: list[BaseEvent]) -> None:
         """Write a batch of events to JSONL in a single file.write() call."""
@@ -1101,24 +1211,29 @@ class TelemetryManager:
                 self._active_spans[event.task_id] = self._tracer.start_span("task", attributes=a)
 
         elif etype == "TaskSubmitted":
-            self._c_submitted.add(1, {**attrs, "task_id": event.task_id})
+            self._c_submitted.add(
+                1,
+                {
+                    **attrs,
+                    "executable": event.attributes.get("executable", ""),
+                    "task_type": event.attributes.get("task_type", ""),
+                },
+            )
 
         elif etype == "TaskStarted":
             executable = event.attributes.get("executable", "")
             task_type = event.attributes.get("task_type", "")
-            a = {
-                **attrs,
-                "task_id": event.task_id,
-                "executable": executable,
-                "task_type": task_type,
-            }
-            self._c_started.add(1, a)
-            self._g_running.add(1, a)
+            # Metric attributes stay bounded (no task_id): per-task identity is on the span.
+            a = {**attrs, "executable": executable, "task_type": task_type}
+            if event.task_id not in self._running_tasks:
+                self._running_tasks[event.task_id] = a
+                self._c_started.add(1, a)
+                self._g_running.add(1, a)
             if event.task_id not in self._active_spans:
                 # Fallback: TaskCreated was never seen (incomplete lifecycle).
                 # Use a_span copy so metric attributes (a) are not polluted with
                 # workflow_id or other span-only extractor fields.
-                a_span = dict(a)
+                a_span = {**a, "task_id": event.task_id}
                 for extractor in self._span_attribute_extractors:
                     try:
                         a_span.update(extractor(event))
@@ -1141,19 +1256,16 @@ class TelemetryManager:
         elif etype == "TaskCompleted":
             executable = event.attributes.get("executable", "")
             task_type = event.attributes.get("task_type", "")
-            a = {
-                **attrs,
-                "task_id": event.task_id,
-                "executable": executable,
-                "task_type": task_type,
-            }
+            # Metric attributes stay bounded (no task_id): per-task identity is on the span.
+            a = {**attrs, "executable": executable, "task_type": task_type}
             self._c_completed.add(1, a)
             self._h_duration.record(event.duration_seconds, a)
+            running_attrs = self._running_tasks.pop(event.task_id, None)
+            if running_attrs is not None:
+                self._g_running.add(-1, running_attrs)
             span = self._active_spans.pop(event.task_id, None)
-            if span is not None:
-                self._g_running.add(-1, a)
-            else:
-                span = self._tracer.start_span("task", attributes=a)
+            if span is None:
+                span = self._tracer.start_span("task", attributes={**a, "task_id": event.task_id})
             span.set_attribute("status", "completed")
             span.set_attribute("executable", executable)
             span.set_attribute("task_type", task_type)
@@ -1167,19 +1279,16 @@ class TelemetryManager:
             executable = event.attributes.get("executable", "")
             task_type = event.attributes.get("task_type", "")
             error_type = event.attributes.get("error_type", event.error_type)
-            a = {
-                **attrs,
-                "task_id": event.task_id,
-                "executable": executable,
-                "task_type": task_type,
-            }
+            # Metric attributes stay bounded (no task_id): per-task identity is on the span.
+            a = {**attrs, "executable": executable, "task_type": task_type}
             self._c_failed.add(1, a)
             self._h_duration.record(event.duration_seconds, a)
+            running_attrs = self._running_tasks.pop(event.task_id, None)
+            if running_attrs is not None:
+                self._g_running.add(-1, running_attrs)
             span = self._active_spans.pop(event.task_id, None)
-            if span is not None:
-                self._g_running.add(-1, a)
-            else:
-                span = self._tracer.start_span("task", attributes=a)
+            if span is None:
+                span = self._tracer.start_span("task", attributes={**a, "task_id": event.task_id})
             span.set_attribute("status", "failed")
             span.set_attribute("error_type", error_type)
             span.set_attribute("executable", executable)
@@ -1193,19 +1302,16 @@ class TelemetryManager:
         elif etype == "TaskCanceled":
             executable = event.attributes.get("executable", "")
             task_type = event.attributes.get("task_type", "")
-            a = {
-                **attrs,
-                "task_id": event.task_id,
-                "executable": executable,
-                "task_type": task_type,
-            }
+            # Metric attributes stay bounded (no task_id): per-task identity is on the span.
+            a = {**attrs, "executable": executable, "task_type": task_type}
             self._c_canceled.add(1, a)
             self._h_duration.record(event.duration_seconds, a)
+            running_attrs = self._running_tasks.pop(event.task_id, None)
+            if running_attrs is not None:
+                self._g_running.add(-1, running_attrs)
             span = self._active_spans.pop(event.task_id, None)
-            if span is not None:
-                self._g_running.add(-1, a)
-            else:
-                span = self._tracer.start_span("task", attributes=a)
+            if span is None:
+                span = self._tracer.start_span("task", attributes={**a, "task_id": event.task_id})
             span.set_attribute("status", "canceled")
             span.set_attribute("executable", executable)
             span.set_attribute("task_type", task_type)
@@ -1344,10 +1450,13 @@ def _task_executable(task: dict) -> str:
     # ComputeTask stores executable directly
     if "executable" in task:
         return str(task["executable"])
-    # FunctionTask stores func reference
+    # FunctionTask stores func reference. The label must not vary per task (it is a
+    # metric attribute): unwrap partials, and never use str(func), which embeds an address.
     func = task.get("func") or task.get("function")
     if func is not None:
-        return getattr(func, "__name__", str(func))
+        while isinstance(func, functools.partial):
+            func = func.func
+        return getattr(func, "__name__", None) or type(func).__name__
     # AITask or others may have a model field
     model = task.get("model") or task.get("model_name")
     if model:

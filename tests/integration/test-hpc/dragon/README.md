@@ -11,6 +11,8 @@ multiple HPC execution backends side by side:
 ```
 tests/integration/test-hpc/
 ├── conftest.py      ← CI gate: entire subtree skipped unless RHAPSODY_HPC=1
+├── run_suite.py     ← runs the test groups, writes one JUnit file
+├── benchmarks/      ← measurements with no pass/fail, not collected by pytest
 ├── dragon/          ← this directory (DragonHPC backend)
 └── flux/            ← planned (Flux backend, same categories)
 ```
@@ -21,8 +23,8 @@ tests/integration/test-hpc/
 
 | Requirement | Details |
 |-------------|---------|
-| Python | 3.10 – 3.12 (Dragon constraint) |
-| DragonHPC | 0.14.0+ installed in the active environment |
+| Python | 3.11 – 3.13 (Dragon constraint) |
+| DragonHPC | 0.15.0 (the version pinned by the `dragon` extra) |
 | RHAPSODY | installed from source (`pip install -e .`) |
 | mpi4py | required only for MPI tests (`pip install mpi4py`) |
 | Active allocation | Dragon global services must be running (`dragon` launcher) |
@@ -45,76 +47,100 @@ make test-regular   # same
 
 ## Running on an HPC cluster
 
-All commands must be run from the **repository root** with the Dragon launcher.
-Set `RHAPSODY_HPC=1` to unlock collection.
-
-### Step 1 — activate your environment
+Inside an allocation of at least 2 nodes, from the repository root:
 
 ```bash
-# Example: Cray/NERSC system
-module load python
 source /path/to/your/venv/bin/activate
+
+python3 tests/integration/test-hpc/run_suite.py --backend dragon --junit results/junit.xml \
+    -- -w slurm -t tcp
 ```
 
-### Step 2 — obtain an allocation and start Dragon
+Everything after `--` goes to the `dragon` launcher, so machine-specific settings stay in the
+job script. `run_suite.py` sets `RHAPSODY_HPC=1` and `PYTHONPATH`.
+
+Useful options:
 
 ```bash
-# Example: SLURM allocation with 4 nodes, 4 GPUs each
-salloc -N 4 --gpus-per-node=4 -t 01:00:00
+--groups tasks,placement   # run only these groups
+--budget mpi=600           # change a group's time budget, in seconds
 ```
 
-### Step 3 — run the tests
+To run one file by hand, without the runner:
 
 ```bash
-# All standard tests (scale excluded by default)
-RHAPSODY_HPC=1 dragon python3 -m pytest tests/integration/test-hpc/dragon/ -v
-
-# Single category
-RHAPSODY_HPC=1 dragon python3 -m pytest tests/integration/test-hpc/dragon/test_pinning.py -v
-
-# Filter by resource mark
-RHAPSODY_HPC=1 dragon python3 -m pytest tests/integration/test-hpc/dragon/ -m gpu -v
-RHAPSODY_HPC=1 dragon python3 -m pytest tests/integration/test-hpc/dragon/ -m multi_node -v
-RHAPSODY_HPC=1 dragon python3 -m pytest tests/integration/test-hpc/dragon/ -m "not scale" -v
-
-# Scale / stress tests (long-running, off by default)
-RHAPSODY_HPC=1 RHAPSODY_RUN_SCALE=1 dragon python3 -m pytest \
-    tests/integration/test-hpc/dragon/test_scale.py -v -s
-
-# MPI tests only
-RHAPSODY_HPC=1 dragon python3 -m pytest tests/integration/test-hpc/dragon/test_mpi.py -v
+export RHAPSODY_HPC=1
+export PYTHONPATH=$PWD/tests/integration/test-hpc/dragon${PYTHONPATH:+:$PYTHONPATH}
+dragon python3 -m pytest tests/integration/test-hpc/dragon/test_placement.py -v
+dragon python3 -m pytest tests/integration/test-hpc/dragon/test_scale.py -m scale -v -s
 ```
+
+---
+
+## Test groups
+
+Each group runs under its own `dragon` launch and time budget, cheapest first. If one crashes or
+hangs, the later groups still run.
+
+| Group | File | Tests | Budget | Covers |
+|-------|------|-------|--------|--------|
+| `tasks` | `test_tasks.py` | 4 | 3 min | Function return values, executables, concurrent submission |
+| `placement` | `test_placement.py` | 5 | 3 min | Node pinning and exact GPU assignment |
+| `scale` | `test_scale.py` | 4 | 4 min | 10 K functions, 1 K executables, mixed, waves |
+| `mpi` | `test_mpi.py` | 6 | 4 min | gather, allreduce, broadcast, concurrent jobs; stops at the first failure |
+
+### How failures appear
+
+| What happens | In `junit.xml` | Later groups |
+|--------------|----------------|--------------|
+| A test fails | That test fails | Run |
+| Launcher crashes | `<group>.launcher` fails, with the log tail; that group's other results are lost | Run |
+| Group exceeds its budget | `<group>.launcher` fails, and is stopped and cleaned up | Run |
+
+`dragon` can exit 0 even when the application fails or is killed, so the runner relies on the
+results file and not on the exit code. Logs for each group are in a `groups/` directory next to
+the JUnit file.
 
 ---
 
 ## File structure
 
 ```
-dragon/
-├── conftest.py            # topology detection, shared fixtures, auto-skip logic
-├── hpc_workers.py         # worker functions importable by Dragon remote processes
-├── pytest.ini             # asyncio mode, marker registration, pythonpath = .
-├── test_multinode_gpu.py  # Category 1 — multi-node, multi-GPU execution
-├── test_singlenode_gpu.py # Category 2 — single-node, single-GPU execution
-├── test_pinning.py        # Category 3 — task pinning and GPU affinity
-├── test_scale.py          # Category 4 — scale and stress (10K+ tasks)
-└── test_mpi.py            # Category 5 — MPI integration (mpi4py)
+test-hpc/
+├── run_suite.py               # the groups, their budgets, and crash handling
+├── benchmarks/
+│   └── dragon_throughput.py   # task throughput measurement
+└── dragon/
+    ├── conftest.py            # topology detection, fixtures, capability checks
+    ├── hpc_workers.py         # worker functions importable by Dragon remote processes
+    ├── pytest.ini             # asyncio mode, markers, scale off by default
+    ├── test_tasks.py
+    ├── test_placement.py
+    ├── test_scale.py
+    └── test_mpi.py
 ```
 
 ---
 
-## Topology-aware skip logic
+## Missing capabilities
 
-Tests auto-skip when the allocation cannot satisfy their resource requirements.
-No manual configuration is needed — topology is detected at runtime from
-`dragon.native.machine.System`.
+Topology is detected at runtime from `dragon.native.machine.System`. When a test's capability is
+missing, it skips, unless the capability is listed in `RHAPSODY_HPC_REQUIRE`, which makes it fail:
 
-| Mark | Skipped when |
+```bash
+export RHAPSODY_HPC_REQUIRE=gpu,multi_node,mpi
+```
+
+Set this on machines that should have those capabilities, so a lost dependency or a wrong
+allocation shows up instead of skipping quietly.
+
+| Mark | Missing when |
 |------|-------------|
 | `multi_node` | fewer than 2 nodes detected in the Dragon allocation |
 | `gpu` | no GPU-equipped nodes detected |
 | `mpi` | `mpi4py` not importable |
-| `scale` | `RHAPSODY_RUN_SCALE != 1` |
+
+The `scale` mark only selects tests: scale tests are excluded by default, and `-m scale` selects them.
 
 ---
 
@@ -122,8 +148,8 @@ No manual configuration is needed — topology is detected at runtime from
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RHAPSODY_HPC` | unset | **Must be `1`** for pytest to collect these tests at all |
-| `RHAPSODY_RUN_SCALE` | `0` | Set to `1` to enable scale/stress tests |
+| `RHAPSODY_HPC` | unset | **Must be `1`** for pytest to collect these tests. `run_suite.py` sets it |
+| `RHAPSODY_HPC_REQUIRE` | unset | Comma-separated capabilities that must be present: `gpu`, `multi_node`, `mpi` |
 | `RHAPSODY_SCALE_FUNC_COUNT` | `10000` | Function task count for scale tests |
 | `RHAPSODY_SCALE_EXEC_COUNT` | `1000` | Executable task count for scale tests |
 | `RHAPSODY_DDICT_MEM_GB` | `2` (standard) / `4` (scale) | GiB per node for Dragon's results DDict |
@@ -139,8 +165,9 @@ Dragon serialises Python functions by **module reference**
 deserialises the function, it imports `hpc_workers` by name. Functions defined
 directly in test files (e.g. `test_scale.py`) would require `test_scale` to be
 importable on every worker node, which fails on multi-node clusters where the
-test directory is not on `sys.path`. `pytest.ini` sets `pythonpath = .` so
-`hpc_workers.py` (in the same directory) is always importable.
+test directory is not on `sys.path`. The worker processes only see the
+environment, so `PYTHONPATH` must include this directory (step 3); without it
+every function task fails with `No module named 'hpc_workers'`.
 
 ### Pinning tests use executables, not Python functions
 
@@ -159,57 +186,6 @@ loop, causing "future belongs to a different loop" errors.
 
 ---
 
-## Full Test Coverage Matrix
-
-**25 tests total** — 21 standard + 4 scale-gated (★)
-
-| # | Test | File | Task Type | Node Scope | GPU | MPI | Scale | What is verified |
-|---|------|------|-----------|-----------|-----|-----|-------|-----------------|
-| 1 | `test_one_task_per_node` | multinode_gpu | Executable (`/bin/hostname`) | All nodes | — | — | — | 1 pinned task/node; stdout = hostname |
-| 2 | `test_one_task_per_gpu_across_nodes` | multinode_gpu | Executable (`/bin/bash`) | All GPU nodes | All GPUs/node | — | — | 1 task/GPU; stdout = `CUDA_VISIBLE_DEVICES` |
-| 3 | `test_concurrent_submission_all_nodes` | multinode_gpu | Executable (`/bin/hostname`) | All nodes | — | — | — | Single `submit_tasks` spans all nodes simultaneously |
-| 4 | `test_executable_pinned_to_first_node` | singlenode_gpu | Executable (`/bin/hostname`) | 1 node | — | — | — | Minimal pinning path; stdout = hostname |
-| 5 | `test_executable_echo_on_first_node` | singlenode_gpu | Executable (`/bin/echo`) | 1 node | — | — | — | Stdout capture; CLI argument forwarding |
-| 6 | `test_function_return_value` | singlenode_gpu | Python function (`add`) | Any | — | — | — | `batch.function()` return value capture |
-| 7 | `test_multiple_function_tasks_return_correct_values` | singlenode_gpu | Python function (`add`) | Any | — | — | — | 10 concurrent tasks; no result corruption |
-| 8 | `test_single_gpu_affinity_on_first_node` | singlenode_gpu | Executable (`/bin/bash`) | 1 GPU node | 1 GPU | — | — | Single GPU affinity; stdout = device ID |
-| 9 | `test_all_gpus_on_first_node` | singlenode_gpu | Executable (`/bin/bash`) | 1 GPU node | All GPUs | — | — | Per-GPU task; each task sees only its GPU |
-| 10 | `test_pin_to_each_node_sequentially` | pinning | Executable (`/bin/hostname`) | All nodes | — | — | — | Sequential pinning correctness per node |
-| 11 | `test_exclusive_node_pinning` | pinning | Executable (`/bin/hostname`) | 2 nodes | — | — | — | Tasks on A ≠ tasks on B; cross-node isolation |
-| 12 | `test_pin_to_specific_gpu` | pinning | Executable (`/bin/bash`) | 1 GPU node | Per GPU | — | — | Each task sees exactly its assigned GPU |
-| 13 | `test_round_robin_gpu_across_nodes` | pinning | Executable (`/bin/bash`) | All GPU nodes | All GPUs/node | — | — | (node, GPU) pair enforced; parsed from stdout |
-| 14 | `test_executable_pinned_to_each_node` | pinning | Executable (`/bin/hostname`) | All nodes | — | — | — | Baseline executable pinning across all nodes |
-| 15 | `test_mpi_gather_single_node` | mpi | Python function (`mpi_gather_hostnames`) | 1 node | — | 2 ranks | — | Gather: all hostnames collected at rank 0 |
-| 16 | `test_mpi_allreduce_single_node` | mpi | Python function (`mpi_allreduce_sum`) | 1 node | — | 4 ranks | — | Allreduce: global sum = n × ranks |
-| 17 | `test_mpi_broadcast_single_node` | mpi | Python function (`mpi_broadcast_check`) | 1 node | — | 4 ranks | — | Broadcast: all ranks receive the correct value |
-| 18 | `test_mpi_gather_across_nodes` | mpi | Python function (`mpi_gather_hostnames`) | All nodes | — | 1 rank/node | — | Each node hostname present in gather result |
-| 19 | `test_mpi_allreduce_across_nodes` | mpi | Python function (`mpi_allreduce_sum`) | All nodes | — | 2 ranks/node | — | Multi-node allreduce sum correctness |
-| 20 | `test_multiple_independent_mpi_jobs` | mpi | Python function (`mpi_gather_hostnames`) | All nodes | — | 1 rank/node | — | 4 concurrent MPI jobs; all complete without interference |
-| 21★ | `test_10k_function_tasks` | scale | Python function (`identity`) | All nodes | — | — | 10,000 | All DONE; `return_value == index` (no result corruption) |
-| 22★ | `test_1k_executable_tasks` | scale | Executable (`/bin/echo`) | All nodes | — | — | 1,000 | All DONE; throughput measured and reported |
-| 23★ | `test_mixed_function_and_executable_tasks` | scale | Mixed | All nodes | — | — | 1,100 | Mixed task types in one submission; all complete |
-| 24★ | `test_wave_submission_stability` | scale | Python function (`identity`) | All nodes | — | — | 10,000 | 10 waves × 1,000 tasks; monitor loop keeps pace with arrivals |
-
-★ scale-gated — requires `RHAPSODY_RUN_SCALE=1`
-
----
-
-## Coverage Summary
-
-| Dimension | What is covered |
-|-----------|----------------|
-| **Task types** | Python function (`batch.function()`), Executable (`batch.process()`), MPI job (`batch.job()`) |
-| **Node scope** | 1 node · 2 nodes (exclusive isolation) · all nodes (sequential and concurrent) |
-| **GPU scope** | No GPU · 1 GPU · all GPUs on one node · all GPUs across all nodes (round-robin) |
-| **MPI patterns** | gather · allreduce · broadcast · concurrent independent jobs |
-| **MPI ranks** | 2 ranks (single-node) · 4 ranks (single-node) · 1 rank/node · 2 ranks/node (multi-node) |
-| **Scale** | 1 task · 10 tasks · 100 tasks · 1 K executables · 10 K functions · 10 K in waves |
-| **Return value paths** | Exit code (executable) · Python return value (`batch.function()`) · MPI collective result at rank 0 |
-| **Submission patterns** | Sequential · concurrent (single call) · wave (incremental batches) |
-| **Verification methods** | `state == DONE` · stdout content · return value equality · MPI collective correctness |
-
----
-
 ## Known Gaps
 
 | Gap | Description | Priority |
@@ -220,4 +196,4 @@ loop, causing "future belongs to a different loop" errors.
 | **Return value from pinned processes** | `batch.process()` with `process_template` only returns the exit code; Python return values from pinned tasks require a separate communication channel | Medium |
 | **DDict overflow / back-pressure** | No test fills the results DDict past capacity to verify graceful failure | Medium |
 | **Heterogeneous node topologies** | All tests assume homogeneous GPU count per node | Low |
-| **Flux backend parity** | `flux/` sibling directory does not yet exist; the same 25 tests should be ported when the Flux backend matures | Low |
+| **Flux backend parity** | `flux/` sibling directory does not yet exist; the same tests should be ported when the Flux backend matures | Low |

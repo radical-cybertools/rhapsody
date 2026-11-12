@@ -200,7 +200,7 @@ async with ConcurrentExecutionBackend() as backend:
         await session.wait_tasks(tasks)
 
     for t in tasks:
-        print(t.stdout)   # path: /tmp/my-run/session.0000/task.000001.stdout
+        print(t.stdout)   # path: /tmp/my-run/rhapsody.session.<id>/task.000001.stdout
         print(open(t.stdout).read())
 ```
 
@@ -390,7 +390,8 @@ ComputeTask(
     executable='/bin/bash',
     arguments=['-c', 'echo $HOSTNAME'],
     task_backend_specific_kwargs={
-        "process_templates": [(2, {}), (2, {})]
+        "process_templates": [(2, {}), (2, {})],
+        "pmi": "none",  # not MPI, so no PMI
     },
 )
 
@@ -398,10 +399,13 @@ ComputeTask(
 ComputeTask(
     function=parallel_function,
     task_backend_specific_kwargs={
-        "process_templates": [(2, {}), (2, {})]
+        "process_templates": [(2, {}), (2, {})],
+        "pmi": "none",  # not MPI, so no PMI
     },
 )
 ```
+
+`"pmi": "none"` runs a job without a PMI. Use it for jobs that aren't MPI. For MPI jobs, see [MPI jobs: PMI and timeout](resource-specification.md#mpi-jobs-pmi-and-timeout).
 
 ### GPU Affinity with Policies
 
@@ -475,7 +479,8 @@ async def main():
             "process_templates": [
                 (2, {"policy": policies[0]}),
                 (2, {"policy": policies[1]}),
-            ]
+            ],
+            "pmi": "none",  # not MPI, so no PMI
         },
     )
 
@@ -538,7 +543,8 @@ async def main():
             executable='/bin/bash',
             arguments=['-c', 'echo $HOSTNAME'],
             task_backend_specific_kwargs={
-                "process_templates": [(2, {}), (2, {})]
+                "process_templates": [(2, {}), (2, {})],
+                "pmi": "none",  # not MPI, so no PMI
             },
         ),
 
@@ -554,7 +560,8 @@ async def main():
         ComputeTask(
             function=parallel_function,
             task_backend_specific_kwargs={
-                "process_templates": [(2, {}), (2, {})]
+                "process_templates": [(2, {}), (2, {})],
+                "pmi": "none",  # not MPI, so no PMI
             },
         ),
     ]
@@ -751,7 +758,7 @@ from rhapsody.api import Session
 
 session = Session(
     backends=[backend],   # list of execution / inference backends
-    uid="my-session",     # optional identifier (default: "session.0000")
+    uid="my-session",     # optional identifier (default: "rhapsody.session.<8 hex chars>")
     work_dir="/path",     # optional working directory (default: cwd)
 )
 
@@ -768,10 +775,11 @@ await session.wait_tasks(tasks, timeout=30.0)
 result  = await futures[0]
 results = await asyncio.gather(*futures)
 
-# Session-wide statistics
-stats = session.get_statistics()
-# stats["counts"]          Counter of terminal states (DONE, FAILED, …)
-# stats["summary"]         avg_total / avg_queue / avg_execution latencies (seconds)
+# Summary of terminal states (tasks are updated in place)
+from collections import Counter
+counts = Counter(t.state for t in tasks)   # e.g. Counter({"DONE": 98, "FAILED": 2})
+# For durations and resource use, enable telemetry before submitting:
+#   telemetry = await session.start_telemetry(); ...; telemetry.summary()
 
 # Shutdown (called automatically when using `async with`)
 await session.close()
