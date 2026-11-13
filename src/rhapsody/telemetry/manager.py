@@ -1,8 +1,9 @@
 """RHAPSODY TelemetryManager.
 
-Central orchestrator: owns the asyncio EventBus (Queue), wires OpenTelemetry SDK
-instruments and tracers, dispatches events to metrics, traces, and external subscribers,
-and writes a single JSONL checkpoint file containing events, metric snapshots, and spans.
+Central orchestrator: owns the asyncio EventBus (Queue), the OpenTelemetry SDK providers and the
+task and session spans, hosts the instrumentations that record metrics (see
+rhapsody.telemetry.instrumentation), dispatches events to them and to external subscribers, and
+writes a single JSONL checkpoint file containing events, metric snapshots, and spans.
 
 OTel imports are deferred inside start() so that importing this module never pulls
 in opentelemetry at startup unless telemetry is explicitly enabled.
@@ -142,7 +143,11 @@ class TelemetryManager:
         # warned about are kept so a failing instrumentation is loud once, not once per event.
         self._instrumentations: dict[str, Instrumentation] = {}
         self._routes: dict[str, tuple[Instrumentation, ...]] = {}
-        self._failed_instrumentations: set[str] = set()
+        self._failed_instrumentations: set[tuple[str, type]] = set()
+        # Default instrumentations (every event goes to them, whatever its backend), only the ones
+        # that started; the route is rebuilt from them at start() and cleared at stop().
+        self._default_instrumentations: dict[str, Instrumentation] = {}
+        self._default_route: tuple[Instrumentation, ...] = ()
         self._running = False
         self._stopped = False  # set once stop() has completed its cleanup
         self._dispatch_task: asyncio.Task | None = None
@@ -162,19 +167,7 @@ class TelemetryManager:
         self._tracer_provider: Any = None
         self._metric_reader: Any = None
         self._span_exporter: Any = None
-        self._meter: Any = None
         self._tracer: Any = None
-
-        # OTel instruments — set in _register_instruments()
-        self._c_submitted: Any = None
-        self._c_started: Any = None
-        self._c_completed: Any = None
-        self._c_failed: Any = None
-        self._g_running: Any = None
-        self._h_duration: Any = None
-        self._g_cpu: Any = None
-        self._g_memory: Any = None
-        self._g_gpu: Any = None
 
         # Active OTel spans keyed by task_id
         self._active_spans: dict[str, Any] = {}
@@ -184,17 +177,9 @@ class TelemetryManager:
         # Wall-clock time recorded when RUNNING is first seen for each task.
         self._task_start_times: dict[str, float] = {}
 
-        # Tasks counted in tasks_running (TaskStarted seen, no terminal event yet), with
-        # the metric attributes of their +1: a task that ends before RUNNING must not
-        # decrement the shared series, and the -1 must hit the series the +1 went to.
-        self._running_tasks: dict[str, dict] = {}
-
         # Temporary span context store: task_id → SpanContext, populated in
         # _process_event() on TaskCompleted/Failed, consumed in _span_ids_for_event().
         self._completed_span_ctx: dict[str, Any] = {}
-
-        # Last-seen resource values for UpDownCounter delta tracking
-        self._last: dict[str, dict[str, float]] = {"cpu": {}, "mem": {}, "gpu": {}}
 
         # Registered by higher-layer runtimes to inject custom OTel span attributes.
         # Each callable receives the event and returns a dict of extra attributes.
@@ -261,10 +246,7 @@ class TelemetryManager:
         for proc in self._extra_span_processors:
             self._tracer_provider.add_span_processor(proc)
 
-        self._meter = self._meter_provider.get_meter("rhapsody")
         self._tracer = self._tracer_provider.get_tracer("rhapsody")
-
-        self._register_instruments()
 
         # Open checkpoint file
         if self._checkpoint_path is not None:
@@ -282,9 +264,11 @@ class TelemetryManager:
 
         self._session_ctx = trace_mod.set_span_in_context(self._session_span)
 
-        # Instrumentations attached before start() could not get a meter until now. After the
-        # session span exists, so ctx.session_span_context() is valid inside instrument() whether
-        # a backend was attached before or after start(); before the dispatch loop starts.
+        # Instrumentations could not get a meter before now. After the session span exists, so
+        # ctx.session_span_context() is valid inside instrument() whether a backend was attached
+        # before or after start(); before the dispatch loop starts. The defaults go first: a
+        # backend's route is the default route plus its own instrumentation.
+        self._start_default_instrumentations()
         for backend_name in list(self._instrumentations):
             self._instrument(backend_name)
 
@@ -387,13 +371,22 @@ class TelemetryManager:
             except Exception:
                 logger.exception("Adapter %s failed to stop", type(adapter).__name__)
 
-        # Before the providers shut down below: instrumentations still hold instruments.
+        # Before the providers shut down below: instrumentations still hold instruments. Each
+        # is taken out of its registry first, so a retried stop() never uninstruments it twice.
         for backend_name in list(self._routes):
             del self._routes[backend_name]
             try:
                 self._instrumentations[backend_name].uninstrument()
             except Exception:
                 logger.exception("Instrumentation of %s failed to stop", backend_name)
+        defaults = list(self._default_instrumentations.items())
+        self._default_instrumentations.clear()
+        self._default_route = ()
+        for domain, instrumentation in defaults:
+            try:
+                instrumentation.uninstrument()
+            except Exception:
+                logger.exception("Default %r instrumentation failed to stop", domain)
 
         if self._checkpoint_task and not self._checkpoint_task.done():
             self._checkpoint_task.cancel()
@@ -643,6 +636,12 @@ class TelemetryManager:
         if not isinstance(domain, str) or not domain or backend_name in self._instrumentations:
             return
         from rhapsody.telemetry.instrumentation import get_instrumentation_class
+        from rhapsody.telemetry.instrumentation.registry import DEFAULT_DOMAINS
+
+        if domain in DEFAULT_DOMAINS:
+            # Default domains already see every event: hosting one again would count twice.
+            logger.warning("Telemetry domain %r is hosted for every backend; ignored", domain)
+            return
 
         try:
             cls = get_instrumentation_class(domain)
@@ -662,9 +661,40 @@ class TelemetryManager:
 
         A failing instrumentation is logged and gets no events; it never stops the manager.
         """
+        instrumentation = self._instrumentations[backend_name]
+        what = f"the instrumentation of {backend_name}"
+        if self._start_instrumentation(instrumentation, backend_name, what):
+            self._routes[backend_name] = (*self._default_route, instrumentation)
+
+    def _start_default_instrumentations(self) -> None:
+        """Create and start the default instrumentations; the ones that fail are left out."""
+        from rhapsody.telemetry.instrumentation import get_instrumentation_class
+        from rhapsody.telemetry.instrumentation.registry import DEFAULT_DOMAINS
+
+        for domain in DEFAULT_DOMAINS:
+            try:
+                instrumentation = get_instrumentation_class(domain)()
+            except Exception:
+                logger.warning(
+                    "Could not create the default %r instrumentation", domain, exc_info=True
+                )
+                continue
+            if self._start_instrumentation(
+                instrumentation, "", f"the default {domain!r} instrumentation"
+            ):
+                self._default_instrumentations[domain] = instrumentation
+        self._default_route = tuple(self._default_instrumentations.values())
+
+    def _start_instrumentation(
+        self, instrumentation: Instrumentation, backend_name: str, what: str
+    ) -> bool:
+        """Call ``instrument()`` with a context scoped to the instrumentation.
+
+        On failure, log a warning with the traceback (``what`` names the instrumentation) and
+        return False.
+        """
         from rhapsody.telemetry.instrumentation import InstrumentationContext
 
-        instrumentation = self._instrumentations[backend_name]
         try:
             scope = instrumentation.scope_name
             instrumentation.instrument(
@@ -679,9 +709,9 @@ class TelemetryManager:
                 )
             )
         except Exception:
-            logger.warning("Could not start the instrumentation of %s", backend_name, exc_info=True)
-            return
-        self._routes[backend_name] = (instrumentation,)
+            logger.warning("Could not start %s", what, exc_info=True)
+            return False
+        return True
 
     def _session_span_context(self) -> Any:
         """The session span's context, or None once the session span has ended."""
@@ -700,12 +730,14 @@ class TelemetryManager:
             try:
                 instrumentation.on_event(event)
             except Exception:
-                # Warn once per backend, then stay quiet: this runs once per event.
-                first = event.backend not in self._failed_instrumentations
-                self._failed_instrumentations.add(event.backend)
+                # Warn once per (backend, instrumentation), then stay quiet: this runs per event.
+                key = (event.backend, type(instrumentation))
+                first = key not in self._failed_instrumentations
+                self._failed_instrumentations.add(key)
                 logger.log(
                     logging.WARNING if first else logging.DEBUG,
-                    "Instrumentation of %s failed on %s",
+                    "Instrumentation %s of %s failed on %s",
+                    type(instrumentation).__name__,
                     event.backend,
                     event.event_type,
                     exc_info=True,
@@ -872,14 +904,9 @@ class TelemetryManager:
 
     def task_count(self) -> dict:
         """Return task counts as a plain dict."""
-        metrics = self.read_metrics()
-        return {
-            "submitted": int(_sum_metric(metrics, "tasks_submitted")),
-            "completed": int(_sum_metric(metrics, "tasks_completed")),
-            "failed": int(_sum_metric(metrics, "tasks_failed")),
-            "canceled": int(_sum_metric(metrics, "tasks_canceled")),
-            "running": int(_sum_metric(metrics, "tasks_running")),
-        }
+        from rhapsody.telemetry.instrumentation.task import TaskInstrumentation
+
+        return TaskInstrumentation.counts(self.read_metrics())
 
     def task_spans(self) -> list[dict]:
         """Return one plain dict per task span — no OTel knowledge required.
@@ -1167,42 +1194,6 @@ class TelemetryManager:
         return hex(span_ctx.trace_id), hex(span_ctx.span_id)
 
     # ------------------------------------------------------------------
-    # Internal: OTel instruments
-    # ------------------------------------------------------------------
-
-    def _register_instruments(self) -> None:
-        self._c_submitted = self._meter.create_counter(
-            "tasks_submitted", description="Total tasks submitted"
-        )
-        self._c_started = self._meter.create_counter(
-            "tasks_started", description="Total tasks started"
-        )
-        self._c_completed = self._meter.create_counter(
-            "tasks_completed", description="Total tasks completed"
-        )
-        self._c_failed = self._meter.create_counter(
-            "tasks_failed", description="Total tasks failed"
-        )
-        self._c_canceled = self._meter.create_counter(
-            "tasks_canceled", description="Total tasks canceled"
-        )
-        self._g_running = self._meter.create_up_down_counter(
-            "tasks_running", description="Tasks currently running"
-        )
-        self._h_duration = self._meter.create_histogram(
-            "task_duration_seconds", description="Task execution duration in seconds"
-        )
-        self._g_cpu = self._meter.create_up_down_counter(
-            "node_cpu_utilization", description="Node CPU utilization percent"
-        )
-        self._g_memory = self._meter.create_up_down_counter(
-            "node_memory_utilization", description="Node memory utilization percent"
-        )
-        self._g_gpu = self._meter.create_up_down_counter(
-            "node_gpu_utilization", description="Node GPU utilization percent"
-        )
-
-    # ------------------------------------------------------------------
     # Internal: dispatch loop
     # ------------------------------------------------------------------
 
@@ -1257,15 +1248,17 @@ class TelemetryManager:
         """Process a collected batch: OTel instruments, JSONL write, subscribers."""
         self._inflight = len(batch)  # reported by stop() if the loop dies in this batch
         routes = self._routes
+        default_route = self._default_route
         for event in batch:
             self._event_log.append(event)
             try:
                 self._process_event(event, trace_mod, otel_context)
             except Exception:
                 logger.exception("Error processing telemetry event %s", event.event_type)
-            # One dictionary lookup per event; no entry means no instrumentation for the backend.
-            route = routes.get(event.backend)
-            if route is not None:
+            # One dictionary lookup per event: a backend with its own instrumentation has its
+            # own route (the default route plus its own), every other backend the default route.
+            route = routes.get(event.backend, default_route)
+            if route:
                 self._route_event(event, route)
 
         if self._checkpoint_file is not None:
@@ -1309,15 +1302,15 @@ class TelemetryManager:
                 )
 
     def _process_event(self, event: BaseEvent, trace_mod: Any, otel_context: Any) -> None:
-        """Translate a RHAPSODY event into OTel instrument calls and span lifecycle."""
+        """Update the task and session spans for an event (metrics: the task instrumentation)."""
         etype = event.event_type
-        attrs = {"session_id": event.session_id, "backend": event.backend or ""}
 
         if etype == "TaskCreated":
             executable = event.attributes.get("executable", "")
             task_type = event.attributes.get("task_type", "")
             a = {
-                **attrs,
+                "session_id": event.session_id,
+                "backend": event.backend or "",
                 "task_id": event.task_id,
                 "executable": executable,
                 "task_type": task_type,
@@ -1338,30 +1331,16 @@ class TelemetryManager:
                 "task", context=_ctx, attributes=a
             )
 
-        elif etype == "TaskSubmitted":
-            self._c_submitted.add(
-                1,
-                {
-                    **attrs,
-                    "executable": event.attributes.get("executable", ""),
-                    "task_type": event.attributes.get("task_type", ""),
-                },
-            )
-
         elif etype == "TaskStarted":
-            executable = event.attributes.get("executable", "")
-            task_type = event.attributes.get("task_type", "")
-            # Metric attributes stay bounded (no task_id): per-task identity is on the span.
-            a = {**attrs, "executable": executable, "task_type": task_type}
-            if event.task_id not in self._running_tasks:
-                self._running_tasks[event.task_id] = a
-                self._c_started.add(1, a)
-                self._g_running.add(1, a)
             if event.task_id not in self._active_spans:
                 # Fallback: TaskCreated was never seen (incomplete lifecycle).
-                # Use a_span copy so metric attributes (a) are not polluted with
-                # workflow_id or other span-only extractor fields.
-                a_span = {**a, "task_id": event.task_id}
+                a_span = {
+                    "session_id": event.session_id,
+                    "backend": event.backend or "",
+                    "executable": event.attributes.get("executable", ""),
+                    "task_type": event.attributes.get("task_type", ""),
+                    "task_id": event.task_id,
+                }
                 for extractor in self._span_attribute_extractors:
                     try:
                         a_span.update(extractor(event))
@@ -1375,17 +1354,12 @@ class TelemetryManager:
         elif etype == "TaskCompleted":
             executable = event.attributes.get("executable", "")
             task_type = event.attributes.get("task_type", "")
-            # Metric attributes stay bounded (no task_id): per-task identity is on the span.
-            a = {**attrs, "executable": executable, "task_type": task_type}
-            self._c_completed.add(1, a)
-            self._h_duration.record(event.duration_seconds, a)
-            running_attrs = self._running_tasks.pop(event.task_id, None)
-            if running_attrs is not None:
-                self._g_running.add(-1, running_attrs)
             span = self._active_spans.pop(event.task_id, None)
             if span is None:
                 span = self._tracer.start_span(
-                    "task", context=self._session_ctx, attributes={**a, "task_id": event.task_id}
+                    "task",
+                    context=self._session_ctx,
+                    attributes=self._fallback_span_attributes(event, executable, task_type),
                 )
             span.set_attribute("status", "completed")
             span.set_attribute("executable", executable)
@@ -1400,17 +1374,12 @@ class TelemetryManager:
             executable = event.attributes.get("executable", "")
             task_type = event.attributes.get("task_type", "")
             error_type = event.attributes.get("error_type", event.error_type)
-            # Metric attributes stay bounded (no task_id): per-task identity is on the span.
-            a = {**attrs, "executable": executable, "task_type": task_type}
-            self._c_failed.add(1, a)
-            self._h_duration.record(event.duration_seconds, a)
-            running_attrs = self._running_tasks.pop(event.task_id, None)
-            if running_attrs is not None:
-                self._g_running.add(-1, running_attrs)
             span = self._active_spans.pop(event.task_id, None)
             if span is None:
                 span = self._tracer.start_span(
-                    "task", context=self._session_ctx, attributes={**a, "task_id": event.task_id}
+                    "task",
+                    context=self._session_ctx,
+                    attributes=self._fallback_span_attributes(event, executable, task_type),
                 )
             span.set_attribute("status", "failed")
             span.set_attribute("error_type", error_type)
@@ -1425,17 +1394,12 @@ class TelemetryManager:
         elif etype == "TaskCanceled":
             executable = event.attributes.get("executable", "")
             task_type = event.attributes.get("task_type", "")
-            # Metric attributes stay bounded (no task_id): per-task identity is on the span.
-            a = {**attrs, "executable": executable, "task_type": task_type}
-            self._c_canceled.add(1, a)
-            self._h_duration.record(event.duration_seconds, a)
-            running_attrs = self._running_tasks.pop(event.task_id, None)
-            if running_attrs is not None:
-                self._g_running.add(-1, running_attrs)
             span = self._active_spans.pop(event.task_id, None)
             if span is None:
                 span = self._tracer.start_span(
-                    "task", context=self._session_ctx, attributes={**a, "task_id": event.task_id}
+                    "task",
+                    context=self._session_ctx,
+                    attributes=self._fallback_span_attributes(event, executable, task_type),
                 )
             span.set_attribute("status", "canceled")
             span.set_attribute("executable", executable)
@@ -1460,17 +1424,16 @@ class TelemetryManager:
                 self._session_span.end()
                 self._session_span = None
 
-        elif etype == "ResourceUpdate":
-            ra = {**attrs, "node_id": event.node_id}
-            for gauge, key, val in (
-                (self._g_cpu, "cpu", event.cpu_percent),
-                (self._g_memory, "mem", event.memory_percent),
-                (self._g_gpu, "gpu", event.gpu_percent),
-            ):
-                if val is not None:
-                    last = self._last[key].get(event.node_id, 0.0)
-                    gauge.add(val - last, ra)
-                    self._last[key][event.node_id] = val
+    @staticmethod
+    def _fallback_span_attributes(event: BaseEvent, executable: str, task_type: str) -> dict:
+        """Attributes of a task span created at its terminal event (TaskCreated was never seen)."""
+        return {
+            "session_id": event.session_id,
+            "backend": event.backend or "",
+            "executable": executable,
+            "task_type": task_type,
+            "task_id": event.task_id,
+        }
 
     # ------------------------------------------------------------------
     # Internal: checkpoint file
@@ -1562,19 +1525,6 @@ class TelemetryManager:
 # ------------------------------------------------------------------
 # Module-level helper
 # ------------------------------------------------------------------
-
-
-def _sum_metric(metrics_data: Any, name: str) -> float:
-    total = 0.0
-    if metrics_data is None:
-        return total
-    for rm in metrics_data.resource_metrics:
-        for sm in rm.scope_metrics:
-            for metric in sm.metrics:
-                if metric.name == name:
-                    for dp in metric.data.data_points:
-                        total += dp.value
-    return total
 
 
 def _task_executable(task: dict) -> str:

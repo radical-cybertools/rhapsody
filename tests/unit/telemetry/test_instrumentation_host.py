@@ -417,6 +417,9 @@ async def test_a_failing_instrument_leaves_the_backend_unrouted_and_start_succee
     with caplog.at_level(logging.WARNING):
         await manager.start()
     assert "Could not start the instrumentation of b" in caplog.text
+    record = next(r for r in caplog.records if "Could not start" in r.getMessage())
+    assert record.levelno == logging.WARNING
+    assert record.exc_info is not None  # the traceback is kept
     assert manager._routes == {}
     assert manager._running
     backend.telemetry.emit("rhapsody.test.One")  # still fine
@@ -445,7 +448,26 @@ async def test_a_failing_uninstrument_does_not_break_stop(caplog):
 def test_the_manager_knows_no_inference_domain():
     """The host stays generic: domain names live in instrumentations."""
     source = pathlib.Path(manager_module.__file__).read_text()
-    words = ["inference", "vllm", "gen_ai", "queue.duration", "model.duration", "dragon_model"]
+    words = [
+        "inference",
+        "vllm",
+        "gen_ai",
+        "queue.duration",
+        "model.duration",
+        "dragon_model",
+        # the task metrics live in instrumentation/task.py
+        "tasks_submitted",
+        "tasks_started",
+        "tasks_completed",
+        "tasks_failed",
+        "tasks_canceled",
+        "tasks_running",
+        "task_duration_seconds",
+        "node_cpu_utilization",
+        "node_memory_utilization",
+        "node_gpu_utilization",
+        "_sum_metric",
+    ]
     found = [w for w in words if re.search(re.escape(w), source, re.IGNORECASE)]
     assert found == []
 

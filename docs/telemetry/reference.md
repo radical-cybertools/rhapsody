@@ -376,7 +376,7 @@ Checkpoint = define_event(
 
 ## OTel metrics instruments
 
-The `TelemetryManager` registers the following instruments on a `rhapsody` meter:
+The task instrumentation (`rhapsody.telemetry.instrumentation.task`) records the following instruments on the `rhapsody` meter scope, from the task and resource events of every backend:
 
 | Instrument name | Type | Unit | Description |
 |---|---|---|---|

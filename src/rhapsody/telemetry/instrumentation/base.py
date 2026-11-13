@@ -4,11 +4,11 @@ An *instrumentation* is the only place that knows a telemetry domain (inference,
 names, units, bucket advice, span attributes. It uses the OpenTelemetry **API** only, through the
 scoped meter and tracer the host hands it, and it never imports the SDK.
 
-The :class:`~rhapsody.telemetry.manager.TelemetryManager` is becoming a generic host: it owns the
-providers, the lifecycle and the event routing, and knows no inference domain (the task metrics
-still live in it until they move to a task instrumentation). It routes every event by
-``event.backend`` to the instrumentations of that backend (one dictionary lookup per event) and
-calls :meth:`Instrumentation.on_event`.
+The :class:`~rhapsody.telemetry.manager.TelemetryManager` is a generic host: it owns the providers,
+the lifecycle and the event routing, and knows no instrumentation domain (task spans and the JSONL
+file stay in it for now). It routes every event by ``event.backend`` to the instrumentations of
+that backend, plus the default instrumentations that see every event (the task metrics), with one
+dictionary lookup per event, and calls :meth:`Instrumentation.on_event`.
 
 A backend names its domain with the plain string class attribute ``telemetry_domain``; the
 registry (:mod:`rhapsody.telemetry.instrumentation.registry`) maps that name to the class.
@@ -35,7 +35,8 @@ class InstrumentationContext:
         meter: OTel ``Meter`` scoped to the instrumentation's ``scope_name``.
         tracer: OTel ``Tracer`` scoped to the instrumentation's ``scope_name``.
         session_id: Session the events belong to.
-        backend_name: Name of the backend this instrumentation serves.
+        backend_name: Name of the backend this instrumentation serves (``""`` for a default
+            instrumentation, which serves the whole session).
         session_span_context: Returns the session span's ``SpanContext``, or None once it ended.
         task_span: ``task_span(task_id)`` returns the task's open span, or None.
         span_context_for: ``span_context_for(task_id)`` returns the ``SpanContext`` of the task's
@@ -52,7 +53,8 @@ class InstrumentationContext:
 
 
 class Instrumentation(ABC):
-    """One telemetry domain, hosted by the TelemetryManager for one backend.
+    """One telemetry domain, hosted by the TelemetryManager for one backend or, for a default
+    instrumentation, for the whole session (it then receives every event).
 
     Lifecycle: ``instrument(ctx)`` when the host starts (or when the backend is attached to a
     running host), ``on_event(event)`` for every event of the backend, ``uninstrument()`` before

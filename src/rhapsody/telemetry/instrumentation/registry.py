@@ -14,7 +14,13 @@ if TYPE_CHECKING:
     from rhapsody.telemetry.instrumentation.base import Instrumentation
 
 # domain name -> class, or "module:ClassName" resolved on first use.
-_REGISTRY: dict[str, type[Instrumentation] | str] = {}
+_REGISTRY: dict[str, type[Instrumentation] | str] = {
+    "task": "rhapsody.telemetry.instrumentation.task:TaskInstrumentation",
+}
+
+# Domains the manager hosts for every session and routes every event to (not tied to a backend).
+# A fixed constant, not a registration flag: a plugin cannot put its own call on every event.
+DEFAULT_DOMAINS: tuple[str, ...] = ("task",)
 
 
 def register_instrumentation(domain: str, instrumentation: type[Instrumentation] | str) -> None:
