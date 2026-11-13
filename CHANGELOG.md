@@ -10,7 +10,9 @@
   with `task["exception"]` set to a `TimeoutError` and the partial response kept (answered prompts
   plus the `ERROR:` strings). `Session.wait_tasks()` now sees the failure, and in AsyncFlow the
   dependents of such a task no longer run. `generate()` and the HTTP endpoints are unchanged.
-  The deadline is the module constant `_BATCH_RESPONSE_TIMEOUT_S`.
+  The deadline covers the whole batch, not each task: if a batch takes longer than 300 s, every
+  task with a prompt still unanswered at that point is FAILED, including tasks whose prompts
+  were last in the batch. The deadline is the module constant `_BATCH_RESPONSE_TIMEOUT_S`.
 
 - **Executable tasks submitted through `OrbitExecutionBackend` never completed** — the
   radical.orbit rhapsody plugin sends DONE notifications without `stdout`, and an executable's

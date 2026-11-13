@@ -11,6 +11,7 @@ Run with:
 """
 
 import asyncio
+import contextlib
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
@@ -215,7 +216,9 @@ class _FakePipeline:
             response_queue.put({"assistant": f"re: {prompt}", "model_inference_latency": 0.1})
 
 
+@contextlib.asynccontextmanager
 async def _running_backend(monkeypatch, answer=None, timeout_s=0.05):
+    """A backend with its batch processor running; the processor is stopped on exit."""
     from rhapsody.backends.ai import vllm as vllm_mod
 
     monkeypatch.setattr(vllm_mod, "_BATCH_RESPONSE_TIMEOUT_S", timeout_s)
@@ -229,7 +232,12 @@ async def _running_backend(monkeypatch, answer=None, timeout_s=0.05):
     states = []
     backend.register_callback(lambda task, state: states.append((task["uid"], state)))
     processor = asyncio.create_task(backend._batch_processor())
-    return backend, states, processor
+    try:
+        yield backend, states
+    finally:
+        processor.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await processor
 
 
 async def _wait_terminal(states, count, limit=5.0):
@@ -240,22 +248,18 @@ async def _wait_terminal(states, count, limit=5.0):
 
 @pytest.mark.asyncio
 async def test_answered_task_is_done(monkeypatch):
-    backend, states, processor = await _running_backend(monkeypatch)
-    try:
+    async with _running_backend(monkeypatch) as (backend, states):
         task = {"uid": "t1", "prompt": ["a", "b"]}
         await backend.submit_tasks([task])
         await _wait_terminal(states, 1)
         assert states[-1] == ("t1", "DONE")
         assert task["response"] == ["re: a", "re: b"]
         assert "exception" not in task
-    finally:
-        processor.cancel()
 
 
 @pytest.mark.asyncio
 async def test_task_with_timed_out_prompts_is_failed_with_partial_response(monkeypatch):
-    backend, states, processor = await _running_backend(monkeypatch, answer=1)
-    try:
+    async with _running_backend(monkeypatch, answer=1) as (backend, states):
         task = {"uid": "t1", "prompt": ["a", "b", "c"]}
         await backend.submit_tasks([task])
         await _wait_terminal(states, 1)
@@ -264,14 +268,11 @@ async def test_task_with_timed_out_prompts_is_failed_with_partial_response(monke
         assert "2 of 3" in str(task["exception"])
         assert task["response"][0] == "re: a"
         assert all(r.startswith("ERROR:") for r in task["response"][1:])
-    finally:
-        processor.cancel()
 
 
 @pytest.mark.asyncio
 async def test_only_the_task_with_unanswered_prompts_fails(monkeypatch):
-    backend, states, processor = await _running_backend(monkeypatch, answer=1)
-    try:
+    async with _running_backend(monkeypatch, answer=1) as (backend, states):
         answered = {"uid": "t1", "prompt": "a"}
         starved = {"uid": "t2", "prompt": ["b", "c"]}
         await backend.submit_tasks([answered, starved])
@@ -280,16 +281,11 @@ async def test_only_the_task_with_unanswered_prompts_fails(monkeypatch):
         assert final == {"t1": "DONE", "t2": "FAILED"}
         assert "exception" not in answered
         assert isinstance(starved["exception"], TimeoutError)
-    finally:
-        processor.cancel()
 
 
 @pytest.mark.asyncio
 async def test_generate_keeps_error_strings_on_timeout(monkeypatch):
-    backend, _states, processor = await _running_backend(monkeypatch, answer=0)
-    try:
+    async with _running_backend(monkeypatch, answer=0) as (backend, _states):
         results = await backend.generate(["a", "b"], timeout=5)
         assert len(results) == 2
         assert all(r.startswith("ERROR:") for r in results)
-    finally:
-        processor.cancel()
