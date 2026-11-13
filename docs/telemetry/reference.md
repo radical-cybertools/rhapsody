@@ -533,4 +533,8 @@ Each limitation has a `TELEMETRY-LIMITATION(<id>)` comment at the place in the c
 
 | Id | Limitation | Planned |
 |---|---|---|
+| L3 | The JSONL metric snapshot sums data points across all attributes (T9), so series split by attribute are added together in the file. `read_metrics()` keeps the dimensions. | Tier 2 |
+| L4 | Task spans start and end at the time the dispatch loop processes the event, not at the event's own time (T3), so they can be offset from spans an instrumentation records with real times. | Tier 3 (Tier 2 partially) |
+| L5 | `subscribe()` callbacks receive events only. OTel metrics recorded by an instrumentation are available through `read_metrics()` or a metric reader, not as events. | Tier 3 |
+| L15 | Instrumentations are keyed by backend name: two backends of one session with the same name share one slot, and the later one is ignored. `Session` and `WorkflowEngine` key their backends by name, so a same-name backend replaces the earlier one there; instrumentations follow the same rule. | None needed |
 | L17 | `Emitter.emit()` (the handle every backend gets as `backend.telemetry`) must be called on the event-loop thread, because the event queue is not thread-safe. A backend whose callbacks run in worker threads would have to hop onto the loop first. The vLLM batcher runs on the loop. | Tier 1 of the telemetry refactor, or a `call_soon_threadsafe` hop in the emitter |

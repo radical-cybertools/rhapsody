@@ -79,6 +79,10 @@ class DataBackend(abc.ABC):
     # TelemetryManager (see BaseBackend.telemetry and rhapsody.telemetry.emitter).
     telemetry: Emitter = NoopEmitter()
 
+    # Name of the telemetry domain whose instrumentation the manager hosts for this backend
+    # (a plain string, looked up in rhapsody.telemetry.instrumentation.registry), or None.
+    telemetry_domain: str | None = None
+
     def __init__(self, *, name: str | None = None) -> None:
         self._name = name
         self._state: DataBackendState = DataBackendState.CREATED
