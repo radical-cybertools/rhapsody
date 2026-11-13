@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from opentelemetry.sdk.trace import SpanProcessor
 
     from rhapsody.telemetry.adapters.base import TelemetryAdapter
+    from rhapsody.telemetry.instrumentation import Instrumentation
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,14 @@ class TelemetryManager:
         # runtime-wide Dragon node poller exists — see attach_backend().
         self._attached_backends: set[int] = set()
         self._dragon_adapter_attached = False
+        # Domain instrumentations hosted by backend name, and the event routes (backend name ->
+        # instrumentations; a name is routed exactly while it is instrumented). The manager knows
+        # no domain: it hosts what the registry returns for a backend's `telemetry_domain` and
+        # passes each event to the instrumentations of the backend it came from. Names already
+        # warned about are kept so a failing instrumentation is loud once, not once per event.
+        self._instrumentations: dict[str, Instrumentation] = {}
+        self._routes: dict[str, tuple[Instrumentation, ...]] = {}
+        self._failed_instrumentations: set[str] = set()
         self._running = False
         self._stopped = False  # set once stop() has completed its cleanup
         self._dispatch_task: asyncio.Task | None = None
@@ -273,6 +282,12 @@ class TelemetryManager:
 
         self._session_ctx = trace_mod.set_span_in_context(self._session_span)
 
+        # Instrumentations attached before start() could not get a meter until now. After the
+        # session span exists, so ctx.session_span_context() is valid inside instrument() whether
+        # a backend was attached before or after start(); before the dispatch loop starts.
+        for backend_name in list(self._instrumentations):
+            self._instrument(backend_name)
+
         # A fresh queue: nothing left by an earlier stop() (e.g. a sentinel) reaches this loop.
         self._queue = asyncio.Queue()
         self._running = True
@@ -372,6 +387,14 @@ class TelemetryManager:
             except Exception:
                 logger.exception("Adapter %s failed to stop", type(adapter).__name__)
 
+        # Before the providers shut down below: instrumentations still hold instruments.
+        for backend_name in list(self._routes):
+            del self._routes[backend_name]
+            try:
+                self._instrumentations[backend_name].uninstrument()
+            except Exception:
+                logger.exception("Instrumentation of %s failed to stop", backend_name)
+
         if self._checkpoint_task and not self._checkpoint_task.done():
             self._checkpoint_task.cancel()
             try:
@@ -435,6 +458,12 @@ class TelemetryManager:
 
         Callbacks may be sync or async. Async callbacks are fire-and-forget tasks. Exceptions in
         callbacks never crash the dispatch loop.
+
+        TELEMETRY-LIMITATION(L5): subscribers receive events only. OTel metrics recorded by an
+        instrumentation reach them only through :meth:`read_metrics` or a metric reader passed as
+        ``metric_readers``, not as events. Why not now: metrics are aggregated by the OTel SDK, not
+        emitted per event. Planned: Tier 3 (subscribers move to a standard SpanProcessor /
+        MetricReader). See docs/telemetry/reference.md#known-limitations.
         """
         self._subscribers.append(callback)
 
@@ -517,12 +546,18 @@ class TelemetryManager:
         ``submit_tasks``). Safe to call before or after start(); if already running the adapter is
         started immediately. Attaching the same backend again adds no second adapter, and all
         Dragon backends of a session share one node poller.
+
+        If the backend names a ``telemetry_domain``, the instrumentation registered for it is
+        hosted too (see :meth:`_attach_instrumentation`).
         """
         try:
             backend.telemetry = BackendEmitter(self, backend_name)
         except Exception:
             # A stand-in object or one with a read-only attribute must not break attach.
             logger.debug("Could not hand an emitter to %s", backend_name, exc_info=True)
+
+        # Before the early returns below: data backends and Dragon backends need it too.
+        self._attach_instrumentation(backend, backend_name)
 
         if not hasattr(backend, "submit_tasks"):
             return  # data backend: no task execution, no resource adapter
@@ -570,7 +605,7 @@ class TelemetryManager:
 
         if backend_cls.startswith("Dragon"):
             # Dragon node metrics are runtime-wide: a second Dragon backend in the
-            # session (e.g. an inference backend) would poll the same nodes again.
+            # session (e.g. an AI backend) would poll the same nodes again.
             if self._dragon_adapter_attached:
                 return
             try:
@@ -590,6 +625,91 @@ class TelemetryManager:
             return
 
         # LocalExecutionBackend, NoopExecutionBackend, unknown — silently skip.
+
+    def _attach_instrumentation(self, backend: Any, backend_name: str) -> None:
+        """Host the instrumentation of the backend's ``telemetry_domain``, if it has one.
+
+        The instrumentation is started now if the manager is running, else at start(). A domain
+        that is not a non-empty string (stand-in backends) is ignored; an unknown domain is
+        logged and ignored.
+
+        TELEMETRY-LIMITATION(L15): instrumentations are keyed by backend name, so two backends of
+        one session with the same name share one slot and the later one is ignored.
+        Why not now: Session and WorkflowEngine key their backends by name, so a same-name
+        backend replaces the earlier one there; instrumentations follow the same rule.
+        Planned: none needed. See docs/telemetry/reference.md#known-limitations.
+        """
+        domain = getattr(backend, "telemetry_domain", None)
+        if not isinstance(domain, str) or not domain or backend_name in self._instrumentations:
+            return
+        from rhapsody.telemetry.instrumentation import get_instrumentation_class
+
+        try:
+            cls = get_instrumentation_class(domain)
+            if cls is None:
+                logger.warning("No instrumentation registered for telemetry domain %r", domain)
+                return
+            instrumentation = cls()
+        except Exception:
+            logger.warning("Could not create the %r instrumentation", domain, exc_info=True)
+            return
+        self._instrumentations[backend_name] = instrumentation
+        if self._running:
+            self._instrument(backend_name)
+
+    def _instrument(self, backend_name: str) -> None:
+        """Start a backend's instrumentation with a scoped meter and tracer, then route to it.
+
+        A failing instrumentation is logged and gets no events; it never stops the manager.
+        """
+        from rhapsody.telemetry.instrumentation import InstrumentationContext
+
+        instrumentation = self._instrumentations[backend_name]
+        try:
+            scope = instrumentation.scope_name
+            instrumentation.instrument(
+                InstrumentationContext(
+                    meter=self._meter_provider.get_meter(scope),
+                    tracer=self._tracer_provider.get_tracer(scope),
+                    session_id=self._session_id,
+                    backend_name=backend_name,
+                    session_span_context=self._session_span_context,
+                    task_span=self._active_spans.get,
+                    span_context_for=self._task_span_context,
+                )
+            )
+        except Exception:
+            logger.warning("Could not start the instrumentation of %s", backend_name, exc_info=True)
+            return
+        self._routes[backend_name] = (instrumentation,)
+
+    def _session_span_context(self) -> Any:
+        """The session span's context, or None once the session span has ended."""
+        return self._session_span.get_span_context() if self._session_span else None
+
+    def _task_span_context(self, task_id: str) -> Any:
+        """Context of a task's span: the open one, else the ended one the host still holds."""
+        span = self._active_spans.get(task_id)
+        if span is not None:
+            return span.get_span_context()
+        return self._completed_span_ctx.get(task_id)
+
+    def _route_event(self, event: BaseEvent, route: tuple) -> None:
+        """Pass an event to its backend's instrumentations; a failing one never stops the rest."""
+        for instrumentation in route:
+            try:
+                instrumentation.on_event(event)
+            except Exception:
+                # Warn once per backend, then stay quiet: this runs once per event.
+                first = event.backend not in self._failed_instrumentations
+                self._failed_instrumentations.add(event.backend)
+                logger.log(
+                    logging.WARNING if first else logging.DEBUG,
+                    "Instrumentation of %s failed on %s",
+                    event.backend,
+                    event.event_type,
+                    exc_info=True,
+                )
 
     def read_metrics(self) -> Any:
         """Return current OTel MetricsData snapshot (InMemoryMetricReader)."""
@@ -1136,12 +1256,17 @@ class TelemetryManager:
     def _flush_batch(self, batch: list[BaseEvent], trace_mod: Any, otel_context: Any) -> None:
         """Process a collected batch: OTel instruments, JSONL write, subscribers."""
         self._inflight = len(batch)  # reported by stop() if the loop dies in this batch
+        routes = self._routes
         for event in batch:
             self._event_log.append(event)
             try:
                 self._process_event(event, trace_mod, otel_context)
             except Exception:
                 logger.exception("Error processing telemetry event %s", event.event_type)
+            # One dictionary lookup per event; no entry means no instrumentation for the backend.
+            route = routes.get(event.backend)
+            if route is not None:
+                self._route_event(event, route)
 
         if self._checkpoint_file is not None:
             self._write_batch(batch)
@@ -1202,6 +1327,12 @@ class TelemetryManager:
                     a.update(extractor(event))
                 except Exception:
                     logger.debug("span attribute extractor failed", exc_info=True)
+            # TELEMETRY-LIMITATION(L4): the task span starts (and later ends) at the time the
+            # dispatch loop processes the event, not at the event's own time (existing issue
+            # T3), while spans recorded by instrumentations can use real times, so the two can
+            # be offset by the dispatch delay. Why not now: existing behaviour of all task
+            # spans, reported and not changed here. Planned: Tier 3 (Tier 2 partially).
+            # See docs/telemetry/reference.md#known-limitations.
             _ctx = self._task_contexts.pop(event.task_id, None) or self._session_ctx
             self._active_spans[event.task_id] = self._tracer.start_span(
                 "task", context=_ctx, attributes=a
@@ -1363,7 +1494,14 @@ class TelemetryManager:
         self._checkpoint_file.write(json.dumps(data, default=str) + "\n")
 
     def _write_metric_snapshot(self) -> None:
-        """Append a metric snapshot line to the checkpoint file."""
+        """Append a metric snapshot line to the checkpoint file.
+
+        TELEMETRY-LIMITATION(L3): the snapshot sums data points across all attributes (existing
+        issue T9), so series an instrumentation splits by attribute (for example by request
+        source) are added together in the JSONL file; ``read_metrics()`` keeps the dimensions.
+        Why not now: existing format, reported and not changed here. Planned: Tier 2 (JSONL as a
+        proper metric exporter). See docs/telemetry/reference.md#known-limitations.
+        """
         if self._checkpoint_file is None:
             return
         metrics = self.read_metrics()
