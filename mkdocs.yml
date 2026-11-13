@@ -116,7 +116,9 @@ nav:
       - Contributing: contributing.md
       - Issues (GitHub): https://github.com/radical-cybertools/rhapsody/issues
   - AI-HPC: ai/index.md
-  - Execution: execution/index.md
+  - Execution:
+      - Overview: execution/index.md
+      - Dragon Native Backend: execution/dragon-native.md
   - Data:
       - Overview: data-backends/index.md
       - Redis Data Backend: data-backends/redis.md

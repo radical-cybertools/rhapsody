@@ -152,6 +152,10 @@ backend = await DaskExecutionBackend()
 from rhapsody.backends import DragonExecutionBackend
 backend = await DragonExecutionBackend()
 
+# Dragon HPC, on Dragon's native API
+from rhapsody.backends import DragonNativeExecutionBackend
+backend = await DragonNativeExecutionBackend()
+
 # Create workflow with chosen backend
 flow = await WorkflowEngine.create(backend=backend)
 ```
@@ -166,6 +170,10 @@ Each backend declares whether it moves data between tasks through two independen
     - Use Dragon backend for HPC-scale workflows (1000+ concurrent tasks)
     - Use Dask backend for distributed cluster computing
     - Use Concurrent backend for local development and testing
+
+!!! tip "Two Dragon backends"
+    `DragonNativeExecutionBackend` takes the same tasks as `DragonExecutionBackend` and drives
+    Dragon's processes directly, without Batch. See [Dragon Native Backend](dragon-native.md).
 
 !!! note "Task Granularity"
     - AsyncFlow excels at dynamic, fine-grained task graphs
