@@ -195,9 +195,10 @@ class TelemetryManager:
         # correct parent span context in the dispatch loop.
         self._task_contexts: dict[str, Any] = {}
 
-        # Token returned by context.attach() when the session span is activated in start().
-        # Stored so it can be properly detached in stop().
-        self._session_ctx_token: Any = None
+        # The session span as an OTel context: the explicit parent of spans that have no caller
+        # span. Never attached: start() and stop() may run in different asyncio tasks, and an
+        # ambient attach belongs to one task (and would leak into the caller's OTel context).
+        self._session_ctx: Any = None
 
         # Caller-supplied OTel extension points wired into RHAPSODY's internal providers
         # at start() time alongside SpanBuffer / InMemoryMetricReader.
@@ -267,12 +268,9 @@ class TelemetryManager:
         self._session_span = self._tracer.start_span(
             "session", attributes={"session_id": self._session_id, "backend": "rhapsody"}
         )
-        from opentelemetry import context as otel_context
         from opentelemetry import trace as trace_mod
 
-        self._session_ctx_token = otel_context.attach(
-            trace_mod.set_span_in_context(self._session_span)
-        )
+        self._session_ctx = trace_mod.set_span_in_context(self._session_span)
 
         # A fresh queue: nothing left by an earlier stop() (e.g. a sentinel) reaches this loop.
         self._queue = asyncio.Queue()
@@ -388,11 +386,7 @@ class TelemetryManager:
             self._checkpoint_file.close()
             self._checkpoint_file = None
 
-        from opentelemetry import context as otel_context
-
-        if self._session_ctx_token is not None:
-            otel_context.detach(self._session_ctx_token)
-            self._session_ctx_token = None
+        self._session_ctx = None
 
         if self._meter_provider:
             self._meter_provider.shutdown()
@@ -428,8 +422,12 @@ class TelemetryManager:
         self._queue.put_nowait(event)
         if self._tracer is not None and event.event_type == "TaskCreated":
             from opentelemetry import context as _ctx
+            from opentelemetry import trace as _trace
 
-            self._task_contexts[event.task_id] = _ctx.get_current()
+            ctx = _ctx.get_current()
+            if not _trace.get_current_span(ctx).get_span_context().is_valid:
+                ctx = self._session_ctx  # no caller span: the session is the parent
+            self._task_contexts[event.task_id] = ctx
 
     def subscribe(self, callback: Callable[[BaseEvent], Any]) -> None:
         """Register a callback to receive every event.
@@ -483,11 +481,7 @@ class TelemetryManager:
         from opentelemetry import trace as trace_mod
 
         _active = trace_mod.get_current_span()
-        _ctx = (
-            None
-            if _active.get_span_context().is_valid
-            else (trace_mod.set_span_in_context(self._session_span) if self._session_span else None)
-        )
+        _ctx = None if _active.get_span_context().is_valid else self._session_ctx
         span = self._tracer.start_span(name, context=_ctx, attributes=attributes or {})
         token = otel_context.attach(trace_mod.set_span_in_context(span))
         try:
@@ -1198,17 +1192,10 @@ class TelemetryManager:
                     a.update(extractor(event))
                 except Exception:
                     logger.debug("span attribute extractor failed", exc_info=True)
-            _ctx = self._task_contexts.pop(event.task_id, None)
-            if _ctx is not None:
-                _token = otel_context.attach(_ctx)
-                try:
-                    self._active_spans[event.task_id] = self._tracer.start_span(
-                        "task", attributes=a
-                    )
-                finally:
-                    otel_context.detach(_token)
-            else:
-                self._active_spans[event.task_id] = self._tracer.start_span("task", attributes=a)
+            _ctx = self._task_contexts.pop(event.task_id, None) or self._session_ctx
+            self._active_spans[event.task_id] = self._tracer.start_span(
+                "task", context=_ctx, attributes=a
+            )
 
         elif etype == "TaskSubmitted":
             self._c_submitted.add(
@@ -1239,19 +1226,10 @@ class TelemetryManager:
                         a_span.update(extractor(event))
                     except Exception:
                         logger.debug("span attribute extractor failed", exc_info=True)
-                _ctx = self._task_contexts.pop(event.task_id, None)
-                if _ctx is not None:
-                    _token = otel_context.attach(_ctx)
-                    try:
-                        self._active_spans[event.task_id] = self._tracer.start_span(
-                            "task", attributes=a_span
-                        )
-                    finally:
-                        otel_context.detach(_token)
-                else:
-                    self._active_spans[event.task_id] = self._tracer.start_span(
-                        "task", attributes=a_span
-                    )
+                _ctx = self._task_contexts.pop(event.task_id, None) or self._session_ctx
+                self._active_spans[event.task_id] = self._tracer.start_span(
+                    "task", context=_ctx, attributes=a_span
+                )
 
         elif etype == "TaskCompleted":
             executable = event.attributes.get("executable", "")
@@ -1265,7 +1243,9 @@ class TelemetryManager:
                 self._g_running.add(-1, running_attrs)
             span = self._active_spans.pop(event.task_id, None)
             if span is None:
-                span = self._tracer.start_span("task", attributes={**a, "task_id": event.task_id})
+                span = self._tracer.start_span(
+                    "task", context=self._session_ctx, attributes={**a, "task_id": event.task_id}
+                )
             span.set_attribute("status", "completed")
             span.set_attribute("executable", executable)
             span.set_attribute("task_type", task_type)
@@ -1288,7 +1268,9 @@ class TelemetryManager:
                 self._g_running.add(-1, running_attrs)
             span = self._active_spans.pop(event.task_id, None)
             if span is None:
-                span = self._tracer.start_span("task", attributes={**a, "task_id": event.task_id})
+                span = self._tracer.start_span(
+                    "task", context=self._session_ctx, attributes={**a, "task_id": event.task_id}
+                )
             span.set_attribute("status", "failed")
             span.set_attribute("error_type", error_type)
             span.set_attribute("executable", executable)
@@ -1311,7 +1293,9 @@ class TelemetryManager:
                 self._g_running.add(-1, running_attrs)
             span = self._active_spans.pop(event.task_id, None)
             if span is None:
-                span = self._tracer.start_span("task", attributes={**a, "task_id": event.task_id})
+                span = self._tracer.start_span(
+                    "task", context=self._session_ctx, attributes={**a, "task_id": event.task_id}
+                )
             span.set_attribute("status", "canceled")
             span.set_attribute("executable", executable)
             span.set_attribute("task_type", task_type)

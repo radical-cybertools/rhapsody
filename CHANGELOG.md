@@ -26,6 +26,35 @@
   task that raises reports what was measured until it raised, so FAILED tasks carry
   `observed` too.
 
+### Fixed
+
+- **BEHAVIOUR CHANGE: `DragonVllmInferenceBackend` reports a timed-out AITask as FAILED, not DONE** —
+  when some prompts of a task got no response within the batch deadline (300 s), the task was
+  reported DONE with `"ERROR: Timeout ..."` strings as its response. It is now reported FAILED,
+  with `task["exception"]` set to a `TimeoutError` and the partial response kept (answered prompts
+  plus the `ERROR:` strings). `Session.wait_tasks()` now sees the failure, and in AsyncFlow the
+  dependents of such a task no longer run. `generate()` and the HTTP endpoints are unchanged.
+  The deadline covers the whole batch, not each task: if a batch takes longer than 300 s, every
+  task with a prompt still unanswered at that point is FAILED, including tasks whose prompts
+  were last in the batch. The deadline is the module constant `_BATCH_RESPONSE_TIMEOUT_S`.
+
+- **Executable tasks submitted through `OrbitExecutionBackend` never completed** — the
+  radical.orbit rhapsody plugin sends DONE notifications without `stdout`, and an executable's
+  result is its stdout, so the consumer's callback failed (`KeyError: 'stdout'`) and the task's
+  future never resolved. For a DONE executable without `stdout`, the backend now fetches the task
+  (`get_task`) and fires DONE with its output. If the fetch fails, or the fetched task carries no
+  `stdout` (as a pool dispatcher's task record does), the task is reported FAILED with the
+  reason. A cancel while the fetch runs is a no-op, since the task has already finished, and
+  `shutdown()` waits for fetches in flight.
+- **Telemetry: `Failed to detach context` error at shutdown, and task spans without a parent** —
+  `TelemetryManager.start()` attached the session span as the ambient OTel context of the
+  asyncio task that called it. When `stop()` ran in another task, OTel logged
+  `ERROR Failed to detach context` (`ValueError: ... was created in a different Context`). Task
+  events emitted from a context the session never touched, e.g. ORBIT callbacks, gave task spans
+  without a parent. The ambient session span also leaked into the caller's OTel context. The
+  session span is now never attached: it is the explicit parent of task and scope spans that
+  have no caller span.
+
 ## [0.7.0] 2026-11-09
 
 ### Changed

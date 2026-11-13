@@ -175,6 +175,9 @@ class OrbitExecutionBackend(BaseBackend):
         # notification and local-cancel paths don't double-fire the same
         # terminal state
         self._terminal_fired: set[str] = set()
+        # uid -> in-flight fetch of an executable's stdout/stderr (see
+        # _apply_task_update), so a duplicate DONE does not fetch twice
+        self._output_fetches: dict[str, asyncio.Task] = {}
 
         self._callback_func: Callable = lambda t, s: None
         self._initialized = False
@@ -401,9 +404,62 @@ class OrbitExecutionBackend(BaseBackend):
         if self._prof:
             self._prof.prof("task_complete", uid=uid, state=state)
 
+        # A DONE notification carries no stdout/stderr: the ORBIT rhapsody
+        # plugin keeps notifications small and leaves them to
+        # ``GET /task/{sid}/{uid}``.  An executable's result *is* its stdout
+        # (asyncflow resolves it from ``task["stdout"]``), so fetch the full
+        # task before reporting it done; the callback fires from the fetch.
+        if (
+            str(state).upper() == "DONE"
+            and "stdout" not in body
+            and task.get("executable") is not None
+            and task.get("function") is None
+        ):
+            if uid not in self._output_fetches:
+                fetch = asyncio.ensure_future(self._fetch_output_then_fire(task, state))
+                self._output_fetches[uid] = fetch
+                fetch.add_done_callback(lambda _f, u=uid: self._output_fetches.pop(u, None))
+            return
+
         # Already on the event-loop thread (dispatched from
         # _on_task_notification via call_soon_threadsafe), so fire directly.
         self._fire_callback(task, state)
+
+    async def _fetch_output_then_fire(self, task: dict, state: str) -> None:
+        """Fetch a DONE executable task's stdout/stderr, then fire its callback.
+
+        Runs on the event loop; the blocking HTTP call goes to a thread.  If the fetch fails, the
+        task is reported FAILED with the reason rather than DONE without its result.
+        """
+        uid = task.get("uid")
+        try:
+            full = await asyncio.to_thread(self._rh.get_task, uid)
+            if not isinstance(full, dict):
+                raise TypeError(f"get_task returned {type(full).__name__}, not a dict")
+        except Exception as e:
+            if uid in self._tasks:  # else a terminal state fired meanwhile
+                self._fail_fetch(task, uid, e)
+            return
+
+        if uid not in self._tasks:
+            return  # a terminal state fired meanwhile
+        # A pool dispatcher's TaskRecord has no stdout: fail rather than resolve with "".
+        if "stdout" not in full:
+            self._fail_fetch(task, uid, "the fetched task carries no stdout")
+            return
+        for key in ("stdout", "stderr", "exit_code"):
+            if key in full:
+                task[key] = full[key]
+        self._fire_callback(task, state)
+
+    def _fail_fetch(self, task: dict, uid: str, reason: Any) -> None:
+        """Report a DONE executable whose output could not be fetched as FAILED."""
+        self.logger.warning("Task %s is DONE but its output could not be fetched: %s", uid, reason)
+        task["state"] = "FAILED"
+        task["exception"] = RuntimeError(
+            f"task {uid} finished, but its stdout could not be fetched: {reason}"
+        )
+        self._fire_callback(task, "FAILED")
 
     def _fire_callback(self, task: dict, state: str) -> None:
         """Invoke the Rhapsody state callback, at most once per terminal state.
@@ -760,7 +816,8 @@ class OrbitExecutionBackend(BaseBackend):
         if not self._initialized:
             await self._async_init()
 
-        if uid not in self._tasks:
+        # Unknown, or already DONE with its output being fetched.
+        if uid not in self._tasks or uid in self._output_fetches:
             return False
 
         # If the task is still buffered locally (not yet flushed), the endpoint
@@ -820,6 +877,11 @@ class OrbitExecutionBackend(BaseBackend):
         # sent before we tear down the clients.
         if self._inflight_flushes:
             await asyncio.gather(*list(self._inflight_flushes), return_exceptions=True)
+
+        # Let output fetches for already-DONE executables finish while the
+        # client is still open, so their futures resolve.
+        if self._output_fetches:
+            await asyncio.gather(*list(self._output_fetches.values()), return_exceptions=True)
 
         self._backend_state = BackendMainStates.SHUTDOWN
 

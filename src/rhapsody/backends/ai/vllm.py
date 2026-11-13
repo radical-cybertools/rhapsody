@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 # Global registry for queues (to avoid serialization)
 _QUEUE_REGISTRY = {}
 
+# Seconds the batch processor waits for the responses of one batch (a module constant so tests
+# can shorten it).
+_BATCH_RESPONSE_TIMEOUT_S = 300
+
 
 def _unwrap_assistant_response(response: Any) -> Any:
     """Extract generated text from an ``Inference.query()`` response.
@@ -331,7 +335,8 @@ class DragonVllmInferenceBackend(BaseBackend):
                 logger.debug("Batch submitted, waiting for responses...")
                 # Collect responses
                 all_results = []
-                deadline = asyncio.get_event_loop().time() + 300  # 5min timeout
+                first_timeout = None  # index of the first prompt that got no response
+                deadline = asyncio.get_event_loop().time() + _BATCH_RESPONSE_TIMEOUT_S
 
                 for i in range(len(all_prompts)):
                     logger.debug(f"Waiting for response {i + 1}/{len(all_prompts)}...")
@@ -350,14 +355,20 @@ class DragonVllmInferenceBackend(BaseBackend):
                             break
 
                         if asyncio.get_event_loop().time() > deadline:
-                            error_msg = f"Timeout waiting for response {i + 1}/{len(all_prompts)} after 300s ({poll_count} polls)"
+                            error_msg = (
+                                f"Timeout waiting for response {i + 1}/{len(all_prompts)} "
+                                f"after {_BATCH_RESPONSE_TIMEOUT_S}s ({poll_count} polls)"
+                            )
                             logger.error(error_msg)
                             all_results.append(f"ERROR: {error_msg}")
+                            first_timeout = i
                             break
 
                         # Log every 10 seconds
                         if poll_count % 10000 == 0:
-                            elapsed = asyncio.get_event_loop().time() - (deadline - 300)
+                            elapsed = asyncio.get_event_loop().time() - (
+                                deadline - _BATCH_RESPONSE_TIMEOUT_S
+                            )
                             logger.debug(
                                 f"Still waiting for response {i + 1}/{len(all_prompts)} after {elapsed:.1f}s ({poll_count} polls)"
                             )
@@ -388,8 +399,23 @@ class DragonVllmInferenceBackend(BaseBackend):
                     if req.task_uid and req.task_uid in self._tasks_in_flight:
                         task = self._tasks_in_flight.pop(req.task_uid)
                         task["response"] = req_results  # AITask uses .response for model output
+
+                        # A task with unanswered prompts failed. It keeps its partial response
+                        # (answered prompts plus "ERROR: ..." strings). generate() and HTTP
+                        # callers still get the strings in their result.
+                        timed_out = 0
+                        if first_timeout is not None:
+                            end = min(offset + size, len(all_prompts))
+                            timed_out = max(0, end - max(offset, first_timeout))
+                        state = "DONE"
+                        if timed_out:
+                            task["exception"] = TimeoutError(
+                                f"{timed_out} of {size} prompts got no response within "
+                                f"{_BATCH_RESPONSE_TIMEOUT_S}s"
+                            )
+                            state = "FAILED"
                         if self._callback_func:
-                            self._callback_func(task, "DONE")
+                            self._callback_func(task, state)
 
                     offset += size
 
