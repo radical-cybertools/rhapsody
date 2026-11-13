@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
 
+from rhapsody.telemetry.emitter import BackendEmitter
 from rhapsody.telemetry.events import BaseEvent
 from rhapsody.telemetry.events import SessionEnded
 from rhapsody.telemetry.events import SessionStarted
@@ -507,13 +508,22 @@ class TelemetryManager:
         backend_name: str,
         interval: float = 5.0,
     ) -> None:
-        """Detect backend type and register the appropriate telemetry adapter.
+        """Hand the backend its emitter, then register its resource telemetry adapter.
 
-        Silently skips backends with no adapter (LocalExecutionBackend, NoopExecutionBackend,
-        unknown types) and data backends (no ``submit_tasks``). Safe to call before or after
-        start(); if already running the adapter is started immediately. Attaching the same backend
-        again is a no-op, and all Dragon backends of a session share one node poller.
+        Every backend, including data backends, gets an emitter (``backend.telemetry``); it is
+        replaced on each call, so a backend reused by a new manager emits into that one. Then the
+        appropriate telemetry adapter is registered. Silently skips backends with no adapter
+        (LocalExecutionBackend, NoopExecutionBackend, unknown types) and data backends (no
+        ``submit_tasks``). Safe to call before or after start(); if already running the adapter is
+        started immediately. Attaching the same backend again adds no second adapter, and all
+        Dragon backends of a session share one node poller.
         """
+        try:
+            backend.telemetry = BackendEmitter(self, backend_name)
+        except Exception:
+            # A stand-in object or one with a read-only attribute must not break attach.
+            logger.debug("Could not hand an emitter to %s", backend_name, exc_info=True)
+
         if not hasattr(backend, "submit_tasks"):
             return  # data backend: no task execution, no resource adapter
         if id(backend) in self._attached_backends:

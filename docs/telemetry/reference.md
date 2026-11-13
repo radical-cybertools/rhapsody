@@ -526,3 +526,11 @@ Each line in the `.telemetry.jsonl` file is a JSON object with a `"section"` dis
 ```
 
 The file is written line-buffered, so it is readable during a live run.
+
+## Known limitations
+
+Each limitation has a `TELEMETRY-LIMITATION(<id>)` comment at the place in the code where it applies.
+
+| Id | Limitation | Planned |
+|---|---|---|
+| L17 | `Emitter.emit()` (the handle every backend gets as `backend.telemetry`) must be called on the event-loop thread, because the event queue is not thread-safe. A backend whose callbacks run in worker threads would have to hop onto the loop first. The vLLM batcher runs on the loop. | Tier 1 of the telemetry refactor, or a `call_soon_threadsafe` hop in the emitter |

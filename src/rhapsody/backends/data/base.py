@@ -5,6 +5,12 @@ from __future__ import annotations
 import abc
 import asyncio
 import enum
+from typing import TYPE_CHECKING
+
+from rhapsody.telemetry.emitter import NoopEmitter
+
+if TYPE_CHECKING:
+    from rhapsody.telemetry.emitter import Emitter
 
 
 class DataBackendState(enum.Enum):
@@ -68,6 +74,10 @@ class DataBackend(abc.ABC):
     lock, which is what makes repeated/concurrent calls idempotent and the
     terminal-state guard correct without any state duplicated in subclasses.
     """
+
+    # Telemetry handle: a no-op emitter until a session attaches the backend to a
+    # TelemetryManager (see BaseBackend.telemetry and rhapsody.telemetry.emitter).
+    telemetry: Emitter = NoopEmitter()
 
     def __init__(self, *, name: str | None = None) -> None:
         self._name = name

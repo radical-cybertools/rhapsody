@@ -14,8 +14,10 @@ from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
 
+from rhapsody.telemetry.emitter import NoopEmitter
+
 if TYPE_CHECKING:
-    pass
+    from rhapsody.telemetry.emitter import Emitter
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,13 @@ class BaseBackend(ABC):
     # of linking without the other.
     supports_implicit_data_linking: bool = False
     supports_explicit_data_linking: bool = False
+
+    # Telemetry handle. The session or workflow engine replaces it with a real emitter when it
+    # attaches the backend to a TelemetryManager; until then (and whenever telemetry is off) it is
+    # a no-op emitter, so backends never check for None. A backend only calls
+    # ``self.telemetry.emit(...)``: it never sees the manager and never imports OpenTelemetry.
+    # See rhapsody.telemetry.emitter.
+    telemetry: Emitter = NoopEmitter()
 
     def __init__(self, name: str | None = None):
         """Initialize the backend."""
