@@ -3,6 +3,7 @@ batches to pipeline for efficiency."""
 
 import asyncio
 import logging
+import math
 import socket
 import time
 import uuid
@@ -53,6 +54,34 @@ def _unwrap_assistant_response(response: Any) -> Any:
     return response
 
 
+def _dragon_fields(response: Any) -> dict:
+    """Batch-level numbers from one raw Dragon response dict, for telemetry.
+
+    In pre-batch mode one ``query()`` is one LLM call, so every response of the batch carries the
+    same model latency and worker host; the first one is enough. Only a finite number and a
+    non-empty string are accepted, and never the prompt or response text.
+    """
+    fields: dict = {}
+    if not isinstance(response, dict):
+        return fields
+    latency = response.get("model_inference_latency")
+    if isinstance(latency, (int, float)) and not isinstance(latency, bool):
+        if math.isfinite(latency):
+            fields["dragon_model_duration_s"] = float(latency)
+    host = response.get("hostname")
+    if isinstance(host, str) and host:
+        fields["dragon_worker_host"] = host
+    return fields
+
+
+def _timed_out_in_range(start: int, size: int, first_timeout: Optional[int], total: int) -> int:
+    """Prompts of the request ``[start, start + size)`` at or after the first unanswered prompt."""
+    if first_timeout is None:
+        return 0
+    end = min(start + size, total)
+    return max(0, end - max(start, first_timeout))
+
+
 @dataclass
 class PendingRequest:
     """Represents a pending inference request."""
@@ -61,6 +90,8 @@ class PendingRequest:
     future: asyncio.Future
     timestamp: float = field(default_factory=time.time)
     task_uid: Optional[str] = None  # UID of the AITask if applicable
+    # Monotonic enqueue time: queue wait = dispatch time - enqueued_at.
+    enqueued_at: float = field(default_factory=time.perf_counter)
 
 
 class DragonVllmInferenceBackend(BaseBackend):
@@ -79,7 +110,17 @@ class DragonVllmInferenceBackend(BaseBackend):
     - Distributes responses back to individual waiting requests
 
     This is MUCH more efficient than sending 1000 individual requests to pipeline!
+
+    Telemetry: the backend reports plain data (numbers and strings, never prompt or response text)
+    through ``self.telemetry``, the emitter it is handed when it is attached to a session: one
+    ``rhapsody.inference.BatchStarted`` when a batch is sent and one ``BatchEnded`` when its
+    responses are in. It never imports OpenTelemetry: RHAPSODY does not own the execution events
+    here (the model runs inside Dragon's pipeline), so the backend translates what Dragon reports
+    into plain data and the inference instrumentation
+    (``rhapsody.telemetry.instrumentation.inference``) turns it into spans and metrics.
     """
+
+    telemetry_domain = "inference"
 
     def __init__(
         self,
@@ -150,6 +191,7 @@ class DragonVllmInferenceBackend(BaseBackend):
         # Callbacks and state tracking
         self._callback_func = None
         self._tasks_in_flight = {}  # UID -> AITask
+        self._batch_seq = 0  # batch ids for telemetry
 
     def __await__(self):
         """Enable `backend = await DragonVllmInferenceBackend(...)`, consistent with the other
@@ -330,11 +372,42 @@ class DragonVllmInferenceBackend(BaseBackend):
                 # Submit to pipeline
                 logger.debug("Submitting batch to Inference pipeline...")
 
+                self._batch_seq += 1
+                batch_id = self._batch_seq
+                dispatch_mono = time.perf_counter()
+                # Why the batch was sent: full ("size") or the accumulation window ended.
+                batch_trigger = "size" if len(batch) == self.max_batch_size else "deadline"
+                if self.telemetry.enabled:
+                    self._emit_telemetry(
+                        "rhapsody.inference.BatchStarted",
+                        {
+                            "batch_id": batch_id,
+                            # TELEMETRY-LIMITATION(L14): `model` is the configured model name and
+                            # may be a local filesystem path; it appears as is in telemetry.
+                            # Why not now: it is the only stable model identifier the backend
+                            # has. Planned: documented only.
+                            # See docs/telemetry/reference.md#known-limitations.
+                            "model": self.model_name,
+                            "batch_prompts": len(all_prompts),
+                            "batch_requests": len(batch),
+                            "batch_trigger": batch_trigger,
+                            "task_ids": [req.task_uid for req in batch if req.task_uid],
+                        },
+                    )
+
+                # TELEMETRY-LIMITATION(L2): no trace context is passed to Dragon here, so if the
+                # Dragon team enables vLLM's native tracing, its spans form separate traces that
+                # can only be matched to ours by time, model and host.
+                # Why not now: Dragon's query() takes no trace context and RHAPSODY cannot change
+                # Dragon. Planned: Tier 1 of the telemetry refactor plus a Dragon feature request
+                # (accept and forward `traceparent`, enable vLLM tracing).
+                # See docs/telemetry/reference.md#known-limitations.
                 self.inference_pipeline.query((all_prompts, response_queue))
 
                 logger.debug("Batch submitted, waiting for responses...")
                 # Collect responses
                 all_results = []
+                first_response: Any = None  # first raw Dragon response: batch-level numbers
                 first_timeout = None  # index of the first prompt that got no response
                 deadline = asyncio.get_event_loop().time() + _BATCH_RESPONSE_TIMEOUT_S
 
@@ -346,7 +419,10 @@ class DragonVllmInferenceBackend(BaseBackend):
                     while True:
                         poll_count += 1
                         if not response_queue.empty():
-                            response = _unwrap_assistant_response(response_queue.get_nowait())
+                            raw_response = response_queue.get_nowait()
+                            if first_response is None:
+                                first_response = raw_response
+                            response = _unwrap_assistant_response(raw_response)
                             all_results.append(response)
                             logger.debug(
                                 f"Received response {i + 1}/{len(all_prompts)} after {poll_count} polls"
@@ -386,9 +462,49 @@ class DragonVllmInferenceBackend(BaseBackend):
                             )
                         break
 
+                batch_duration = time.perf_counter() - dispatch_mono
+                total_prompts = len(all_prompts)
+                # Unanswered prompts of each request (see B1 below), computed once.
+                timed_outs = []
+                offset = 0
+                for size in request_sizes:
+                    timed_outs.append(
+                        _timed_out_in_range(offset, size, first_timeout, total_prompts)
+                    )
+                    offset += size
+
+                # Emitted before the tasks are reported, so their spans are still open when the
+                # instrumentation handles it.
+                if self.telemetry.enabled:
+                    # TELEMETRY-LIMITATION(L11): after a timeout the late responses of this batch
+                    # stay in the shared response queue (existing issue B2), so the next batch
+                    # may read its Dragon fields from the wrong batch.
+                    # Why not now: B2 is an existing bug, reported and not patched.
+                    # Planned: B2 fix. See docs/telemetry/reference.md#known-limitations.
+                    payload = {
+                        "batch_id": batch_id,
+                        "model": self.model_name,
+                        "batch_trigger": batch_trigger,
+                        "batch_prompts": total_prompts,
+                        "batch_requests": len(batch),
+                        "batch_duration_s": batch_duration,
+                        "timed_out_prompts": sum(timed_outs),
+                        "requests": [
+                            {
+                                "task_id": req.task_uid,
+                                "prompt_count": size,
+                                "queue_duration_s": max(dispatch_mono - req.enqueued_at, 0.0),
+                                "timed_out_prompts": timed_out,
+                            }
+                            for req, size, timed_out in zip(batch, request_sizes, timed_outs)
+                        ],
+                    }
+                    payload.update(_dragon_fields(first_response))
+                    self._emit_telemetry("rhapsody.inference.BatchEnded", payload)
+
                 # Distribute results back to individual requests
                 offset = 0
-                for req, size in zip(batch, request_sizes):
+                for req, size, timed_out in zip(batch, request_sizes, timed_outs):
                     req_results = all_results[offset : offset + size]
 
                     # Store results in future (for direct generate() calls)
@@ -403,10 +519,6 @@ class DragonVllmInferenceBackend(BaseBackend):
                         # A task with unanswered prompts failed. It keeps its partial response
                         # (answered prompts plus "ERROR: ..." strings). generate() and HTTP
                         # callers still get the strings in their result.
-                        timed_out = 0
-                        if first_timeout is not None:
-                            end = min(offset + size, len(all_prompts))
-                            timed_out = max(0, end - max(offset, first_timeout))
                         state = "DONE"
                         if timed_out:
                             task["exception"] = TimeoutError(
@@ -423,6 +535,13 @@ class DragonVllmInferenceBackend(BaseBackend):
 
             except Exception as e:
                 logger.error(f"Batch processor error: {e}", exc_info=True)
+
+                # TELEMETRY-LIMITATION(L12): a batch that fails on this path emits no BatchEnded
+                # (existing issue B11), so its batch span stays open until the next batch or the
+                # end of the session and the queue times of its tasks are missing; the tasks still
+                # produce their own failure events.
+                # Why not now: this exception path is existing behaviour, reported and not
+                # changed here. Planned: B11 fix. See docs/telemetry/reference.md#known-limitations.
 
                 # Fail requests in the current batch being processed
                 if "batch" in locals():
@@ -449,6 +568,13 @@ class DragonVllmInferenceBackend(BaseBackend):
                                 self._callback_func(task, "FAILED")
 
                     self._pending_requests.clear()
+
+    def _emit_telemetry(self, name: str, attributes: dict) -> None:
+        """Emit one inference event; telemetry must never break inference."""
+        try:
+            self.telemetry.emit(name, attributes, event_time=time.time())
+        except Exception:
+            logger.debug("Could not emit %s", name, exc_info=True)
 
     async def _start_http_server(self):
         """Start the HTTP server (only called if use_service=True)"""
