@@ -184,7 +184,7 @@ All accepted keys and their defaults are documented in the
 | `process_template` | `dict` | `ProcessTemplate` kwargs for a single-process task |
 | `process_templates` | `list[tuple[int, dict]]` | List of `(n_procs, template_dict)` for multi-rank jobs |
 | `pmi` | `str` or `PMIBackend` | PMI for a `process_templates` job: `"pmix"`, `"cray"` or `"none"`; overrides the backend's `pmi` (see [MPI jobs](#mpi-jobs-pmi-and-timeout)) |
-| `timeout` | `float` | Seconds before Dragon cancels the task (default `1e9`, also for `None`) |
+| `timeout` | `float` | Seconds the task may run; past them it ends `FAILED` with a `TimeoutError` (default `1e9`, also for `None`; see [Timeouts and cancellation](#timeouts-and-cancellation)) |
 
 **`ProcessTemplate` kwargs** (passed inside `process_template` or each entry of `process_templates`):
 
@@ -288,8 +288,9 @@ Tasks with `process_template`, or with no template, run without a PMI: a `pmi` h
 effect on them, but an unknown name still fails the task.
 
 Give MPI jobs a `timeout` too. When a rank dies, Dragon does not end the job: the other
-ranks can wait for it until the timeout, `1e9` s by default. The first multi-rank job
-without one, or with `None`, logs a warning.
+ranks can wait for it until the timeout, `1e9` s by default, and the job then ends
+`FAILED` with a `TimeoutError`. The first multi-rank job without one, or with `None`,
+logs a warning.
 
 RHAPSODY can't tell whether a job's processes use MPI, so set `"pmi": "none"` for jobs
 that don't, such as several copies of a script or a Python function. They then run
@@ -303,6 +304,27 @@ job gets Batch's default too.
     must be on `LD_LIBRARY_PATH`. Some distributions ship that name only in their PMIx
     development package (`libpmix-dev` on Ubuntu). When it can't be loaded, the whole
     Dragon runtime aborts with "Unable to initialize PMIx server".
+
+### Timeouts and cancellation
+
+A task that runs past its `timeout` ends `FAILED`, with a `TimeoutError` as its exception,
+so `wait_tasks` and consumers such as AsyncFlow see an error they can retry or report. Only
+a task cancelled with `backend.cancel_task(uid)` ends `CANCELED`.
+
+- **Function tasks.** Dragon raises the `TimeoutError`. It stops the function only when the
+  function next runs Python code: one blocked in a C call, such as `time.sleep`, runs until
+  that call returns.
+- **Process and job tasks.** Dragon stops the processes with SIGINT, then SIGTERM, then
+  SIGKILL, and reports only their exit codes. The backend reports the task as timed out
+  when a process ended by one of those signals and the timeout has passed since the task
+  was submitted. The task keeps its `exit_code`. Time spent waiting in Batch's queue counts
+  toward the timeout here, so a process killed by one of those signals for another reason
+  after that time, the out-of-memory killer for instance, is reported as timed out too.
+
+`cancel_task` returns `True` when the task ends `CANCELED` because of the call; the
+`CANCELED` report has been made by the time it returns. It returns `False` when nothing
+happens: an unknown uid, a task that has already ended, or a cancel Dragon refused because
+the task is finishing. It does not raise for an unknown uid.
 
 ### GPU affinity with `Policy`
 

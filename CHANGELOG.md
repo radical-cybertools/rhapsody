@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Behaviour change: `DragonExecutionBackend` reports a timeout as a failure, and CANCELED
+  only for a requested cancel.** A task that runs past its `timeout` ends FAILED with a
+  `TimeoutError` as its exception. Function tasks already did, since Dragon raises the
+  `TimeoutError` for them. Process and job tasks
+  ended FAILED with a negative exit code and no exception, so `wait_tasks` raised a
+  `TaskExecutionError`; they now carry the `TimeoutError` and keep their `exit_code`.
+  Dragon reports only exit codes for them. The backend counts such a task as timed out
+  when a process ended by SIGINT, SIGTERM or SIGKILL (Dragon sends them in turn when the
+  timeout expires), and the timeout has passed since the task was submitted. A Dragon
+  `TaskCancelledError` for a task `cancel_task()` never asked to cancel now ends FAILED
+  instead of CANCELED; Dragon 0.15.0 raises it only for cancel requests. Code that took a
+  CANCELED task as a timed-out one should check for FAILED and `TimeoutError` instead.
+
+- **`DragonExecutionBackend.cancel_task()` returns False for an unknown uid** instead of
+  raising `ValueError`, like the other backends. It returns True when the task ends
+  CANCELED because of the call, also when the monitor thread reported the cancel before
+  Dragon's answer came back (it used to return False then), and False when nothing happens:
+  an unknown uid, a task that has already ended, or a cancel Dragon refused.
+
 ### Fixed
 
 - **Executable tasks submitted through `OrbitExecutionBackend` never completed** — the

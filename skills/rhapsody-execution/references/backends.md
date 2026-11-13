@@ -129,7 +129,7 @@ See [multi-node.md](multi-node.md).
 | `process_template` | dict of `ProcessTemplate` options for one process |
 | `process_templates` | list of `(n_procs, dict)` groups forming one job |
 | `pmi` | `"pmix"` (Open MPI and other PMIx MPIs), `"cray"` (Cray MPICH), `"none"` (non-MPI parallel processes). Overrides the backend's `pmi`. |
-| `timeout` | seconds before Dragon cancels the task. Always set one for multi-rank jobs. |
+| `timeout` | seconds the task may run; past them it ends `FAILED` with a `TimeoutError`, not `CANCELED`. Always set one for multi-rank jobs. |
 
 **`ProcessTemplate` options:**
 - `cwd`, `env`, `stdout`, `stderr`, `options`;
