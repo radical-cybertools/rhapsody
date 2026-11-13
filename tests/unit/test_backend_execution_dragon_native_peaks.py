@@ -10,6 +10,7 @@ import os
 import pickle
 import socket
 import sys
+import threading
 import time
 
 import pytest
@@ -30,6 +31,7 @@ from test_backend_execution_dragon_native import square  # noqa: E402
 from test_backend_execution_dragon_native import until  # noqa: E402
 
 from rhapsody.backends.execution import _dragon_native_worker as worker_module  # noqa: E402
+from rhapsody.backends.execution import _measure  # noqa: E402
 from rhapsody.backends.execution import _peak  # noqa: E402
 from rhapsody.backends.execution.dragon import PEAK_LAUNCHER  # noqa: E402
 from rhapsody.backends.execution.dragon_native import DragonNativeExecutionBackend  # noqa: E402
@@ -146,9 +148,11 @@ async def test_executables_run_under_the_launcher_done_and_failed(observing, dra
         observed = task["observed"]
         assert_window(observed, before)
         assert observed["host_mem"] * (1 << 30) >= mib * MIB - SLACK
-    launched = [p for p in dragon.started if p.target == sys.executable]
-    assert len(launched) == 2
-    assert all(p.args[:2] == (PEAK_LAUNCHER, "--out-dir") and p.args[3] == "--" for p in launched)
+    launched = [p for p in dragon.started if PEAK_LAUNCHER in p.args]
+    assert len(launched) == 2 and all(p.target == sys.executable for p in launched)
+    # python -I _peak.py --out-dir DIR -- command
+    assert all(p.args[:3] == ("-I", PEAK_LAUNCHER, "--out-dir") for p in launched)
+    assert all(p.args[4] == "--" for p in launched)
     roots = list(tmp_path.glob("rhapsody-peaks.*"))
     assert len(roots) == 1 and os.listdir(roots[0]) == []  # records read and removed
     await observing.shutdown()
@@ -237,10 +241,10 @@ async def test_function_processes_and_group_members_write_their_records(observin
         assert_window(observed, before)
         assert observed["host_mem"] > 0 and observed["gpu_mem"] is None
         assert "approximate" not in observed  # the process's own peak, not a growth
-    # Two members, two records, summed: here both are this test process
-    assert tasks[2]["observed"]["host_mem"] == pytest.approx(
-        2 * tasks[0]["observed"]["host_mem"], rel=0.2
-    )
+        # The CPU time of the call, not of the process's whole life (here: pytest's)
+        assert observed["cpu_seconds"] <= observed["ended"] - observed["started"] + 0.5
+    # In the fake, processes are threads of pytest: their real peaks are tested in
+    # test_backend_execution_peak.py (a process record in a process of its own) and on Dragon.
 
 
 # ============================================================================
@@ -248,52 +252,121 @@ async def test_function_processes_and_group_members_write_their_records(observin
 # ============================================================================
 
 
-def test_worker_measurement_has_the_keys_of_measured_call():
-    assert worker_module.OBSERVED_ATTR == _peak.OBSERVED_ATTR
-    value, observed = worker_module.measured(square, (6,), {})
+def test_the_worker_measures_with_measured_calls_keys():
+    ok, (value, observed), _ = worker_module.outcome(square, (6,), {}, measure=True)
     reference = _peak.measured_call(square, (6,), {}).observed
-    assert value == 36 and set(observed) == set(reference)
-    value, observed = worker_module.measured(asquare, (2,), {})  # driven as call() does
-    assert value == 4 and observed["started"] <= observed["ended"]
+    assert ok and value == 36 and set(observed) == set(reference)
+    ok, (value, observed), _ = worker_module.outcome(asquare, (2,), {}, measure=True)
+    assert ok and value == 4 and observed["started"] <= observed["ended"]  # driven as call()
 
 
-def test_a_raising_call_carries_its_measurement_through_pickling():
-    with pytest.raises(ValueError, match="spun, then failed") as excinfo:
-        worker_module.measured(spin_then, (1,), {})
-    observed = getattr(excinfo.value, worker_module.OBSERVED_ATTR)
-    assert observed["cpu_seconds"] >= 0.1
-    again = cloudpickle.loads(cloudpickle.dumps(excinfo.value))
-    assert getattr(again, _peak.OBSERVED_ATTR) == observed
-    assert pickle.loads(pickle.dumps(excinfo.value)).rhapsody_observed == observed
+def test_a_raising_call_comes_back_as_its_error_with_its_measurement():
+    ok, (error, observed), tb = worker_module.outcome(spin_then, (1,), {}, measure=True)
+    assert not ok and isinstance(error, ValueError) and "spun, then failed" in tb
+    assert observed["cpu_seconds"] >= 0.1 and observed["host"] == socket.gethostname()
+    msg = cloudpickle.loads(worker_module.pack(("done", 0, "u", ok, (error, observed)), 4, True))
+    again = cloudpickle.loads(msg[4])
+    assert isinstance(again[0], ValueError) and again[1] == observed
 
 
-def test_run_task_returns_the_value_with_its_measurement():
-    ok, value, tb, _, _ = worker_module.run_task("tok", square, (3,), {}, None, None, False, True)
-    assert ok and value[0] == 9 and value[1]["started"] <= value[1]["ended"]
-    ok, value, tb, _, _ = worker_module.run_task("tok", boom, (), {}, None, None, False, True)
-    assert not ok and getattr(value, worker_module.OBSERVED_ATTR)["host"] == socket.gethostname()
+def exits():
+    sys.exit(3)
+
+
+def test_sys_exit_comes_back_as_a_runtime_error_with_its_measurement():
+    ok, (error, observed), _ = worker_module.outcome(exits, (), {}, measure=True)
+    assert not ok and isinstance(error, RuntimeError) and "SystemExit" in str(error)
+    assert observed["started"] <= observed["ended"]
+
+
+def returns_lock():
+    return threading.Lock()
+
+
+def test_an_unpicklable_value_is_named_and_keeps_its_measurement():
+    ok, value, tb, _, _ = worker_module.run_task(
+        "tok", returns_lock, (), {}, None, None, False, True
+    )
+    raw = worker_module.pack(("done", 0, "u", ok, value, tb, "", ""), 4, measured=True)
+    msg = cloudpickle.loads(raw)
+    assert msg[3] is False
+    error, observed = cloudpickle.loads(msg[4])
+    assert "cannot pickle the task's lock" in str(error)
+    assert observed["started"] <= observed["ended"]
 
 
 def test_records_from_inside_a_process_read_as_the_launchers_do(tmp_path):
-    peak_dir = str(tmp_path / "uid")
-    started = time.time()
-    worker_module.write_record(peak_dir, worker_module.process_record(started, 0))
-    worker_module.write_record(peak_dir, worker_module.process_record(started, 1))
+    peak_dir = _peak.make_peak_dir(str(tmp_path), "uid")
+    started, cpu = time.time(), _measure.cpu_now()
+    _measure.write_record(peak_dir, _measure.process_record(started, cpu, 0))
+    _measure.write_record(peak_dir, _measure.process_record(started, cpu, 1))
     observed = _peak.read_peaks(peak_dir, 2)
     assert observed["host"] == socket.gethostname() and observed["gpu_mem"] is None
     assert observed["started"] == started and observed["ended"] >= started
-    assert observed["host_mem"] > 0 and observed["cpu_seconds"] > 0
+    assert observed["host_mem"] > 0 and observed["cpu_seconds"] >= 0
     assert not os.path.exists(peak_dir)
 
 
 def test_a_group_member_writes_its_record_also_when_it_raises(tmp_path):
-    peak_dir = str(tmp_path / "uid")
+    peak_dir = _peak.make_peak_dir(str(tmp_path), "uid")
     with pytest.raises(ValueError):
         worker_module.run_group_member(spin_then, (1,), {}, None, None, peak_dir)
     worker_module.run_group_member(spin_then, (0,), {}, None, None, peak_dir)
     records = [r for r in os.listdir(peak_dir) if r.endswith(".json")]
     assert len(records) == 2
     assert _peak.read_peaks(peak_dir, 2)["cpu_seconds"] >= 0.2
+
+
+MEASURED_IN_A_PROCESS = """
+import json, sys
+from rhapsody.backends.execution import _dragon_native_worker as w
+ok, (value, observed), _ = w.outcome(lambda: len(b"x" * (128 << 20)), (), {}, measure=True)
+print(json.dumps(observed))
+"""
+
+
+@pytest.mark.skipif(not LINUX, reason="RSS growth is measured on Linux only")
+def test_a_pool_call_reports_its_rss_growth_in_a_process_of_its_own():
+    """In the fake, workers are threads of pytest; here the worker's measurement runs in a real
+    process, as on Dragon."""
+    import json
+    import subprocess
+
+    out = subprocess.run(
+        [sys.executable, "-c", MEASURED_IN_A_PROCESS], capture_output=True, text=True, timeout=60
+    )
+    observed = json.loads(out.stdout)
+    assert observed["approximate"] is True
+    assert observed["host_mem"] * (1 << 30) >= 128 * MIB - SLACK
+
+
+WORKER_WITHOUT_RHAPSODY = """
+import sys, cloudpickle
+outcome = cloudpickle.loads(sys.stdin.buffer.read())
+ok, (value, observed), _ = outcome(len, ([1, 2],), {}, True)
+print(value, "started" in observed, any(m.startswith("rhapsody") for m in sys.modules))
+"""
+
+
+def test_the_worker_measures_without_importing_rhapsody(dragon, tmp_path):  # noqa: F811
+    """_measure travels by value with the worker's code, as the backend registers both."""
+    import subprocess
+
+    cloudpickle.register_pickle_by_value(worker_module)
+    cloudpickle.register_pickle_by_value(_measure)
+    try:
+        blob = cloudpickle.dumps(worker_module.outcome)
+    finally:
+        cloudpickle.unregister_pickle_by_value(worker_module)
+        cloudpickle.unregister_pickle_by_value(_measure)
+    out = subprocess.run(
+        [sys.executable, "-I", "-c", WORKER_WITHOUT_RHAPSODY],
+        input=blob,
+        capture_output=True,
+        timeout=60,
+    )
+    assert out.returncode == 0, out.stderr.decode()
+    assert out.stdout.decode().split() == ["2", "True", "False"]
 
 
 # ============================================================================
@@ -333,3 +406,151 @@ async def test_real_runtime_observed(tmp_path):
     assert tasks[6]["observed"]["host_mem"] * (1 << 30) >= 2 * (40 * MIB - SLACK)
     assert tasks[0]["observed"]["approximate"] is True
     assert not list(tmp_path.glob("rhapsody-peaks.*"))
+
+
+# ============================================================================
+# Review findings (MTU-51): each test fails without its fix
+# ============================================================================
+
+
+async def make(tmp_path, observe=True, workers=1):
+    be = DragonNativeExecutionBackend(
+        workers_per_node=workers, inline_stdio=False, kill_grace=0.5, observe_peaks=observe
+    )
+    be._work_dir = str(tmp_path)
+    await be
+    return be
+
+
+class ApiError(Exception):
+    """An error whose __getattr__ raises KeyError for an unknown field."""
+
+    def __init__(self, payload):
+        super().__init__(payload)
+        self.payload = payload
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return self.__dict__["payload"][name]
+
+    def __reduce__(self):
+        return (ApiError, (self.payload,))
+
+
+def raises_api_error():
+    raise ApiError({"status": 500})
+
+
+async def test_a_strange_error_neither_strands_its_task_nor_its_worker(dragon, tmp_path):  # noqa: F811
+    be = await make(tmp_path)  # one worker per node
+    try:
+        bad, after = (
+            fn_task(raises_api_error, placement={"host": "n0"}),
+            fn_task(square, 4, placement={"host": "n0"}),
+        )
+        assert await run(be, [bad], timeout=5) == ["FAILED"]
+        assert isinstance(bad["exception"], ApiError) and "observed" in bad
+        assert await run(be, [after], timeout=5) == ["DONE"]  # the worker was fed
+    finally:
+        await be.shutdown()
+
+
+async def test_sys_exit_in_the_pool_reports_its_measurement(dragon, tmp_path):  # noqa: F811
+    be = await make(tmp_path)
+    try:
+        task = fn_task(exits)
+        assert await run(be, [task]) == ["FAILED"]
+    finally:
+        await be.shutdown()
+    assert isinstance(task["exception"], RuntimeError) and "observed" in task
+
+
+async def test_the_task_environment_does_not_break_the_launcher(dragon, tmp_path):  # noqa: F811
+    be = await make(tmp_path)
+    try:
+        env = {"PYTHONHOME": "/nonexistent"}
+        task = exe_task(
+            "/bin/echo", "hi", task_backend_specific_kwargs={"process_template": {"env": env}}
+        )
+        assert await run(be, [task]) == ["DONE"]
+    finally:
+        await be.shutdown()
+    assert task["observed"]["started"] <= task["observed"]["ended"]
+
+
+async def test_a_reused_uid_gets_a_record_directory_of_its_own(dragon, tmp_path):  # noqa: F811
+    be = await make(tmp_path)
+    try:
+        first = be.build_task(exe_task("/bin/echo", "x", uid="same"))
+        second = be.build_task(exe_task("/bin/echo", "x", uid="same"))
+    finally:
+        await be.shutdown()
+    assert first.peak_dir != second.peak_dir
+
+
+async def test_unsafe_uids_keep_the_work_directory(dragon, tmp_path):  # noqa: F811
+    keep = tmp_path / "keep.txt"
+    keep.write_text("x")
+    be = await make(tmp_path)
+    try:
+        uids = ("..", str(tmp_path / "absolute-uid"), "a/../../b")
+        tasks = [exe_task("/bin/echo", "x") for _ in uids]
+        for task, uid in zip(tasks, uids):
+            task["uid"] = uid
+        assert await run(be, tasks) == ["DONE"] * 3
+    finally:
+        await be.shutdown()
+    assert keep.exists()
+    assert all(task["observed"]["started"] <= task["observed"]["ended"] for task in tasks)
+
+
+async def test_a_relative_work_dir_and_a_template_cwd_keep_the_records(
+    dragon,
+    tmp_path,
+    monkeypatch,  # noqa: F811
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "taskdir").mkdir()
+    be = await make(tmp_path)
+    be._work_dir = "run"
+    try:
+        tmpl = {"process_template": {"cwd": str(tmp_path / "taskdir")}}
+        task = alloc(8)
+        task["task_backend_specific_kwargs"] = tmpl
+        assert await run(be, [task]) == ["DONE"]
+    finally:
+        await be.shutdown()
+    assert task["observed"]["host_mem"] > 0
+    assert not list((tmp_path / "taskdir").rglob("*.json"))
+
+
+async def test_a_bad_record_costs_the_observation_not_the_task(
+    dragon,
+    tmp_path,
+    monkeypatch,  # noqa: F811
+):
+    from rhapsody.backends.execution import dragon_native
+
+    def broken(peak_dir, ranks):
+        raise KeyError("host_mem")
+
+    monkeypatch.setattr(dragon_native._peak, "read_peaks", broken)
+    be = await make(tmp_path)
+    try:
+        task = exe_task("/bin/echo", "x")
+        assert await run(be, [task], timeout=5) == ["DONE"]
+    finally:
+        await be.shutdown()
+    assert "observed" not in task
+
+
+async def test_records_stay_gone_once_read(dragon, tmp_path):  # noqa: F811
+    be = await make(tmp_path)
+    try:
+        tasks = [alloc(1), alloc(1, code=2)]
+        assert await run(be, tasks) == ["DONE", "FAILED"]
+        (root,) = tmp_path.glob("rhapsody-peaks.*")  # made when the tasks were built
+        assert os.listdir(root) == []
+    finally:
+        await be.shutdown()

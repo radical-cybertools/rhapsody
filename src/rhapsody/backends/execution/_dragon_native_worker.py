@@ -2,7 +2,8 @@
 
 The backend registers this module with ``cloudpickle.register_pickle_by_value``, so its functions
 travel to Dragon processes by value. A worker therefore never imports ``rhapsody``, only the
-standard library, cloudpickle and Dragon. Keep it that way: no imports from ``rhapsody`` here.
+standard library, cloudpickle and Dragon. Keep it that way: the one import from ``rhapsody`` here,
+``_measure`` (``observe_peaks``), is standard-library only and is registered by value too.
 
 Messages are cloudpickled to ``bytes`` before they go on a Dragon queue, so a value that cannot
 be pickled is reported as an error instead of failing inside the queue. A task's value is pickled
@@ -13,12 +14,12 @@ import asyncio
 import contextlib
 import ctypes
 import inspect
-import json
 import os
-import resource
+import signal
 import socket
 import sys
 import tempfile
+import threading
 import time
 import traceback
 
@@ -26,6 +27,8 @@ try:
     import cloudpickle
 except ImportError:  # pragma: no cover - only Dragon processes run this code, and Dragon needs it
     cloudpickle = None
+
+from . import _measure  # noqa: E402 - travels by value, as this module does
 
 try:
     from dragon.managed_memory import DragonPoolAllocationNotAvailable as PoolFull
@@ -43,13 +46,6 @@ RESULT = "result"
 # Seconds a result waits for room in Dragon's memory pool before its task fails.
 PUT_PATIENCE = 60.0
 
-# observe_peaks. What a task used, as ``task["observed"]``, measured where it runs, with the keys
-# and rules of ``rhapsody.backends.execution._peak``, which a worker cannot import: the attribute
-# under which a raised exception carries its measurement, and the launcher's record file.
-OBSERVED_ATTR = "rhapsody_observed"
-GIB = float(1 << 30)
-MAXRSS_UNIT = 1 if sys.platform == "darwin" else 1024
-
 
 def call(fn, args, kwargs):
     """Call ``fn``; drive the result with ``asyncio.run`` when ``fn`` is async."""
@@ -65,149 +61,51 @@ def call(fn, args, kwargs):
     return result
 
 
-def _status_bytes(field):
-    """A ``kB`` field of ``/proc/self/status`` (e.g. ``VmRSS``), in bytes; None off Linux."""
-    try:
-        with open("/proc/self/status") as f:
-            for line in f:
-                if line.startswith(field + ":"):
-                    return int(line.split()[1]) * 1024
-    except (OSError, ValueError, IndexError):
-        pass
-    return None
-
-
-def _reset_peak_rss():
-    """Reset this process's ``VmHWM`` to its current RSS (Linux >= 4.0); return that RSS."""
-    try:
-        with open("/proc/self/clear_refs", "w") as f:
-            f.write("5")
-    except OSError:
-        return None
-    return _status_bytes("VmRSS")
-
-
-def _call_observed(base, started, cpu_seconds):
-    ended = time.time()
-    peak = _status_bytes("VmHWM") if base is not None else None
-    observed = {
-        "host_mem": None if peak is None else max(peak - base, 0) / GIB,
-        "gpu_mem": None,
-        "started": started,
-        "ended": ended,
-        "cpu_seconds": cpu_seconds,
-        "host": socket.gethostname(),
-    }
-    if peak is not None:
-        observed["approximate"] = True
-    return observed
-
-
-def measured(fn, args, kwargs):
-    """Call ``fn`` as :func:`call` does in a pool worker; return ``(value, observed)``.
-
-    The measurement of ``_peak.measured_call``: the call's wall-clock ``started`` and ``ended``,
-    the ``host``, the worker's CPU time during the call as ``cpu_seconds`` (a worker runs one call
-    at a time), and on Linux ``host_mem``, the worker's peak RSS during the call minus its RSS
-    before, marked ``approximate``. An exception propagates with the measurement as its
-    ``rhapsody_observed`` attribute.
-    """
-    base = _reset_peak_rss()
-    started = time.time()
-    cpu_start = time.process_time()
-    try:
-        value = call(fn, args, kwargs)
-    except Exception as exc:
-        # An exception that takes no attributes goes without
-        with contextlib.suppress(Exception):
-            setattr(
-                exc, OBSERVED_ATTR, _call_observed(base, started, time.process_time() - cpu_start)
-            )
-        raise
-    return value, _call_observed(base, started, time.process_time() - cpu_start)
-
-
-def process_record(started, exit_code):
-    """This process's record as the peak launcher writes one for a command it ran.
-
-    For a function task that runs as its own Dragon process, which the launcher cannot run:
-    ``host_mem`` is the larger peak RSS of this process and of its waited-for children (the
-    largest single process), ``cpu_seconds`` their CPU time; no GPU memory.
-    """
-    me = resource.getrusage(resource.RUSAGE_SELF)
-    children = resource.getrusage(resource.RUSAGE_CHILDREN)
-    return {
-        "started": started,
-        "ended": time.time(),
-        "cpu_seconds": me.ru_utime + me.ru_stime + children.ru_utime + children.ru_stime,
-        "host_mem": max(me.ru_maxrss, children.ru_maxrss) * MAXRSS_UNIT / GIB,
-        "gpu_mem": None,
-        "gpu_mem_devices": {},
-        "nvml": False,
-        "samples": 0,
-        "exit_code": exit_code,
-        "host": socket.gethostname(),
-    }
-
-
-def write_record(peak_dir, record):
-    """Write ``record`` to ``peak_dir/<host>.<pid>.<random>.json`` atomically, as the launcher
-    writes its own, which ``_peak.read_peaks`` combines."""
-    try:
-        os.makedirs(peak_dir, exist_ok=True)
-        name = f"{record['host']}.{os.getpid()}.{os.urandom(4).hex()}.json"
-        tmp = os.path.join(peak_dir, f".{name}.tmp")
-        with open(tmp, "w") as f:
-            json.dump(record, f)
-        os.replace(tmp, os.path.join(peak_dir, name))
-    except OSError as exc:
-        print(f"rhapsody: cannot write peaks to {peak_dir}: {exc}", file=sys.stderr)
-
-
-@contextlib.contextmanager
-def recorded(peak_dir):
-    """Write this process's record to ``peak_dir`` when the block ends, if ``peak_dir`` is set."""
-    started = time.time()
-    exit_code = 1
-    try:
-        yield
-        exit_code = 0
-    finally:
-        if peak_dir:
-            write_record(peak_dir, process_record(started, exit_code))
+def _safe_error(exc):
+    """``SystemExit`` and its like come back as a ``RuntimeError``: raised in the client when it
+    awaits the task, they would end the client too."""
+    return exc if isinstance(exc, Exception) else RuntimeError(f"task raised {exc!r}")
 
 
 def outcome(fn, args, kwargs, measure=False):
     """Return ``(ok, value, traceback)`` for one call of ``fn``.
 
-    With ``measure``, ``value`` is ``(value, observed)`` (see :func:`measured`). ``SystemExit`` and
-    its like come back as a ``RuntimeError``: raised in the client when it awaits the task, they
-    would end the client too.
+    With ``measure`` (``observe_peaks``), the call is measured in this worker (``_measure``), and
+    ``value`` is ``(value, observed)``, or ``(error, observed)`` when the call raised, also on
+    ``SystemExit`` and its like.
     """
+    if measure:
+        try:
+            return True, _measure.measure(call, (fn, args, kwargs), {}, True, BaseException), None
+        except _measure.MeasuredError as merr:
+            error, observed = merr.args
+            tb = "".join(traceback.format_exception(type(error), error, error.__traceback__))
+            return False, (_safe_error(error), observed), tb
+        except Exception as exc:  # noqa: BLE001 - the error goes back to the client
+            return False, (exc, None), traceback.format_exc()
     try:
-        if measure:
-            return True, measured(fn, args, kwargs), None
         return True, call(fn, args, kwargs), None
-    except Exception as exc:  # noqa: BLE001 - the error goes back to the client
-        return False, exc, traceback.format_exc()
-    except BaseException as exc:  # noqa: BLE001
-        return False, RuntimeError(f"task raised {exc!r}"), traceback.format_exc()
+    except BaseException as exc:  # noqa: BLE001 - the error goes back to the client
+        return False, _safe_error(exc), traceback.format_exc()
 
 
-def pack(msg, value_index):
+def pack(msg, value_index, measured=False):
     """Pickle ``msg``, with ``msg[value_index]`` pickled on its own inside it.
 
     The client can then always load the message, and it fails only this task when it cannot load
     the value. A value that cannot be pickled here is replaced by an error, and ``ok``, the field
-    before it, becomes False.
+    before it, becomes False. A ``measured`` value is ``(value, observed)``: the error names the
+    value's type, and the measurement is kept.
     """
     msg = list(msg)
+    value = msg[value_index]
     try:
-        msg[value_index] = cloudpickle.dumps(msg[value_index])
+        msg[value_index] = cloudpickle.dumps(value)
     except Exception as exc:  # noqa: BLE001
-        name = type(msg[value_index]).__name__
+        inner = measured and isinstance(value, tuple) and len(value) == 2
+        name = type(value[0] if inner else value).__name__
         error = RuntimeError(f"cannot pickle the task's {name}: {exc!r}")
-        msg[value_index] = cloudpickle.dumps(error)
+        msg[value_index] = cloudpickle.dumps((error, value[1]) if inner else error)
         msg[value_index - 1] = False
     return cloudpickle.dumps(tuple(msg))
 
@@ -232,17 +130,20 @@ def put_waiting(results, raw, flush=False):
             delay = min(delay * 2, 1.0)
 
 
-def send(results, msg, value_index, flush=False):
+def send(results, msg, value_index, flush=False, measured=False):
     """Send a result message; one that Dragon cannot take fails its task, not the worker."""
-    raw = pack(msg, value_index)
+    raw = pack(msg, value_index, measured)
     try:
         put_waiting(results, raw, flush)
     except Exception as exc:  # noqa: BLE001 - the error goes back to the client
         fields = list(msg)
-        fields[value_index] = RuntimeError(f"cannot send {len(raw)} bytes of results: {exc}")
+        error = RuntimeError(f"cannot send {len(raw)} bytes of results: {exc}")
+        value = fields[value_index]
+        inner = measured and isinstance(value, tuple) and len(value) == 2
+        fields[value_index] = (error, value[1]) if inner else error
         fields[value_index - 1] = False
         fields[value_index + 2 :] = [""] * len(fields[value_index + 2 :])  # the output may be why
-        put_waiting(results, pack(tuple(fields), value_index), flush)
+        put_waiting(results, pack(tuple(fields), value_index, measured), flush)
 
 
 def _open_append(path):
@@ -349,7 +250,7 @@ def worker_main(wid, inbox, results):
     ``(token, fn, args, kwargs, out_path, err_path, inline, measure)``: a body that cannot be
     unpickled here (say, its function's module is missing on this node) still fails only its own
     task. Each result is a pickled ``(DONE, wid, uid, ok, value, traceback, stdout, stderr)``; with
-    ``measure``, a successful task's ``value`` is ``(value, observed)``.
+    ``measure``, ``value`` is ``(value or error, observed)`` (see :func:`outcome`).
     """
     results.put(cloudpickle.dumps((READY, wid, socket.gethostname(), os.getpid())))
     while True:
@@ -366,7 +267,7 @@ def worker_main(wid, inbox, results):
         ok, value, tb, out, err = run_task(
             token, fn, args, kwargs, out_path, err_path, inline, measure
         )
-        send(results, (DONE, wid, uid, ok, value, tb, out, err), 4)
+        send(results, (DONE, wid, uid, ok, value, tb, out, err), 4, measured=measure)
 
 
 def _redirect_for_good(out_path, err_path):
@@ -377,20 +278,46 @@ def _redirect_for_good(out_path, err_path):
         os.close(new)
 
 
+def _record_this_process(peak_dir):
+    """Start this process's record (``observe_peaks``); return the function that writes it.
+
+    A SIGTERM (a cancel or a timeout) writes the record before the process dies of it. The record is
+    written once.
+    """
+    if not peak_dir:
+        return lambda exit_code: None
+    started, cpu_start = time.time(), _measure.cpu_now()
+    written = []
+
+    def write(exit_code):
+        if not written:
+            written.append(exit_code)
+            _measure.write_record(peak_dir, _measure.process_record(started, cpu_start, exit_code))
+
+    def on_term(sig, _frame):
+        write(-sig)
+        signal.signal(sig, signal.SIG_DFL)
+        os.kill(os.getpid(), sig)
+
+    if threading.current_thread() is threading.main_thread():
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(signal.SIGTERM, on_term)
+    return write
+
+
 def run_function_process(results, uid, fn, args, kwargs, out_path, err_path, peak_dir=None):
     """Run a function task in its own Dragon process and send its return value to ``results``.
 
     Output is appended to ``out_path``/``err_path`` when they are set. A raised exception is sent,
     then re-raised, so Dragon prints its traceback to stderr and the process exits with 1. The
     result is flushed, so it is on the queue before the process exits. With ``peak_dir``, the
-    process's record (see :func:`process_record`) is written there before the result is sent.
+    process's record (``_measure.process_record``) is written there before the result is sent.
     """
     if out_path:
         _redirect_for_good(out_path, err_path)
-    started = time.time()
+    write_record = _record_this_process(peak_dir)
     ok, value, tb = outcome(fn, args, kwargs)
-    if peak_dir:
-        write_record(peak_dir, process_record(started, 0 if ok else 1))
+    write_record(0 if ok else 1)
     send(results, (RESULT, uid, ok, value, tb), 3, flush=True)
     if not ok:
         raise value
@@ -403,8 +330,13 @@ def run_group_member(fn, args, kwargs, out_path, err_path, peak_dir=None):
     """
     if out_path:
         _redirect_for_good(out_path, err_path)
-    with recorded(peak_dir):
+    write_record = _record_this_process(peak_dir)
+    try:
         call(fn, args, kwargs)
+    except BaseException:
+        write_record(1)
+        raise
+    write_record(0)
 
 
 # Runs an executable with its output appended to two files. Local Services gets no pipe from the

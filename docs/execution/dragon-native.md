@@ -254,7 +254,7 @@ nothing changes.
 | Function in the pool | the worker measures the call | the worker's RSS growth during the call, `"approximate": True` (Linux only) | not measured |
 | Executable (one `Process`) | the peak launcher reaps it with `wait4` | `ru_maxrss`: the largest single process of the command's tree | with `pynvml`: largest per-GPU sum over the tree's processes |
 | `process_templates` of executables | the launcher, per rank | the ranks' sum (an upper bound) | per GPU, summed over the ranks that share it |
-| Function with a `process_template`, or in `process_templates` | the process writes its own record | its own or its children's peak RSS, the larger; a group sums its members | not measured |
+| Function with a `process_template`, or in `process_templates` | the process writes its own record | its lifetime peak RSS or its children's, the larger, so it includes the Dragon process it runs in; a group sums its members | not measured |
 
 Every task also reports `started` and `ended` (wall clock, where it ran: around the call, or from
 just before the launcher starts the command to just after it reaped it), `cpu_seconds`, and
@@ -265,14 +265,19 @@ task, which can be well before a worker or process runs it; `started` says when 
   launching; the native API reports none, so `peak_source="auto"` (the default) and `"launcher"`
   both use the launcher, and `"dragon"` raises `ValueError`.
 - **A FAILED task reports too**: a command through its launcher, a function with what was measured
-  until it raised. A task killed for a timeout reports what its launcher saw; a cancelled task
-  reports nothing.
-- **The launcher costs one Python process per executable.** It runs with the client's Python, the
-  same path on every node, and writes its records to `<work_dir>/rhapsody-peaks.<tag>/<uid>/`,
-  which must be on a file system the nodes share, as inline output already must. A command that
-  is not found exits 127.
+  until it raised (also on `SystemExit`). A process task killed for a timeout reports what its
+  launcher, or its function process on SIGTERM, saw. A cancelled task reports nothing, and
+  neither does a pool task that timed out or whose worker died (killed for memory, for instance).
+- **The launcher costs one Python process per executable.** It runs with the client's Python
+  (`python -I`, so the task's `PYTHON*` variables cannot break it), the same path on every node.
+  Records go to a directory the backend makes for each run,
+  `<work_dir>/rhapsody-peaks.<tag>/<uid>.<random>/`, which must be on a file system the nodes
+  share, as inline output already must. A command that is not found exits 127.
 - **Placement, environment, working directory and output** are the launcher's, and its command
-  inherits them.
+  inherits them; the command runs in a process group of its own.
+- **Pool workers import no `rhapsody` to measure**: the measurement travels with the workers'
+  code. A pool function's figures are approximate: they miss memory the allocator kept from
+  earlier calls, and count threads an earlier call left running.
 
 ## What it does not do yet
 

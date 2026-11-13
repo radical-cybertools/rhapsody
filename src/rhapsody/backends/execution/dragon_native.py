@@ -26,7 +26,6 @@ import os
 import queue
 import resource
 import shutil
-import sys
 import threading
 import time
 import uuid
@@ -44,9 +43,9 @@ from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
 from . import _dragon_native_worker as _worker
+from . import _measure
 from . import _peak
 from .dragon import CRAY_MPICH_ENV
-from .dragon import PEAK_LAUNCHER
 from .dragon import PEAK_SOURCES
 from .dragon import _pmi_options
 
@@ -312,9 +311,9 @@ def _launch_under_peak(kwargs: dict, peak_dir: str) -> None:
     environment, directory, policy and output settings are the launcher's, and its child inherits
     them.
     """
-    target = kwargs["target"]
-    kwargs["args"] = [PEAK_LAUNCHER, "--out-dir", peak_dir, "--", target, *kwargs.get("args", ())]
-    kwargs["target"] = sys.executable
+    launcher = _peak.launcher_argv(peak_dir)  # python -I _peak.py --out-dir DIR --
+    kwargs["args"] = [*launcher[1:], kwargs["target"], *kwargs.get("args", ())]
+    kwargs["target"] = launcher[0]
 
 
 def _read_and_remove(path: str | None) -> str:
@@ -399,10 +398,11 @@ class DragonNativeExecutionBackend(BaseBackend):
               with ``wait4`` (``ru_maxrss``: the largest single process of its tree) and, with
               ``pynvml``, samples its GPU memory. A group sums its ranks.
             - Function tasks that run as their own process, or as group members, write the same
-              record from inside the process: its own and its children's peak RSS and CPU time;
-              no ``gpu_mem``.
-            - The records go to ``<work_dir>/rhapsody-peaks.<tag>/<uid>/``, which must be on a
-              file system the nodes share, and the launcher runs with this Python.
+              record from inside the process: its lifetime peak RSS or its children's, and its
+              CPU time during the call; no ``gpu_mem``.
+            - The records go to a fresh directory per run under
+              ``<work_dir>/rhapsody-peaks.<tag>/``, which must be on a file system the nodes
+              share, and the launcher runs with this Python (``-I``).
         peak_source: ``"auto"`` (the default) or ``"launcher"``: both use the launcher. Dragon's
             native API reports no per-process resource usage (``Task.rusage`` is Batch's), so
             ``"dragon"`` raises ``ValueError`` with ``observe_peaks``.
@@ -577,6 +577,7 @@ class DragonNativeExecutionBackend(BaseBackend):
 
         # The workers' code travels by value, so they never import rhapsody.
         cloudpickle.register_pickle_by_value(_worker)
+        cloudpickle.register_pickle_by_value(_measure)  # the workers' one rhapsody import
         self._results = Queue(
             maxsize=_RESULT_SIZE,
             block_size=_BLOCK_SIZE,
@@ -783,11 +784,9 @@ class DragonNativeExecutionBackend(BaseBackend):
             del self._tasks[uid]
             rec.state = "done"
             observed = None
-            if rec.measured:
-                if not ok:
-                    observed = getattr(value, _worker.OBSERVED_ATTR, None)
-                elif isinstance(value, tuple) and len(value) == 2:
-                    value, observed = value
+            if rec.measured and isinstance(value, tuple) and len(value) == 2:
+                # (value or error, observed); an error replaced in transit comes alone
+                value, observed = value
             if ok:
                 fields = {"return_value": value, "stdout": out, "stderr": err}
                 completions.append((rec, "DONE", fields))
@@ -1151,7 +1150,10 @@ class DragonNativeExecutionBackend(BaseBackend):
             for path in rec.stdio:
                 _read_and_remove(path)
         if rec.peak_dir is not None:
-            self._collect_observed(rec, state, fields)
+            try:
+                self._collect_observed(rec, state, fields)
+            except Exception:  # costs the task its observed, never its final state
+                self.logger.exception(f"Could not read what {rec.uid} used")
         self._finish(rec, state, fields)
 
     def _collect_observed(self, rec: _Task, state: str, fields: dict) -> None:
@@ -1467,10 +1469,10 @@ class DragonNativeExecutionBackend(BaseBackend):
         return (host, gpus)
 
     def _peak_dir(self, uid: str) -> str:
-        """Where a process or group task's processes write their peak records."""
-        root = os.path.join(self._work_dir, f"rhapsody-peaks.{self._peak_tag}")
+        """A fresh record directory for one run of a process or group task (``_peak``)."""
+        root = os.path.abspath(os.path.join(self._work_dir, f"rhapsody-peaks.{self._peak_tag}"))
         self._peak_roots.add(root)
-        return os.path.join(root, uid)
+        return _peak.make_peak_dir(root, uid)
 
     def _stdio_paths(self, uid: str, capture: bool) -> tuple[str | None, str | None, bool]:
         """Output files for a process task, and whether they are inline (read back, removed)."""
