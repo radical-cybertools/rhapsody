@@ -11,8 +11,10 @@
   ended FAILED with a negative exit code and no exception, so `wait_tasks` raised a
   `TaskExecutionError`; they now carry the `TimeoutError` and keep their `exit_code`.
   Dragon reports only exit codes for them. The backend counts such a task as timed out
-  when a process ended by SIGINT, SIGTERM or SIGKILL (Dragon sends them in turn when the
-  timeout expires), and the timeout has passed since the task was submitted. A Dragon
+  when, once the timeout has passed since the task was submitted, a process ended by
+  SIGINT, SIGTERM or SIGKILL (Dragon sends them in turn when the timeout expires) or
+  exited with 128 plus the signal's number, as a process that catches it usually does. A
+  process that catches SIGINT and exits 0 ends DONE. A Dragon
   `TaskCancelledError` for a task `cancel_task()` never asked to cancel now ends FAILED
   instead of CANCELED; Dragon 0.15.0 raises it only for cancel requests. Code that took a
   CANCELED task as a timed-out one should check for FAILED and `TimeoutError` instead.

@@ -61,11 +61,12 @@ class FakeProcessTemplate:
 class FakeBatchTask:
     """A Batch task that behaves as Dragon 0.15.0's did on a real runtime.
 
-    It runs for ``args[0]`` seconds (a ``sleep_for`` function or a ``sleep`` executable), and an
-    executable named ``false`` exits 1 at once. When the timeout expires first, a function task
-    raises TimeoutError, and a process or job task returns -SIGINT for each process, the exit
-    code Dragon's walltime kill gave. A cancel accepted before the end makes ``get()`` raise
-    TaskCancelledError.
+    It runs for ``args[0]`` seconds (a ``sleep_for`` function, or a ``sleep`` or ``trap-sigint``
+    executable), and an executable named ``false`` exits 1 at once. When the timeout expires
+    first, a function task raises TimeoutError, and a process or job task returns -SIGINT for
+    each process, the exit code Dragon's walltime kill gave, or 130 for ``trap-sigint``, which
+    catches SIGINT and exits as a bash trap does. A cancel accepted before the end makes
+    ``get()`` raise TaskCancelledError.
     """
 
     traceback = None
@@ -89,7 +90,8 @@ class FakeBatchTask:
             if kind == "function":
                 value = TimeoutError(f"task timed out before completing: tuid={self.uid}")
             else:
-                value = [-signal.SIGINT] * nranks if nranks > 1 else -signal.SIGINT
+                code = 128 + signal.SIGINT if target == "trap-sigint" else -signal.SIGINT
+                value = [code] * nranks if nranks > 1 else code
             duration = timeout
         self._timer = threading.Timer(duration, self._finish, args=(value,))
         self._timer.daemon = True
@@ -267,6 +269,20 @@ async def test_requested_cancel_ends_canceled(contract_backend, kind):
 
     assert await reports.wait_terminal(task["uid"]) == ["CANCELED"]
     assert not isinstance(task.get("exception"), TimeoutError)
+
+
+async def test_timeout_of_a_process_that_catches_sigint_ends_failed_with_timeout_error(
+    contract_backend,
+):
+    """A process that catches the signal stopping it at its timeout, and exits as a shell does,
+    still timed out."""
+    reports = Reports(contract_backend)
+    task = make_task("executable", LONG, timeout=TIMEOUT)
+    task["executable"] = "trap-sigint"
+    await contract_backend.submit_tasks([task])
+
+    assert await reports.wait_terminal(task["uid"]) == ["FAILED"]
+    assert isinstance(task.get("exception"), TimeoutError)
 
 
 async def test_requested_cancel_before_the_timeout_ends_canceled(contract_backend):

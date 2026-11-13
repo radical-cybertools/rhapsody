@@ -293,6 +293,11 @@ async def _deliver_process_result(backend, result, timeout, ran_for):
         ([SIGINT, SIGINT], SIGINT, f"exit codes [{SIGINT}, {SIGINT}]"),
         # A rank died and the others waited for it until the timeout.
         ([1, SIGINT], 1, f"exit codes [1, {SIGINT}]"),
+        # Processes that catch the signal and exit with 128 + its number, as shells do.
+        (130, 130, "exit code 130"),
+        (143, 143, "exit code 143"),
+        (137, 137, "exit code 137"),
+        ([130, SIGINT], 130, f"exit codes [130, {SIGINT}]"),
     ],
 )
 async def test_process_stopped_at_its_timeout_fails_with_timeout_error(
@@ -318,6 +323,8 @@ async def test_process_stopped_at_its_timeout_fails_with_timeout_error(
         (-signal.SIGSEGV, 5, 6),  # crashed, not stopped by Dragon
         (SIGINT, None, 6),  # no timeout to expire
         (1, 5, 6),  # an ordinary failure
+        (130, 60, 1),  # caught SIGINT well before its timeout
+        (128 + signal.SIGSEGV, 5, 6),  # a shell's report of a crashed child
     ],
 )
 async def test_other_process_failures_are_not_timeouts(backend, result, timeout, ran_for):

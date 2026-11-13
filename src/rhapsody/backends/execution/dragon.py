@@ -138,9 +138,12 @@ CRAY_MPICH_ENV = ("CRAY_MPICH_DIR", "CRAY_MPICH_VERSION")
 
 # Exit codes of a process that Dragon stopped when its timeout expired. Batch gives a process or
 # job task its timeout as the ProcessGroup walltime; at expiry Dragon sends SIGINT, then SIGTERM,
-# then SIGKILL, and the task returns the exit codes (-2 for a process that SIGINT ends) rather than
-# raising. A function task's timeout raises TimeoutError instead.
-_WALLTIME_EXIT_CODES = frozenset({-signal.SIGINT, -signal.SIGTERM, -signal.SIGKILL})
+# then SIGKILL, and the task returns the exit codes rather than raising: -2 for a process that
+# SIGINT ends, or 128 + 2 = 130 for one that catches it and exits as shells do (a bash trap, or
+# Python's KeyboardInterrupt turned into sys.exit(130)). A function task's timeout raises
+# TimeoutError instead.
+_WALLTIME_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGKILL)
+_WALLTIME_EXIT_CODES = frozenset(code for sig in _WALLTIME_SIGNALS for code in (-sig, 128 + sig))
 
 
 def _pmi_options(pmi: Optional[Union[str, "PMIBackend"]]) -> dict[str, Any]:
@@ -272,10 +275,12 @@ class DragonExecutionBackend(BaseBackend):
         when it next runs Python code, so a function blocked in a C call, such as
         ``time.sleep``, runs until that call returns. Dragon stops a process or job task
         at its timeout with SIGINT, then SIGTERM, then SIGKILL, and reports only exit codes.
-        The backend reports such a task as timed out when a process ended by one of those
-        signals and the timeout has passed since the task was submitted. The task keeps its
-        ``exit_code``. A process killed by one of those signals for another reason after that
-        time, the out-of-memory killer for instance, is reported as timed out too.
+        The backend reports such a task as timed out when, once the timeout has passed since
+        the task was submitted, a process ended by one of those signals or exited with 128
+        plus its number (130, 143 or 137), as a process that catches it usually does. The task
+        keeps its ``exit_code``. A process killed by one of those signals for another reason
+        after that time, the out-of-memory killer for instance, is reported as timed out too.
+        One that catches SIGINT and exits 0 ends DONE.
     """
 
     # Hygiene backstop: max wall-clock seconds a tuid can stay pending before it's dropped.

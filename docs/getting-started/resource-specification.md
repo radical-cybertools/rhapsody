@@ -316,10 +316,12 @@ a task cancelled with `backend.cancel_task(uid)` ends `CANCELED`.
   that call returns.
 - **Process and job tasks.** Dragon stops the processes with SIGINT, then SIGTERM, then
   SIGKILL, and reports only their exit codes. The backend reports the task as timed out
-  when a process ended by one of those signals and the timeout has passed since the task
-  was submitted. The task keeps its `exit_code`. Time spent waiting in Batch's queue counts
-  toward the timeout here, so a process killed by one of those signals for another reason
-  after that time, the out-of-memory killer for instance, is reported as timed out too.
+  when, once the timeout has passed since the task was submitted, a process ended by one of
+  those signals or exited with 128 plus its number (130, 143 or 137), as a process that
+  catches it usually does. The task keeps its `exit_code`. Time spent waiting in Batch's
+  queue counts toward the timeout here, so a process killed by one of those signals for
+  another reason after that time, the out-of-memory killer for instance, is reported as
+  timed out too. A process that catches SIGINT and exits 0 ends `DONE`.
 
 `cancel_task` returns `True` when the task ends `CANCELED` because of the call; the
 `CANCELED` report has been made by the time it returns. It returns `False` when nothing
