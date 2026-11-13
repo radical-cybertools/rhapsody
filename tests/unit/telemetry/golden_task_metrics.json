@@ -1,0 +1,1002 @@
+{
+  "jsonl_metric": {
+    "node_cpu_utilization": 62.5,
+    "node_gpu_utilization": 80.0,
+    "node_memory_utilization": 20.0,
+    "task_duration_seconds_count": 9,
+    "task_duration_seconds_sum": 11.75,
+    "tasks_canceled": 1,
+    "tasks_completed": 7,
+    "tasks_failed": 1,
+    "tasks_running": 1,
+    "tasks_started": 8,
+    "tasks_submitted": 4
+  },
+  "metrics": {
+    "node_cpu_utilization": {
+      "description": "Node CPU utilization percent",
+      "monotonic": false,
+      "points": [
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "node_id",
+              "n1"
+            ],
+            [
+              "session_id",
+              "golden"
+            ]
+          ],
+          "value": 30.0,
+          "value_type": "float"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "node_id",
+              "n2"
+            ],
+            [
+              "session_id",
+              "golden"
+            ]
+          ],
+          "value": 12.5,
+          "value_type": "float"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "beta"
+            ],
+            [
+              "node_id",
+              "n1"
+            ],
+            [
+              "session_id",
+              "golden"
+            ]
+          ],
+          "value": 20.0,
+          "value_type": "float"
+        }
+      ],
+      "temporality": "CUMULATIVE",
+      "type": "Sum",
+      "unit": ""
+    },
+    "node_gpu_utilization": {
+      "description": "Node GPU utilization percent",
+      "monotonic": false,
+      "points": [
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "node_id",
+              "n1"
+            ],
+            [
+              "session_id",
+              "golden"
+            ]
+          ],
+          "value": 5.0,
+          "value_type": "float"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "node_id",
+              "n2"
+            ],
+            [
+              "session_id",
+              "golden"
+            ]
+          ],
+          "value": 75.0,
+          "value_type": "float"
+        }
+      ],
+      "temporality": "CUMULATIVE",
+      "type": "Sum",
+      "unit": ""
+    },
+    "node_memory_utilization": {
+      "description": "Node memory utilization percent",
+      "monotonic": false,
+      "points": [
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "node_id",
+              "n1"
+            ],
+            [
+              "session_id",
+              "golden"
+            ]
+          ],
+          "value": 20.0,
+          "value_type": "float"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "node_id",
+              "n2"
+            ],
+            [
+              "session_id",
+              "golden"
+            ]
+          ],
+          "value": 0.0,
+          "value_type": "float"
+        }
+      ],
+      "temporality": "CUMULATIVE",
+      "type": "Sum",
+      "unit": ""
+    },
+    "task_duration_seconds": {
+      "description": "Task execution duration in seconds",
+      "monotonic": null,
+      "points": [
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "executable",
+              "sleep"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "bucket_counts": [
+            1,
+            3,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "count": 4,
+          "explicit_bounds": [
+            0.0,
+            5.0,
+            10.0,
+            25.0,
+            50.0,
+            75.0,
+            100.0,
+            250.0,
+            500.0,
+            750.0,
+            1000.0,
+            2500.0,
+            5000.0,
+            7500.0,
+            10000.0
+          ],
+          "max": 1.5,
+          "min": 0.0,
+          "sum": 2.5,
+          "sum_type": "float"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "executable",
+              "work"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "function"
+            ]
+          ],
+          "bucket_counts": [
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "count": 1,
+          "explicit_bounds": [
+            0.0,
+            5.0,
+            10.0,
+            25.0,
+            50.0,
+            75.0,
+            100.0,
+            250.0,
+            500.0,
+            750.0,
+            1000.0,
+            2500.0,
+            5000.0,
+            7500.0,
+            10000.0
+          ],
+          "max": 0.25,
+          "min": 0.25,
+          "sum": 0.25,
+          "sum_type": "float"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "beta"
+            ],
+            [
+              "executable",
+              "b"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "y"
+            ]
+          ],
+          "bucket_counts": [
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "count": 1,
+          "explicit_bounds": [
+            0.0,
+            5.0,
+            10.0,
+            25.0,
+            50.0,
+            75.0,
+            100.0,
+            250.0,
+            500.0,
+            750.0,
+            1000.0,
+            2500.0,
+            5000.0,
+            7500.0,
+            10000.0
+          ],
+          "max": 3.0,
+          "min": 3.0,
+          "sum": 3.0,
+          "sum_type": "float"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "beta"
+            ],
+            [
+              "executable",
+              "sleep"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "bucket_counts": [
+            1,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "count": 2,
+          "explicit_bounds": [
+            0.0,
+            5.0,
+            10.0,
+            25.0,
+            50.0,
+            75.0,
+            100.0,
+            250.0,
+            500.0,
+            750.0,
+            1000.0,
+            2500.0,
+            5000.0,
+            7500.0,
+            10000.0
+          ],
+          "max": 2.0,
+          "min": 0.0,
+          "sum": 2.0,
+          "sum_type": "float"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "tagged"
+            ],
+            [
+              "executable",
+              "sleep"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "bucket_counts": [
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "count": 1,
+          "explicit_bounds": [
+            0.0,
+            5.0,
+            10.0,
+            25.0,
+            50.0,
+            75.0,
+            100.0,
+            250.0,
+            500.0,
+            750.0,
+            1000.0,
+            2500.0,
+            5000.0,
+            7500.0,
+            10000.0
+          ],
+          "max": 4.0,
+          "min": 4.0,
+          "sum": 4.0,
+          "sum_type": "float"
+        }
+      ],
+      "temporality": "CUMULATIVE",
+      "type": "Histogram",
+      "unit": ""
+    },
+    "tasks_canceled": {
+      "description": "Total tasks canceled",
+      "monotonic": true,
+      "points": [
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "executable",
+              "sleep"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "value": 1,
+          "value_type": "int"
+        }
+      ],
+      "temporality": "CUMULATIVE",
+      "type": "Sum",
+      "unit": ""
+    },
+    "tasks_completed": {
+      "description": "Total tasks completed",
+      "monotonic": true,
+      "points": [
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "executable",
+              "sleep"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "value": 3,
+          "value_type": "int"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "beta"
+            ],
+            [
+              "executable",
+              "b"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "y"
+            ]
+          ],
+          "value": 1,
+          "value_type": "int"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "beta"
+            ],
+            [
+              "executable",
+              "sleep"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "value": 2,
+          "value_type": "int"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "tagged"
+            ],
+            [
+              "executable",
+              "sleep"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "value": 1,
+          "value_type": "int"
+        }
+      ],
+      "temporality": "CUMULATIVE",
+      "type": "Sum",
+      "unit": ""
+    },
+    "tasks_failed": {
+      "description": "Total tasks failed",
+      "monotonic": true,
+      "points": [
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "executable",
+              "work"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "function"
+            ]
+          ],
+          "value": 1,
+          "value_type": "int"
+        }
+      ],
+      "temporality": "CUMULATIVE",
+      "type": "Sum",
+      "unit": ""
+    },
+    "tasks_running": {
+      "description": "Tasks currently running",
+      "monotonic": false,
+      "points": [
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "executable",
+              "long"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "value": 1,
+          "value_type": "int"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "executable",
+              "sleep"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "value": 0,
+          "value_type": "int"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "executable",
+              "work"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "function"
+            ]
+          ],
+          "value": 0,
+          "value_type": "int"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "beta"
+            ],
+            [
+              "executable",
+              "a"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "x"
+            ]
+          ],
+          "value": 0,
+          "value_type": "int"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "beta"
+            ],
+            [
+              "executable",
+              "sleep"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "value": 0,
+          "value_type": "int"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "tagged"
+            ],
+            [
+              "executable",
+              "sleep"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "value": 0,
+          "value_type": "int"
+        }
+      ],
+      "temporality": "CUMULATIVE",
+      "type": "Sum",
+      "unit": ""
+    },
+    "tasks_started": {
+      "description": "Total tasks started",
+      "monotonic": true,
+      "points": [
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "executable",
+              "long"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "value": 1,
+          "value_type": "int"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "executable",
+              "sleep"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "value": 3,
+          "value_type": "int"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "executable",
+              "work"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "function"
+            ]
+          ],
+          "value": 1,
+          "value_type": "int"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "beta"
+            ],
+            [
+              "executable",
+              "a"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "x"
+            ]
+          ],
+          "value": 1,
+          "value_type": "int"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "beta"
+            ],
+            [
+              "executable",
+              "sleep"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "value": 1,
+          "value_type": "int"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "tagged"
+            ],
+            [
+              "executable",
+              "sleep"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "value": 1,
+          "value_type": "int"
+        }
+      ],
+      "temporality": "CUMULATIVE",
+      "type": "Sum",
+      "unit": ""
+    },
+    "tasks_submitted": {
+      "description": "Total tasks submitted",
+      "monotonic": true,
+      "points": [
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "executable",
+              "sleep"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "value": 2,
+          "value_type": "int"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "alpha"
+            ],
+            [
+              "executable",
+              "work"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "function"
+            ]
+          ],
+          "value": 1,
+          "value_type": "int"
+        },
+        {
+          "attributes": [
+            [
+              "backend",
+              "tagged"
+            ],
+            [
+              "executable",
+              "sleep"
+            ],
+            [
+              "session_id",
+              "golden"
+            ],
+            [
+              "task_type",
+              "executable"
+            ]
+          ],
+          "value": 1,
+          "value_type": "int"
+        }
+      ],
+      "temporality": "CUMULATIVE",
+      "type": "Sum",
+      "unit": ""
+    }
+  },
+  "task_count": {
+    "canceled": 1,
+    "completed": 7,
+    "failed": 1,
+    "running": 1,
+    "submitted": 4
+  }
+}
