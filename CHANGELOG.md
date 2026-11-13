@@ -12,6 +12,8 @@
   function task without templates runs as one placed Dragon process and returns
   its value through `<work_dir>/<uid>.result`. A host or GPU that Dragon does not
   have fails only that task (Dragon would abort the runtime on an unknown host).
+  When Dragon lists no GPUs on the node, the error says why that happens on
+  Dragon 0.15 (no GPUs in the job, or `libcudart.so` not loadable).
   The first GPU placement also counts the GPUs the backend's node can reach, once
   (libcuda, or `nvidia-smi -L` when the backend's Python cannot load libcuda), and
   warns when that is fewer than Dragon lists (a Slurm job without `--gres`). A

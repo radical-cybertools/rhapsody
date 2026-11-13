@@ -737,9 +737,17 @@ class DragonExecutionBackend(BaseBackend):
             )
         unknown = sorted(set(policy.gpu_affinity) - gpus)
         if unknown:
+            hint = ""
+            if not gpus:
+                hint = (
+                    ". Dragon lists no GPUs there. Dragon 0.15 finds NVIDIA GPUs through the CUDA "
+                    "runtime, so the job must request GPUs (e.g. Slurm --gres or --gpus), and "
+                    "libcudart.so and the driver's libcuda.so.1 must load in the Dragon runtime's "
+                    "environment (e.g. through LD_LIBRARY_PATH)"
+                )
             raise ValueError(
                 f"placement GPUs {unknown} are not on Dragon node {policy.host_name!r}; "
-                f"its GPUs: {sorted(gpus)}"
+                f"its GPUs: {sorted(gpus)}{hint}"
             )
         if policy.gpu_affinity and not self._gpus_probed:
             self._gpus_probed = True
@@ -748,9 +756,11 @@ class DragonExecutionBackend(BaseBackend):
     def _warn_unreachable_gpus(self) -> None:
         """Warn once when this node reaches fewer GPUs than Dragon lists for it.
 
-        Dragon counts a node's GPUs from ``nvidia-smi -L`` or ``lspci``, not from what the job may
-        use: in a Slurm job without ``--gres`` it still lists GPU 0, and a task pinned there runs
-        without a GPU. The count comes from libcuda, through this Python; when this Python cannot
+        Dragon 0.14 counts a node's GPUs from ``nvidia-smi -L`` or ``lspci``, not from what the job
+        may use: in a Slurm job without ``--gres`` it still lists GPU 0, and a task pinned there runs
+        without a GPU. Dragon 0.15 counts them through the CUDA runtime, so it lists only the GPUs
+        the job reaches, and none when libcudart.so does not load. The reachable count comes from
+        libcuda, through this Python; when this Python cannot
         load libcuda, it comes from ``nvidia-smi -L``. Only the node this process runs on is
         probed, and only NVIDIA GPUs.
         """

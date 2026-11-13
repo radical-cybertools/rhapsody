@@ -281,6 +281,24 @@ async def test_unknown_gpu_fails_the_task_only(backend):
         await backend.build_task(_task(placement={"node": 1, "host": "gpua042", "gpus": [3, 4]}))
 
     assert backend.batch.calls == []
+    assert backend._task_registry == {}
+
+
+async def test_gpus_on_a_node_without_listed_gpus_name_the_cause(backend):
+    # Dragon 0.15 lists no GPUs when the CUDA runtime does not load, or the job has none
+    with pytest.raises(ValueError, match=r"GPUs \[0\].*its GPUs: \[\]. Dragon lists no GPUs") as e:
+        await backend.build_task(_task(placement={"node": 0, "host": "cn001", "gpus": [0]}))
+
+    assert "libcudart.so" in str(e.value)
+    assert "--gres" in str(e.value)
+    assert backend.batch.calls == []
+
+
+async def test_unknown_gpu_on_a_gpu_node_has_no_cuda_hint(backend):
+    with pytest.raises(ValueError) as e:
+        await backend.build_task(_task(placement={"node": 1, "host": "gpua042", "gpus": [9]}))
+
+    assert "libcudart" not in str(e.value)
 
 
 async def test_dragon_nodes_are_looked_up_once(backend):

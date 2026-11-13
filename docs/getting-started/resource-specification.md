@@ -373,14 +373,24 @@ and pins it to those GPUs with
   backend work directory, which must be on a file system the nodes share.
 
 `host` must be the name Dragon gives the node (`Node(h_uid).hostname` for
-`h_uid in System().nodes`, which is `localhost` on a single-node local run), and
-`gpus` must be device ids of that node. The backend checks both before submitting:
+`h_uid in System().nodes`), and `gpus` must be device ids of that node. In
+single-node mode (`dragon -s`, or a local run) Dragon calls its node `localhost`;
+started through a workload manager (`dragon -w slurm`), even on one node, it uses
+the node's host name. The backend checks both before submitting:
 Dragon aborts the whole runtime on an unknown host and silently drops unknown GPU
 ids, so a bad placement fails only its own task, with a `ValueError`.
 
-Dragon lists a node's GPUs from `nvidia-smi -L` or `lspci`, not from the GPUs the
-job may use: in a Slurm job without `--gres` (or `--gpus`) it still lists GPU 0,
-and a task pinned there runs without a GPU. On the first placement that asks for
+Dragon 0.15 lists a node's NVIDIA GPUs through the CUDA runtime: it loads
+`libcudart.so` by that name, which loads the driver's `libcuda.so.1`. So it lists
+only the GPUs the job can reach, and none at all when either library does not load
+in the Dragon runtime's environment. Then every placement that asks for GPUs fails
+with a `ValueError` that says so: request GPUs from the scheduler (Slurm `--gres` or
+`--gpus`), and make `libcudart.so` loadable (a CUDA toolkit module, or a directory
+on `LD_LIBRARY_PATH` with a `libcudart.so` link to the CUDA runtime).
+
+Dragon 0.14 lists a node's GPUs from `nvidia-smi -L` or `lspci`, not from the GPUs
+the job may use: in a Slurm job without `--gres` (or `--gpus`) it still lists GPU
+0, and a task pinned there runs without a GPU. On the first placement that asks for
 GPUs, the backend counts the GPUs its own node can reach, once, in a subprocess:
 through libcuda with the backend's Python, or with `nvidia-smi -L` when that Python
 cannot load libcuda (which also gets its own warning, since Python function tasks
