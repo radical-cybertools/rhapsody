@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **Executable tasks submitted through `OrbitExecutionBackend` never completed** — the
+  radical.orbit rhapsody plugin sends DONE notifications without `stdout`, and an executable's
+  result is its stdout, so the consumer's callback failed (`KeyError: 'stdout'`) and the task's
+  future never resolved. For a DONE executable without `stdout`, the backend now fetches the task
+  (`get_task`) and fires DONE with its output. If the fetch fails, or the fetched task carries no
+  `stdout` (as a pool dispatcher's task record does), the task is reported FAILED with the
+  reason. A cancel while the fetch runs is a no-op, since the task has already finished, and
+  `shutdown()` waits for fetches in flight.
 - **Telemetry: `Failed to detach context` error at shutdown, and task spans without a parent** —
   `TelemetryManager.start()` attached the session span as the ambient OTel context of the
   asyncio task that called it. When `stop()` ran in another task, OTel logged
