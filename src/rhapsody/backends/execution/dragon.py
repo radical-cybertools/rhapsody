@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import shutil
+import signal
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -135,6 +136,12 @@ if TYPE_CHECKING:
 # The Cray MPICH module sets these; Batch's default PMI, cray, is the right one there.
 CRAY_MPICH_ENV = ("CRAY_MPICH_DIR", "CRAY_MPICH_VERSION")
 
+# Exit codes of a process that Dragon stopped when its timeout expired. Batch gives a process or
+# job task its timeout as the ProcessGroup walltime; at expiry Dragon sends SIGINT, then SIGTERM,
+# then SIGKILL, and the task returns the exit codes (-2 for a process that SIGINT ends) rather than
+# raising. A function task's timeout raises TimeoutError instead.
+_WALLTIME_EXIT_CODES = frozenset({-signal.SIGINT, -signal.SIGTERM, -signal.SIGKILL})
+
 
 def _pmi_options(pmi: Optional[Union[str, "PMIBackend"]]) -> dict[str, Any]:
     """Return the ``Batch.options()`` kwargs that launch a job with ``pmi``.
@@ -255,6 +262,20 @@ class DragonExecutionBackend(BaseBackend):
         ``libpmix.so`` must be on ``LD_LIBRARY_PATH``; some distributions ship that name only
         in their PMIx development package. When it can't be loaded, the whole Dragon runtime
         aborts.
+
+    Note on timeouts and cancellation:
+        A task that runs past its ``timeout`` ends FAILED, with a ``TimeoutError`` as its
+        ``exception``. A cancel is a different outcome: only a task cancelled through
+        ``cancel_task()`` ends CANCELED.
+
+        For a function task, Dragon raises the ``TimeoutError``. It stops the function only
+        when it next runs Python code, so a function blocked in a C call, such as
+        ``time.sleep``, runs until that call returns. Dragon stops a process or job task
+        at its timeout with SIGINT, then SIGTERM, then SIGKILL, and reports only exit codes.
+        The backend reports such a task as timed out when a process ended by one of those
+        signals and the timeout has passed since the task was submitted. The task keeps its
+        ``exit_code``. A process killed by one of those signals for another reason after that
+        time, the out-of-memory killer for instance, is reported as timed out too.
     """
 
     # Hygiene backstop: max wall-clock seconds a tuid can stay pending before it's dropped.
@@ -310,6 +331,10 @@ class DragonExecutionBackend(BaseBackend):
         self._pending_tuids: dict[str, float] = {}
         # Dragon tuids confirmed cancelled, so _monitor_loop discards them instead of retrying.
         self._cancelled_tuids: set[str] = set()
+        # uids cancel_task() asked Dragon to cancel, from the request until the task's end is
+        # reported. A TaskCancelledError for one of them is reported CANCELED; for any other task
+        # it is a failure. True once the monitor has reported the CANCELED, for cancel_task().
+        self._cancel_requested: dict[str, bool] = {}
         self._batch_monitor_thread = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         # Job warnings: no PMI, once per kind of job (see _job_options); no timeout, once.
@@ -430,9 +455,11 @@ class DragonExecutionBackend(BaseBackend):
                             # ensures get_stdout(block=False) is safe afterward.
                             result = batch_task.get(block=True)
                             raised, tb = False, None
-                        except TaskCancelledError:
-                            # Dragon-side timeout / upstream cancel (not a user cancel_task call)
-                            cancelled.append(uid)
+                        except TaskCancelledError as exc:
+                            # Dragon 0.15.0 raises it only for a cancel request; a timeout raises
+                            # TimeoutError or returns exit codes. _deliver_cancelled sorts out
+                            # requested cancels from any others.
+                            cancelled.append((uid, exc))
                             continue
                         except Exception as exc:
                             result, raised, tb = exc, True, batch_task.traceback
@@ -474,6 +501,8 @@ class DragonExecutionBackend(BaseBackend):
         thread wakeups from O(tasks) to O(sweeps).
         """
         for uid, result, tb, raised, stdout, stderr in completions:
+            # The task ended on its own, so a cancel still in flight can only be refused.
+            self._cancel_requested.pop(uid, None)
             task_info = self._task_registry.pop(uid, None)
             if not task_info:
                 continue
@@ -500,18 +529,54 @@ class DragonExecutionBackend(BaseBackend):
                     task_desc["exit_code"] = exit_code
                     if exit_code != 0:
                         state = "FAILED"
+                        if self._timed_out(task_info, codes):
+                            noun = "exit codes" if isinstance(result, list) else "exit code"
+                            task_desc["exception"] = TimeoutError(
+                                f"task {uid} exceeded its timeout of {task_info['timeout']} s "
+                                f"({noun} {result})"
+                            )
                 self._callback_func(task_desc, state)
 
-    def _deliver_cancelled(self, uids: list) -> None:
-        """Deliver CANCELED for tasks Dragon cancelled itself (timeout / upstream cancel). Runs on
-        the asyncio event loop (via call_soon_threadsafe), like _deliver_batch.
+    @staticmethod
+    def _timed_out(task_info: dict, codes: list) -> bool:
+        """Whether Dragon stopped a process or job task because its timeout expired.
 
-        A task cancel_task() already reported is no longer in _task_registry and is skipped.
+        Batch reports only exit codes for such a task. A walltime kill ends a process with one
+        of ``_WALLTIME_EXIT_CODES``, and it can only happen once the timeout has passed since the
+        task was submitted (its time in Batch's queue counts toward that, so the check is
+        necessary, not sufficient).
         """
-        for uid in uids:
+        timeout = task_info.get("timeout")
+        submitted_at = task_info.get("submitted_at")
+        if timeout is None or submitted_at is None:
+            return False
+        if time.monotonic() - submitted_at < timeout:
+            return False
+        return any(code in _WALLTIME_EXIT_CODES for code in codes)
+
+    def _deliver_cancelled(self, cancellations: list) -> None:
+        """Deliver tasks whose result is Dragon's TaskCancelledError. Runs on the asyncio event loop
+        (via call_soon_threadsafe), like _deliver_batch.
+
+        A task cancel_task() asked to cancel is reported CANCELED, and marked so that the
+        cancel_task() call still waiting for Dragon's answer returns True. Any other task is a
+        failure: CANCELED is only for a requested cancel, and Dragon 0.15.0 raises
+        TaskCancelledError for nothing else. A task cancel_task() already reported is no longer in
+        _task_registry and is skipped.
+        """
+        for uid, exc in cancellations:
             task_info = self._task_registry.pop(uid, None)
-            if task_info:
-                self._callback_func(task_info["description"], "CANCELED")
+            if not task_info:
+                continue
+            task_desc = task_info["description"]
+            if uid in self._cancel_requested:
+                self._cancel_requested[uid] = True
+                self._callback_func(task_desc, "CANCELED")
+                continue
+            self.logger.warning(f"Dragon cancelled task {uid}, which no one asked to cancel")
+            task_desc["exception"] = exc
+            task_desc["stderr"] = str(exc)
+            self._callback_func(task_desc, "FAILED")
 
     async def submit_tasks(self, tasks: list[dict]) -> None:
         """Submit tasks to the backend.
@@ -603,9 +668,8 @@ class DragonExecutionBackend(BaseBackend):
             task_args = tuple(task.get("arguments", []))
             task_kwargs = None
 
-        timeout = backend_kwargs.get("timeout")
-        if timeout is None:
-            timeout = 1000000000.0
+        task_timeout = backend_kwargs.get("timeout")
+        timeout = 1000000000.0 if task_timeout is None else task_timeout
 
         # Handle async functions
         if is_function and asyncio.iscoroutinefunction(target):
@@ -653,6 +717,9 @@ class DragonExecutionBackend(BaseBackend):
             **job_options,
         )
 
+        # Taken before Dragon can start the task: a walltime kill comes at least `timeout` after it.
+        submitted_at = time.monotonic()
+
         # Single decision tree - no redundant checks
         if process_templates_config is not None:
             # Priority 1: Job with user templates
@@ -684,7 +751,11 @@ class DragonExecutionBackend(BaseBackend):
             "description": task,
             "batch_task": batch_task,
             "is_native_function": is_native_function,
+            "timeout": task_timeout,
+            "submitted_at": submitted_at,
         }
+        # A uid can be used again once its task has ended; forget an old cancel request for it.
+        self._cancel_requested.pop(uid, None)
         self._monitored_batches[batch_task.uid] = (batch_task, uid)
 
         self.logger.debug(
@@ -767,32 +838,49 @@ class DragonExecutionBackend(BaseBackend):
         return self._task_states
 
     async def cancel_task(self, uid: str) -> bool:
-        if uid not in self._task_registry:
-            raise ValueError(f"Task {uid} not found")
+        """Cancel a task.
 
-        batch_task = self._task_registry[uid]["batch_task"]
+        Returns True when the task ends CANCELED because of this call. The CANCELED report has been
+        made by the time it returns. Returns False when nothing happens: the uid is unknown, the
+        task has already ended, or Dragon refused the cancel because the task is finishing, in which
+        case its own end is reported. It never raises for an unknown uid.
+
+        If Dragon's cancel request itself fails, the task is reported CANCELED anyway and the
+        backend stops tracking it (a soft cancel).
+        """
+        task_info = self._task_registry.get(uid)
+        if task_info is None:
+            return False
+
+        batch_task = task_info["batch_task"]
         loop = asyncio.get_running_loop()
 
+        # Recorded before Dragon can act on the cancel, so the TaskCancelledError it causes is
+        # reported CANCELED even if the monitor sees it first, or this coroutine is cancelled.
+        self._cancel_requested.setdefault(uid, False)
         try:
             cancelled = await loop.run_in_executor(None, batch_task.cancel)
         except Exception as e:
             self.logger.warning(f"Dragon cancel failed for {uid}: {e}; falling back to soft-cancel")
             cancelled = True
 
-        if cancelled:
-            registry_entry = self._task_registry.pop(uid, None)
-            if registry_entry is None:
-                # Task completed naturally between the executor call and here — not cancelled.
-                return False
-            task_desc = registry_entry["description"]
-            # Eagerly pop from _monitored_batches so when the cancelled tuid arrives from
-            # poll(), the None entry is skipped without delivering a spurious result.
-            # Mark cancelled so _monitor_loop drops it instead of retrying it forever.
-            self._monitored_batches.pop(batch_task.uid, None)
-            self._cancelled_tuids.add(batch_task.uid)
-            self._callback_func(task_desc, "CANCELED")
+        if not cancelled:
+            return False
 
-        return cancelled
+        registry_entry = self._task_registry.pop(uid, None)
+        if registry_entry is None:
+            # The task's end was reported while Dragon handled the cancel: True if that end was
+            # the CANCELED this cancel caused, False if the task completed first.
+            return self._cancel_requested.pop(uid, False)
+        self._cancel_requested.pop(uid, None)
+        task_desc = registry_entry["description"]
+        # Eagerly pop from _monitored_batches so when the cancelled tuid arrives from
+        # poll(), the None entry is skipped without delivering a spurious result.
+        # Mark cancelled so _monitor_loop drops it instead of retrying it forever.
+        self._monitored_batches.pop(batch_task.uid, None)
+        self._cancelled_tuids.add(batch_task.uid)
+        self._callback_func(task_desc, "CANCELED")
+        return True
 
     async def shutdown(self) -> None:
         """Shutdown the backend and clean up resources."""
@@ -842,6 +930,7 @@ class DragonExecutionBackend(BaseBackend):
         self._task_registry.clear()
         self._pending_tuids.clear()
         self._cancelled_tuids.clear()
+        self._cancel_requested.clear()
         self._state = "idle"
         self.logger.info("Dragon backend shutdown complete")
 
