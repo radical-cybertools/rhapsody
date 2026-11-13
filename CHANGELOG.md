@@ -28,6 +28,17 @@
   positional calls keep their meaning. The launcher runs with `python -I`, gives the command
   default signal dispositions and a process group of its own, and sets NVML up off the
   command's path; records go to a fresh directory per run.
+- **`DragonNativeExecutionBackend`** (backend name `dragon_native`) — a second
+  Dragon backend beside `DragonExecutionBackend`, on Dragon's `Process`,
+  `ProcessGroup`, `Policy` and `Queue`, without `dragon.workflows.batch`. It takes
+  the same task descriptions. Functions run in a persistent pool of workers, by
+  default one per physical core, pinned to their hosts and CPUs (placed functions
+  on a worker of that host, GPU tasks on a worker started for that GPU set),
+  executables as one native process each, and
+  `process_templates` as one process group, with the PMI chosen by `pmi`. Unlike a
+  Batch job, a group has no PMI by default. See `docs/execution/dragon-native.md`.
+  `tests/integration/test-hpc/benchmarks/dragon_throughput.py` measures it with
+  `--with-rhapsody-dragon-native`, and `--workers_per_node` sets its pool size.
 
 ### Fixed
 
