@@ -10,6 +10,7 @@ to end.
 """
 
 import asyncio
+import inspect
 import json
 import os
 import queue
@@ -19,6 +20,7 @@ from unittest.mock import patch
 
 import pytest
 
+from rhapsody.backends.execution import _measure
 from rhapsody.backends.execution import _peak
 from rhapsody.backends.execution import dragon as dragon_module
 from rhapsody.backends.execution.dragon import PEAK_LAUNCHER
@@ -103,10 +105,20 @@ class FakeBatch:
 
     @staticmethod
     def _execute(kind, payload, with_rusage=False):
-        """Run a submission; return (result, rusage) as a Dragon with Task.rusage would."""
+        """Run a submission; return (result, rusage) as a Dragon with Task.rusage would.
+
+        A function's target, arguments, result and exception go through cloudpickle, as Batch sends
+        them to a pool worker and back.
+        """
         if kind == "function":
-            target, args, kwargs = payload
-            return target(*args, **kwargs), None
+            import cloudpickle
+
+            target, args, kwargs = cloudpickle.loads(cloudpickle.dumps(payload))
+            try:
+                result = target(*args, **kwargs)
+            except Exception as exc:
+                raise cloudpickle.loads(cloudpickle.dumps(exc)) from None
+            return cloudpickle.loads(cloudpickle.dumps(result)), None
         templates = [(1, payload[0])] if kind == "process" else payload[0]
         codes, rusages = [], []
         for nranks, t in templates:
@@ -167,12 +179,13 @@ def _exe(uid="t1", **extra):
     return {"uid": uid, "executable": "/bin/echo", "arguments": ["hi", 3], **extra}
 
 
-def _peak_dir(backend, uid):
-    return os.path.join(backend._work_dir, f"rhapsody-peaks.{backend._peak_tag}", uid)
+def _peak_root(backend):
+    return os.path.join(backend._work_dir, f"rhapsody-peaks.{backend._peak_tag}")
 
 
 def _launcher_args(backend, uid):
-    return (PEAK_LAUNCHER, "--out-dir", _peak_dir(backend, uid), "--")
+    peak_dir = backend._task_registry[uid]["peak_dir"]
+    return ("-I", PEAK_LAUNCHER, "--out-dir", peak_dir, "--")
 
 
 # ============================================================================
@@ -188,7 +201,8 @@ async def test_executable_runs_under_launcher(backend):
     assert template.target == sys.executable
     assert template.args == (*_launcher_args(backend, "t1"), "/bin/echo", "hi", 3)
     reg = backend._task_registry["t1"]
-    assert reg["peak_dir"] == _peak_dir(backend, "t1")
+    assert os.path.dirname(reg["peak_dir"]) == _peak_root(backend)
+    assert os.path.basename(reg["peak_dir"]).startswith("t1.") and os.path.isdir(reg["peak_dir"])
     assert reg["peak_ranks"] == 1
 
 
@@ -224,7 +238,7 @@ async def test_native_function_is_wrapped_in_measured_call(backend):
     await backend.build_task({"uid": "f1", "function": f, "args": [1], "kwargs": {"b": 2}})
     (kind, (target, args, kwargs)) = backend.batch.calls[0]
     assert kind == "function"
-    assert target is _peak.measured_call
+    assert target is _measure.measure
     assert args == (f, (1,), {"b": 2})
     assert kwargs == {}
     assert backend._task_registry["f1"]["measured"] is True
@@ -376,7 +390,8 @@ async def test_job_observed_is_the_sum_of_its_ranks(tmp_path):
         finals = await _run(be, [job])
     state, task = finals["job"]
     assert state == "DONE" and task["return_value"] == [0, 0, 0]
-    assert 300 * MIB - SLACK <= task["observed"]["host_mem"] * (1 << 30) <= 492 * MIB
+    # three ranks: their buffers plus a Python interpreter each
+    assert 300 * MIB - SLACK <= task["observed"]["host_mem"] * (1 << 30) <= 3 * (100 + 40) * MIB
 
 
 @pytest.mark.asyncio
@@ -434,7 +449,7 @@ async def test_auto_reads_dragon_rusage_instead_of_launching(tmp_path):
     assert be._task_registry["t1"]["dragon_rusage"] is True
     assert be._task_registry["t1"]["peak_dir"] is None
     # Native functions are still measured in their pool worker.
-    assert target is _peak.measured_call and be._task_registry["f1"]["dragon_rusage"] is False
+    assert target is _measure.measure and be._task_registry["f1"]["dragon_rusage"] is False
     # A function in its own process gets Dragon's rusage too.
     assert ftemplate.target is f and be._task_registry["f2"]["dragon_rusage"] is True
     assert be._peak_roots == set()
@@ -495,3 +510,90 @@ async def test_dragon_rusage_reaches_callback(tmp_path):
     state, task = finals["job"]
     assert state == "DONE" and task["observed"]["host_mem"] * (1 << 30) >= 400 * MIB - SLACK
     assert os.listdir(tmp_path) == []
+
+
+# ============================================================================
+# Review findings (MTU-51): each test fails without its fix
+# ============================================================================
+
+
+def test_positional_arguments_keep_their_v070_meaning():
+    params = inspect.signature(DragonExecutionBackend.__init__).parameters
+    positional = [n for n, p in params.items() if p.kind is p.POSITIONAL_OR_KEYWORD]
+    assert positional == ["self", "batch_kwargs", "name", "size_pool_to_affinity", "pmi"]
+    assert (
+        params["observe_peaks"].kind is params["peak_source"].kind is inspect.Parameter.KEYWORD_ONLY
+    )
+    params = inspect.signature(DragonExecutionBackend.create).parameters
+    positional = [n for n, p in params.items() if p.kind is p.POSITIONAL_OR_KEYWORD]
+    assert positional == ["batch_kwargs", "pmi"]
+
+
+@pytest.mark.asyncio
+async def test_a_pool_worker_measures_without_importing_rhapsody(backend):
+    """The measured target travels by value: unpickled where rhapsody is absent, it works."""
+    import cloudpickle
+
+    await backend.build_task({"uid": "f1", "function": len, "args": [[1, 2, 3]]})
+    (_, (target, args, kwargs)) = backend.batch.calls[0]
+    blob = cloudpickle.dumps((target, args, kwargs))
+    script = (
+        "import sys, cloudpickle\n"
+        "target, args, kwargs = cloudpickle.loads(sys.stdin.buffer.read())\n"
+        "value, observed = target(*args, **kwargs)\n"
+        "print(value, 'started' in observed, 'rhapsody' in sys.modules)\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-I", "-c", script], input=blob, capture_output=True, timeout=60
+    )
+    assert out.returncode == 0, out.stderr.decode()
+    assert out.stdout.decode().split() == ["3", "True", "False"]
+
+
+@pytest.mark.asyncio
+async def test_a_relative_work_dir_and_a_task_cwd_keep_their_records(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    be = _make_backend(FakeBatch(run=True), tmp_path)
+    be._work_dir = "work"
+    (tmp_path / "elsewhere").mkdir()
+    task = _alloc_task("t1", 8, task_backend_specific_kwargs={"process_template": {}})
+    with patch.object(dragon_module, "ProcessTemplate", FakeProcessTemplate):
+        await be.build_task(task)
+    peak_dir = be._task_registry["t1"]["peak_dir"]
+    assert os.path.isabs(peak_dir) and peak_dir.startswith(str(tmp_path / "work"))
+
+
+@pytest.mark.asyncio
+async def test_unsafe_uids_stay_inside_the_record_root(backend):
+    for uid in ("..", "/etc", "a/../../b"):
+        await backend.build_task(_exe(uid=uid))
+        peak_dir = backend._task_registry[uid]["peak_dir"]
+        assert os.path.dirname(peak_dir) == os.path.abspath(_peak_root(backend))
+
+
+@pytest.mark.asyncio
+async def test_a_bad_record_costs_the_observation_not_the_task(tmp_path):
+    be = _make_backend(FakeBatch(run=True), tmp_path)
+    with patch.object(dragon_module, "_read_peaks", side_effect=KeyError("host_mem")):
+        with patch.object(dragon_module, "ProcessTemplate", FakeProcessTemplate):
+            finals = await _run(be, [_alloc_task("ok", 8)])
+    state, task = finals["ok"]
+    assert state == "DONE" and "observed" not in task
+
+
+@pytest.mark.asyncio
+async def test_observe_peaks_off_runs_nothing_extra_end_to_end(tmp_path):
+    def double(x):
+        return 2 * x
+
+    be = _make_backend(FakeBatch(run=True), tmp_path, observe_peaks=False)
+    with patch.object(dragon_module, "ProcessTemplate", FakeProcessTemplate):
+        finals = await _run(
+            be, [_alloc_task("exe", 8), {"uid": "f", "function": double, "args": [4]}]
+        )
+    assert finals["f"][1]["return_value"] == 8
+    assert all("observed" not in task for _, task in finals.values())
+    assert all(
+        PEAK_LAUNCHER not in map(str, getattr(p[0], "args", None) or ()) for _, p in be.batch.calls
+    )
+    assert not os.path.exists(_peak_root(be))

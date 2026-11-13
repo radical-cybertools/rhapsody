@@ -7,7 +7,6 @@ import asyncio
 import logging
 import os
 import shutil
-import sys
 import uuid
 from concurrent.futures import Executor
 from concurrent.futures import ProcessPoolExecutor
@@ -18,6 +17,7 @@ from typing import Callable
 from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
+from . import _measure
 from . import _peak
 
 # Run by path, as DragonExecutionBackend does: a launch does not import rhapsody.
@@ -54,7 +54,8 @@ class ConcurrentExecutionBackend(BaseBackend):
               ``started``/``ended`` wall-clock times and ``host``. A command that is not found
               exits 127 instead of raising.
             - Function tasks report the call's ``started``/``ended`` times in the worker,
-              ``host`` and ``cpu_seconds`` (the worker process's, or in a thread the thread's);
+              ``host`` and ``cpu_seconds`` (the worker process's, or in a thread the calling
+              thread's only, marked ``"approximate": True``);
               in a ``ProcessPoolExecutor`` on Linux also ``host_mem``, the worker's RSS growth
               during the call, marked ``"approximate": True``. Threads share one process, so
               they report no memory. A function that raises reports what was measured until
@@ -65,6 +66,7 @@ class ConcurrentExecutionBackend(BaseBackend):
         self,
         executor: Executor = None,
         name: str = "concurrent",
+        *,
         observe_peaks: bool = False,
     ):
         super().__init__(name=name)
@@ -156,18 +158,19 @@ class ConcurrentExecutionBackend(BaseBackend):
             else:
                 return await self._execute_command(task)
         except Exception as e:
+            # A measured function that raised: its error, and what it used until then
+            error, observed = _measure.split_error(e)
             task.update(
                 {
-                    "stderr": str(e),
+                    "stderr": str(error),
                     "stdout": "",
                     "exit_code": 1,
-                    "exception": e,
+                    "exception": error,
                     "return_value": None,
                 }
             )
-            observed = getattr(e, _peak.OBSERVED_ATTR, None)
             if self._observe_peaks and isinstance(observed, dict):
-                task["observed"] = observed  # a measured function that raised
+                task["observed"] = observed
             return task, "FAILED"
 
     @staticmethod
@@ -237,9 +240,11 @@ class ConcurrentExecutionBackend(BaseBackend):
         redirect = task.get("capture_stdio")
         peak_dir = None
         if self._observe_peaks:
-            peak_root = os.path.join(self._work_dir, f"rhapsody-peaks.{self._peak_tag}")
+            peak_root = os.path.abspath(
+                os.path.join(self._work_dir, f"rhapsody-peaks.{self._peak_tag}")
+            )
             self._peak_roots.add(peak_root)
-            peak_dir = os.path.join(peak_root, task["uid"])
+            peak_dir = _peak.make_peak_dir(peak_root, task["uid"])
         stdout_f = stderr_f = process = None
         stdout_val = stderr_val = None
         exit_code = 1
@@ -269,11 +274,7 @@ class ConcurrentExecutionBackend(BaseBackend):
                     else [executable, *arguments]
                 )
                 process = await asyncio.create_subprocess_exec(
-                    sys.executable,
-                    PEAK_LAUNCHER,
-                    "--out-dir",
-                    peak_dir,
-                    "--",
+                    *_peak.launcher_argv(peak_dir),
                     *command,
                     stdout=stdout_arg,
                     stderr=stderr_arg,
@@ -435,7 +436,7 @@ class ConcurrentExecutionBackend(BaseBackend):
 
     @classmethod
     async def create(
-        cls, executor: Executor, observe_peaks: bool = False
+        cls, executor: Executor, *, observe_peaks: bool = False
     ) -> "ConcurrentExecutionBackend":
         """Alternative factory method for creating initialized backend.
 

@@ -2,35 +2,46 @@
 
 Usage::
 
-    python -m rhapsody.backends.execution._peak --out-dir DIR [--interval S] -- CMD [ARG ...]
+    python -I -m rhapsody.backends.execution._peak --out-dir DIR [--interval S] -- CMD [ARG ...]
 
 The command runs as a child of this process, which reaps it with ``os.wait4`` to read its peak
 resident set size (``ru_maxrss``: the largest single process of the command's tree, not a sum).
 The kernel carries the RSS of this process at fork (about 10 MiB) into the child's ``ru_maxrss``
-across ``exec``, so that is the smallest peak reported. When ``pynvml`` is importable, a thread also samples, every ``--interval`` seconds, the memory that
-NVML reports for the command's processes on each GPU. This process then writes
-``DIR/<host>.<pid>.json``::
+across ``exec``, so that is the smallest peak reported. When ``pynvml`` is importable, a thread
+also samples, every ``--interval`` seconds, the memory that NVML reports for the command's
+processes on each GPU. This process then writes ``DIR/<host>.<pid>.json``::
 
     {"host_mem": GiB, "gpu_mem": GiB per GPU or null, "gpu_mem_devices": {uuid: GiB},
      "started": wall s, "ended": wall s, "cpu_seconds": s, "host": name, ...}
 
 ``started`` and ``ended`` are this process's wall-clock time just before it forks the command
-and just after it reaped it: the command's execution window, as seen on its node.
+and just after the command exited: the command's execution window, as seen on its node.
 
-and exits the way the command did: the same exit code, or the same signal. Signals sent to this
-process are forwarded to the command; on Linux the command is also killed if this process dies.
+It then exits the way the command did: the same exit code, or the same signal.
 
-The module needs only the standard library (and optionally ``pynvml``), so ``DragonExecutionBackend``
-runs it by path, without importing rhapsody, to keep the per-task start cost small.
+- **Signals.** The command starts with the default disposition of every signal (Python ignores
+  ``SIGPIPE`` and ``SIGXFSZ``) and, unless this process runs in a terminal's foreground, in a
+  process group of its own. Signals sent to this process, or to its group, reach the command's
+  group once, forwarded. On Linux the command is also killed if this process dies.
+- **Isolation.** Backends run it with ``python -I``, so the task's ``PYTHONHOME``,
+  ``PYTHONPATH`` or ``PYTHONWARNINGS`` cannot break it; the command still gets the task's
+  environment unchanged.
+- **GPUs.** NVML is set up in the sampler thread, so a slow or broken NVML neither delays the
+  command nor kills this process; ``usedGpuMemory`` that NVML cannot tell counts as unknown, not
+  zero.
 
-Function tasks have no process of their own; :func:`measured_call` gives them an approximate figure.
+The module needs only the standard library (and optionally ``pynvml``), so the backends run it by
+path, without importing rhapsody, to keep the per-task start cost small.
+
+Function tasks have no process of their own; :func:`measured_call` gives them an approximate figure
+(see :mod:`rhapsody.backends.execution._measure`).
 """
 
 import argparse
-import contextlib
 import errno
 import json
 import os
+import re
 import resource
 import shutil
 import signal
@@ -38,6 +49,7 @@ import socket
 import sys
 import threading
 import time
+import uuid
 from typing import Any
 from typing import Callable
 from typing import NamedTuple
@@ -54,7 +66,33 @@ FORWARDED_SIGNALS = (
     signal.SIGUSR1,
     signal.SIGUSR2,
 )
+# Python starts with these ignored; a command must not inherit that.
+RESET_SIGNALS = tuple(
+    getattr(signal, name) for name in ("SIGPIPE", "SIGXFSZ") if hasattr(signal, name)
+)
 PR_SET_PDEATHSIG = 1
+# Seconds stop() waits for the GPU sampler thread, which may hang in NVML on a bad node.
+GPU_STOP_TIMEOUT = 5.0
+
+
+def launcher_argv(out_dir: str) -> list[str]:
+    """The command that runs a task's command under this launcher: append the command to it."""
+    return [sys.executable, "-I", os.path.abspath(__file__), "--out-dir", out_dir, "--"]
+
+
+def make_peak_dir(root: str, uid: str) -> str:
+    """Make and return a fresh, absolute record directory for one run of task ``uid``.
+
+    The name is the uid made safe for a path, plus a random suffix, so a uid such as ``..`` or
+    ``/x`` cannot point outside ``root``, and a uid reused after a cancel gets a directory of its
+    own. It is made now, before the task starts: writers never make it, so a late writer cannot
+    bring it back once it has been read and removed.
+    """
+    root = os.path.abspath(root)
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(uid)).strip(".") or "task"
+    path = os.path.join(root, f"{safe}.{uuid.uuid4().hex[:8]}")
+    os.makedirs(path)
+    return path
 
 
 def _die_with_parent_hook() -> Callable[[], None]:
@@ -81,18 +119,42 @@ def _die_with_parent_hook() -> Callable[[], None]:
     return hook
 
 
-def spawn(cmd: list[str]) -> int:
-    """Fork and exec ``cmd``, keeping this process's stdio, environment and file descriptors."""
+def _in_terminal_foreground() -> bool:
+    """Whether this process runs in its terminal's foreground group (typed at a shell)."""
+    try:
+        return os.isatty(0) and os.tcgetpgrp(0) == os.getpgrp()
+    except OSError:
+        return False
+
+
+def spawn(cmd: list[str], own_group: bool = False, mask: Optional[set] = None) -> int:
+    """Fork and exec ``cmd``, keeping this process's stdio, environment and file descriptors.
+
+    The child resets the signals this process changed (``SIGPIPE``, ``SIGXFSZ``, the forwarded
+    ones) to their defaults, with ``own_group`` starts a process group of its own, and restores the
+    signal ``mask`` before it execs.
+    """
     before_exec = _die_with_parent_hook()
     pid = os.fork()
     if pid == 0:  # pragma: no cover - runs in the child, which execs or exits
         try:
             before_exec()
+            if own_group:
+                os.setpgid(0, 0)
+            for sig in RESET_SIGNALS + FORWARDED_SIGNALS:
+                signal.signal(sig, signal.SIG_DFL)
+            if mask is not None:
+                signal.pthread_sigmask(signal.SIG_SETMASK, mask)
             os.execvp(cmd[0], cmd)  # noqa: S606 - runs the task command as given
         except OSError as exc:
             os.write(2, f"{cmd[0]}: {exc.strerror}\n".encode())
             os._exit(127 if exc.errno == errno.ENOENT else 126)
         os._exit(127)
+    if own_group:  # also here, so a signal forwarded at once finds the group
+        try:
+            os.setpgid(pid, pid)
+        except OSError:  # the child already exec'd (EACCES) or exited (ESRCH)
+            pass
     return pid
 
 
@@ -123,10 +185,10 @@ def descendants(pid: int) -> set[int]:
 
 
 def load_nvml():
-    """Return an initialized ``pynvml`` module, or None if it is missing or NVML has no GPUs."""
+    """Return an initialized ``pynvml`` module, or None if it is missing, broken or sees no GPU."""
     try:
         import pynvml
-    except ImportError:
+    except Exception:  # ImportError, or a broken or deprecated install
         return None
     try:
         pynvml.nvmlInit()
@@ -142,7 +204,10 @@ class GpuSampler(threading.Thread):
     """Samples the GPU memory NVML reports for a process tree; keeps the peak per device.
 
     ``peak`` maps device UUID to the largest sum of ``usedGpuMemory`` (bytes) seen at one sample
-    for the tree's processes on that device. A device appears only once the tree was seen on it.
+    for the tree's processes on that device. A device appears only once the tree was seen on it
+    with a usage NVML could tell. With ``nvml`` None, the thread loads NVML itself (see
+    :func:`load_nvml`) and shuts it down when it stops; ``active`` says whether it had NVML. An
+    error in NVML ends the sampling and keeps what was seen.
     """
 
     def __init__(
@@ -159,37 +224,61 @@ class GpuSampler(threading.Thread):
         self.tree = tree
         self.peak: dict[str, int] = {}
         self.samples = 0
+        self.active = nvml is not None
+        self._owns_nvml = nvml is None
         self._stop_event = threading.Event()
-        self._devices = []
-        for i in range(nvml.nvmlDeviceGetCount()):
-            handle = nvml.nvmlDeviceGetHandleByIndex(i)
-            uuid = nvml.nvmlDeviceGetUUID(handle)
-            self._devices.append((uuid.decode() if isinstance(uuid, bytes) else uuid, handle))
+        self._devices: Optional[list] = None
+
+    def _open(self) -> None:
+        if self.nvml is None:
+            self.nvml = load_nvml()
+            self.active = self.nvml is not None
+        if self.nvml is None or self._devices is not None:
+            return
+        devices = []
+        for i in range(self.nvml.nvmlDeviceGetCount()):
+            handle = self.nvml.nvmlDeviceGetHandleByIndex(i)
+            uuid_ = self.nvml.nvmlDeviceGetUUID(handle)
+            devices.append((uuid_.decode() if isinstance(uuid_, bytes) else uuid_, handle))
+        self._devices = devices
 
     def sample(self) -> None:
+        self._open()
+        if self.nvml is None:
+            return
         pids = self.tree(self.pid)
-        for uuid, handle in self._devices:
+        for uuid_, handle in self._devices or ():
             try:
                 procs = self.nvml.nvmlDeviceGetComputeRunningProcesses(handle)
             except Exception:  # noqa: S112 - NVMLError: device busy, lost, unsupported
                 continue
-            mine = [p for p in procs if p.pid in pids]
-            if mine:
-                # usedGpuMemory is None when NVML cannot tell (e.g. without permission).
-                used = sum(p.usedGpuMemory or 0 for p in mine)
-                self.peak[uuid] = max(self.peak.get(uuid, 0), used)
+            # usedGpuMemory is None when NVML cannot tell (no permission, MIG): unknown, not 0
+            known = [
+                p.usedGpuMemory for p in procs if p.pid in pids and p.usedGpuMemory is not None
+            ]
+            if known:
+                self.peak[uuid_] = max(self.peak.get(uuid_, 0), sum(known))
         self.samples += 1
 
     def run(self) -> None:
-        while True:
-            self.sample()
-            if self._stop_event.wait(self.interval):
-                return
+        try:
+            while True:
+                self.sample()
+                if self.nvml is None or self._stop_event.wait(self.interval):
+                    return
+        except Exception:  # noqa: S110 - NVML failed: keep what was seen
+            return
+        finally:
+            if self._owns_nvml and self.nvml is not None:
+                try:
+                    self.nvml.nvmlShutdown()
+                except Exception:  # noqa: S110
+                    pass
 
-    def stop(self) -> None:
+    def stop(self, timeout: Optional[float] = GPU_STOP_TIMEOUT) -> None:
         self._stop_event.set()
         if self.is_alive():
-            self.join()
+            self.join(timeout)
 
 
 def report(
@@ -210,7 +299,7 @@ def report(
         # keeps asyncflow from learning a zero for a GPU task it could not see.
         "gpu_mem": max(devices.values()) if devices else None,
         "gpu_mem_devices": devices,
-        "nvml": gpu is not None,
+        "nvml": bool(gpu is not None and gpu.active),
         "samples": gpu.samples if gpu else 0,
         "exit_code": exit_code,
         "host": socket.gethostname(),
@@ -225,9 +314,12 @@ def _cpu_seconds(rusage) -> Optional[float]:
 
 
 def write_report(out_dir: str, record: dict) -> None:
-    """Write ``record`` to ``out_dir/<host>.<pid>.json`` atomically; warn instead of failing."""
+    """Write ``record`` to ``out_dir/<host>.<pid>.json`` atomically; warn instead of failing.
+
+    ``out_dir`` was made by the backend (:func:`make_peak_dir`); it is not made here, so a record
+    written after the backend gave up on it does not bring the directory back.
+    """
     try:
-        os.makedirs(out_dir, exist_ok=True)
         name = f"{record['host']}.{os.getpid()}.json"
         tmp = os.path.join(out_dir, f".{name}.tmp")
         with open(tmp, "w") as f:
@@ -255,40 +347,66 @@ def exit_like(exit_code: int) -> None:
     os._exit(128 + sig)  # the signal does not terminate by default (e.g. SIGCHLD)
 
 
+def _wait_exited(pid: int) -> bool:
+    """Wait until ``pid`` has exited, without reaping it; False where the OS cannot.
+
+    As a zombie its pid cannot be reused, so a signal forwarded meanwhile cannot reach another
+    process.
+    """
+    waitid = getattr(os, "waitid", None)
+    nowait = getattr(os, "WNOWAIT", 0)
+    if waitid is None or not nowait:
+        return False
+    try:
+        waitid(os.P_PID, pid, os.WEXITED | nowait)  # retried on EINTR (PEP 475)
+    except OSError:
+        return False
+    return True
+
+
 def run(cmd: list[str], out_dir: str, interval: float = 0.2) -> int:
     """Run ``cmd``, write its peaks to ``out_dir``, and return its exit code (negative: signal)."""
-    started = time.time()
-    pid = spawn(cmd)
+    child: dict = {"pid": None, "group": False}
 
     def forward(sig, _frame):
+        pid = child["pid"]
+        if pid is None:  # exited: forward nothing more
+            return
         try:
-            os.kill(pid, sig)
-        except ProcessLookupError:
+            if child["group"]:
+                os.killpg(pid, sig)
+            else:
+                os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
             pass
 
+    # Signals that come before the child's pid is known are held, then forwarded.
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, FORWARDED_SIGNALS)
     for sig in FORWARDED_SIGNALS:
         signal.signal(sig, forward)
+    own_group = not _in_terminal_foreground()
+    started = time.time()
+    try:
+        pid = spawn(cmd, own_group=own_group, mask=mask)
+        child.update(pid=pid, group=own_group)
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
 
-    nvml = load_nvml()
-    gpu = None
-    if nvml is not None:
-        try:
-            gpu = GpuSampler(nvml, pid, interval)
-            gpu.start()
-        except Exception:
-            gpu = None
+    gpu: Optional[GpuSampler] = GpuSampler(None, pid, interval)
+    try:
+        gpu.start()  # loads NVML in its own thread
+    except RuntimeError:  # no thread to be had
+        gpu = None
 
+    if _wait_exited(pid):
+        child["pid"] = None
     _, status, rusage = os.wait4(pid, 0)  # retried on EINTR (PEP 475)
+    child["pid"] = None
     ended = time.time()
     exit_code = os.waitstatus_to_exitcode(status)
 
     if gpu is not None:
         gpu.stop()
-    if nvml is not None:
-        try:
-            nvml.nvmlShutdown()
-        except Exception:  # noqa: S110
-            pass
     write_report(out_dir, report(rusage, gpu, exit_code, started, ended))
     return exit_code
 
@@ -297,11 +415,13 @@ def read_peaks(peak_dir: str, ranks: int) -> Optional[dict]:
     """Combine the records in ``peak_dir`` into ``task["observed"]``, then remove the directory.
 
     A job's ranks add up, on the host (an upper bound: their peaks need not coincide) and on each
-    GPU they share; ``gpu_mem`` is the busiest GPU's. None unless all ``ranks`` reported, since a
-    partial sum would understate the demand. When every record has them, ``started`` is the
-    earliest start, ``ended`` the latest end, ``cpu_seconds`` the sum, and ``host`` the node (or
-    ``hosts``, sorted, for a job on several).
+    GPU they share; ``gpu_mem`` is the busiest GPU's. None unless exactly ``ranks`` complete
+    records are there: a partial sum would understate the demand, and an extra record is not this
+    run's. When every record has them, ``started`` is the earliest start, ``ended`` the latest end,
+    ``cpu_seconds`` the sum, and ``host`` the node (or ``hosts``, sorted, for a job on several).
     """
+    if os.path.basename(peak_dir.rstrip(os.sep)) in ("", ".", ".."):
+        return None  # never remove a work directory itself
     records = []
     try:
         names = os.listdir(peak_dir)
@@ -312,15 +432,18 @@ def read_peaks(peak_dir: str, ranks: int) -> Optional[dict]:
             continue
         try:
             with open(os.path.join(peak_dir, name)) as f:
-                records.append(json.load(f))
+                rec = json.load(f)
         except (OSError, ValueError):
             continue
+        if isinstance(rec, dict) and isinstance(rec.get("host_mem"), (int, float)):
+            records.append(rec)
     shutil.rmtree(peak_dir, ignore_errors=True)
-    if not records or len(records) < ranks:
+    if len(records) != ranks:
         return None
     gpu: dict[str, float] = {}
     for rec in records:
-        for device, gib in (rec.get("gpu_mem_devices") or {}).items():
+        devices = rec.get("gpu_mem_devices")
+        for device, gib in (devices if isinstance(devices, dict) else {}).items():
             gpu[device] = gpu.get(device, 0.0) + gib
     observed = {
         "host_mem": sum(rec["host_mem"] for rec in records),
@@ -347,82 +470,23 @@ class MeasuredResult(NamedTuple):
     observed: Optional[dict]
 
 
-def _status_bytes(field: str) -> Optional[int]:
-    """A ``kB`` field of ``/proc/self/status`` (e.g. ``VmRSS``), in bytes; None off Linux."""
-    try:
-        with open("/proc/self/status") as f:
-            for line in f:
-                if line.startswith(field + ":"):
-                    return int(line.split()[1]) * 1024
-    except (OSError, ValueError, IndexError):
-        pass
-    return None
-
-
-def _reset_peak_rss() -> Optional[int]:
-    """Reset this process's ``VmHWM`` to its current RSS (Linux >= 4.0); return that RSS."""
-    try:
-        with open("/proc/self/clear_refs", "w") as f:
-            f.write("5")
-    except OSError:
-        return None
-    return _status_bytes("VmRSS")
-
-
-# The attribute under which an exception raised by a measured call carries its measurement
-OBSERVED_ATTR = "rhapsody_observed"
-
-
 def measured_call(fn: Callable, args: tuple, kwargs: dict, memory: bool = True) -> MeasuredResult:
-    """Call ``fn`` and return its value with the host-memory growth of this process during the call.
+    """Call ``fn`` and return its value with its measurement (``_measure.measure``).
 
-    For function tasks, which Dragon's Batch runs one at a time in long-lived pool workers, where the
-    OS keeps no per-call peak. The peak RSS mark is reset before the call and read after it, so
-    ``host_mem`` is the worker's peak during the call minus its RSS before. It is approximate:
-    memory the allocator kept from earlier calls is reused without counting, and other threads of
-    the worker count. ``gpu_mem`` is not measured: CUDA contexts and caching allocators outlive a
-    call. ``host_mem`` is None off Linux, and with ``memory=False``, for workers that run several
-    calls at once (threads), where the process's peak is not the call's. ``observed`` always has
-    the call's wall-clock ``started`` and ``ended``, the ``host``, and ``cpu_seconds``: the CPU time
-    of this process during the call, or with ``memory=False`` of the calling thread (threads the
-    function starts are then not counted). An exception from ``fn`` propagates with the
-    measurement as its ``rhapsody_observed`` attribute (:data:`OBSERVED_ATTR`), which pickling
-    keeps across a process pool.
+    For function tasks in long-lived pool workers, where the OS keeps no per-call peak. A call that
+    raises raises ``_measure.MeasuredError``, which carries the call's exception and its
+    measurement; ``_measure.split_error`` takes them apart.
     """
-    base = _reset_peak_rss() if memory else None
-    cpu_clock = time.process_time if memory else time.thread_time
-    started = time.time()
-    cpu_start = cpu_clock()
-    try:
-        value = fn(*args, **kwargs)
-    except Exception as e:
-        # An exception that takes no attributes goes without
-        with contextlib.suppress(Exception):
-            setattr(e, OBSERVED_ATTR, _call_observed(base, started, cpu_clock() - cpu_start))
-        raise
-    return MeasuredResult(value, _call_observed(base, started, cpu_clock() - cpu_start))
+    from . import _measure  # here, so the launcher run by path needs only the standard library
 
-
-def _call_observed(base: Optional[int], started: float, cpu_seconds: float) -> dict:
-    ended = time.time()
-    peak = _status_bytes("VmHWM") if base is not None else None
-    observed = {
-        "host_mem": None if peak is None else max(peak - base, 0) / GIB,
-        "gpu_mem": None,
-        "started": started,
-        "ended": ended,
-        "cpu_seconds": cpu_seconds,
-        "host": socket.gethostname(),
-    }
-    if peak is not None:
-        observed["approximate"] = True
-    return observed
+    value, observed = _measure.measure(fn, args, kwargs, memory)
+    return MeasuredResult(value, observed)
 
 
 def main(argv: Optional[list[str]] = None) -> None:
     argv = sys.argv[1:] if argv is None else argv
     parser = argparse.ArgumentParser(
-        prog="python -m rhapsody.backends.execution._peak",
+        prog="python -I -m rhapsody.backends.execution._peak",
         description="Run CMD and write its peak host and GPU memory to OUT_DIR.",
         usage="%(prog)s --out-dir OUT_DIR [--interval S] -- CMD [ARG ...]",
     )
@@ -438,7 +502,9 @@ def main(argv: Optional[list[str]] = None) -> None:
 
 
 if __name__ == "__main__":
-    # Run by path, this file's directory leads sys.path: its modules (concurrent.py, dragon.py, ...)
-    # would shadow what is imported lazily here (ctypes, pynvml and their imports).
-    sys.path.pop(0)
+    # Run by path without -I, this file's directory leads sys.path: its modules (concurrent.py,
+    # dragon.py, ...) would shadow what is imported lazily here (ctypes, pynvml and their imports).
+    _here = os.path.dirname(os.path.abspath(__file__))
+    if sys.path and os.path.abspath(sys.path[0] or os.curdir) == _here:
+        sys.path.pop(0)
     main()

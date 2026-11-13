@@ -24,7 +24,10 @@
   wrapper, and from Dragon's rusage when Dragon reports them. Backends report RUNNING when they
   hand a task over, which can be well before it runs; these times say when it ran. A function
   task that raises reports what was measured until it raised, so FAILED tasks carry
-  `observed` too.
+  `observed` too. The new options are keyword-only, after the existing parameters, so
+  positional calls keep their meaning. The launcher runs with `python -I`, gives the command
+  default signal dispositions and a process group of its own, and sets NVML up off the
+  command's path; records go to a fresh directory per run.
 
 ### Fixed
 

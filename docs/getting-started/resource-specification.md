@@ -69,14 +69,15 @@ task = ComputeTask(
 |------|------------|-----------|----------------------------|---------------|
 | Executable | peak RSS from `wait4`, under the peak launcher | with `pynvml` | the command's | yes |
 | Function, `ProcessPoolExecutor` | worker RSS growth during the call, `"approximate": True` (Linux only) | not measured | the call's, in the worker | the worker process's, during the call |
-| Function, `ThreadPoolExecutor` | not measured (threads share one process) | not measured | the call's, in the worker | the calling thread's (not threads the function starts) |
+| Function, `ThreadPoolExecutor` | not measured (threads share one process) | not measured | the call's, in the worker | the calling thread's (not threads or processes the function starts); marked `"approximate": True` |
 
 `started` and `ended` are wall-clock times taken where the task ran, so they show when it really
 ran. The backend reports RUNNING when it hands the task to the executor or starts the launcher,
 which can be earlier when the executor is busy. A FAILED task reports `observed` too: an
 executable through its launcher, and a function that raised with what was measured until it
-raised. Each executable starts one extra Python process, the launcher. A command that is not
-found then exits with code 127 instead of raising.
+raised. Each executable starts one extra Python process, the launcher (`python -I`, so the
+task's `PYTHON*` variables cannot break it). A command that is not found then exits with code 127
+instead of raising.
 
 ---
 
@@ -420,10 +421,20 @@ Limits:
   containers) is not seen.
 - GPU memory is sampled every 0.2 s, so a GPU peak that lasts less than that can be missed
   or under-stated: a 0.3 s task that allocated 1 GiB reported 12 MiB.
-- The launcher writes one small record per process to `<work_dir>/rhapsody-peaks.<tag>/<uid>/`,
-  which must be on a file system the nodes share. A job reports nothing unless every rank wrote
-  its record.
+- The launcher writes one small record per process to a directory the backend makes for each
+  run, `<work_dir>/rhapsody-peaks.<tag>/<uid>.<random>/` (made absolute), which must be on a file
+  system the nodes share. A job reports nothing unless exactly every rank wrote its record; a
+  record written after the backend read the directory is dropped.
+- The launcher runs the command with every signal at its default disposition and, outside a
+  terminal's foreground, in a process group of its own. A signal to the launcher, or to its
+  group, reaches the command's group once.
+- NVML is set up in the launcher's sampler thread: a slow or broken NVML (or `pynvml`) neither
+  delays the command nor fails the task; GPU memory NVML cannot tell (MIG) is unknown, not zero.
 - A native function's figure misses memory the allocator kept from earlier calls in the same
-  worker, and counts other threads of the worker.
+  worker, and counts other threads of the worker, including threads an earlier call left
+  running. The measurement travels to the worker by value, so the worker does not import
+  rhapsody.
+- A Dragon function that times out reports nothing: Dragon replaces its exception with a
+  `TimeoutError` of its own.
 - A task cancelled with `cancel_task()` reports nothing. A Dragon `timeout` ends as FAILED and
   still reports: the launcher passes the signal to the command and reaps it.

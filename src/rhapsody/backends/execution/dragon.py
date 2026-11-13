@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import shutil
-import sys
 import threading
 import time
 import uuid
@@ -15,6 +14,7 @@ from typing import Union
 from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
+from . import _measure
 from . import _peak
 
 # Run by path so a launch does not import rhapsody (and Dragon) before the task's command.
@@ -311,10 +311,11 @@ class DragonExecutionBackend(BaseBackend):
         self,
         batch_kwargs: Optional[dict] = None,
         name: Optional[str] = "dragon",
-        observe_peaks: bool = False,
-        peak_source: str = "auto",
         size_pool_to_affinity: bool = True,
         pmi: Optional[Union[str, "PMIBackend"]] = None,
+        *,
+        observe_peaks: bool = False,
+        peak_source: str = "auto",
     ):
         if not Batch:
             raise RuntimeError(DRAGON_BATCH_INIT_ERROR)
@@ -334,6 +335,15 @@ class DragonExecutionBackend(BaseBackend):
 
         self.logger = _get_logger()
         self._observe_peaks = observe_peaks
+        if observe_peaks:
+            # Batch cloudpickles a function task's target: with this, _measure travels by value,
+            # and a pool worker measures a call without importing rhapsody
+            try:
+                import cloudpickle  # noqa: PLC0415 - Dragon depends on it
+
+                cloudpickle.register_pickle_by_value(_measure)
+            except ImportError:
+                pass
         self._peaks_from_dragon = observe_peaks and peak_source != "launcher" and dragon_rusage
         if observe_peaks:
             source = "Dragon's Batch rusage" if self._peaks_from_dragon else "the peak launcher"
@@ -533,8 +543,28 @@ class DragonExecutionBackend(BaseBackend):
     def _collect_observed(self, task_reg: dict, result: Any, raised: bool, batch_task) -> Any:
         """Store a finished task's peaks as ``task_reg["observed"]``; return its unwrapped result.
 
-        Runs on the monitor thread, so reading the launcher's files stays off the event loop.
+        Runs on the monitor thread, so reading the launcher's files stays off the event loop. A
+        measured function's ``(value, observed)``, or its ``MeasuredError``, is unwrapped. Whatever
+        goes wrong here costs the task its ``observed``, never its result.
         """
+        if task_reg.get("measured"):
+            if raised:
+                result, observed = _measure.split_error(result)
+            elif isinstance(result, tuple) and len(result) == 2:
+                result, observed = result
+            else:
+                observed = None
+            if isinstance(observed, dict):
+                task_reg["observed"] = observed
+            return result
+        try:
+            self._collect_records(task_reg, batch_task)
+        except Exception:
+            self.logger.exception(f"Could not read what {task_reg.get('uid')} used")
+        return result
+
+    def _collect_records(self, task_reg: dict, batch_task) -> None:
+        """``observed`` from Dragon's rusage, or from the records the launcher wrote."""
         peak_dir = task_reg.get("peak_dir")
         if task_reg.get("dragon_rusage"):
             try:
@@ -546,14 +576,6 @@ class DragonExecutionBackend(BaseBackend):
             task_reg["observed"] = _read_peaks(peak_dir, task_reg["peak_ranks"])
             if task_reg["observed"] is None:
                 self.logger.debug(f"No complete peaks for {task_reg['uid']} in {peak_dir}")
-        elif task_reg.get("measured") and not raised and isinstance(result, _peak.MeasuredResult):
-            task_reg["observed"] = result.observed
-            result = result.value
-        elif task_reg.get("measured") and raised:
-            observed = getattr(result, _peak.OBSERVED_ATTR, None)  # the call raised
-            if isinstance(observed, dict):
-                task_reg["observed"] = observed
-        return result
 
     def _deliver_batch(self, completions: list) -> None:
         """Deliver a batch of completed tasks. Runs on the asyncio event loop (via
@@ -736,16 +758,20 @@ class DragonExecutionBackend(BaseBackend):
         measured = self._observe_peaks and is_native_function
         dragon_rusage = self._peaks_from_dragon and not is_native_function
         if self._observe_peaks and not is_function and not dragon_rusage:
-            peak_root = os.path.join(self._work_dir, f"rhapsody-peaks.{self._peak_tag}")
+            peak_root = os.path.abspath(
+                os.path.join(self._work_dir, f"rhapsody-peaks.{self._peak_tag}")
+            )
             self._peak_roots.add(peak_root)
-            peak_dir = os.path.join(peak_root, uid)
+            peak_dir = _peak.make_peak_dir(peak_root, uid)
             peak_ranks = (
                 sum(nranks for nranks, _ in process_templates_config)
                 if process_templates_config is not None
                 else 1
             )
-            task_args = (PEAK_LAUNCHER, "--out-dir", peak_dir, "--", target, *task_args)
-            target = sys.executable
+            # python -I _peak.py --out-dir DIR -- target args...
+            launcher = _peak.launcher_argv(peak_dir)
+            task_args = (*launcher[1:], target, *task_args)
+            target = launcher[0]
 
         def _build_process_template_kwargs(template_cfg: dict[str, Any]) -> dict[str, Any]:
             """Build ProcessTemplate kwargs from user config."""
@@ -778,9 +804,10 @@ class DragonExecutionBackend(BaseBackend):
             )
 
         elif measured:
-            # Priority 3, measured: returns _peak.MeasuredResult, unwrapped by _collect_observed
+            # Priority 3, measured: returns (value, observed) or raises MeasuredError, unwrapped by
+            # _collect_observed. _measure travels by value, so the worker imports no rhapsody.
             batch_task = task_opts.function(
-                _peak.measured_call, target, tuple(task_args), dict(task_kwargs)
+                _measure.measure, target, tuple(task_args), dict(task_kwargs or {})
             )
 
         elif is_function:
@@ -991,9 +1018,10 @@ class DragonExecutionBackend(BaseBackend):
     async def create(
         cls,
         batch_kwargs: Optional[dict] = None,
+        pmi: Optional[Union[str, "PMIBackend"]] = None,
+        *,
         observe_peaks: bool = False,
         peak_source: str = "auto",
-        pmi: Optional[Union[str, "PMIBackend"]] = None,
     ):
         """Create and initialize a DragonExecutionBackend."""
         backend = cls(

@@ -1,6 +1,7 @@
 """ConcurrentExecutionBackend(observe_peaks=True): each task's usage as task["observed"]."""
 
 import asyncio
+import inspect
 import os
 import socket
 import sys
@@ -153,3 +154,80 @@ async def test_off_by_default_nothing_observed(tmp_path):
         await backend.shutdown()
     assert all("observed" not in task for _, task in finals.values())
     assert os.listdir(tmp_path) == []
+
+
+# ============================================================================
+# Review findings (MTU-51): each test fails without its fix
+# ============================================================================
+
+
+def test_positional_arguments_keep_their_v070_meaning():
+    params = inspect.signature(ConcurrentExecutionBackend.__init__).parameters
+    positional = [n for n, p in params.items() if p.kind is p.POSITIONAL_OR_KEYWORD]
+    assert positional == ["self", "executor", "name"]
+    assert params["observe_peaks"].kind is inspect.Parameter.KEYWORD_ONLY
+    params = inspect.signature(ConcurrentExecutionBackend.create).parameters
+    assert params["observe_peaks"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+@pytest.mark.asyncio
+async def test_a_relative_work_dir_and_a_task_cwd_keep_the_records(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "taskdir").mkdir()
+    backend = await ConcurrentExecutionBackend(ThreadPoolExecutor(1), observe_peaks=True)
+    backend._work_dir = "work"
+    try:
+        task = _alloc("t", 8, task_backend_specific_kwargs={"cwd": str(tmp_path / "taskdir")})
+        finals = await _run(backend, [task])
+    finally:
+        await backend.shutdown()
+    state, task = finals["t"]
+    assert state == "DONE" and task["observed"]["host_mem"] > 0
+    assert not list((tmp_path / "taskdir").rglob("*.json"))
+
+
+@pytest.mark.asyncio
+async def test_the_task_environment_does_not_break_the_launcher(tmp_path):
+    backend = await ConcurrentExecutionBackend(ThreadPoolExecutor(1), observe_peaks=True)
+    backend._work_dir = str(tmp_path)
+    env = {**os.environ, "PYTHONHOME": "/nonexistent"}
+    try:
+        task = {
+            "uid": "e",
+            "executable": "/bin/echo",
+            "arguments": ["hi"],
+            "task_backend_specific_kwargs": {"env": env},
+        }
+        finals = await _run(backend, [task])
+    finally:
+        await backend.shutdown()
+    state, task = finals["e"]
+    assert state == "DONE" and task["stdout"] == "hi\n" and "observed" in task
+
+
+SHARED = ValueError("one stored error")
+
+
+async def _raise_shared(seconds):
+    await asyncio.sleep(seconds)
+    raise SHARED
+
+
+@pytest.mark.asyncio
+async def test_tasks_raising_one_shared_error_keep_their_own_measurements():
+    backend = await ConcurrentExecutionBackend(ThreadPoolExecutor(2), observe_peaks=True)
+    try:
+        finals = await _run(
+            backend,
+            [
+                {"uid": "a", "function": _raise_shared, "args": [0.01]},
+                {"uid": "b", "function": _raise_shared, "args": [0.2]},
+            ],
+        )
+    finally:
+        await backend.shutdown()
+    (sa, a), (sb, b) = finals["a"], finals["b"]
+    assert sa == sb == "FAILED" and a["exception"] is b["exception"] is SHARED
+    assert vars(SHARED) == {}  # nothing written on the user's exception
+    window = {t["uid"]: t["observed"]["ended"] - t["observed"]["started"] for t in (a, b)}
+    assert window["a"] < 0.15 <= window["b"]
