@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 # domain name -> class, or "module:ClassName" resolved on first use.
 _REGISTRY: dict[str, type[Instrumentation] | str] = {
     "task": "rhapsody.telemetry.instrumentation.task:TaskInstrumentation",
+    "inference": "rhapsody.telemetry.instrumentation.inference:InferenceInstrumentation",
 }
 
 # Domains the manager hosts for every session and routes every event to (not tied to a backend).

@@ -795,6 +795,13 @@ class TelemetryManager:
             if s.status.description:
                 status_obj["message"] = s.status.description
 
+            # TELEMETRY-LIMITATION(L18): the OTLP export writes the OTel SpanKind value, which is
+            # off by one from the OTLP value (OTel CLIENT is 2, OTLP CLIENT is 3), hardcodes the
+            # instrumentation scope "rhapsody" for every span and drops span links. Exported
+            # spans that carry links (such as batch spans) are therefore mislabeled and lose them.
+            # Why not now: existing behaviour of the export, reported (T19) and not changed here.
+            # Planned: Tier 2 (use the SDK's OTLP encoder). See
+            # docs/telemetry/reference.md#known-limitations.
             try:
                 kind = s.kind.value
             except AttributeError:
