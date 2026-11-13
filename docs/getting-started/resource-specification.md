@@ -351,3 +351,56 @@ task = ComputeTask(
     },
 )
 ```
+
+### Placement from AsyncFlow (`placement`)
+
+AsyncFlow's `ResourcePolicy` in `node` mode picks the node and GPUs for each task
+and writes them into the task description:
+
+```python
+task["placement"] = {"node": 0, "host": "gpua001", "gpus": [2]}
+```
+
+When `placement` has a `host`, `DragonExecutionBackend` runs the task on that host
+and pins it to those GPUs with
+`Policy(placement=Policy.Placement.HOST_NAME, host_name=host, gpu_affinity=gpus)`:
+
+- **Process and job tasks** (executables, or any task with `process_template` /
+  `process_templates`): the policy goes on every process template.
+- **Function tasks without templates**: `Batch.function()` takes no policy, so the
+  function runs as one placed Dragon process. Its return value or exception still
+  comes back as for a native function task, through a `<uid>.result` file in the
+  backend work directory, which must be on a file system the nodes share.
+
+`host` must be the name Dragon gives the node (`Node(h_uid).hostname` for
+`h_uid in System().nodes`), and `gpus` must be device ids of that node. In
+single-node mode (`dragon -s`, or a local run) Dragon calls its node `localhost`;
+started through a workload manager (`dragon -w slurm`), even on one node, it uses
+the node's host name. The backend checks both before submitting:
+Dragon aborts the whole runtime on an unknown host and silently drops unknown GPU
+ids, so a bad placement fails only its own task, with a `ValueError`.
+
+Dragon 0.15 lists a node's NVIDIA GPUs through the CUDA runtime: it loads
+`libcudart.so` by that name, which loads the driver's `libcuda.so.1`. So it lists
+only the GPUs the job can reach, and none at all when either library does not load
+in the Dragon runtime's environment. Then every placement that asks for GPUs fails
+with a `ValueError` that says so: request GPUs from the scheduler (Slurm `--gres` or
+`--gpus`), and make `libcudart.so` loadable (a CUDA toolkit module, or a directory
+on `LD_LIBRARY_PATH` with a `libcudart.so` link to the CUDA runtime).
+
+Dragon 0.14 lists a node's GPUs from `nvidia-smi -L` or `lspci`, not from the GPUs
+the job may use: in a Slurm job without `--gres` (or `--gpus`) it still lists GPU
+0, and a task pinned there runs without a GPU. On the first placement that asks for
+GPUs, the backend counts the GPUs its own node can reach, once, in a subprocess:
+through libcuda with the backend's Python, or with `nvidia-smi -L` when that Python
+cannot load libcuda (which also gets its own warning, since Python function tasks
+it runs may not reach CUDA either). If fewer GPUs are reachable than Dragon lists,
+it logs a warning; the tasks still run.
+
+These warnings go to the `rhapsody` logger. Under Dragon, a handler you put on
+the root logger may never see them, so call `rhapsody.enable_logging()` before
+creating the backend, or attach your handler to `logging.getLogger("rhapsody")`.
+
+A `policy` you set yourself in `process_template` or a `process_templates` entry
+wins over the placement, and the backend logs a warning. Tasks without
+`placement`, or with `host` set to `None`, are submitted as before.

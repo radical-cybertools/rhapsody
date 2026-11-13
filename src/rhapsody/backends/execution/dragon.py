@@ -1,9 +1,14 @@
 import asyncio
+import contextlib
 import logging
 import os
+import pickle
 import shutil
+import subprocess
+import sys
 import threading
 import time
+import traceback
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
@@ -18,16 +23,20 @@ DRAGON_BATCH_INIT_ERROR = None
 
 try:
     import dragon
+    from dragon.infrastructure.policy import Policy
     from dragon.native.machine import Node
     from dragon.native.machine import System
+    from dragon.native.machine import current as current_node
     from dragon.native.process import ProcessTemplate
     from dragon.workflows.batch import Batch
     from dragon.workflows.batch import TaskCancelledError
 
 except ImportError as e:  # pragma: no cover - environment without Dragon
     dragon = None
+    Policy = None
     Node = None
     System = None
+    current_node = None
     ProcessTemplate = None
     Batch = None
     TaskCancelledError = None
@@ -113,6 +122,138 @@ def _workers_per_node_for_affinity(
         "holds. Request whole nodes to use all CPUs."
     )
     return workers
+
+
+# ============================================================================
+# Task Placement
+# ============================================================================
+
+
+def _placement_policy(placement: Optional[dict]):
+    """Translate a task's ``placement`` into a Dragon host-name policy.
+
+    ``placement`` is ``{"node": index, "host": name, "gpus": [device, ...]}``, as written by
+    AsyncFlow's ``ResourcePolicy`` in node mode. Returns None when there is no placement or no
+    host, so Dragon keeps choosing the node.
+    """
+    if not placement or not placement.get("host"):
+        return None
+    return Policy(
+        placement=Policy.Placement.HOST_NAME,
+        host_name=placement["host"],
+        gpu_affinity=list(placement.get("gpus") or []),
+    )
+
+
+# Prints how many CUDA devices a fresh process can use; exits 2 without libcuda, 3 on a CUDA error.
+_CUDA_PROBE = """
+import ctypes, sys
+try:
+    cu = ctypes.CDLL("libcuda.so.1")
+except OSError:
+    sys.exit(2)
+rc = cu.cuInit(0)
+if rc == 100:  # CUDA_ERROR_NO_DEVICE
+    print(0)
+    sys.exit(0)
+if rc != 0:
+    sys.exit(3)
+count = ctypes.c_int()
+if cu.cuDeviceGetCount(ctypes.byref(count)) != 0:
+    sys.exit(3)
+print(count.value)
+"""
+
+
+def _cuda_device_count() -> tuple[Optional[int], bool]:
+    """Count the CUDA devices a process of this Python on this node can use.
+
+    Returns ``(count, loaded)``. ``loaded`` is False when this Python cannot load libcuda, and
+    ``count`` is None whenever the count is unknown. The probe runs in a subprocess, so this
+    process never initialises CUDA: CUDA does not survive a fork, and the caller may fork later.
+    """
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-c", _CUDA_PROBE], capture_output=True, text=True, timeout=60
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, True
+    if probe.returncode == 2:
+        return None, False
+    try:
+        return (int(probe.stdout.strip()) if probe.returncode == 0 else None), True
+    except ValueError:
+        return None, True
+
+
+def _nvidia_smi_device_count() -> Optional[int]:
+    """Count the GPUs ``nvidia-smi -L`` lists on this node; None without nvidia-smi.
+
+    Only lines starting with ``GPU`` count: in a job without GPUs, nvidia-smi prints "No devices
+    found." (exit 0 on some versions), and Dragon 0.14.1 counts that line as GPU 0.
+    """
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi is None:
+        return None
+    try:
+        out = subprocess.run([nvidia_smi, "-L"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return 0 if "No devices" in out.stdout + out.stderr else None
+    return sum(1 for line in out.stdout.splitlines() if line.startswith("GPU "))
+
+
+def _run_placed_function(result_path: str, target: Callable, args: tuple, kwargs: dict) -> None:
+    """Run a placed function task in its own Dragon process.
+
+    Dragon discards a process's return value, so the outcome is pickled to ``result_path`` as
+    ``(result, raised, traceback)`` for the monitor thread to read back. An exception raised by
+    ``target`` is stored there rather than re-raised.
+    """
+    try:
+        outcome = (target(*args, **kwargs), False, None)
+    except Exception as exc:
+        outcome = (exc, True, traceback.format_exc())
+    try:
+        data = pickle.dumps(outcome)
+    except Exception as exc:
+        error = RuntimeError(f"cannot pickle the outcome of the placed function: {exc}")
+        data = pickle.dumps((error, True, traceback.format_exc()))
+    tmp_path = f"{result_path}.tmp"
+    with open(tmp_path, "wb") as f:
+        f.write(data)
+    os.replace(tmp_path, result_path)
+
+
+def _read_placed_result(result_path: str, result: Any, raised: bool, tb: Optional[str]) -> tuple:
+    """Swap a placed function's exit code for the outcome it wrote to ``result_path``.
+
+    Returns ``(result, raised, traceback)``. A Dragon-side failure (``raised``) is kept as is.
+    """
+    try:
+        if raised:
+            return result, raised, tb
+        try:
+            with open(result_path, "rb") as f:
+                # Written by _run_placed_function into this backend's own work dir.
+                return pickle.load(f)  # noqa: S301
+        except FileNotFoundError:
+            if isinstance(result, int) and result != 0:
+                return SystemExit(result), True, None
+            return (
+                RuntimeError(
+                    f"placed function task exited without a result at {result_path}; "
+                    "the backend work dir must be on a file system shared with the nodes"
+                ),
+                True,
+                None,
+            )
+        except Exception as exc:
+            return exc, True, None
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(result_path)
 
 
 # ============================================================================
@@ -220,6 +361,15 @@ class DragonExecutionBackend(BaseBackend):
                 },
             )
 
+    Note on placement:
+        A task description may carry ``placement = {"node": i, "host": name, "gpus": [...]}``
+        (AsyncFlow's ``ResourcePolicy`` in node mode writes it). With a host, the task runs on
+        that host, pinned to those GPUs, through a Dragon ``Policy`` on its process template(s).
+        ``Batch.function()`` takes no policy, so a placed function task without templates runs
+        as one Dragon process, and its result comes back through ``<work_dir>/<uid>.result``.
+        A host or GPU that Dragon does not have fails the task. A ``policy`` the user set in a
+        process template wins over the placement.
+
     Note on MPI jobs:
         A task with ``process_templates`` runs as one Batch job, which Dragon launches with a
         PMI. Batch's default is ``PMIBackend.CRAY``, right for Cray MPICH. With Open MPI it is
@@ -312,6 +462,10 @@ class DragonExecutionBackend(BaseBackend):
         self._cancelled_tuids: set[str] = set()
         self._batch_monitor_thread = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Dragon host name -> GPU device ids, looked up on the first placed task.
+        self._node_gpus: Optional[dict[str, set[int]]] = None
+        # Whether the first placed GPU task has had its GPUs probed for reachability.
+        self._gpus_probed = False
         # Job warnings: no PMI, once per kind of job (see _job_options); no timeout, once.
         self._warned_job_pmi: set[tuple[bool, bool]] = set()
         self._warned_job_timeout = False
@@ -440,6 +594,11 @@ class DragonExecutionBackend(BaseBackend):
                         # Exit codes of process/job tasks pass through unchanged;
                         # _deliver_batch maps them to exit_code and DONE/FAILED.
                         task_reg = self._task_registry.get(uid)
+                        result_path = task_reg.get("result_path") if task_reg else None
+                        if result_path:
+                            result, raised, tb = _read_placed_result(
+                                result_path, result, raised, tb
+                            )
                         capture_stdio = (
                             task_reg.get("description", {}).get("capture_stdio")
                             if task_reg
@@ -561,20 +720,91 @@ class DragonExecutionBackend(BaseBackend):
         # otherwise complete and be polled before this loop even finishes).
         self.logger.info(f"Submitted {len(batch_tasks_data)} tasks (streaming, auto-dispatched)")
 
+    def _check_placement(self, policy) -> None:
+        """Reject a placement on a host or GPU this Dragon runtime does not have.
+
+        Dragon aborts the whole runtime on an unknown host name, and silently drops unknown GPU ids,
+        which leaves the task unpinned. Raising here fails only this task.
+        """
+        if self._node_gpus is None:
+            nodes = [Node(h_uid) for h_uid in System().nodes]
+            self._node_gpus = {node.hostname: set(node.gpus or []) for node in nodes}
+        gpus = self._node_gpus.get(policy.host_name)
+        if gpus is None:
+            raise ValueError(
+                f"placement host {policy.host_name!r} is not a Dragon node; "
+                f"Dragon nodes: {sorted(self._node_gpus)}"
+            )
+        unknown = sorted(set(policy.gpu_affinity) - gpus)
+        if unknown:
+            hint = ""
+            if not gpus:
+                hint = (
+                    ". Dragon lists no GPUs there. Dragon 0.15 finds NVIDIA GPUs through the CUDA "
+                    "runtime, so the job must request GPUs (e.g. Slurm --gres or --gpus), and "
+                    "libcudart.so and the driver's libcuda.so.1 must load in the Dragon runtime's "
+                    "environment (e.g. through LD_LIBRARY_PATH)"
+                )
+            raise ValueError(
+                f"placement GPUs {unknown} are not on Dragon node {policy.host_name!r}; "
+                f"its GPUs: {sorted(gpus)}{hint}"
+            )
+        if policy.gpu_affinity and not self._gpus_probed:
+            self._gpus_probed = True
+            self._warn_unreachable_gpus()
+
+    def _warn_unreachable_gpus(self) -> None:
+        """Warn once when this node reaches fewer GPUs than Dragon lists for it.
+
+        Dragon 0.14 counts a node's GPUs from ``nvidia-smi -L`` or ``lspci``, not from what the job
+        may use: in a Slurm job without ``--gres`` it still lists GPU 0, and a task pinned there runs
+        without a GPU. Dragon 0.15 counts them through the CUDA runtime, so it lists only the GPUs
+        the job reaches, and none when libcudart.so does not load. The reachable count comes from
+        libcuda, through this Python; when this Python cannot
+        load libcuda, it comes from ``nvidia-smi -L``. Only the node this process runs on is
+        probed, and only NVIDIA GPUs.
+        """
+        host = current_node().hostname
+        listed = sorted(self._node_gpus.get(host, ()))
+        if not listed:
+            return
+        reachable, loaded = _cuda_device_count()
+        source = "CUDA"
+        if not loaded:
+            self.logger.warning(
+                f"Dragon lists GPUs {listed} on {host}, but this Python ({sys.executable}) "
+                "cannot load libcuda.so.1 there: Python function tasks it runs may not reach "
+                "CUDA either."
+            )
+            reachable, source = _nvidia_smi_device_count(), "nvidia-smi"
+        if reachable is not None and reachable < len(listed):
+            self.logger.warning(
+                f"Dragon lists GPUs {listed} on {host}, but {source} reaches {reachable} of them: "
+                "GPU tasks placed there may run without their GPU. "
+                "Does the job request GPUs (e.g. Slurm --gres or --gpus)?"
+            )
+
     async def build_task(self, task: dict):
         """Translate AsyncFlow task to Dragon Batch task.
 
         Translation Priority (in order):
         1. If process_templates (list) provided → Job mode [function/executable]
         2. If process_template (single) provided → Process mode [function/executable]
-        3. If is_function (no templates) → Function mode (native) [function only]
-        4. If is_executable (no templates) → Process mode (auto-build) [executable only]
+        3. If is_function with a placement (no templates) → Placed function mode
+        4. If is_function (no templates) → Function mode (native) [function only]
+        5. If is_executable (no templates) → Process mode (auto-build) [executable only]
 
         Execution Modes:
         - Function Native: batch.function() - direct Python function call
+        - Placed Function: batch.process() - function in one placed process, returns its value
         - Function Process: batch.process() - function wrapped in ProcessTemplate
         - Executable Process: batch.process() - single executable process
         - Executable Job: batch.job() - executable in MPI job via process_templates
+
+        Placement:
+            ``task["placement"]`` with a ``host`` adds ``Policy(placement=HOST_NAME,
+            host_name=host, gpu_affinity=gpus)`` to every process template that has no
+            ``policy`` of its own. A user-set template ``policy`` wins, with a warning.
 
         Setting cwd (working directory):
             Pass ``cwd`` inside ``process_template`` or each entry of ``process_templates``
@@ -638,9 +868,27 @@ class DragonExecutionBackend(BaseBackend):
             stdout_path = os.path.join(self._work_dir, f"{uid}.stdout")
             stderr_path = os.path.join(self._work_dir, f"{uid}.stderr")
 
+        placement = task.get("placement")
+        placement_policy = _placement_policy(placement)
+        result_path = None
+        if placement_policy is not None:
+            self._check_placement(placement_policy)
+            self.logger.debug(
+                f"Placing task {uid} on {placement_policy.host_name}, "
+                f"GPUs {placement_policy.gpu_affinity}"
+            )
+
         def _build_process_template_kwargs(template_cfg: dict[str, Any]) -> dict[str, Any]:
-            """Build ProcessTemplate kwargs from user config."""
-            return {**template_cfg, "args": task_args, "kwargs": task_kwargs}
+            """Build ProcessTemplate kwargs from user config, adding the placement policy."""
+            template_kwargs = {**template_cfg, "args": task_args, "kwargs": task_kwargs}
+            if placement_policy is not None:
+                if template_cfg.get("policy") is None:
+                    template_kwargs["policy"] = placement_policy
+                else:
+                    self.logger.warning(
+                        f"Task {uid}: process template policy overrides placement {placement}"
+                    )
+            return template_kwargs
 
         # Build task options once and reuse across all submission paths.
         # Dragon 0.14.1-rc requires metadata (name, timeout, stdio paths) to go through
@@ -668,12 +916,24 @@ class DragonExecutionBackend(BaseBackend):
                 ProcessTemplate(target, **_build_process_template_kwargs(process_template_config))
             )
 
+        elif is_function and placement_policy is not None:
+            # Priority 3: Placed function. batch.function() takes no policy, so run the
+            # function as one placed process; _run_placed_function writes its result.
+            result_path = os.path.join(self._work_dir, f"{uid}.result")
+            batch_task = task_opts.process(
+                ProcessTemplate(
+                    _run_placed_function,
+                    args=(result_path, target, tuple(task_args), task_kwargs),
+                    policy=placement_policy,
+                )
+            )
+
         elif is_function:
-            # Priority 3: Function native (batch.function — returns Python value, not exit code)
+            # Priority 4: Function native (batch.function — returns Python value, not exit code)
             batch_task = task_opts.function(target, *task_args, **task_kwargs)
 
         else:
-            # Priority 4: Executable process auto-build
+            # Priority 5: Executable process auto-build
             batch_task = task_opts.process(
                 ProcessTemplate(target, **_build_process_template_kwargs({}))
             )
@@ -684,6 +944,7 @@ class DragonExecutionBackend(BaseBackend):
             "description": task,
             "batch_task": batch_task,
             "is_native_function": is_native_function,
+            "result_path": result_path,
         }
         self._monitored_batches[batch_task.uid] = (batch_task, uid)
 
