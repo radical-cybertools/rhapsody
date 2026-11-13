@@ -1805,6 +1805,109 @@ async def test_unplaced_tasks_fail_when_no_worker_is_left(dragon, tmp_path, monk
         await be.shutdown()
 
 
+def never_ready(wid, inbox, results):
+    """A worker whose process runs but never reports ready, as on a hung node."""
+    GATE.wait(30)
+
+
+@pytest.mark.parametrize("gpus", [False, True], ids=["replacement", "gpu-worker"])
+async def test_worker_not_ready_by_its_deadline_fails_the_tasks_waiting_for_it(
+    dragon, tmp_path, monkeypatch, gpus
+):
+    """A replacement or GPU worker that never reported ready used to count as live for good.
+
+    The tasks queued for it never started, so even a task with a timeout never ended.
+    """
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False)
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        rec = Recorder(be)
+        be._worker_start_timeout = 0.3
+        if gpus:
+            monkeypatch.setattr(worker_module, "worker_main", never_ready)
+            placement = {"host": "n0", "gpus": [1]}
+        else:
+            first = fn_task(blocked, placement={"host": "n0"})
+            await be.submit_tasks([first])
+            monkeypatch.setattr(worker_module, "worker_main", never_ready)
+            assert await be.cancel_task(first["uid"]) is True  # its replacement never gets ready
+            placement = {"host": "n0"}
+        task = fn_task(square, 3, placement=placement, task_backend_specific_kwargs={"timeout": 5})
+        await be.submit_tasks([task])
+        assert await rec.wait(task["uid"]) == ["FAILED"]
+        assert "was not ready 0.3 s after its launch" in task["stderr"]
+        stuck = [p for p in dragon.started if p.target is never_ready]
+        assert len(stuck) == 1
+        await until(lambda: stuck[0].done.is_set())  # killed
+        assert be.num_workers == (2 if gpus else 1)
+    finally:
+        GATE.set()
+        await be.shutdown()
+
+
+async def test_host_that_loses_its_last_worker_is_logged_and_not_counted(
+    dragon, tmp_path, monkeypatch, caplog
+):
+    """``num_workers`` kept the pool's size at start, and a host's empty pool went unremarked."""
+    caplog.set_level("ERROR", logger=dragon_native._get_logger().name)
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False)
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        rec = Recorder(be)
+        assert be.num_workers == 2
+        first = fn_task(blocked, placement={"host": "n0"})
+        await be.submit_tasks([first])
+
+        def no_inbox(*args, **kwargs):
+            raise RuntimeError("cannot make a channel on n0")
+
+        monkeypatch.setattr(dragon_native, "Queue", no_inbox)
+        assert await be.cancel_task(first["uid"]) is True  # its replacement cannot start
+        await until(lambda: be.num_workers == 1)
+        assert any("No pool worker is left on n0" in r.getMessage() for r in caplog.records)
+        placed = fn_task(square, 2, placement={"host": "n0"})
+        await be.submit_tasks([placed])
+        assert await rec.wait(placed["uid"]) == ["FAILED"]
+    finally:
+        GATE.set()
+        await be.shutdown()
+
+
+async def test_group_whose_join_fails_has_its_ranks_killed(backend, dragon, monkeypatch):
+    """With no timeout, the error went up as is: close() sends no SIGKILL, and reaps nothing."""
+    monkeypatch.setattr(dragon.ProcessGroup, "join_error", FakeProcessGroupError("manager died"))
+    rec = Recorder(backend)
+    task = exe_task(
+        "/bin/sleep", "30", task_backend_specific_kwargs={"process_templates": [(2, {})]}
+    )
+    await backend.submit_tasks([task])
+    assert await rec.wait(task["uid"]) == ["FAILED"]
+    members = dragon.groups[-1].members
+    await until(lambda: all(p.popen.poll() is not None for p in members))
+    token = f"{worker_module.TOKEN_ENV}={backend._id}.{task['uid']}"
+    assert token in [line for _, line, _ in dragon.reaped]
+
+
+async def test_process_task_whose_join_fails_has_its_process_killed(backend, dragon, monkeypatch):
+    join = dragon.Process.join
+
+    def failing_join(self, timeout=None):
+        if self.target == "/bin/sleep":
+            raise RuntimeError("Global Services went away")
+        return join(self, timeout)
+
+    monkeypatch.setattr(dragon.Process, "join", failing_join)
+    rec = Recorder(backend)
+    task = exe_task("/bin/sleep", "30")
+    await backend.submit_tasks([task])
+    assert await rec.wait(task["uid"]) == ["FAILED"]
+    assert "Global Services went away" in task["stderr"]
+    proc = next(p for p in dragon.started if p.target == "/bin/sleep")
+    await until(lambda: proc.popen.poll() is not None)
+
+
 @pytest.mark.parametrize("soft, warned", [(45, True), (4096, False)])
 async def test_start_warns_when_a_node_may_run_out_of_descriptors(
     dragon, tmp_path, monkeypatch, caplog, soft, warned
