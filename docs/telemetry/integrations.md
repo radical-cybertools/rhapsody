@@ -331,6 +331,8 @@ Trace (one per session)
     ├── task span  [TaskStarted … TaskFailed]       task_id=B
     ├── task span  [TaskStarted … TaskCompleted]   task_id=C
     │   ⋮
+    ├── chat span  [batch dispatched … last response]   inference batch (experimental),
+    │              linked to the task spans of the batch
     │
     └── ResourceUpdate events (linked to session span via span_id)
         ├── resource_scope="per_node", node_id=node0, gpu_id=null   (aggregate)

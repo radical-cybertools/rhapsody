@@ -85,6 +85,10 @@ Once the allocation is granted, launch with the `dragon` command:
 dragon <script.py>
 ```
 
+### 7. Check the inference telemetry (optional)
+
+To check on your allocation that the inference telemetry (batch spans, queue waits, batch and model durations) is recorded correctly, run the self-verifying script `examples/telemetry/01-inference-telemetry.py` with the same `dragon` command. It prints a PASS/FAIL table; the steps, the runs to do and what to send back are in `examples/telemetry/README.md` ("Verifying inference telemetry on a cluster"). See also the [telemetry reference](../telemetry/reference.md#inference-telemetry-experimental).
+
 ---
 
 ## Example

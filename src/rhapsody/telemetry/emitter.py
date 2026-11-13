@@ -1,8 +1,9 @@
 """The telemetry handle a backend uses to report plain data.
 
-Every backend (execution, AI, data) gets an :class:`Emitter` as ``backend.telemetry``. The session
-or workflow engine hands a :class:`BackendEmitter` over when it attaches the backend to a
-:class:`~rhapsody.telemetry.manager.TelemetryManager`. Until then, and whenever telemetry is off,
+Every backend (execution, AI, data) gets an :class:`Emitter` as ``backend.telemetry``. When the
+backend is attached to a session or workflow engine with telemetry, the
+:class:`~rhapsody.telemetry.manager.TelemetryManager` hands it a :class:`BackendEmitter` through
+the backend's ``register_emitter`` hook. Until then, and whenever telemetry is off,
 ``backend.telemetry`` is a :class:`NoopEmitter`, so a backend never checks for ``None``::
 
     if self.telemetry.enabled:

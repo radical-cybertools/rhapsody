@@ -2,7 +2,32 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Telemetry (experimental): every backend has an emitter.** `backend.telemetry` is a no-op
+  emitter (`enabled` is `False`) until the telemetry manager attaches the backend and hands it a
+  real one through the new `BaseBackend.register_emitter` / `DataBackend.register_emitter` hook
+  (the counterpart of `register_callback`; override it to react). A backend reports plain data
+  with `self.telemetry.emit(name, attributes)` and never imports OpenTelemetry. `Session` now
+  also attaches data backends to telemetry (emitter only: no resource adapter). A failing
+  emitter handoff is now logged as a warning with its traceback instead of at debug level.
+- **Telemetry (experimental): instrumentations.** A backend names its domain with the class
+  attribute `telemetry_domain` (on `BaseBackend` and `DataBackend`); the manager hosts the
+  instrumentation registered for it (`rhapsody.telemetry.instrumentation`:
+  `Instrumentation`, `register_instrumentation`) and routes the backend's events to it. See
+  "Backends, emitters and instrumentations" in the telemetry reference.
+- **Telemetry (experimental): inference telemetry for `DragonVllmInferenceBackend`.** Per batch:
+  one `chat {model}` span (real start and end, linked to the task spans of the batch),
+  per-task attributes (batch id, prompt count, queue wait, timeouts), histograms of the request
+  queue wait, batch duration and Dragon's model time, and counters of requests, prompts,
+  timed-out prompts and batches. Prompt and response text is never carried. Names follow the
+  OpenTelemetry GenAI conventions, which are still in development. See "Inference telemetry" in
+  the telemetry reference.
+
 ### Changed
+
+- **The `telemetry` extra needs `opentelemetry-sdk>=1.30.0`** (was 1.20), only for the histogram
+  bucket advice of the inference durations.
 
 - **Telemetry (experimental): task and resource metrics are recorded by a task instrumentation**
   instead of the `TelemetryManager`. Instrument names, descriptions, attributes, values, the

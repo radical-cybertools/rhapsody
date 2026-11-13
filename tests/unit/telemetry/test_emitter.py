@@ -222,3 +222,110 @@ def test_importing_the_emitter_does_not_import_opentelemetry():
     out = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "ok"
+
+
+# ------------------------------------------------------------- register_emitter hook
+
+
+class _Data(DataBackend):
+    async def _do_start(self): ...
+    async def _do_shutdown(self): ...
+    async def _do_ready(self):
+        return True
+
+
+def _noop_backend():
+    from rhapsody.backends.execution.noop import NoopExecutionBackend
+
+    return NoopExecutionBackend(name="hooked")
+
+
+def test_the_default_hook_stores_the_emitter_on_both_backend_bases():
+    manager = TelemetryManager(session_id="s")
+    for backend in (_noop_backend(), _Data()):
+        emitter = BackendEmitter(manager, "b")
+        backend.register_emitter(emitter)
+        assert backend.telemetry is emitter
+
+
+def test_attach_backend_calls_the_hook_with_a_backend_emitter():
+    seen = []
+
+    class Recording(type(_noop_backend())):
+        def register_emitter(self, emitter):
+            seen.append(emitter)
+            super().register_emitter(emitter)
+
+    manager = TelemetryManager(session_id="s")
+    backend = Recording(name="hooked")
+    _attach(manager, backend, name="hooked")
+    assert len(seen) == 1
+    assert isinstance(seen[0], BackendEmitter)
+    assert backend.telemetry is seen[0]  # the override called super()
+    assert seen[0]._backend_name == "hooked"
+
+
+def test_a_data_backend_override_is_called_too():
+    seen = []
+
+    class Recording(_Data):
+        def register_emitter(self, emitter):
+            seen.append(emitter)
+            super().register_emitter(emitter)
+
+    backend = Recording()
+    _attach(TelemetryManager(session_id="s"), backend)
+    assert len(seen) == 1
+    assert backend.telemetry is seen[0]
+
+
+def test_a_raising_hook_does_not_break_attach_and_is_logged(caplog):
+    import logging
+
+    class Broken(type(_noop_backend())):
+        def register_emitter(self, emitter):
+            raise RuntimeError("hook failed")
+
+    manager = TelemetryManager(session_id="s")
+    with caplog.at_level(logging.WARNING):
+        _attach(manager, Broken(name="broken"), name="broken")  # must not raise
+    record = next(r for r in caplog.records if "Could not hand an emitter" in r.getMessage())
+    assert record.levelno == logging.WARNING
+    assert record.exc_info is not None
+
+
+def test_an_object_without_the_hook_still_gets_the_emitter():
+    class Plain:  # not a BaseBackend or DataBackend: no register_emitter
+        pass
+
+    plain = Plain()
+    manager = TelemetryManager(session_id="s")
+    _attach(manager, plain)
+    assert isinstance(plain.telemetry, BackendEmitter)
+    assert not hasattr(plain, "register_emitter")
+
+
+def test_a_backend_that_skips_super_init_still_has_the_default_emitter():
+    from rhapsody.backends.base import BaseBackend
+
+    class Lazy(BaseBackend):
+        def __init__(self):  # no super().__init__()
+            pass
+
+        async def submit_tasks(self, tasks): ...
+        async def shutdown(self): ...
+        def state(self):
+            return "x"
+
+        def task_state_cb(self, task, state): ...
+        def get_task_states_map(self):
+            return None
+
+        def build_task(self, task): ...
+        async def cancel_task(self, uid):
+            return False
+
+    backend = Lazy()
+    assert isinstance(backend.telemetry, NoopEmitter)  # the class attribute
+    _attach(TelemetryManager(session_id="s"), backend)
+    assert isinstance(backend.telemetry, BackendEmitter)

@@ -75,8 +75,8 @@ class DataBackend(abc.ABC):
     terminal-state guard correct without any state duplicated in subclasses.
     """
 
-    # Telemetry handle: a no-op emitter until a session attaches the backend to a
-    # TelemetryManager (see BaseBackend.telemetry and rhapsody.telemetry.emitter).
+    # Telemetry handle: a no-op emitter until the TelemetryManager hands the backend a real one
+    # through ``register_emitter`` (see BaseBackend.telemetry and rhapsody.telemetry.emitter).
     telemetry: Emitter = NoopEmitter()
 
     # Name of the telemetry domain whose instrumentation the manager hosts for this backend
@@ -88,6 +88,15 @@ class DataBackend(abc.ABC):
         self._state: DataBackendState = DataBackendState.CREATED
         self._endpoints: list[Endpoint] = []
         self._lock = asyncio.Lock()
+
+    def register_emitter(self, emitter: Emitter) -> None:
+        """Receive the telemetry emitter (same contract as ``BaseBackend.register_emitter``).
+
+        The :class:`~rhapsody.telemetry.manager.TelemetryManager` calls this when the backend is
+        attached to a session with telemetry. The default stores the emitter in ``self.telemetry``;
+        override it to react and call ``super().register_emitter(emitter)``.
+        """
+        self.telemetry = emitter
 
     @property
     def name(self) -> str:

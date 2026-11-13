@@ -532,22 +532,31 @@ class TelemetryManager:
     ) -> None:
         """Hand the backend its emitter, then register its resource telemetry adapter.
 
-        Every backend, including data backends, gets an emitter (``backend.telemetry``); it is
-        replaced on each call, so a backend reused by a new manager emits into that one. Then the
-        appropriate telemetry adapter is registered. Silently skips backends with no adapter
-        (LocalExecutionBackend, NoopExecutionBackend, unknown types) and data backends (no
-        ``submit_tasks``). Safe to call before or after start(); if already running the adapter is
-        started immediately. Attaching the same backend again adds no second adapter, and all
-        Dragon backends of a session share one node poller.
+        Every backend, including data backends, gets an emitter through its ``register_emitter``
+        hook (an object without the hook, such as a duck-typed stand-in, gets the ``telemetry``
+        attribute set directly); it is replaced on each call, so a backend reused by a new
+        manager emits into that one. A failing hook is logged as a warning and never breaks
+        attach. Then the appropriate telemetry adapter is registered. Silently skips backends
+        with no adapter (LocalExecutionBackend, NoopExecutionBackend, unknown types) and data
+        backends (no ``submit_tasks``). Safe to call before or after start(); if already running
+        the adapter is started immediately. Attaching the same backend again adds no second
+        adapter, and all Dragon backends of a session share one node poller.
 
         If the backend names a ``telemetry_domain``, the instrumentation registered for it is
         hosted too (see :meth:`_attach_instrumentation`).
         """
+        emitter = BackendEmitter(self, backend_name)
         try:
-            backend.telemetry = BackendEmitter(self, backend_name)
+            register = getattr(backend, "register_emitter", None)
+            if register is not None:
+                register(emitter)
+            else:
+                # Legacy: an object that is not a BaseBackend or DataBackend (a duck-typed
+                # stand-in, an engine's own simple backend) has no hook.
+                backend.telemetry = emitter
         except Exception:
-            # A stand-in object or one with a read-only attribute must not break attach.
-            logger.debug("Could not hand an emitter to %s", backend_name, exc_info=True)
+            # A failing override, or an object with a read-only attribute, must not break attach.
+            logger.warning("Could not hand an emitter to %s", backend_name, exc_info=True)
 
         # Before the early returns below: data backends and Dragon backends need it too.
         self._attach_instrumentation(backend, backend_name)
