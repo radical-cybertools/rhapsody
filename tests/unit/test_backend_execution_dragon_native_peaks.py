@@ -331,8 +331,8 @@ def test_a_pool_call_reports_its_peak_and_its_growth_in_a_process_of_its_own():
     """In the fake, workers are threads of pytest; here the worker's measurement runs in a real
     process, as on Dragon.
 
-    ``host_mem`` is the worker's whole peak during the call (decision-4,
-    D2), ``host_mem_growth`` the call's growth.
+    ``host_mem`` is the worker's whole peak during the call, ``host_mem_growth`` the call's
+    growth.
     """
     import json
     import subprocess
@@ -416,7 +416,7 @@ async def test_real_runtime_observed(tmp_path):
 
 
 # ============================================================================
-# Review findings (MTU-51): each test fails without its fix
+# Review findings: each test fails without its fix
 # ============================================================================
 
 
@@ -564,7 +564,7 @@ async def test_records_stay_gone_once_read(dragon, tmp_path):  # noqa: F811
 
 
 # ============================================================================
-# Tasks that die with their process (decision-4, D3), and what workers say about themselves
+# Tasks that die with their process, and what workers say about themselves
 # ============================================================================
 
 
