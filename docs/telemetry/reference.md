@@ -289,6 +289,9 @@ To get CPU/memory for a specific GPU node, join `per_gpu` events to the `per_nod
 | `disk_read/write_bytes` | `per_node` only | ✅ (delta) | ✅ (delta, first poll = null) | ✅ (delta) |
 | `net_sent/recv_bytes` | `per_node` only | ✅ (delta) | ❌ | ✅ (delta) |
 
+The Dragon column holds for every Dragon backend, `DragonNativeExecutionBackend` included: they share
+one adapter, which polls the runtime's nodes once per session.
+
 ---
 
 ## Custom events — `define_event()`

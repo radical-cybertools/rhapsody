@@ -8,6 +8,7 @@ import pytest
 pytest.importorskip("opentelemetry", reason="opentelemetry-sdk not installed")
 
 from rhapsody.backends.execution.concurrent import ConcurrentExecutionBackend
+from rhapsody.backends.execution.dragon_native import DragonNativeExecutionBackend
 from rhapsody.telemetry.adapters.concurrent import ConcurrentTelemetryAdapter
 from rhapsody.telemetry.manager import TelemetryManager
 
@@ -52,6 +53,14 @@ def test_dragon_backends_share_one_node_poller():
     manager = TelemetryManager(session_id="s")
     _attach(manager, DragonExecutionBackend(), "dragon")
     _attach(manager, DragonVllmInferenceBackend(), "vllm")
+    assert [type(a).__name__ for a in manager._adapters] == ["DragonTelemetryAdapter"]
+
+
+def test_native_dragon_backend_gets_the_dragon_node_poller():
+    """It matches by class name; the adapter uses Dragon's native API, not Batch."""
+    manager = TelemetryManager(session_id="s")
+    backend = DragonNativeExecutionBackend.__new__(DragonNativeExecutionBackend)
+    _attach(manager, backend, "dragon_native")
     assert [type(a).__name__ for a in manager._adapters] == ["DragonTelemetryAdapter"]
 
 

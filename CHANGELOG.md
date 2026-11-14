@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`DragonNativeExecutionBackend`** (backend name `dragon_native`) — a second
+  Dragon backend beside `DragonExecutionBackend`, on Dragon's `Process`,
+  `ProcessGroup`, `Policy` and `Queue`, without `dragon.workflows.batch`. It takes
+  the same task descriptions. Functions run in a persistent pool of workers, by
+  default one per physical core, pinned to their hosts and CPUs (placed functions
+  on a worker of that host, GPU tasks on a worker started for that GPU set),
+  executables as one native process each, and
+  `process_templates` as one process group, with the PMI chosen by `pmi`. Unlike a
+  Batch job, a group has no PMI by default. A relay process on the client's node
+  trades tasks and results with the client in batches, so a client process that
+  keeps its GIL busy still starts tasks quickly. See `docs/execution/dragon-native.md`.
+  `tests/integration/test-hpc/benchmarks/dragon_throughput.py` measures it with
+  `--with-rhapsody-dragon-native`, and `--workers_per_node` sets its pool size;
+  `tests/performance/dragon_native_busy_client.py` measures it next to a busy thread.
+
 ### Changed
 
 - **Telemetry (experimental): task and resource metrics are recorded by a task instrumentation**

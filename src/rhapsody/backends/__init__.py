@@ -52,6 +52,13 @@ except ImportError:
     pass
 
 try:
+    from .execution import DragonNativeExecutionBackend  # noqa: F401
+
+    __all__.append("DragonNativeExecutionBackend")
+except ImportError:
+    pass
+
+try:
     from .execution import OrbitExecutionBackend  # noqa: F401
 
     __all__.append("OrbitExecutionBackend")
