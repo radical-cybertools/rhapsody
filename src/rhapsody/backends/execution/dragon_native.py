@@ -28,6 +28,7 @@ import os
 import queue
 import resource
 import shutil
+import signal
 import threading
 import time
 import uuid
@@ -35,6 +36,7 @@ from collections import Counter
 from collections import defaultdict
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
@@ -123,9 +125,21 @@ _JOIN_RUNNING = (2, 4)
 # Seconds a timed-out process task waits for its process to exit after the kill, before it ends
 # without an exit code.
 _KILL_WAIT = 10.0
-# Seconds shutdown gives all kills, on top of kill_grace, and then all task threads.
+# Seconds shutdown gives: an idle worker's inbox to take its stop, a worker to exit once told to, a
+# process to exit after its SIGKILL, all processes to exit, the group tasks' threads to end, and
+# the queues to go.
+_SEND_STOP = 0.1
+_STOP_WORKERS = 5.0
 _STOP_KILLS = 20.0
+_STOP_PROCESSES = 120.0
 _STOP_THREADS = 15.0
+_STOP_QUEUES = 30.0
+# Processes shutdown lets be on their way out at once: 768 at once wedged Global Services.
+_STOP_WINDOW = 64
+# Seconds between shutdown's checks for processes that exited, and the threads it sends signals and
+# destroys queues from: each is a request to Global Services, too slow one at a time.
+_STOP_POLL = 0.05
+_STOP_PARALLEL = 8
 # Template keys the backend sets itself.
 _OWN_TEMPLATE_KEYS = ("target", "args", "kwargs")
 # Where a result message holds the task's pickled value.
@@ -493,6 +507,8 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._flush_loop: asyncio.AbstractEventLoop | None = None
 
         self._stop_event = threading.Event()
+        # Seconds each step of the last shutdown took.
+        self._stop_phases: dict[str, float] = {}
         # Wakes the process watcher when it has nothing to watch.
         self._watch_wake = threading.Event()
         self._threads: list[threading.Thread] = []
@@ -1995,13 +2011,27 @@ class DragonNativeExecutionBackend(BaseBackend):
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._stop)
         self._flush_outbox()
-        self.logger.info("DragonNativeExecutionBackend shutdown complete")
+        phases = ", ".join(f"{name} {s:.2f}" for name, s in self._stop_phases.items())
+        self.logger.info(f"DragonNativeExecutionBackend shutdown complete, in s: {phases}")
 
     def _stop(self) -> None:
-        """Stop everything, each step with a deadline.
+        """Stop everything, each step with a deadline, and keep the seconds each step took in
+        ``_stop_phases``.
 
-        Runs off the loop.
+        The backend's processes end, many at a time but not all at once (``_stop_processes``),
+        then one reaper per node kills what the tasks left, the threads and the relay stop, and
+        the queues are destroyed, several at a time. Runs off the loop.
         """
+        t0 = mark = time.monotonic()
+        phases: dict[str, float] = {}
+        self._stop_phases = phases
+
+        def lap(name: str) -> None:
+            nonlocal mark
+            now = time.monotonic()
+            phases[name] = round(now - mark, 3)
+            mark = now
+
         with self._lock:
             self._stopping = True
             records = list(self._tasks.values())
@@ -2012,47 +2042,173 @@ class DragonNativeExecutionBackend(BaseBackend):
             for rec in records:
                 rec.cancelled = True
                 if rec.kind == "pool" and rec.worker is not None:
-                    busy.append((rec.worker, rec.token))
+                    busy.append(rec.worker)
                     rec.worker.state = "dead"
                     rec.worker.task = None
             workers = list(self._workers.values())
         if self._loop is not None:
             self._emit_all([(rec, "CANCELED", {}) for rec in records])
 
-        kills = [self._ops.submit(self._kill_worker_now, w, token) for w, token in busy]
-        kills += [
-            self._ops.submit(self._kill_process_task, rec)
-            for rec in records
-            if rec.kind != "pool" and rec.puids
-        ]
+        # Queued starts would start processes now; a start under way kills its own process.
+        self._proc_ops.shutdown(wait=False, cancel_futures=True)
+        lap("cancel")
+
+        tasks = [rec for rec in records if rec.kind != "pool" and rec.puids]
+        # Not a with-block: leaving one waits for every thread, deadline or not.
+        pool = ThreadPoolExecutor(_STOP_PARALLEL, thread_name_prefix="dragon_native_stop")
+        try:
+            self._stop_processes(pool, workers, {w.wid for w in busy}, tasks)
+            lap("processes")
+            if busy or tasks:
+                self._reap_all()
+            lap("reap")
+            deadline = time.monotonic() + _STOP_THREADS
+            for rec in records:
+                if rec.thread is not None:
+                    rec.thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            lap("groups")
+            self._stop_threads()
+            lap("threads")
+            queues = [w.inbox for w in workers if w.inbox is not None]
+            queues += [q for q in (self._results, self._control, self._inbound) if q is not None]
+            _, left = wait_futures([pool.submit(q.destroy) for q in queues], timeout=_STOP_QUEUES)
+            if left:
+                self.logger.warning(
+                    f"{len(left)} of {len(queues)} queues were not destroyed in {_STOP_QUEUES} s"
+                )
+            lap("queues")
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+        for directory in self._stdio_dirs:
+            shutil.rmtree(directory, ignore_errors=True)
+        self._ops.shutdown(wait=False, cancel_futures=True)
+        phases["total"] = round(time.monotonic() - t0, 3)
+
+    def _stop_processes(
+        self, pool: ThreadPoolExecutor, workers: list, busy: set, tasks: list
+    ) -> None:
+        """End every process the backend started, with at most ``_STOP_WINDOW`` on their way out.
+
+        A process gets its stop once fewer than ``_STOP_WINDOW`` others wait to exit: a task's
+        process SIGTERM, a busy worker SIGKILL (its task is cancelled), an idle worker ``None`` on
+        its inbox. One non-blocking poll finds which exited, every ``_STOP_POLL`` seconds. A task's
+        process still there ``kill_grace`` seconds after its SIGTERM gets SIGKILL, and so does a
+        worker ``_STOP_WORKERS`` seconds after its stop. One still there ``_STOP_KILLS`` seconds
+        after its SIGKILL, and all left after ``_STOP_PROCESSES`` seconds, are logged and left for
+        Dragon to end with the runtime.
+
+        768 workers told to stop at once wedged Global Services: it answered no request for minutes,
+        and the backend's close never ended. One at a time, it would take a request or more each.
+        """
+        waiting: deque = deque()  # (puid, how): "term", "kill", or the worker's inbox
+        waiting.extend((puid, "term") for rec in tasks for puid in rec.puids)
         for w in workers:
-            if w.state != "dead" and w.inbox is not None:
-                with contextlib.suppress(Exception):
-                    w.inbox.put(None, timeout=1.0)
-        deadline = time.monotonic() + self._kill_grace + _STOP_KILLS
-        for future in kills:
-            with contextlib.suppress(Exception):
-                future.result(timeout=max(0.0, deadline - time.monotonic()))
+            if w.proc is None:
+                continue  # not started: _launch_worker kills it once it is
+            if w.wid in busy or w.state == "dead" or w.inbox is None:
+                waiting.append((w.proc.puid, "kill"))
+            else:
+                waiting.append((w.proc.puid, w.inbox))
+        due: dict[int, float] = {}  # on their way out: when they get SIGKILL
+        killed: dict[int, float] = {}  # got SIGKILL: when shutdown stops waiting for them
+        lost = 0
+        deadline = time.monotonic() + _STOP_PROCESSES
+        while waiting or due or killed:
+            now = time.monotonic()
+            if now >= deadline:
+                lost += len(waiting) + len(due) + len(killed)
+                break
+            kill = [puid for puid, at in due.items() if at <= now]
+            term = []
+            for puid in kill:
+                del due[puid]
+            while waiting and len(due) + len(killed) + len(kill) < _STOP_WINDOW:
+                puid, how = waiting.popleft()
+                if how == "kill":
+                    kill.append(puid)
+                elif how == "term":
+                    term.append(puid)
+                    due[puid] = now + self._kill_grace
+                else:
+                    try:
+                        how.put(None, timeout=_SEND_STOP)
+                    except Exception:
+                        kill.append(puid)
+                    else:
+                        due[puid] = now + _STOP_WORKERS
+            killed.update((puid, now + _STOP_KILLS) for puid in kill)
+            self._signal_all(pool, term, signal.SIGTERM)
+            self._signal_all(pool, kill, signal.SIGKILL)
+            stuck = [puid for puid, at in killed.items() if at <= now]
+            for puid in stuck:
+                del killed[puid]
+            lost += len(stuck)
+            if not due and not killed:
+                continue
+            gone = self._exited_of([*due, *killed])
+            if gone is None:
+                lost += len(waiting) + len(due) + len(killed)
+                break
+            for puid in gone:
+                due.pop(puid, None)
+                killed.pop(puid, None)
+            time.sleep(_STOP_POLL)
+        if lost:
+            self.logger.warning(
+                f"{lost} Dragon processes of the backend did not exit; the runtime ends them"
+            )
 
-        puids = [w.proc.puid for w in workers if w.proc is not None]
-        if puids:
+    def _signal_all(self, pool: ThreadPoolExecutor, puids: list, sig: int) -> None:
+        """Send ``sig`` to every process of ``puids``, from several threads at once."""
+
+        def send(chunk):
+            for puid in chunk:
+                with contextlib.suppress(Exception):
+                    process_kill(puid, sig=sig)
+
+        chunks = [puids[i::_STOP_PARALLEL] for i in range(_STOP_PARALLEL)]
+        wait_futures([pool.submit(send, c) for c in chunks if c], timeout=_STOP_KILLS)
+
+    def _exited_of(self, puids: list) -> set | None:
+        """The processes of ``puids`` that exited, or that Global Services does not know.
+
+        None when it cannot tell: shutdown stops waiting.
+        """
+        try:
+            exited, status = multi_join(puids, timeout=0, join_all=False)
+        except Exception as exc:  # also when it knows none of them
+            self.logger.warning(f"Shutdown cannot join the backend's processes: {exc!r}")
+            return None
+        gone = {puid for puid, _ in exited or ()}
+        for key, (err, _) in (status or {}).items():
+            if err != _JOIN_EXITED and err not in _JOIN_RUNNING:
+                with contextlib.suppress(ValueError):
+                    gone.add(int(key))
+        return gone
+
+    def _reap_all(self) -> None:
+        """Kill, on every node, what is left of the backend's tasks: one reaper per node."""
+        prefix = f"{_worker.TOKEN_ENV}={self._id}."
+        reapers = []
+        for host in self._host_order:
             try:
-                exited, _ = multi_join(puids, timeout=5.0, join_all=True)
-            except Exception:
-                exited = None
-            if not exited or len(exited) < len(puids):
-                for w in workers:
-                    if w.proc is not None:
-                        with contextlib.suppress(Exception):
-                            w.proc.kill()
-                with contextlib.suppress(Exception):
-                    multi_join(puids, timeout=5.0, join_all=True)
+                reaper = Process(
+                    "/bin/sh",
+                    args=["-c", _worker.REAP_ALL_SCRIPT, "reap", prefix, "KILL"],
+                    stdout=ProcessTemplate.DEVNULL,
+                    stderr=ProcessTemplate.DEVNULL,
+                    policy=self._host_policy(host),
+                )
+                reaper.start()
+                reapers.append(reaper.puid)
+            except Exception as exc:
+                self.logger.warning(f"Could not reap the backend's tasks on {host}: {exc!r}")
+        if reapers:
+            with contextlib.suppress(Exception):
+                multi_join(reapers, timeout=10.0, join_all=True)
 
-        deadline = time.monotonic() + _STOP_THREADS
-        for rec in records:
-            if rec.thread is not None:
-                rec.thread.join(timeout=max(0.0, deadline - time.monotonic()))
-
+    def _stop_threads(self) -> None:
+        """Stop the backend's threads and its relay, each with a deadline."""
         self._stop_event.set()
         self._watch_wake.set()
         with self._timer_cv:
@@ -2070,23 +2226,6 @@ class DragonNativeExecutionBackend(BaseBackend):
             with contextlib.suppress(Exception):
                 if self._relay.join(timeout=5.0) is None:
                     self._relay.kill()
-
-        for w in workers:
-            self._discard_worker_queue(w)
-        for q in (self._results, self._control, self._inbound):
-            if q is not None:
-                with contextlib.suppress(Exception):
-                    q.destroy()
-        for directory in self._stdio_dirs:
-            shutil.rmtree(directory, ignore_errors=True)
-        self._ops.shutdown(wait=False, cancel_futures=True)
-        self._proc_ops.shutdown(wait=False, cancel_futures=True)
-
-    def _kill_worker_now(self, w: _Worker, token: str) -> None:
-        if w.proc is not None:
-            with contextlib.suppress(Exception):
-                w.proc.kill()
-        self._reap(w.host, token)
 
     async def state(self) -> str:  # type: ignore[override]
         """Backend state: INITIALIZED, RUNNING or SHUTDOWN."""

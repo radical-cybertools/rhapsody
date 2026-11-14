@@ -90,9 +90,11 @@ class FakeDragon:
         self.groups = []
         self.puids = itertools.count(1000)
         self.lock = threading.Lock()
-        # Requests to Global Services in flight from the client, and the most at once.
+        # Requests to Global Services in flight from the client, the most at once, and the seconds
+        # each one takes.
         self.in_flight = 0
         self.peak = 0
+        self.latency = 0.0
         dragon = self
 
         @contextlib.contextmanager
@@ -101,6 +103,8 @@ class FakeDragon:
                 dragon.in_flight += 1
                 dragon.peak = max(dragon.peak, dragon.in_flight)
             try:
+                if dragon.latency:
+                    time.sleep(dragon.latency)
                 yield
             finally:
                 with dragon.lock:
@@ -169,7 +173,10 @@ class FakeDragon:
                     dragon.started.append(self)
                 if callable(self.target):
                     threading.Thread(target=self._run_python, daemon=True).start()
-                elif self.target == "/bin/sh" and self.args[1] == worker_module.REAP_SCRIPT:
+                elif self.target == "/bin/sh" and self.args[1] in (
+                    worker_module.REAP_SCRIPT,
+                    worker_module.REAP_ALL_SCRIPT,
+                ):
                     dragon.reaped.append((self.host, self.args[3], self.args[4]))
                     self._exit(0)
                 else:
@@ -193,6 +200,7 @@ class FakeDragon:
             def _exit(self, code):
                 if not self.done.is_set():
                     self.code = code
+                    self.exited_at = time.monotonic()
                     self.done.set()
 
             def signal(self, sig):
@@ -287,7 +295,8 @@ class FakeDragon:
                 return self.q.get(timeout=timeout)
 
             def destroy(self):
-                self.destroyed = True
+                with request():
+                    self.destroyed = True
 
         def multi_join(puids, timeout=None, join_all=False):
             # As in Dragon, None waits for good and 0 checks once.
@@ -1895,6 +1904,123 @@ async def test_shutdown_cancels_running_and_queued_tasks_and_stops_the_pool(drag
         await be.submit_tasks([fn_task(square, 1)])
 
 
+async def test_shutdown_ends_a_large_pool_together(dragon, tmp_path):
+    """At 20 ms a request, stopping, joining, killing and destroying one worker at a time cost
+    seconds per hundred workers: with 768, the close did not end in 120 s."""
+    be = DragonNativeExecutionBackend(
+        workers_per_node=128, inline_stdio=False, kill_grace=0.2, max_process_ranks=16
+    )
+    be._work_dir = str(tmp_path)
+    await be
+    Recorder(be)
+    busy = [fn_task(blocked) for _ in range(16)]
+    exes = [exe_task("/bin/sleep", "30") for _ in range(16)]
+    await be.submit_tasks(busy + exes)
+    await until(lambda: len(be._watched) == 16)
+    dragon.latency = 0.02
+    t0 = time.monotonic()
+    await be.shutdown()
+    took = time.monotonic() - t0
+    assert took < 2.5, be._stop_phases
+    assert all(p.done.is_set() for p in dragon.workers())
+    assert sum(1 for p in dragon.workers() if p.code == -signal.SIGKILL) == 16
+    sleeps = [p for p in dragon.started if p.target == "/bin/sleep"]
+    await until(lambda: all(p.popen.poll() == -signal.SIGTERM for p in sleeps))
+    assert all(q.destroyed for q in [w.inbox for w in be._workers.values()] + [be._results])
+    assert {"processes", "reap", "groups", "threads", "queues", "total"} <= set(be._stop_phases)
+
+
+async def test_shutdown_reaps_what_the_tasks_left_once_per_node(backend, dragon):
+    tasks = [fn_task(blocked) for _ in range(3)] + [exe_task("/bin/sleep", "30") for _ in range(3)]
+    await backend.submit_tasks(tasks)
+    await until(lambda: len(backend._watched) == 3)
+    before = len(dragon.reaped)
+    await backend.shutdown()
+    prefix = f"{worker_module.TOKEN_ENV}={backend._id}."
+    assert sorted(dragon.reaped[before:]) == [("n0", prefix, "KILL"), ("n1", prefix, "KILL")]
+
+
+async def test_shutdown_kills_a_worker_that_does_not_stop(dragon, tmp_path, monkeypatch):
+    monkeypatch.setattr(dragon_native, "_STOP_WORKERS", 0.3)
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False)
+    be._work_dir = str(tmp_path)
+    await be
+    deaf, other = list(be._workers.values())
+    put = deaf.inbox.put
+    deaf.inbox.put = lambda obj, *args, **kwargs: None if obj is None else put(obj, *args, **kwargs)
+    t0 = time.monotonic()
+    await be.shutdown()
+    assert 0.3 <= time.monotonic() - t0 < 2.0
+    assert (deaf.proc.code, other.proc.code) == (-signal.SIGKILL, 0)
+    put(None)  # the fake worker's thread
+
+
+async def test_shutdown_lets_only_a_window_of_processes_out_at_once(dragon, tmp_path, monkeypatch):
+    """768 workers told to stop at once wedged Global Services, and the close never ended."""
+    monkeypatch.setattr(dragon_native, "_STOP_WINDOW", 4)
+    monkeypatch.setattr(dragon_native, "_STOP_WORKERS", 0.2)
+    be = DragonNativeExecutionBackend(workers_per_node=8, inline_stdio=False)
+    be._work_dir = str(tmp_path)
+    await be
+    told: dict = {}
+    puts = {}
+    for w in be._workers.values():  # workers that ignore their stop, and get SIGKILL
+        puts[w.wid] = put = w.inbox.put
+
+        def deaf(obj, *args, _wid=w.wid, _put=put, **kwargs):
+            if obj is None:
+                told.setdefault(_wid, time.monotonic())
+                return None
+            return _put(obj, *args, **kwargs)
+
+        w.inbox.put = deaf
+    t0 = time.monotonic()
+    await be.shutdown()
+    took = time.monotonic() - t0
+    workers = list(be._workers.values())
+    assert all(w.proc.code == -signal.SIGKILL for w in workers)
+    assert len(told) == 16 and took >= 16 / 4 * 0.2
+    for at in told.values():
+        out = [w for w in workers if told[w.wid] <= at < w.proc.exited_at]
+        assert len(out) <= 4
+    for put in puts.values():
+        put(None)  # the fake workers' threads
+
+
+async def test_shutdown_kills_a_process_that_ignores_sigterm_after_kill_grace(backend, dragon):
+    task = exe_task("/bin/sh", "-c", "trap '' TERM; exec sleep 30")
+    await backend.submit_tasks([task])
+    await until(lambda: len(backend._watched) == 1)
+    t0 = time.monotonic()
+    await backend.shutdown()
+    assert 0.5 <= time.monotonic() - t0 < 3.0
+    proc = next(p for p in dragon.started if p.target == "/bin/sh" and "trap" in p.args[1])
+    assert proc.popen.wait(5) == -signal.SIGKILL
+
+
+async def test_shutdown_stops_waiting_for_a_process_that_outlives_its_sigkill(
+    backend, dragon, monkeypatch, caplog
+):
+    monkeypatch.setattr(dragon_native, "_STOP_KILLS", 0.3)
+    caplog.set_level("WARNING", logger=dragon_native._get_logger().name)
+    task = exe_task("/bin/sleep", "30")
+    await backend.submit_tasks([task])
+    await until(lambda: len(backend._watched) == 1)
+    proc = next(p for p in dragon.started if p.target == "/bin/sleep")
+    signal_all = backend._signal_all
+    monkeypatch.setattr(
+        backend, "_signal_all", lambda pool, puids, sig: signal_all(pool, puids, 0)
+    )  # every signal is lost
+    t0 = time.monotonic()
+    await backend.shutdown()
+    try:
+        assert time.monotonic() - t0 < 3.0
+        assert any("did not exit" in r.getMessage() for r in caplog.records)
+        assert proc.popen.poll() is None
+    finally:
+        proc.popen.kill()
+
+
 async def test_worker_launch_after_shutdown_starts_nothing(backend, dragon):
     """A launch still queued when the pool stops must not leave a process behind."""
     await backend.shutdown()
@@ -2490,3 +2616,31 @@ async def test_real_runtime_many_executables_at_once_share_a_few_threads(tmp_pat
     finally:
         await be.shutdown()
     assert peak < 64, peak
+
+
+def sleep_long():
+    time.sleep(300)
+
+
+@needs_runtime
+async def test_real_runtime_a_large_busy_pool_shuts_down_in_seconds(tmp_path):
+    """Closing 768 workers did not end in 300 s: they stopped at once and Dragon wedged."""
+    cloudpickle.register_pickle_by_value(sys.modules[__name__])
+    be = await DragonNativeExecutionBackend(workers_per_node=128, max_process_ranks=64)
+    be._work_dir = str(tmp_path)
+    tasks = [fn_task(sleep_long) for _ in range(32)] + [
+        exe_task("/bin/sleep", "300") for _ in range(32)
+    ]
+    try:
+        await be.submit_tasks(tasks)
+        await until(lambda: len(be._watched) == 32, 60)
+        await until(lambda: all(r.state == "running" for r in be._tasks.values()), 60)
+        workers = [w.proc.puid for w in be._workers.values()]
+        exes = list(be._watched)
+        t0 = time.monotonic()
+    finally:
+        await be.shutdown()
+        cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
+    assert time.monotonic() - t0 < 30, be._stop_phases
+    exited, _ = dragon_native.multi_join(workers + exes, timeout=0, join_all=False)
+    assert len(exited or ()) == len(workers + exes), be._stop_phases

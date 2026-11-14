@@ -235,6 +235,14 @@ MPI, so set `"pmi": "none"` for jobs that don't: it logs neither warning.
   background, and it returns False for an unknown or finished task, as the Concurrent and Dask
   backends do. `shutdown()` kills what still runs at once and reports it CANCELED, where
   `DragonExecutionBackend` gives tasks up to 10 s to end.
+- **Shutdown ends the processes 64 at a time.** Idle workers are told to stop, busy workers get
+  SIGKILL, and process and group tasks SIGTERM, then SIGKILL after `kill_grace`; a worker that has
+  not exited 5 s after its stop gets SIGKILL too. One non-blocking `multi_join` finds the
+  processes that exited, and the next ones get their stop as they go: 768 workers told to stop at
+  once wedged Global Services, and one at a time took a request or more each. One reaper per node
+  then kills what the tasks left, and the queues are destroyed eight at a time. A process that
+  outlives its SIGKILL by 20 s, and whatever is left after 120 s, is logged and left for Dragon to
+  end with the runtime. The last log line of `shutdown()` gives the seconds of each step.
 - **Bad placements fail only their task.** Hosts and GPU ids in a `placement` or a `policy` are
   checked against Dragon's nodes before anything is submitted: Dragon aborts the whole runtime on
   an unknown host and silently drops unknown GPU ids.
@@ -318,4 +326,11 @@ rate and the client's threads, or, if the run stalls, where they wait:
 
 ```bash
 dragon python tests/performance/dragon_native_many_processes.py --ranks 512 --tasks 2000 --python
+```
+
+`tests/performance/dragon_native_shutdown.py` times the shutdown of a large pool, with busy
+workers and running executables if asked, and samples where the client's threads spend it:
+
+```bash
+dragon python tests/performance/dragon_native_shutdown.py --workers 768 --busy 256 --exes 256
 ```
