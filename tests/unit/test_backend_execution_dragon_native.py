@@ -28,6 +28,7 @@ import pytest
 
 cloudpickle = pytest.importorskip("cloudpickle")
 
+from rhapsody.api import Session  # noqa: E402
 from rhapsody.api.errors import TaskExecutionError  # noqa: E402
 from rhapsody.backends.discovery import BackendRegistry  # noqa: E402
 from rhapsody.backends.execution import _dragon_native_worker as worker_module  # noqa: E402
@@ -590,26 +591,64 @@ async def test_failing_function_reports_exception_and_traceback(backend):
     assert "boom-from-task" in task["stderr"] and "Traceback" in task["stderr"]
 
 
-async def test_task_with_the_uid_of_an_unfinished_task_fails(backend):
-    """The second task used to replace the first in the backend: the first never ended."""
-    rec = Recorder(backend)
+def record_states(backend):
+    """Register a callback that records (task, state) in order, keeping the task itself."""
+    seen = []
+    backend.register_callback(lambda task, state: seen.append((task, state)))
+    return seen
+
+
+async def test_a_repeat_of_an_unfinished_uid_joins_the_task(backend):
+    """A repeat neither runs nor fails: it gets the first task's states and result.
+
+    It used to fail with "has not finished", once replacing the first was fixed. Through a Session,
+    which keeps one future per uid, that failed the first task's future.
+    """
+    seen = record_states(backend)
     first = fn_task(blocked)
     second = dict(fn_task(square, 2), uid=first["uid"])
     third = dict(fn_task(square, 3), uid=first["uid"])
     await backend.submit_tasks([first, second])
-    await backend.submit_tasks([third])
-    for task in (second, third):
-        assert isinstance(task["exception"], ValueError)
-        assert "has not finished" in task["stderr"]
+    await backend.submit_tasks([third, first])  # the same description again adds nothing
+    assert len(backend._tasks) == 1
     GATE.set()
-    await until(lambda: "return_value" in first)
-    assert first["return_value"] == "released"
-    states = [s for u, s, _ in rec.records if u == first["uid"]]
-    assert states == ["RUNNING", "FAILED", "FAILED", "DONE"]
+    await until(lambda: len(seen) == 6)
+    tasks = (first, second, third)
+    order = [(next(i for i, t in enumerate(tasks) if t is task), s) for task, s in seen]
+    assert order[:3] == [(0, "RUNNING"), (1, "RUNNING"), (2, "RUNNING")]
+    assert order[3:] == [(0, "DONE"), (1, "DONE"), (2, "DONE")]  # the first task's future first
+    assert [t["return_value"] for t in tasks] == ["released"] * 3
     again = dict(fn_task(square, 4), uid=first["uid"])
     await backend.submit_tasks([again])
     await until(lambda: "return_value" in again)
-    assert again["return_value"] == 16
+    assert again["return_value"] == 16  # once the task has ended, its uid runs again
+
+
+async def test_cancelling_a_task_cancels_its_repeats(backend):
+    seen = record_states(backend)
+    first = fn_task(blocked)
+    repeat = dict(fn_task(square, 2), uid=first["uid"])
+    await backend.submit_tasks([first, repeat])
+    assert await backend.cancel_task(first["uid"]) is True
+    assert [(t is first, s) for t, s in seen] == [
+        (True, "RUNNING"),
+        (False, "RUNNING"),
+        (True, "CANCELED"),
+        (False, "CANCELED"),
+    ]
+
+
+async def test_in_a_session_a_repeat_leaves_the_first_tasks_future_alone(backend, tmp_path):
+    """A repeat while the first task runs, as an agent's tool call sent again on resume."""
+    session = Session(backends=[backend], work_dir=str(tmp_path))
+    first = fn_task(blocked)
+    (future,) = await session.submit_tasks([first])
+    await session.submit_tasks([dict(fn_task(square, 2), uid=first["uid"])])
+    await asyncio.sleep(0.1)
+    assert not future.done()
+    GATE.set()
+    assert await asyncio.wait_for(future, 10) is first
+    assert first["return_value"] == "released"
 
 
 async def test_unpicklable_result_fails_only_its_task(backend):

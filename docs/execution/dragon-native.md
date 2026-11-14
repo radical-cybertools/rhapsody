@@ -221,8 +221,10 @@ MPI, so set `"pmi": "none"` for jobs that don't: it logs neither warning.
 - **Bad placements fail only their task.** Hosts and GPU ids in a `placement` or a `policy` are
   checked against Dragon's nodes before anything is submitted: Dragon aborts the whole runtime on
   an unknown host and silently drops unknown GPU ids.
-- **A uid in use fails its task.** A task submitted while another task with its uid has not
-  finished fails with `ValueError`, and the first runs on.
+- **A repeated uid joins its task.** A task submitted while another task with its uid has not
+  finished does not run: it gets that task's states and, when it ends, its result or error. A
+  `Session` keeps one future per uid, so a repeat that failed would fail the first task's future.
+  Once the task has ended, its uid runs again.
 - **Dead workers are noticed.** A worker that dies on its own fails its task with the exit code,
   and is replaced (once: a replacement that dies before it is ready is not replaced again). A
   replacement or GPU worker that is not ready `worker_start_timeout` after its launch counts as

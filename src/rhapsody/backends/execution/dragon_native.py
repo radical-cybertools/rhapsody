@@ -191,11 +191,14 @@ class _Task:
         "timer",
         "put_deadline",
         "put_failed_on",
+        "repeats",
     )
 
     def __init__(self, uid: str, desc: dict, kind: str, timeout: float | None, token: str):
         self.uid = uid
         self.desc = desc
+        # Descriptions submitted with this uid while the task ran: they get its states, in order.
+        self.repeats: list = []
         self.kind = kind  # pool, process, group
         self.key: tuple = (None, ())
         self.timeout = timeout
@@ -1321,6 +1324,8 @@ class DragonNativeExecutionBackend(BaseBackend):
         loop = self._loop
         with self._outbox_lock:
             self._outbox.append((rec.desc, state, fields))
+            # No repeat joins once the task has left _tasks, which it has before any final state.
+            self._outbox.extend((desc, state, fields) for desc in rec.repeats)
             # A flush scheduled on a loop that has closed, or that is no longer the backend's,
             # may never run: schedule one on the current loop.
             flush_loop = self._flush_loop
@@ -1602,7 +1607,10 @@ class DragonNativeExecutionBackend(BaseBackend):
         """Submit tasks.
 
         Pool tasks are sent to a free worker or queued for one. A task whose uid belongs to a task
-        still in the backend fails, so that each task gets one final state.
+        still in the backend joins that task: it does not run, and it gets that task's states,
+        RUNNING now and the final state with its result when the task ends. A ``Session`` keeps one
+        future per uid, so failing the repeat would fail the first task's future. Once the task has
+        ended, its uid runs again.
         """
         if self._backend_state == BackendMainStates.SHUTDOWN:
             raise RuntimeError("Cannot submit during shutdown")
@@ -1613,11 +1621,20 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._loop = asyncio.get_running_loop()
 
         for task in tasks:
+            with self._lock:
+                running = self._tasks.get(task["uid"])
+                joins = False
+                if running is not None:
+                    joins = all(task is not d for d in (running.desc, *running.repeats))
+                    if joins:
+                        running.repeats.append(task)
+            if running is not None:
+                # Its final state goes through the loop, after this RUNNING.
+                if joins:
+                    self.logger.debug(f"Task {task['uid']} joins the unfinished task of its uid")
+                    self._callback_func(task, "RUNNING")
+                continue
             try:
-                with self._lock:
-                    in_use = task["uid"] in self._tasks
-                if in_use:
-                    raise ValueError(f"task {task['uid']}: a task with this uid has not finished")
                 rec = self.build_task(task)
             except Exception as exc:
                 self.logger.error(f"Failed to create task {task.get('uid')}: {exc}", exc_info=True)
@@ -1657,7 +1674,8 @@ class DragonNativeExecutionBackend(BaseBackend):
                 worker.task = None
             rec.state = "done"
             started = bool(rec.puids)
-        self._callback_func(rec.desc, "CANCELED")
+        for desc in (rec.desc, *rec.repeats):
+            self._callback_func(desc, "CANCELED")
         if worker is not None:
             self._ops.submit(self._retire_worker, worker, rec.token)
         elif rec.kind != "pool" and started:
