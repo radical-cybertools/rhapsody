@@ -104,6 +104,66 @@ RhapsodyError
 
 ---
 
+## A uid Names One Task
+
+A uid names one task in a `Session`. Submitting a task with the uid of a task the
+Session already has doesn't run it again: the new task is a repeat, and it attaches
+to that task. A repeat never reaches a backend.
+
+- **While the task runs**, the repeat shares its future. When the task ends, the
+  repeat gets its results.
+- **After the task has ended**, the repeat gets its results at once, with a future
+  that is already done. This holds for FAILED and CANCELED tasks too.
+- **Two tasks with one uid in one call:** the second is a repeat of the first.
+- **The uid decides, not the description.** A repeat with another function or
+  executable still attaches, and the Session logs a warning.
+
+So a call that may be sent twice, such as an agent's tool call after the agent
+resumes, can reuse its uid safely:
+
+```python
+async with Session(backends=[backend]) as session:
+    sim = ComputeTask(uid=f"sim-{thread_id}-{call_id}", function=simulate, args=(params,))
+    await session.submit_tasks([sim])
+
+    # Later, the same call again: nothing runs a second time.
+    again = ComputeTask(uid=f"sim-{thread_id}-{call_id}", function=simulate, args=(params,))
+    await session.submit_tasks([again])
+    await again
+    assert again.return_value == sim.return_value
+```
+
+The results a repeat gets are `state`, `return_value`, `response`, `exception`,
+`stdout`, `stderr` and `exit_code`. Awaiting a repeat of a running task returns
+the first task object; awaiting a repeat of an ended task returns the repeat.
+For a failed task, a repeat that comes after the end gets a copy of its exception,
+without the traceback. The first task keeps the original. A task that already has
+a final state keeps its own fields. Telemetry records the first task only.
+
+To run the same work again, give it a new uid.
+
+### How long the Session keeps ended tasks
+
+The Session keeps the outcomes of the last 100,000 ended tasks, oldest dropped
+first. A task submitted with a uid the Session has dropped runs again.
+`retained_tasks` changes the bound:
+
+```python
+Session(backends=[backend], retained_tasks=1_000_000)  # more
+Session(backends=[backend], retained_tasks=None)       # all, for the Session's life
+Session(backends=[backend], retained_tasks=0)          # none: only running tasks attach
+```
+
+An ended task costs a few hundred bytes plus its return value and output: 100,000
+no-op tasks take about 21 MB. A long-lived Session that runs millions of tasks
+should keep the default or set a lower bound. The Session keeps each running task
+until it ends, whatever the bound.
+
+A uid is per Session, in one process. A repeat submitted to another Session runs
+again.
+
+---
+
 ## Sync and Async Callable Tasks
 
 `ComputeTask` accepts **any Python callable** — both regular (synchronous) and
