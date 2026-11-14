@@ -242,8 +242,8 @@ MPI, so set `"pmi": "none"` for jobs that don't: it logs neither warning.
   `worker_oom_score_adj` (500 by default, Linux), so the kernel's out-of-memory killer picks a
   worker, which fails one task, before one of Dragon's services, whose death ends the runtime.
   The client keeps each worker's pid and host name from its ready message, and numbers the tasks
-  it sends each worker as the worker does, so `(worker, number)` names a task where its uid is
-  not known.
+  it gives each worker as the worker does (a task the relay could not put on the worker's inbox
+  gives its number back), so `(worker, number)` names a task where its uid is not known.
 - **Dead workers are noticed.** A worker that dies on its own fails its task with the exit code,
   and is replaced (once: a replacement that dies before it is ready is not replaced again). A
   replacement or GPU worker that is not ready `worker_start_timeout` after its launch counts as

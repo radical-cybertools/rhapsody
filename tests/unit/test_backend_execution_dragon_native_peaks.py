@@ -27,7 +27,9 @@ from test_backend_execution_dragon_native import boom  # noqa: E402
 from test_backend_execution_dragon_native import dragon  # noqa: E402, F401 - fixture
 from test_backend_execution_dragon_native import exe_task  # noqa: E402
 from test_backend_execution_dragon_native import fn_task  # noqa: E402
+from test_backend_execution_dragon_native import full_until  # noqa: E402
 from test_backend_execution_dragon_native import needs_runtime  # noqa: E402
+from test_backend_execution_dragon_native import pool_full  # noqa: E402, F401 - fixture
 from test_backend_execution_dragon_native import square  # noqa: E402
 from test_backend_execution_dragon_native import until  # noqa: E402
 
@@ -647,6 +649,47 @@ async def test_the_client_keeps_what_ready_says_and_numbers_each_workers_tasks(
         assert await run(be, tasks) == ["DONE"] * 3
         (w,) = [w for w in be._workers.values() if w.host == "n0"]
         assert w.sent == 3
+    finally:
+        await be.shutdown()
+
+
+async def test_the_relay_keeps_what_workers_say_and_an_unsent_task_gives_its_number_back(
+    dragon,  # noqa: F811
+    tmp_path,
+    pool_full,  # noqa: F811
+    monkeypatch,
+):
+    """READY, DONE with the worker's number, and ``(value, observed)`` cross the relay intact.
+
+    The relay could not put the first task on a full pool twice: the worker never saw those sends,
+    so the client takes their numbers back, and both still count the task as the worker's first.
+    """
+    be = await make(tmp_path)
+    try:
+        (w,) = [w for w in be._workers.values() if w.host == "n0"]
+        assert (w.pid, w.node) == (os.getpid(), socket.gethostname())
+        failures = iter(range(2))
+        monkeypatch.setattr(
+            w.inbox, "put", full_until(w.inbox, lambda: next(failures, None) is not None)
+        )
+        numbers = []
+        on_done = be._on_done
+
+        def record(msg, completions):
+            rec = be._workers[msg[1]].task
+            numbers.append((msg[2], msg[-1], rec.seq if rec is not None else None))
+            on_done(msg, completions)
+
+        monkeypatch.setattr(be, "_on_done", record)
+        tasks = [fn_task(square, i, placement={"host": "n0"}) for i in range(3)]
+        assert await run(be, tasks) == ["DONE"] * 3
+        assert [t["return_value"] for t in tasks] == [0, 1, 4]
+        assert numbers == [(t["uid"], i, i) for i, t in enumerate(tasks, 1)]
+        assert w.sent == 3
+        for task in tasks:  # the measurement came back with each value
+            assert all(task["observed"].get(k) is not None for k in WINDOW)
+            if LINUX:
+                assert task["observed"]["approximate"] is True
     finally:
         await be.shutdown()
 

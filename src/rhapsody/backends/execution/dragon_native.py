@@ -919,6 +919,10 @@ class DragonNativeExecutionBackend(BaseBackend):
         if w is None or w.state != "busy" or w.task is None or w.task.uid != uid:
             return  # its worker was killed for a cancel or a timeout, or died: handled there
         rec, w.task = w.task, None
+        # The worker never took it, so it does not count it: the number goes to its next task
+        if rec.seq is not None and rec.seq == w.sent:
+            w.sent -= 1
+        rec.seq = rec.sent_at = None
         rec.worker = None
         rec.timer = None  # its timeout started with a send that did not happen
         rec.state = "queued"
