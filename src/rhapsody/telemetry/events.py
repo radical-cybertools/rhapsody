@@ -144,7 +144,9 @@ class TaskCompleted(BaseEvent):
 class TaskFailed(BaseEvent):
     """Emitted when a task reaches FAILED state.
 
-    attributes keys: executable, task_type, error_type
+    attributes keys: executable, task_type, error_type, and, when known, the failure details
+    error_message, exit_code, traceback and stderr. The texts are capped in size and keep
+    their tail.
     If incomplete_lifecycle=True in attributes, duration_seconds is 0.0
     because the STARTED timestamp was not recorded.
     """

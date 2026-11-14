@@ -17,6 +17,7 @@ import functools
 import json
 import logging
 import time
+import traceback
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1092,6 +1093,9 @@ class TelemetryManager:
                     "error_type": error_type,
                     "incomplete_lifecycle": True,
                 }
+            # The message, exit code and traceback or stderr, so a failure can be debugged
+            # from the telemetry record after the run (the task object may be gone by then).
+            attrs.update(_failure_details(task, exc))
             self.emit(
                 make_event(
                     TaskFailed,
@@ -1394,6 +1398,10 @@ class TelemetryManager:
             span.set_attribute("task_type", task_type)
             if event.attributes.get("incomplete_lifecycle"):
                 span.set_attribute("incomplete_lifecycle", True)
+            for key in _FAILURE_DETAIL_KEYS:
+                if key in event.attributes:
+                    span.set_attribute(key, event.attributes[key])
+            # The description stays the short type name; the details are attributes.
             span.set_status(trace_mod.StatusCode.ERROR, error_type)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
@@ -1551,3 +1559,78 @@ def _task_executable(task: dict) -> str:
     if model:
         return str(model)
     return ""
+
+
+# Failure details on a TaskFailed event. Each text is capped at this many characters and keeps
+# its tail, where a traceback or stderr ends with the error.
+_ERROR_MESSAGE_MAX_CHARS = 2048
+_ERROR_OUTPUT_MAX_CHARS = 2048  # traceback and stderr, each
+_TRUNCATION_MARKER = "[truncated] ..."
+_FAILURE_DETAIL_KEYS = ("error_message", "exit_code", "traceback", "stderr")
+
+
+def _tail(text: str, limit: int) -> str:
+    """Return ``text``, or the marker and its last characters, in at most ``limit`` characters."""
+    if len(text) <= limit:
+        return text
+    keep = limit - len(_TRUNCATION_MARKER)
+    return _TRUNCATION_MARKER + text[len(text) - keep :]
+
+
+def _failure_details(task: dict, exc: Any) -> dict:
+    """Return the attributes that describe why a task failed, for its TaskFailed event.
+
+    - ``error_message``: ``str(exception)``, whenever the task has an exception (some backends
+      set a plain string).
+    - ``exit_code``: the task's exit code, when the backend set one.
+    - ``traceback``: the formatted traceback of a raised exception, or the traceback text a
+      backend stored on the task.
+    - ``stderr``: the task's stderr, unless it only repeats the message. A backend that
+      redirects stderr to a file stores the file's path here.
+
+    Texts keep their tail within the caps above. Never raises: this runs in the task state
+    callback.
+    """
+    details: dict = {}
+    message = None
+    if exc is not None:
+        message = _safe_str(exc)
+        if message is None:
+            message = f"<unprintable {type(exc).__name__}>"
+        details["error_message"] = _tail(message, _ERROR_MESSAGE_MAX_CHARS)
+
+    exit_code = task.get("exit_code")
+    if exit_code is not None:
+        try:
+            details["exit_code"] = int(exit_code)
+        except Exception:
+            logger.debug("Task %s exit code %r is not a number", task.get("uid"), exit_code)
+
+    tb_text = None
+    if isinstance(exc, BaseException) and exc.__traceback__ is not None:
+        try:
+            tb_text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        except Exception:
+            logger.debug(
+                "Could not format the traceback of task %s", task.get("uid"), exc_info=True
+            )
+    if not tb_text and isinstance(task.get("traceback"), str):
+        tb_text = task["traceback"]
+    if tb_text:
+        details["traceback"] = _tail(tb_text, _ERROR_OUTPUT_MAX_CHARS)
+
+    stderr = task.get("stderr")
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    if isinstance(stderr, str) and stderr.strip() and stderr.strip() != (message or "").strip():
+        details["stderr"] = _tail(stderr, _ERROR_OUTPUT_MAX_CHARS)
+
+    return details
+
+
+def _safe_str(value: Any) -> str | None:
+    """``str(value)``, or None if its ``__str__`` raises."""
+    try:
+        return str(value)
+    except Exception:
+        return None

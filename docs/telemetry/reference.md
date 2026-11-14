@@ -159,10 +159,26 @@ attributes = {
     "executable":  str,
     "task_type":   str,
     "error_type":  str,
+    # failure details, each only when known:
+    "error_message": str,   # str(exception)
+    "exit_code":     int,
+    "traceback":     str,   # formatted traceback, tail kept
+    "stderr":        str,   # task stderr, tail kept
     # optionally:
     "incomplete_lifecycle": True,
 }
 ```
+
+The failure details let you debug a failed task from the telemetry record after the run, when the task object is gone:
+
+| Attribute | When it is set |
+|---|---|
+| `error_message` | The task has an exception: `str(exception)`. Some backends store the exception as a plain string; `error_type` is then `"str"`. |
+| `exit_code` | The backend set an exit code (executables; the concurrent backend also sets `1` for a function that raised). |
+| `traceback` | The exception was raised in this process (function tasks), or the backend stored the traceback text on the task (`task["traceback"]`). |
+| `stderr` | The task has a non-empty `stderr` that is not just the message again. A backend that redirects stderr to a file stores the file's path. |
+
+Each text is capped at 2048 characters and keeps its tail, where a traceback or stderr ends with the error; a truncated text starts with `[truncated] ...`. The details are also set on the task span. The span's status description stays the short `error_type`.
 
 ---
 
@@ -424,6 +440,8 @@ task span
 │     task_type  = "compute"
 │     status     = "completed" | "failed"
 │     error_type = "RuntimeError"   (failed tasks only)
+│     error_message, exit_code, traceback, stderr
+│                                   (failed tasks, when known; see TaskFailed)
 └── duration: TaskCreated (span open) → TaskCompleted/Failed/Canceled (span close)
 ```
 

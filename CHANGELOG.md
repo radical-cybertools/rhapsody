@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Telemetry (experimental): `TaskFailed` carries the failure details** — the event had only
+  `error_type`, the exception's class name, so a failure could not be debugged from telemetry
+  once the task objects were gone. Its attributes now add `error_message` (`str(exception)`),
+  `exit_code` when the backend set one, the formatted `traceback` of a raised exception (or the
+  traceback text a backend stored on the task) and the task's `stderr` unless it only repeats
+  the message. Each is set only when known. The texts are capped at 2048 characters each and
+  keep their tail. The details reach the JSONL checkpoint (event and span records), the task
+  span and `export_as_otlp()`; the span's status description stays the short `error_type`.
+  Metric attributes are unchanged.
+
 ### Changed
 
 - **Telemetry (experimental): task and resource metrics are recorded by a task instrumentation**
