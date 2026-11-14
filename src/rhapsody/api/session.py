@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
+import operator
 import os
 import uuid
+from collections import OrderedDict
 from typing import TYPE_CHECKING
 from typing import Callable
 
@@ -18,20 +21,56 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# How many ended tasks a Session keeps by default, so that a repeat of their uid gets their outcome.
+# About 21 MB for no-op tasks; a task's return value and output add to it.
+DEFAULT_RETAINED_TASKS = 100_000
+
+# The fields a task's run fills in. A repeat of the task gets them.
+RESULT_FIELDS = ("state", "return_value", "response", "exception", "stdout", "stderr", "exit_code")
+_EXCEPTION_AT = RESULT_FIELDS.index("exception")
+_RESULTS = operator.itemgetter(*RESULT_FIELDS)
+
+
+def _results(task: dict | BaseTask) -> tuple:
+    """A task's result values, in RESULT_FIELDS order."""
+    try:
+        return _RESULTS(task)
+    except KeyError:  # a plain dict task may lack some
+        return tuple(map(task.get, RESULT_FIELDS))
+
 
 class TaskStateManager:
     """Centralized manager for task state updates and monitoring.
 
     This class subscribes to backend callbacks and provides a synchronization mechanism for waiting
     on task completion.
+
+    It also keeps the Session's record of uids. A uid names one task: a task submitted with the
+    uid of a running or ended task is a repeat. It attaches to that task and never reaches a
+    backend. The record holds the running tasks and the outcomes of the last ``retained`` ended
+    tasks (all of them if ``retained`` is None).
     """
 
-    def __init__(self):
+    def __init__(self, retained: int | None = DEFAULT_RETAINED_TASKS):
+        if retained is not None and (
+            not isinstance(retained, int) or isinstance(retained, bool) or retained < 0
+        ):
+            raise ValueError(f"retained must be None or an int >= 0, not {retained!r}")
         self._task_futures: dict[str, asyncio.Future] = {}
         self._terminal_states = set()  # Will be populated by backends
         self._loop: asyncio.AbstractEventLoop | None = None
         # Telemetry observer — set by Session.enable_telemetry(), None = zero cost
         self._telemetry_observer: Callable[[dict, str], None] | None = None
+        # Tasks submitted through the Session that have not ended: the first task of each uid.
+        self._running: dict[str, dict | BaseTask] = {}
+        # Repeats of running tasks, by uid. They get the task's state and, at its end, its results.
+        self._repeats: dict[str, list[dict | BaseTask]] = {}
+        # Ended tasks, oldest first: uid -> the result values in RESULT_FIELDS order, then the id
+        # of the task's function and its executable, to warn about a repeat that differs. Ids and
+        # plain values keep the tuples out of the garbage collector's way.
+        self._ended: OrderedDict[str, tuple] = OrderedDict()
+        self._retained = retained
+        self._dropped_any = False
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
@@ -51,55 +90,157 @@ class TaskStateManager:
         if self._telemetry_observer is not None:
             self._telemetry_observer(task, state)
 
-        # If terminal, notify waiters
+        # If terminal, record the outcome, hand it to the repeats and notify waiters
         if state in self._terminal_states:
+            if uid in self._running or self._repeats:
+                self._task_ended(uid, task)
             if uid in self._task_futures:
                 fut = self._task_futures.pop(uid)
                 if not fut.done():
-                    exc = task.get("exception")
-                    exit_code = task.get("exit_code")
-                    if isinstance(exc, BaseException):
-                        fut.set_exception(exc)
-                    elif exit_code is not None and exit_code != 0:
-                        fut.set_exception(
-                            TaskExecutionError(uid, task.get("stderr") or "", exit_code)
-                        )
-                    else:
-                        fut.set_result(task)
+                    _settle(fut, uid, task)
+        elif self._repeats:
+            for repeat in self._repeats.get(uid, ()):
+                repeat["state"] = state
+
+    def _task_ended(self, uid: str, task: dict | BaseTask) -> None:
+        """Keep an ended task's outcome and copy it into the task's repeats."""
+        first = self._running.pop(uid, None)
+        repeats = self._repeats.pop(uid, None)
+        if first is None and repeats is None:
+            return  # submitted straight to a backend, not through the Session
+        values = _results(task)
+        if repeats:
+            outcome = dict(zip(RESULT_FIELDS, values))
+            for repeat in repeats:
+                if repeat is not task:
+                    repeat.update(outcome)
+        if first is None or self._retained == 0:
+            return
+        if values[_EXCEPTION_AT] is not None:
+            exc = _without_traceback(values[_EXCEPTION_AT])
+            values = values[:_EXCEPTION_AT] + (exc,) + values[_EXCEPTION_AT + 1 :]
+        self._ended[uid] = values + (id(first.get("function")), first.get("executable"))
+        if self._retained is not None and len(self._ended) > self._retained:
+            self._ended.popitem(last=False)
+            if not self._dropped_any:
+                self._dropped_any = True
+                logger.info(
+                    f"The Session keeps the last {self._retained} ended tasks; "
+                    "a task submitted again with an older uid runs again"
+                )
+
+    def attach_repeat(self, task: dict | BaseTask) -> asyncio.Future | None:
+        """Attach ``task`` to the running or ended task with its uid.
+
+        A repeat of a running task shares its future and gets its results when it ends. A
+        repeat of an ended task gets its results now and a future that is already done; a task
+        that already carries a final state keeps its own fields. The function or executable of
+        a repeat is not checked beyond a warning: the uid decides.
+
+        Returns:
+            The repeat's future, or None if no running or kept ended task has its uid.
+        """
+        uid = task["uid"]
+        first = self._running.get(uid)
+        if first is not None:
+            if first is not task:
+                _warn_if_different(task, first.get("function"), first.get("executable"))
+                self._repeats.setdefault(uid, []).append(task)
+                task["state"] = first.get("state")
+            return self.get_wait_future(uid, first)
+
+        kept = self._ended.get(uid)
+        if kept is None:
+            return None
+        *values, function_id, executable = kept
+        if id(task.get("function")) != function_id or task.get("executable") != executable:
+            _warn_repeat(task)
+        if task.get("state") not in self._terminal_states:
+            task.update(zip(RESULT_FIELDS, values))
+        return self.get_wait_future(uid, task)
+
+    def forget(self, task: dict | BaseTask) -> None:
+        """Drop a task that was registered as running but never reached its backend."""
+        uid = task["uid"]
+        if self._running.get(uid) is task:
+            del self._running[uid]
+            self._repeats.pop(uid, None)
+            self._task_futures.pop(uid, None)
 
     def get_wait_future(self, uid: str, task: dict | BaseTask) -> asyncio.Future:
-        """Get or create a future to wait for a specific task."""
+        """Get or create a future to wait for a specific task.
+
+        The future of a task that has not ended is kept until the task ends, and every call gets the
+        same one. A task that has already ended gets a new future that is already done, and nothing
+        keeps it.
+        """
         if self._loop is None:
             try:
                 self.bind_loop(asyncio.get_running_loop())
             except RuntimeError:
                 pass
 
-        if uid not in self._task_futures:
-            # Create a future on the correct loop
-            if self._loop:
-                self._task_futures[uid] = self._loop.create_future()
-            else:
-                self._task_futures[uid] = asyncio.Future()
+        fut = self._task_futures.get(uid)
+        if fut is not None:
+            return fut
 
-            # If already done before we started waiting, resolve immediately
-            if task.get("state") in self._terminal_states:
-                exc = task.get("exception")
-                exit_code = task.get("exit_code")
-                if isinstance(exc, BaseException):
-                    self._task_futures[uid].set_exception(exc)
-                elif exit_code is not None and exit_code != 0:
-                    self._task_futures[uid].set_exception(
-                        TaskExecutionError(uid, task.get("stderr") or "", exit_code)
-                    )
-                else:
-                    self._task_futures[uid].set_result(task)
+        # Create a future on the correct loop
+        fut = self._loop.create_future() if self._loop else asyncio.Future()
 
-        return self._task_futures[uid]
+        # If already done before we started waiting, resolve immediately
+        if task.get("state") in self._terminal_states:
+            _settle(fut, uid, task)
+        else:
+            self._task_futures[uid] = fut
+        return fut
 
     def set_terminal_states(self, states: set[str]) -> None:
         """Update the set of states considered terminal."""
         self._terminal_states = states
+
+
+def _settle(fut: asyncio.Future, uid: str, task: dict | BaseTask) -> None:
+    """Resolve ``fut`` with an ended task: its exception, a TaskExecutionError, or the task."""
+    exc = task.get("exception")
+    exit_code = task.get("exit_code")
+    if isinstance(exc, BaseException):
+        fut.set_exception(exc)
+    elif exit_code is not None and exit_code != 0:
+        fut.set_exception(TaskExecutionError(uid, task.get("stderr") or "", exit_code))
+    else:
+        fut.set_result(task)
+
+
+def _without_traceback(exc: object) -> object:
+    """A copy of ``exc`` without its traceback, cause or context, so that a kept outcome does not
+    hold the failed call's frames.
+
+    ``exc`` itself if it is not an exception or cannot be copied.
+    """
+    if not isinstance(exc, BaseException):
+        return exc
+    try:
+        clone = copy.copy(exc)
+    except Exception:
+        return exc
+    if type(clone) is not type(exc) or clone.args != exc.args:
+        return exc
+    clone.__traceback__ = None
+    clone.__cause__ = None
+    clone.__context__ = None
+    return clone
+
+
+def _warn_if_different(task: dict | BaseTask, function: object, executable: object) -> None:
+    if task.get("function") is not function or task.get("executable") != executable:
+        _warn_repeat(task)
+
+
+def _warn_repeat(task: dict | BaseTask) -> None:
+    logger.warning(
+        f"Task {task['uid']} repeats the uid of a task with another function or executable. "
+        "It gets that task's outcome and does not run."
+    )
 
 
 class Session:
@@ -107,6 +248,10 @@ class Session:
 
     The Session acts as the central coordinator. It is initialized with a list of execution backends
     and manages the flow of tasks and their state updates.
+
+    A uid names one task in a Session. A task submitted with the uid of a running task, or of an
+    ended task the Session still keeps, is a repeat: it gets that task's future and results, and
+    nothing runs. To run the same work again, give it a new uid.
     """
 
     def __init__(
@@ -114,6 +259,7 @@ class Session:
         backends: list[BaseBackend | DataBackend] | None = None,
         uid: str | None = None,
         work_dir: str | None = None,
+        retained_tasks: int | None = DEFAULT_RETAINED_TASKS,
     ):
         """Initialize a new session.
 
@@ -124,11 +270,14 @@ class Session:
                 If None, no backends are configured.
             uid: Optional unique identifier for the session.
             work_dir: working directory (default: cwd).
+            retained_tasks: How many ended tasks the Session keeps, so that a repeat of
+                their uid gets their outcome instead of running again (default 100,000).
+                The oldest go first. ``None`` keeps all; ``0`` keeps none, so only repeats
+                of running tasks attach. Running tasks are always kept.
         """
         self.uid = uid or f"rhapsody.session.{uuid.uuid4().hex[:8]}"
         self.work_dir = work_dir or os.getcwd()
-        self._tasks: dict[str, BaseTask | dict] = {}
-        self._state_manager = TaskStateManager()
+        self._state_manager = TaskStateManager(retained=retained_tasks)
         self._telemetry: TelemetryManager | None = None
         # Scheduled ResourceLayout emissions (keeps task references alive), and the
         # backends (by id) whose layout went out — re-adding one must not resend it.
@@ -213,44 +362,17 @@ class Session:
         # Group tasks by their explicit backend target
         tasks_by_backend: dict[str, list] = {}
         futures = []
-        for task in tasks:
-            uid = task["uid"]
-            self._tasks[uid] = task
-
-            # Create and bind future
-            fut = self._state_manager.get_wait_future(uid, task)
-            if hasattr(task, "bind_future"):
-                task.bind_future(fut)
-            futures.append(fut)
-
-            # Stamp task_type for telemetry event classification
-            task["task_type"] = type(task).__name__
-
-            # TaskCreated: task is registered and future is bound; backend not yet assigned.
-            if self._telemetry is not None:
-                self._telemetry._on_task_created(task)
-
-            # Routing decision
-            target_name = task.get("backend")
-            if not target_name:
-                # If no backend specified, use the first task-executing one as
-                # default (DataBackend instances registered in the same
-                # Session are never eligible here).
-                target_name = next(iter(self._exec_backends))
-                task["backend"] = target_name  # Ensure it's recorded
-
-            # Emit TaskSubmitted AFTER routing so task["backend"] is always set.
-            if self._telemetry is not None:
-                self._telemetry._on_task_submitted(task)
-
-            if target_name not in self._exec_backends:
-                available = list(self._exec_backends.keys())
-                raise ValueError(
-                    f"Backend '{target_name}' requested by task {uid} not found in Session. "
-                    f"Available backends: {available}"
-                )
-
-            tasks_by_backend.setdefault(target_name, []).append(task)
+        added: list[dict | BaseTask] = []
+        try:
+            for task in tasks:
+                fut = self._route(task, tasks_by_backend, added)
+                if hasattr(task, "bind_future"):
+                    task.bind_future(fut)
+                futures.append(fut)
+        except BaseException:
+            for task in added:
+                self._state_manager.forget(task)
+            raise
 
         # Submit each group to its respective backend concurrently
         submission_tasks = []
@@ -268,6 +390,58 @@ class Session:
         logger.info(f"Successfully submitted {len(tasks)} tasks")
 
         return futures
+
+    def _route(
+        self,
+        task: dict | BaseTask,
+        tasks_by_backend: dict[str, list],
+        added: list[dict | BaseTask],
+    ) -> asyncio.Future:
+        """Attach a repeat, or register a new task and add it to its backend's group.
+
+        Returns:
+            The task's future.
+        """
+        fut = self._state_manager.attach_repeat(task)
+        if fut is not None:
+            return fut
+
+        uid = task["uid"]
+        fut = self._state_manager.get_wait_future(uid, task)
+        # Registered at once, so a later task with this uid in the same call attaches to it,
+        # and a failed call can forget it.
+        self._state_manager._running[uid] = task
+        added.append(task)
+
+        # Stamp task_type for telemetry event classification
+        task["task_type"] = type(task).__name__
+
+        # TaskCreated: task is registered; backend not yet assigned.
+        if self._telemetry is not None:
+            self._telemetry._on_task_created(task)
+
+        # Routing decision
+        target_name = task.get("backend")
+        if not target_name:
+            # If no backend specified, use the first task-executing one as
+            # default (DataBackend instances registered in the same
+            # Session are never eligible here).
+            target_name = next(iter(self._exec_backends))
+            task["backend"] = target_name  # Ensure it's recorded
+
+        # Emit TaskSubmitted AFTER routing so task["backend"] is always set.
+        if self._telemetry is not None:
+            self._telemetry._on_task_submitted(task)
+
+        if target_name not in self._exec_backends:
+            available = list(self._exec_backends.keys())
+            raise ValueError(
+                f"Backend '{target_name}' requested by task {uid} not found in Session. "
+                f"Available backends: {available}"
+            )
+
+        tasks_by_backend.setdefault(target_name, []).append(task)
+        return fut
 
     async def wait_tasks(
         self,

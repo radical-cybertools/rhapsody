@@ -4,6 +4,21 @@
 
 ### Changed
 
+- **BEHAVIOUR CHANGE: a uid names one task in a `Session`.** A task submitted with the uid of a
+  running task, or of an ended task the Session keeps, is a repeat: it gets that task's future
+  and results and never reaches a backend. Before, a repeat of a running task was also sent to
+  the backend, which ran it again and kept it in place of the first task; a repeat of an ended
+  task ran again with a new future. A repeat of an ended task gets its `state`, `return_value`,
+  `response`, `exception` (a copy without the traceback), `stdout`, `stderr` and `exit_code`,
+  and a future that is already done. A repeat with another function or executable logs a
+  warning and still attaches. Repeats send no telemetry task events. To run the same work again,
+  give it a new uid. The Advanced Usage guide has the details.
+- **`Session(retained_tasks=100_000)`**: how many ended tasks the Session keeps for repeats, oldest
+  dropped first; `None` keeps all and `0` none. It replaces `Session._tasks`, which kept every task
+  object for the Session's life and was never read. A repeat of a dropped uid runs again.
+- **`wait_tasks()` on an ended task no longer keeps a future for it.** Each call gets a new future
+  that is already done.
+
 - **Telemetry (experimental): task and resource metrics are recorded by a task instrumentation**
   instead of the `TelemetryManager`. Instrument names, descriptions, attributes, values, the
   `rhapsody` meter scope and `task_count()` / `summary()` are unchanged (a golden test pins them).
