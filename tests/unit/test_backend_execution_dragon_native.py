@@ -1253,6 +1253,39 @@ async def test_function_process_that_sent_no_result_fails_once_the_queue_is_drai
     assert task["exit_code"] == 0 and "without a result" in task["stderr"]
 
 
+@pytest.mark.parametrize("kind", ["function", "executable", "group"])
+async def test_process_task_that_times_out_fails_once_its_process_is_killed(
+    dragon, tmp_path, monkeypatch, kind
+):
+    """A timed-out function process used to wait for the result it would never send.
+
+    The wait ended only when the result thread next found its queue empty, which an idle client does
+    once a relay interval (one second; five here). Executables and groups never waited.
+    """
+    monkeypatch.setattr(dragon_native, "_WATCH_INTERVAL", 5.0)
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, kill_grace=0.5)
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        rec = Recorder(be)
+        if kind == "function":
+            task = fn_task(blocked, task_backend_specific_kwargs={"process_template": {}})
+        elif kind == "executable":
+            task = exe_task("/bin/sleep", "30")
+        else:
+            task = exe_task("/bin/sleep", "30")
+            task["task_backend_specific_kwargs"] = {"process_templates": [(2, {})]}
+        task.setdefault("task_backend_specific_kwargs", {})["timeout"] = 0.3
+        t0 = time.monotonic()
+        await be.submit_tasks([task])
+        assert await rec.wait(task["uid"]) == ["FAILED"]
+        assert isinstance(task["exception"], TimeoutError)
+        assert time.monotonic() - t0 < 3.0
+    finally:
+        GATE.set()
+        await be.shutdown()
+
+
 async def test_function_with_process_template_returns_its_value(backend):
     rec = Recorder(backend)
     ok = fn_task(square, 9, task_backend_specific_kwargs={"process_template": {}})
@@ -2240,10 +2273,14 @@ async def test_shutdown_lets_only_a_window_of_processes_out_at_once(dragon, tmp_
         put(None)  # the fake workers' threads
 
 
-async def test_shutdown_kills_a_process_that_ignores_sigterm_after_kill_grace(backend, dragon):
-    task = exe_task("/bin/sh", "-c", "trap '' TERM; exec sleep 30")
+async def test_shutdown_kills_a_process_that_ignores_sigterm_after_kill_grace(
+    backend, dragon, tmp_path
+):
+    # The SIGTERM must come after the trap: a loaded machine can start the shell late.
+    trapped = tmp_path / "trapped"
+    task = exe_task("/bin/sh", "-c", f"trap '' TERM; : >{trapped}; exec sleep 30")
     await backend.submit_tasks([task])
-    await until(lambda: len(backend._watched) == 1)
+    await until(trapped.exists)
     t0 = time.monotonic()
     await backend.shutdown()
     assert 0.5 <= time.monotonic() - t0 < 3.0
@@ -2461,6 +2498,25 @@ async def test_a_relay_that_dies_fails_the_pool_tasks_and_new_ones(backend):
     assert await rec.wait(late["uid"]) == ["FAILED"]
     assert "relay" in late["stderr"]
     assert await rec.wait(executable["uid"]) == ["DONE"]
+
+
+async def test_a_relay_that_dies_while_the_pool_starts_fails_the_start_at_once(
+    dragon, tmp_path, monkeypatch
+):
+    """A relay that dies while the pool starts fails the start once its death is seen.
+
+    The pool's READY messages come through the relay: the start used to wait for them until
+    ``worker_start_timeout``, 300 s by default (20 here).
+    """
+    monkeypatch.setattr(worker_module, "relay_main", lambda *args: None)
+    be = DragonNativeExecutionBackend(
+        workers_per_node=1, inline_stdio=False, worker_start_timeout=20.0
+    )
+    be._work_dir = str(tmp_path)
+    t0 = time.monotonic()
+    with pytest.raises(RuntimeError, match="relay process exited with code 0 before the pool"):
+        await be
+    assert time.monotonic() - t0 < 5.0
 
 
 # ============================================================================
