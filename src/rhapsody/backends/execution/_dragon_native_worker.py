@@ -509,3 +509,10 @@ REAP_SCRIPT = (
     'for f in $(grep -lzxF -e "$1" /proc/[0-9]*/environ 2>/dev/null); do '
     'p=${f#/proc/}; p=${p%/environ}; kill -s "$2" "$p" 2>/dev/null; done; exit 0'
 )
+
+# The same for every process whose initial environment holds a line that contains $1: at shutdown,
+# what all of a backend's tasks left, with $1 the start of its tokens' lines.
+REAP_ALL_SCRIPT = (
+    'for f in $(grep -lzF -e "$1" /proc/[0-9]*/environ 2>/dev/null); do '
+    'p=${f#/proc/}; p=${p%/environ}; kill -s "$2" "$p" 2>/dev/null; done; exit 0'
+)
