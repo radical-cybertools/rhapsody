@@ -71,6 +71,13 @@ HOSTS = {
     "n1": {"h_uid": 11, "cpus": [4, 5, 6, 7], "gpus": []},
 }
 
+# Every fake queue, by id, so that one pickles as a handle to itself.
+QUEUES: dict = {}
+
+
+def queue_by_id(key):
+    return QUEUES[key]
+
 
 class FakeDragon:
     """One fake runtime: its processes, and classes bound to it."""
@@ -242,12 +249,17 @@ class FakeDragon:
 
         class FakeQueue:
             def __init__(self, maxsize=100, block_size=None, policy=None):
-                self.q = queue.Queue()
+                self.q = queue.Queue(maxsize)
                 self.policy = policy
                 self.destroyed = False
+                QUEUES[id(self)] = self
+
+            def __reduce__(self):
+                # A Dragon queue pickles as a handle to the same queue, as the relay receives it.
+                return (queue_by_id, (id(self),))
 
             def put(self, obj, block=True, timeout=None, flush=False):
-                self.q.put(obj)
+                self.q.put(obj, block, timeout)
 
             def get(self, block=True, timeout=None):
                 if not block:
@@ -746,7 +758,8 @@ async def test_placed_function_runs_on_a_worker_of_that_host(backend, dragon):
     await backend.submit_tasks([by_placement, by_policy])
     hosts = {backend._tasks[t["uid"]].worker.host for t in (by_placement, by_policy)}
     assert hosts == {"n1"}
-    assert all(p.target is worker_module.worker_main for p in dragon.started)
+    pool = (worker_module.worker_main, worker_module.relay_main)
+    assert all(p.target in pool for p in dragon.started)
     GATE.set()
     for task in (by_placement, by_policy):
         assert await rec.wait(task["uid"]) == ["DONE"]
@@ -870,9 +883,12 @@ async def test_failed_send_goes_to_an_idle_worker_when_the_replacement_cannot_st
     assert (broken.state, healthy.state) == ("dead", "idle")
 
 
-async def test_a_stalled_send_times_out_and_the_task_runs_elsewhere(backend, monkeypatch):
+async def test_a_stalled_send_times_out_and_the_task_runs_elsewhere(dragon, tmp_path, monkeypatch):
     """A put that never returned used to hold the backend's lock, and so the backend, for good."""
-    monkeypatch.setattr(dragon_native, "_SEND_TIMEOUT", 0.2)
+    monkeypatch.setattr(dragon_native, "_SEND_TIMEOUT", 0.2)  # before the relay starts with it
+    backend = DragonNativeExecutionBackend(workers_per_node=2, inline_stdio=False, kill_grace=0.5)
+    backend._work_dir = str(tmp_path)
+    await backend
     rec = Recorder(backend)
     stalled, healthy = backend._idle[("n0", ())]
     timeouts = []
@@ -886,11 +902,14 @@ async def test_a_stalled_send_times_out_and_the_task_runs_elsewhere(backend, mon
     monkeypatch.setattr(stalled.inbox, "put", stalled_put)
     task = fn_task(square, 5, placement={"host": "n0"})
     t0 = time.monotonic()
-    await backend.submit_tasks([task])
-    assert time.monotonic() - t0 < 2.0
-    assert await rec.wait(task["uid"]) == ["DONE"]
-    assert timeouts == [0.2]
-    assert (stalled.state, healthy.state) == ("dead", "idle")
+    try:
+        await backend.submit_tasks([task])
+        assert time.monotonic() - t0 < 2.0
+        assert await rec.wait(task["uid"]) == ["DONE"]
+        assert timeouts == [0.2]
+        assert (stalled.state, healthy.state) == ("dead", "idle")
+    finally:
+        await backend.shutdown()
 
 
 async def test_a_task_whose_send_fails_on_two_hosts_fails(backend, dragon, monkeypatch):
@@ -1885,6 +1904,81 @@ def test_flush_left_on_a_loop_that_closed_does_not_hold_later_states(dragon, tmp
 
 
 # ============================================================================
+# The relay
+# ============================================================================
+
+
+async def test_a_slow_client_trades_tasks_with_the_relay_in_batches(dragon, tmp_path):
+    """The client's queue calls are what a busy client process starves, and there are far fewer of
+    them than tasks.
+
+    Each get takes 10 ms here, as one can next to a thread that holds the GIL: one put and one get
+    per task made the pool start some 50 tasks a second there.
+    """
+    be = DragonNativeExecutionBackend(workers_per_node=8, inline_stdio=False)
+    be._work_dir = str(tmp_path)
+    await be
+    rec = Recorder(be)
+    calls = {"get": 0, "put": 0}
+    get, put = be._inbound.get, be._control.put
+
+    def slow_get(*args, **kwargs):
+        calls["get"] += 1
+        time.sleep(0.01)
+        return get(*args, **kwargs)
+
+    def counted_put(*args, **kwargs):
+        calls["put"] += 1
+        return put(*args, **kwargs)
+
+    be._inbound.get, be._control.put = slow_get, counted_put
+    tasks = [fn_task(square, i) for i in range(400)]
+    try:
+        await be.submit_tasks(tasks)
+        for task in tasks:
+            assert await rec.wait(task["uid"]) == ["DONE"]
+    finally:
+        await be.shutdown()
+    assert [t["return_value"] for t in tasks] == [i * i for i in range(400)]
+    assert calls["get"] < len(tasks) / 4 and calls["put"] < len(tasks) / 4, calls
+
+
+def test_relay_forwards_what_it_has_in_one_batch(dragon):
+    results, control, inbound = dragon.Queue(4096), dragon.Queue(16), dragon.Queue(1)
+    for i in range(5):
+        results.put(cloudpickle.dumps(("message", i)))
+    relay = threading.Thread(
+        target=worker_module.relay_main, args=(control, results, inbound, 0.05, 1.0), daemon=True
+    )
+    relay.start()
+    batch, drained_at = cloudpickle.loads(inbound.get(timeout=5))
+    assert [cloudpickle.loads(raw)[1] for raw in batch] == [0, 1, 2, 3, 4]
+    assert drained_at is not None
+    results.put(None)
+    control.put(None)
+    while (raw := inbound.get(timeout=5)) is not None:
+        assert cloudpickle.loads(raw)[0] == []  # idle: no messages, the time it found none
+    relay.join(5)
+    assert not relay.is_alive()
+
+
+async def test_a_relay_that_dies_fails_the_pool_tasks_and_new_ones(backend):
+    """Processes do not need the relay, and still run."""
+    rec = Recorder(backend)
+    running = fn_task(blocked)
+    await backend.submit_tasks([running])
+    await until(lambda: backend._tasks[running["uid"]].state == "running")
+    backend._relay._exit(-9)
+    assert await rec.wait(running["uid"]) == ["FAILED"]
+    assert "relay process exited with code -9" in running["stderr"]
+    late, executable = fn_task(square, 2), exe_task("true")
+    await backend.submit_tasks([late, executable])
+    assert await rec.wait(late["uid"]) == ["FAILED"]
+    assert "relay" in late["stderr"]
+    assert await rec.wait(executable["uid"]) == ["DONE"]
+
+
+# ============================================================================
 # Task callback contract
 # ============================================================================
 
@@ -2225,3 +2319,50 @@ async def test_real_runtime_cancel_timeout_and_reaper(tmp_path):
     finally:
         await be.shutdown()
         cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
+
+
+def spin_until(stop):
+    """Run bytecode until ``stop``: a thread that always wants the GIL."""
+    x = 0
+    while not stop.is_set():
+        for _ in range(1000):
+            x += 1
+
+
+@needs_runtime
+async def test_real_runtime_busy_client_trades_with_the_relay_in_batches(tmp_path):
+    """Next to a thread that never lets the GIL go, the pool used to start about 50 tasks a second.
+
+    The client's queue calls are what that thread starves, so there must be far fewer than tasks.
+    ``tests/performance/dragon_native_busy_client.py`` measures the rate.
+    """
+    cloudpickle.register_pickle_by_value(sys.modules[__name__])
+    be = await DragonNativeExecutionBackend(workers_per_node=16)
+    be._work_dir = str(tmp_path)
+    rec = Recorder(be)
+    calls = {"get": 0, "put": 0}
+    get, put = be._inbound.get, be._control.put
+
+    def counted_get(*args, **kwargs):
+        calls["get"] += 1
+        return get(*args, **kwargs)
+
+    def counted_put(*args, **kwargs):
+        calls["put"] += 1
+        return put(*args, **kwargs)
+
+    be._inbound.get, be._control.put = counted_get, counted_put
+    stop = threading.Event()
+    tasks = [fn_task(square, i) for i in range(1000)]
+    try:
+        threading.Thread(target=spin_until, args=(stop,), daemon=True).start()
+        t0 = time.monotonic()
+        await be.submit_tasks(tasks)
+        for task in tasks:
+            assert await rec.wait(task["uid"], 120) == ["DONE"]
+        rate = len(tasks) / (time.monotonic() - t0)
+    finally:
+        stop.set()
+        await be.shutdown()
+        cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
+    assert calls["get"] < len(tasks) / 3 and calls["put"] < len(tasks) / 3, (calls, rate)

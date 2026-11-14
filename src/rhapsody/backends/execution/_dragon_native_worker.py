@@ -14,8 +14,10 @@ import contextlib
 import ctypes
 import inspect
 import os
+import queue
 import sys
 import tempfile
+import threading
 import time
 import traceback
 
@@ -36,9 +38,14 @@ TOKEN_ENV = "RHAPSODY_DRAGON_NATIVE_TASK"  # noqa: S105 - a variable name, not a
 READY = "ready"
 DONE = "done"
 RESULT = "result"
+# From the relay: a task it could not put on its worker's inbox.
+UNSENT = "unsent"
 
 # Seconds a result waits for room in Dragon's memory pool before its task fails.
 PUT_PATIENCE = 60.0
+# Most messages, and bytes, the relay forwards to the client at once.
+RELAY_BATCH = 4096
+RELAY_BYTES = 1 << 22
 
 
 def call(fn, args, kwargs):
@@ -240,6 +247,92 @@ def worker_main(wid, inbox, results):
         del body
         ok, value, tb, out, err = run_task(token, fn, args, kwargs, out_path, err_path, inline)
         send(results, (DONE, wid, uid, ok, value, tb, out, err), 4)
+
+
+def relay_main(control, results, inbound, idle_interval, send_timeout):
+    """Carry tasks to the workers and results back, in a process of its own on the client's node.
+
+    The backend's threads share the GIL of the client's process. Every queue call gives the GIL up
+    about twice, and when another thread there keeps it busy, each time costs up to a switch
+    interval to get it back: one put and one get per task made the backend start some 50 tasks a
+    second next to a thread that never blocks. Here nothing else wants the GIL, so the relay makes
+    the calls for each task, and the client sends and takes them in batches:
+
+    - ``control`` brings lists of operations: ``("inbox", wid, queue)`` names a worker's inbox,
+      ``("forget", wid)`` drops it, and ``("send", wid, uid, payload)`` puts a task on it. ``None``
+      ends this thread. A send that fails comes back as ``(UNSENT, wid, uid, kind, error,
+      payload)`` through ``results``, so the client reads it in order with that worker's messages;
+      ``kind`` is ``"full"`` (Dragon's memory pool), ``"timeout"`` or ``"broken"``.
+    - ``results`` brings what workers and function processes send, and the relay forwards it to
+      ``inbound`` as ``(messages, drained_at)``: the messages it had, and the time it found
+      ``results`` empty, or None if it did not. ``inbound`` holds one batch, so while the client
+      handles one, the next grows. With nothing to forward for ``idle_interval`` seconds, it sends
+      an empty batch, which still moves ``drained_at`` on. A ``None`` on ``results`` is forwarded as
+      ``None`` and ends the relay.
+    """
+
+    def report(wid, uid, kind, error, payload):
+        msg = (UNSENT, wid, uid, kind, f"{type(error).__name__}: {error}", payload)
+        put_waiting(results, cloudpickle.dumps(msg))
+
+    def run_control():
+        inboxes = {}
+        while True:
+            raw = control.get()
+            if raw is None:
+                return
+            for op in cloudpickle.loads(raw):
+                if op[0] == "inbox":
+                    inboxes[op[1]] = op[2]
+                elif op[0] == "forget":
+                    inboxes.pop(op[1], None)
+                else:
+                    _, wid, uid, payload = op
+                    try:
+                        inboxes[wid].put(payload, timeout=send_timeout)
+                    except PoolFull as exc:
+                        report(wid, uid, "full", exc, payload)
+                    except queue.Full:
+                        error = TimeoutError(f"the put took over {send_timeout} s")
+                        report(wid, uid, "timeout", error, payload)
+                    except Exception as exc:  # noqa: BLE001 - the client replaces the worker
+                        report(wid, uid, "broken", exc, payload)
+
+    def run_control_or_exit():
+        try:
+            run_control()
+        except BaseException:  # noqa: BLE001 - the client sees the relay die, not tasks vanish
+            traceback.print_exc()
+            os._exit(70)
+
+    thread = threading.Thread(target=run_control_or_exit, name="relay_control", daemon=True)
+    thread.start()
+    while True:
+        empty_at = time.monotonic()
+        try:
+            batch = [results.get(timeout=idle_interval)]
+        except queue.Empty:
+            put_waiting(inbound, cloudpickle.dumps(([], empty_at)))
+            continue
+        drained_at = None
+        size = len(batch[0] or b"")
+        while batch[-1] is not None and len(batch) < RELAY_BATCH and size < RELAY_BYTES:
+            now = time.monotonic()
+            try:
+                batch.append(results.get(block=False))
+            except queue.Empty:
+                drained_at = now
+                break
+            size += len(batch[-1] or b"")
+        stop = batch[-1] is None
+        if stop:
+            batch.pop()
+        if batch:
+            put_waiting(inbound, cloudpickle.dumps((batch, drained_at)))
+        if stop:
+            put_waiting(inbound, None)
+            thread.join(timeout=5.0)
+            return
 
 
 def _redirect_for_good(out_path, err_path):
