@@ -363,8 +363,9 @@ class DragonNativeExecutionBackend(BaseBackend):
 
     It accepts the task descriptions of ``DragonExecutionBackend``: ``function`` or
     ``executable`` with ``args``/``kwargs`` or ``arguments``, ``capture_stdio``, ``placement``
-    (``{"node", "host", "gpus"}`` from AsyncFlow), and ``task_backend_specific_kwargs`` with
-    ``timeout``, ``process_template`` or ``process_templates``. How each kind runs:
+    (``{"node_id", "host", "cores", "gpu_ids"}`` from AsyncFlow), and
+    ``task_backend_specific_kwargs`` with ``timeout``, ``process_template`` or
+    ``process_templates``. How each kind runs:
 
     - A function task without templates, or whose ``process_template`` holds only a ``policy``
       that names at most a host and GPUs, runs in the worker pool and returns its value. Async
@@ -1791,13 +1792,22 @@ class DragonNativeExecutionBackend(BaseBackend):
             raise ValueError(f"task {uid}: GPUs {sorted(gpus)} are not on {where}; GPUs: {listed}")
 
     def _placement_policy(self, placement: dict | None, uid: str):
-        """Translate AsyncFlow's ``placement`` into a host-name policy, or None."""
-        if not placement or not placement.get("host"):
+        """Translate AsyncFlow's ``placement`` into a host-name policy, or None.
+
+        ``placement`` is ``{"node_id", "host", "cores", "gpu_ids"}``, as ``ResourcePolicy`` writes
+        it. The host is ``host``, else ``node_id``; the GPUs are ``gpu_ids``. ``cores`` is not
+        used: Dragon places a process on a host, not on cores. With no host name, the task is not
+        placed.
+        """
+        if not placement:
+            return None
+        host = placement.get("host") or placement.get("node_id")
+        if not host:
             return None
         policy = Policy(
             placement=Policy.Placement.HOST_NAME,
-            host_name=placement["host"],
-            gpu_affinity=list(placement.get("gpus") or []),
+            host_name=host,
+            gpu_affinity=list(placement.get("gpu_ids") or []),
         )
         self._check_policy(policy, uid)
         return policy

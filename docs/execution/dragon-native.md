@@ -30,7 +30,7 @@ Install it with the `dragon` extra, and start your script with the Dragon launch
 | Task | Runs as | `return_value` |
 |---|---|---|
 | Function, no templates | a pool worker | the function's value |
-| Function with `placement` (`{"node", "host", "gpus"}`), or a `process_template` holding only a `policy` with a host and/or GPUs | a free pool worker on that host; for GPUs, a worker started for that GPU set | the function's value |
+| Function with `placement` (`{"node_id", "host", "cores", "gpu_ids"}`: the host is `host`, else `node_id`; `cores` is not used), or a `process_template` holding only a `policy` with a host and/or GPUs | a free pool worker on that host; for `gpu_ids`, a worker started for that GPU set | the function's value |
 | Function with any other `process_template` (`{}`, `cwd`, `env`, a CPU affinity, ...) | one native `Process` | the function's value |
 | Executable | one native `Process` | the exit code (also `exit_code`); a non-zero one also sets `exception` to the `TaskExecutionError` a `Session` raises |
 | `process_templates` (function or executable) | one `ProcessGroup`, with the task's or the backend's `pmi` (none by default) | the list of exit codes; `exit_code` is the first non-zero one |
