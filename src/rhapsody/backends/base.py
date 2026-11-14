@@ -51,9 +51,9 @@ class BaseBackend(ABC):
     supports_implicit_data_linking: bool = False
     supports_explicit_data_linking: bool = False
 
-    # Telemetry handle. The session or workflow engine replaces it with a real emitter when it
-    # attaches the backend to a TelemetryManager; until then (and whenever telemetry is off) it is
-    # a no-op emitter, so backends never check for None. A backend only calls
+    # Telemetry handle. The TelemetryManager hands the backend a real emitter through
+    # ``register_emitter`` when it attaches the backend; until then (and whenever telemetry is
+    # off) it is a no-op emitter, so backends never check for None. A backend only calls
     # ``self.telemetry.emit(...)``: it never sees the manager and never imports OpenTelemetry.
     # See rhapsody.telemetry.emitter.
     telemetry: Emitter = NoopEmitter()
@@ -130,6 +130,20 @@ class BaseBackend(ABC):
                 The function should accept task and state parameters.
         """
         self._callback_func = func
+
+    def register_emitter(self, emitter: Emitter) -> None:
+        """Receive the telemetry emitter, like :meth:`register_callback` receives the callback.
+
+        The :class:`~rhapsody.telemetry.manager.TelemetryManager` calls this when the backend is
+        attached to a session or workflow engine that has telemetry (it is called again, with a
+        new emitter, if the backend is attached to another manager). The default stores the
+        emitter in ``self.telemetry``, which the backend then uses to report plain data. Override
+        it to react to the handoff and call ``super().register_emitter(emitter)``.
+
+        Args:
+            emitter: The handle with ``enabled`` and ``emit(...)``.
+        """
+        self.telemetry = emitter
 
     @abstractmethod
     def get_task_states_map(self) -> Any:

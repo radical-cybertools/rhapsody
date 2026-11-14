@@ -122,6 +122,20 @@ Telemetry is designed to be low-overhead:
 
 At default settings (5 s poll, checkpoint on stop), telemetry overhead is negligible. For a 6-hour run with 10 nodes, expect a JSONL file of roughly 10–50 MB depending on task throughput.
 
+The per-event cost of the dispatch path did not change when instrumentations were introduced: in an interleaved A/B run of the benchmark (`tests/performance/session_floor.py`, 100K tasks, 400K events, one machine, medians of 5 runs) the cost was about 24.7 µs per event both before and after, within 1% (run the script to reproduce it on your machine). The inference batch events add one row per request: about 90 bytes in the JSONL file and about 260 bytes in the in-memory event log (measured on 1024-request batches); the per-task attributes add about 150 bytes to each task span line of the JSONL file.
+
+---
+
+## Where are my inference metrics?
+
+They are recorded for a `DragonVllmInferenceBackend` that is part of a session (or a `WorkflowEngine`) with telemetry started. Read them with `telemetry.read_metrics()` (scope `rhapsody.instrumentation.inference`) and `telemetry.read_traces()` (spans named `chat <model>`), or forward them with a `MetricReader` / `SpanProcessor`. They need `opentelemetry-sdk>=1.30`. If nothing shows up, check that the backend was passed to the session or engine **before** `start_telemetry()` was called on a `WorkflowEngine`, and that at least one `AITask` or `generate()` call ran. See [Inference telemetry](reference.md#inference-telemetry-experimental).
+
+---
+
+## Does telemetry include my prompts?
+
+No. The inference events, spans and metrics carry numbers, ids, the model name (which may be a filesystem path) and the Dragon worker's host name. They never carry prompt or response text.
+
 ---
 
 ## Can I use telemetry without writing a checkpoint file?

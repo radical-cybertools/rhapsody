@@ -9,6 +9,7 @@ RHAPSODY ships a built-in, zero-configuration telemetry layer (the **Telemetry A
 | **Session** | Start / end timestamps, total duration, session span (root of the OTel trace) |
 | **Tasks** | Full lifecycle events (Created → Submitted → Queued → Started → Completed / Failed) with wall-clock timestamps, per-task duration, backend, executable identity |
 | **Resources** | Per-node CPU %, memory %, disk I/O bytes/interval, network I/O bytes/interval, per-GPU utilization % with device index |
+| **Inference** *(experimental)* | For a `DragonVllmInferenceBackend`: one span per batch, queue wait, batch and model durations, request / prompt / timeout counters, per-task batch attributes. See [Inference telemetry](reference.md#inference-telemetry-experimental) |
 | **OTel SDK** | Counters, gauges, histograms, and traces stored in-memory and written to a JSONL checkpoint file |
 
 ## Architecture at a glance
@@ -27,7 +28,7 @@ RHAPSODY ships a built-in, zero-configuration telemetry layer (the **Telemetry A
 │  │  ┌─────────────┐  │    │         │                 │          │  │
 │  │  │ Concurrent  │  │    │  ┌──────▼─────────────────▼───────┐  │  │
 │  │  │  (psutil +  │  │    │  │         Dispatch Loop          │  │  │
-│  │  │   pynvml)   │  │    │  │  • Update OTel instruments     │  │  │
+│  │  │   pynvml)   │  │    │  │  • Route to instrumentations   │  │  │
 │  │  ├─────────────┤  │    │  │  • Open / close task spans     │  │  │
 │  │  │  Dask       │  │    │  │  • Attach trace_id / span_id   │  │  │
 │  │  │ (scheduler  │  │    │  │  • Fan-out to subscribers      │  │  │
@@ -82,6 +83,8 @@ This means:
 - **No extra dependencies** are added to a backend that does not already use them.
 - **Polling intervals** are configurable and low-overhead (default 5 s, can be 0.1 s for dashboards).
 - **GPU data is per-device**: on a 4-GPU node the adapter emits one aggregate `ResourceUpdate` (with `gpu_id=None`) plus one per-GPU `ResourceUpdate` (with `gpu_id=0..3`), matching the OTel hierarchy.
+
+Backends can also report data about their own work. Every backend has an *emitter* (`backend.telemetry`) and sends plain events through it; an *instrumentation* turns them into spans and metrics. The vLLM inference backend does this for its batches. See [Backends, emitters and instrumentations](reference.md#backends-emitters-and-instrumentations).
 
 ## OpenTelemetry compatibility
 
