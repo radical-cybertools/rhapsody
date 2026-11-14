@@ -9,8 +9,10 @@
   `ResourcePolicy` learns memory demand from. Executable tasks run under a small launcher
   (`rhapsody.backends.execution._peak`) that reaps the command with `wait4` for its peak RSS
   and, when `pynvml` is installed, samples its per-process GPU memory through NVML; a job sums
-  its ranks. Native function tasks share pool workers, so they report the worker's RSS growth
-  during the call, marked `"approximate": True`. Off by default. With a Dragon whose Batch
+  its ranks, with `host_mem_max` (the largest) and `ranks`, and ranks that stayed at the
+  launcher's own size count it once between them. Native function tasks share pool workers, so
+  they report the worker's peak RSS during the call (its growth as `host_mem_growth`), marked
+  `"approximate": True`. Off by default. With a Dragon whose Batch
   tasks report their processes' resource usage (`Task.rusage`), executable peaks are read from
   there instead of running the launcher; `peak_source` (`"auto"`, `"dragon"`, `"launcher"`)
   chooses. See
@@ -18,7 +20,7 @@
 - **`ConcurrentExecutionBackend(observe_peaks=True)`** reports `task["observed"]` with the
   same keys: executables run under the same launcher (peak RSS, GPU memory with `pynvml`);
   functions report the call's times, and in a `ProcessPoolExecutor` on Linux the worker's
-  RSS growth (`"approximate": True`). Off by default.
+  peak RSS during the call (`"approximate": True`). Off by default.
 - **`observed` carries the task's execution window** — `started` and `ended` (wall clock, where
   the task ran), `host`/`hosts` and `cpu_seconds`, from the launcher, from a native function's
   wrapper, and from Dragon's rusage when Dragon reports them. Backends report RUNNING when they
@@ -46,6 +48,10 @@
   write the launcher's record from inside. Every task reports `started`, `ended`, `host` and
   `cpu_seconds`, also when FAILED. Dragon's native API has no per-task `rusage`, so
   `peak_source="auto"` means the launcher. Off by default.
+- **Telemetry: `TaskCompleted` and `TaskFailed` carry what the task used** — with
+  `observe_peaks`, `task["observed"]` is flattened into the event's attributes and onto the task
+  span, memory in bytes (`memory_peak_bytes`, `cpu_seconds`, `exec_start`, `exec_end`,
+  `exec_host`, ...). See `docs/telemetry/reference.md`.
 
 ### Changed
 

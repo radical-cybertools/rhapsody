@@ -68,7 +68,7 @@ task = ComputeTask(
 | Task | `host_mem` | `gpu_mem` | `started`, `ended`, `host` | `cpu_seconds` |
 |------|------------|-----------|----------------------------|---------------|
 | Executable | peak RSS from `wait4`, under the peak launcher | with `pynvml` | the command's | yes |
-| Function, `ProcessPoolExecutor` | worker RSS growth during the call, `"approximate": True` (Linux only) | not measured | the call's, in the worker | the worker process's, during the call |
+| Function, `ProcessPoolExecutor` | the worker's peak RSS during the call, its own size included; the growth during the call in `host_mem_growth`; `"approximate": True` (Linux only) | not measured | the call's, in the worker | the worker process's, during the call |
 | Function, `ThreadPoolExecutor` | not measured (threads share one process) | not measured | the call's, in the worker | the calling thread's (not threads or processes the function starts); marked `"approximate": True` |
 
 `started` and `ended` are wall-clock times taken where the task ran, so they show when it really
@@ -409,15 +409,18 @@ Executable tasks take their peaks from one of two sources, chosen by `peak_sourc
 | Task | How | `host_mem` | `gpu_mem` |
 |------|-----|------------|-----------|
 | Executable (process, `process_template`) | Dragon's `Task.rusage`, or the launcher | `ru_maxrss`: the largest single process of the command's tree | launcher only: largest per-GPU sum over the tree's processes; needs `pynvml` |
-| Executable job (`process_templates`) | per rank, as above | sum over ranks (an upper bound) | launcher only: per GPU, summed over the ranks that share it |
-| Native function | the call is wrapped in the pool worker | worker RSS growth during the call, marked `"approximate": True` (Linux only) | not measured |
+| Executable job (`process_templates`) | per rank, as above | sum over ranks (an upper bound); with the launcher, ranks that stayed at its floor count one floor between them; `host_mem_max` is the largest rank, `ranks` their number | launcher only: per GPU, summed over the ranks that share it |
+| Native function | the call is wrapped in the pool worker | the worker's peak RSS during the call, its own size included; the growth during the call in `host_mem_growth`; marked `"approximate": True` (Linux only) | not measured |
 | Function with `process_template(s)` | Dragon's `Task.rusage` only | as for an executable | not measured |
 
 Limits:
 
-- `ru_maxrss` keeps, across `exec`, the resident size of the process that forked the command.
-  So the smallest `host_mem` reported is about 10 MiB with the launcher, and the resident size
-  of Dragon's Local Services (about 140 MiB) with Dragon's rusage. Larger peaks are exact.
+- `ru_maxrss` is a high-water mark kept across `exec`, so it includes the resident size of the
+  process that forked the command: about 10 MiB with the launcher, and the size of Dragon's Local
+  Services (about 140 MiB) with Dragon's rusage. A command that stays below it reports that size;
+  larger peaks are exact. The launcher writes its size as the record's `floor`, so a job's ranks
+  that stayed at it count one floor between them, not one each. With Dragon's rusage, every
+  rank counts its floor.
 - `gpu_mem` is `None` without `pynvml`, without a GPU, or when NVML never listed the task's
   processes on a GPU. NVML reports host PIDs, so a task in its own PID namespace (some
   containers) is not seen.
@@ -432,9 +435,11 @@ Limits:
   group, reaches the command's group once.
 - NVML is set up in the launcher's sampler thread: a slow or broken NVML (or `pynvml`) neither
   delays the command nor fails the task; GPU memory NVML cannot tell (MIG) is unknown, not zero.
-- A native function's figure misses memory the allocator kept from earlier calls in the same
-  worker, and counts other threads of the worker, including threads an earlier call left
-  running. The measurement travels to the worker by value, so the worker does not import
+- A native function's `host_mem` is what its node held for it: the worker's own size (60 to
+  100 MiB on Dragon) and the call's arguments included, so small calls are over-stated by about
+  the worker's size. `host_mem_growth`, the growth during the call, misses memory the allocator
+  kept from earlier calls in the same worker. Both count other threads of the worker, including
+  threads an earlier call left running. The measurement travels to the worker by value, so the worker does not import
   rhapsody.
 - A Dragon function that times out reports nothing: Dragon replaces its exception with a
   `TimeoutError` of its own.

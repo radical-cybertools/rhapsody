@@ -287,7 +287,7 @@ def _write(peak_dir, name, **rec):
 def test_read_peaks_single_process(tmp_path):
     d = str(tmp_path / "t1")
     _write(d, "h.1.json", host_mem=1.5, gpu_mem=None, gpu_mem_devices={})
-    assert _read_peaks(d, 1) == {"host_mem": 1.5, "gpu_mem": None}
+    assert _read_peaks(d, 1) == {"host_mem": 1.5, "host_mem_max": 1.5, "ranks": 1, "gpu_mem": None}
     assert not os.path.exists(d)
 
 
@@ -296,7 +296,7 @@ def test_read_peaks_job_sums_ranks_and_shared_gpus(tmp_path):
     _write(d, "a.1.json", host_mem=1.0, gpu_mem_devices={"GPU-a": 2.0})
     _write(d, "a.2.json", host_mem=2.0, gpu_mem_devices={"GPU-a": 3.0, "GPU-b": 1.0})
     _write(d, "b.1.json", host_mem=0.5, gpu_mem_devices={"GPU-c": 4.0})
-    assert _read_peaks(d, 3) == {"host_mem": 3.5, "gpu_mem": 5.0}
+    assert _read_peaks(d, 3) == {"host_mem": 3.5, "host_mem_max": 2.0, "ranks": 3, "gpu_mem": 5.0}
 
 
 def test_read_peaks_combines_the_ranks_windows_and_hosts(tmp_path):
@@ -328,7 +328,7 @@ def test_read_peaks_skips_temp_and_corrupt_files(tmp_path):
     _write(d, ".a.2.json.tmp", host_mem=9.0)
     with open(os.path.join(d, "a.3.json"), "w") as f:
         f.write("{not json")
-    assert _read_peaks(d, 1) == {"host_mem": 1.0, "gpu_mem": None}
+    assert _read_peaks(d, 1) == {"host_mem": 1.0, "host_mem_max": 1.0, "ranks": 1, "gpu_mem": None}
 
 
 # ============================================================================
@@ -478,11 +478,15 @@ def test_observed_from_rusage():
     one = {"max_rss": 1 << 30, "utime": 0.1, "stime": 0.0}
     assert _observed_from_rusage(one) == {
         "host_mem": 1.0,
+        "host_mem_max": 1.0,
+        "ranks": 1,
         "gpu_mem": None,
         "cpu_seconds": 0.1,
     }
     three = _observed_from_rusage([one, one, one])
     assert three["host_mem"] == 3.0 and three["cpu_seconds"] == pytest.approx(0.3)
+    # Dragon's rusage has no floor to subtract: each process counts its own (decision-4, D1)
+    assert (three["host_mem_max"], three["ranks"]) == (1.0, 3)
     # A Dragon that reports when Local Services spawned and reaped each process
     timed = [{**one, "start": 10.0, "end": 12.0}, {**one, "start": 9.5, "end": 11.0}]
     assert _observed_from_rusage(timed)["started"] == 9.5

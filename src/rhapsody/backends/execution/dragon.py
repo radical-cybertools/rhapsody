@@ -1036,15 +1036,21 @@ class DragonExecutionBackend(BaseBackend):
 def _observed_from_rusage(rusage) -> Optional[dict]:
     """``task["observed"]`` from a Batch task's ``rusage``: a dict, or a job's list of them.
 
-    A job's processes add up (an upper bound: their peaks need not coincide). None unless every
-    process reported. Dragon reports no GPU memory. ``cpu_seconds`` sums ``utime`` and ``stime``;
+    A job's processes add up (an upper bound: their peaks need not coincide), each with the floor
+    ``ru_maxrss`` keeps of the process that forked it; ``host_mem_max`` is the largest and ``ranks``
+    the number of processes. None unless every process reported. Dragon reports no GPU memory. ``cpu_seconds`` sums ``utime`` and ``stime``;
     a Dragon that also reports each process's ``start`` and ``end`` (wall clock, from Local
     Services) gives ``started`` (the earliest) and ``ended`` (the latest).
     """
     entries = rusage if isinstance(rusage, list) else [rusage]
     if not entries or any(not isinstance(e, dict) or e.get("max_rss") is None for e in entries):
         return None
-    observed = {"host_mem": sum(e["max_rss"] for e in entries) / _peak.GIB, "gpu_mem": None}
+    observed = {
+        "host_mem": sum(e["max_rss"] for e in entries) / _peak.GIB,
+        "host_mem_max": max(e["max_rss"] for e in entries) / _peak.GIB,
+        "ranks": len(entries),
+        "gpu_mem": None,
+    }
     if all(e.get("utime") is not None and e.get("stime") is not None for e in entries):
         observed["cpu_seconds"] = sum(e["utime"] + e["stime"] for e in entries)
     if all(e.get("start") is not None for e in entries):
