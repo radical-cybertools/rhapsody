@@ -9,7 +9,8 @@ which carries the call's exception and its measurement together across a process
 result queue; :func:`split_error` takes them apart. ``observed`` has the keys of the peak launcher's
 records (:mod:`rhapsody.backends.execution._peak`): ``host_mem`` and ``gpu_mem`` (GiB, None when not
 measured), ``started`` and ``ended`` (wall clock, where the call ran), ``cpu_seconds`` and ``host``,
-plus ``approximate`` when the figures cover only part of what the call used.
+plus ``approximate`` when the figures cover only part of what the call used, and, for a call in a
+pool worker, ``host_mem_growth``.
 
 :func:`process_record` and :func:`write_record` give a function that runs as a process of its own,
 which the launcher cannot run, the record the launcher writes for a command.
@@ -86,10 +87,11 @@ def measure(fn, args, kwargs, memory=True, catch=Exception):
     """Call ``fn(*args, **kwargs)`` and return ``(value, observed)``.
 
     With ``memory`` (a worker that runs one call at a time), ``cpu_seconds`` is the CPU time of the
-    process and of the children it waited for, during the call, and on Linux ``host_mem`` is the
-    process's peak RSS during the call minus its RSS before, marked ``approximate``: memory the
-    allocator kept from earlier calls is reused without counting, and leftover threads of earlier
-    calls count. Without ``memory`` (a thread of a pool that runs several calls at once),
+    process and of the children it waited for, during the call. On Linux, ``host_mem`` is the
+    process's peak RSS during the call: what its node held for it, the worker's own size and the
+    call's arguments included. ``host_mem_growth`` is that peak minus the RSS before the call. Both
+    are marked ``approximate``: leftover threads of earlier calls count, and the children's memory
+    does not. Without ``memory`` (a thread of a pool that runs several calls at once),
     ``cpu_seconds`` is the calling thread's only, without the threads and processes the call
     starts, ``host_mem`` is None, and the measurement is marked ``approximate``. An exception of
     type ``catch`` is raised as :class:`MeasuredError`.
@@ -110,13 +112,15 @@ def _call_observed(base, started, cpu_seconds, memory):
     ended = time.time()
     peak = status_bytes("VmHWM") if base is not None else None
     observed = {
-        "host_mem": None if peak is None else max(peak - base, 0) / GIB,
+        "host_mem": None if peak is None else peak / GIB,
         "gpu_mem": None,
         "started": started,
         "ended": ended,
         "cpu_seconds": cpu_seconds,
         "host": socket.gethostname(),
     }
+    if peak is not None:
+        observed["host_mem_growth"] = max(peak - base, 0) / GIB
     if peak is not None or not memory:
         observed["approximate"] = True
     return observed
@@ -130,18 +134,23 @@ def cpu_now():
 def process_record(started, cpu_start, exit_code):
     """This process's record, in the format the peak launcher writes for a command.
 
-    For a function task that runs as a Dragon process of its own: ``host_mem`` is the larger
-    lifetime peak RSS of this process and of the children it waited for (the largest single
-    process, as the launcher reports); ``cpu_seconds`` is their CPU time since ``cpu_start``
-    (:func:`cpu_now`). No GPU memory.
+    For a function task that runs as a Dragon process of its own: ``host_mem`` is the larger of
+    this process's peak RSS and the children's it waited for (the largest single process, as the
+    launcher reports); ``cpu_seconds`` is their CPU time since ``cpu_start`` (:func:`cpu_now`). No
+    GPU memory. On Linux this process's peak is its ``VmHWM``: since it started its program, so
+    without the size of the process that forked it, which ``ru_maxrss`` keeps as a floor.
     """
     me = resource.getrusage(resource.RUSAGE_SELF)
     children = resource.getrusage(resource.RUSAGE_CHILDREN)
+    own = status_bytes("VmHWM")
+    if own is None:
+        own = me.ru_maxrss * MAXRSS_UNIT
     return {
         "started": started,
         "ended": time.time(),
         "cpu_seconds": max(_cpu_with_children() - cpu_start, 0.0),
-        "host_mem": max(me.ru_maxrss, children.ru_maxrss) * MAXRSS_UNIT / GIB,
+        "host_mem": max(own, children.ru_maxrss * MAXRSS_UNIT) / GIB,
+        "floor": None,
         "gpu_mem": None,
         "gpu_mem_devices": {},
         "nvml": False,

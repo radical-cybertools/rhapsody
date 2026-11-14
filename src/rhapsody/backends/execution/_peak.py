@@ -6,13 +6,16 @@ Usage::
 
 The command runs as a child of this process, which reaps it with ``os.wait4`` to read its peak
 resident set size (``ru_maxrss``: the largest single process of the command's tree, not a sum).
-The kernel carries the RSS of this process at fork (about 10 MiB) into the child's ``ru_maxrss``
-across ``exec``, so that is the smallest peak reported. When ``pynvml`` is importable, a thread
-also samples, every ``--interval`` seconds, the memory that NVML reports for the command's
-processes on each GPU. This process then writes ``DIR/<host>.<pid>.json``::
+``ru_maxrss`` is a high-water mark kept across ``exec``, so it includes the copy of this process
+the child was before it ran the command: a command whose own peak stays below this process's size
+at fork (about 10 MiB) reports that size. The record keeps it as ``floor``, so that
+:func:`read_peaks` can tell such ranks apart. When ``pynvml`` is importable, a thread also
+samples, every ``--interval`` seconds, the memory that NVML reports for the command's processes on
+each GPU. This process then writes ``DIR/<host>.<pid>.json``::
 
-    {"host_mem": GiB, "gpu_mem": GiB per GPU or null, "gpu_mem_devices": {uuid: GiB},
-     "started": wall s, "ended": wall s, "cpu_seconds": s, "host": name, ...}
+    {"host_mem": GiB, "floor": GiB, "gpu_mem": GiB per GPU or null,
+     "gpu_mem_devices": {uuid: GiB}, "started": wall s, "ended": wall s, "cpu_seconds": s,
+     "host": name, ...}
 
 ``started`` and ``ended`` are this process's wall-clock time just before it forks the command
 and just after the command exited: the command's execution window, as seen on its node.
@@ -73,6 +76,9 @@ RESET_SIGNALS = tuple(
 PR_SET_PDEATHSIG = 1
 # Seconds stop() waits for the GPU sampler thread, which may hang in NVML on a bad node.
 GPU_STOP_TIMEOUT = 5.0
+# A rank whose peak is within this of its floor (GiB) never grew past the launcher's own size:
+# the child touches a few pages of its copy of the launcher before it runs the command.
+FLOOR_SLACK = 1.0 / 1024
 
 
 def launcher_argv(out_dir: str) -> list[str]:
@@ -93,6 +99,18 @@ def make_peak_dir(root: str, uid: str) -> str:
     path = os.path.join(root, f"{safe}.{uuid.uuid4().hex[:8]}")
     os.makedirs(path)
     return path
+
+
+def rss_now() -> int:
+    """This process's resident set size in bytes: ``VmRSS``, or off Linux its peak so far."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * MAXRSS_UNIT
 
 
 def _die_with_parent_hook() -> Callable[[], None]:
@@ -287,14 +305,19 @@ def report(
     exit_code: int,
     started: Optional[float] = None,
     ended: Optional[float] = None,
+    floor: Optional[int] = None,
 ) -> dict:
-    """Build the peaks record from the child's rusage and, if any, the GPU sampler."""
+    """Build the peaks record from the child's rusage and, if any, the GPU sampler.
+
+    ``floor`` is this process's RSS in bytes when it forked the command.
+    """
     devices = {u: b / GIB for u, b in gpu.peak.items()} if gpu else {}
     return {
         "started": started,
         "ended": ended,
         "cpu_seconds": _cpu_seconds(rusage),
         "host_mem": rusage.ru_maxrss * MAXRSS_UNIT / GIB,
+        "floor": None if floor is None else floor / GIB,
         # None when GPUs were not sampled or the tree never showed up on one: "not observed"
         # keeps asyncflow from learning a zero for a GPU task it could not see.
         "gpu_mem": max(devices.values()) if devices else None,
@@ -385,6 +408,7 @@ def run(cmd: list[str], out_dir: str, interval: float = 0.2) -> int:
     for sig in FORWARDED_SIGNALS:
         signal.signal(sig, forward)
     own_group = not _in_terminal_foreground()
+    floor = rss_now()
     started = time.time()
     try:
         pid = spawn(cmd, own_group=own_group, mask=mask)
@@ -407,19 +431,12 @@ def run(cmd: list[str], out_dir: str, interval: float = 0.2) -> int:
 
     if gpu is not None:
         gpu.stop()
-    write_report(out_dir, report(rusage, gpu, exit_code, started, ended))
+    write_report(out_dir, report(rusage, gpu, exit_code, started, ended, floor))
     return exit_code
 
 
-def read_peaks(peak_dir: str, ranks: int) -> Optional[dict]:
-    """Combine the records in ``peak_dir`` into ``task["observed"]``, then remove the directory.
-
-    A job's ranks add up, on the host (an upper bound: their peaks need not coincide) and on each
-    GPU they share; ``gpu_mem`` is the busiest GPU's. None unless exactly ``ranks`` complete
-    records are there: a partial sum would understate the demand, and an extra record is not this
-    run's. When every record has them, ``started`` is the earliest start, ``ended`` the latest end,
-    ``cpu_seconds`` the sum, and ``host`` the node (or ``hosts``, sorted, for a job on several).
-    """
+def read_records(peak_dir: str) -> Optional[list[dict]]:
+    """The complete records in ``peak_dir``, then remove the directory; None if unreadable."""
     if os.path.basename(peak_dir.rstrip(os.sep)) in ("", ".", ".."):
         return None  # never remove a work directory itself
     records = []
@@ -438,15 +455,41 @@ def read_peaks(peak_dir: str, ranks: int) -> Optional[dict]:
         if isinstance(rec, dict) and isinstance(rec.get("host_mem"), (int, float)):
             records.append(rec)
     shutil.rmtree(peak_dir, ignore_errors=True)
-    if len(records) != ranks:
+    return records
+
+
+def _at_floor(rec: dict) -> bool:
+    floor = rec.get("floor")
+    return isinstance(floor, (int, float)) and rec["host_mem"] <= floor + FLOOR_SLACK
+
+
+def combine(records: list[dict], ranks: int) -> Optional[dict]:
+    """Combine a run's records into ``task["observed"]``; None unless there are exactly ``ranks``.
+
+    A partial sum would understate the demand, and an extra record is not this run's.
+
+    - ``host_mem`` adds the ranks up (an upper bound: their peaks need not coincide). A rank whose
+      peak stayed at its ``floor`` (the launcher's size when it forked the command, which
+      ``ru_maxrss`` keeps) used at most that much, so all such ranks count one floor between them
+      instead of one each. Every other rank's peak is its command's own.
+    - ``host_mem_max`` is the largest rank's peak, and ``ranks`` the number of records.
+    - ``gpu_mem`` is the busiest GPU's, the ranks sharing a GPU adding up.
+    - When every record has them, ``started`` is the earliest start, ``ended`` the latest end,
+      ``cpu_seconds`` the sum, and ``host`` the node (or ``hosts``, sorted, for a job on several).
+    """
+    if len(records) != ranks or not records:
         return None
     gpu: dict[str, float] = {}
     for rec in records:
         devices = rec.get("gpu_mem_devices")
         for device, gib in (devices if isinstance(devices, dict) else {}).items():
             gpu[device] = gpu.get(device, 0.0) + gib
+    floors = [rec["floor"] for rec in records if _at_floor(rec)]
+    above = sum(rec["host_mem"] for rec in records if not _at_floor(rec))
     observed = {
-        "host_mem": sum(rec["host_mem"] for rec in records),
+        "host_mem": above + (max(floors) if floors else 0.0),
+        "host_mem_max": max(rec["host_mem"] for rec in records),
+        "ranks": len(records),
         "gpu_mem": max(gpu.values()) if gpu else None,
     }
     if all(rec.get("started") is not None for rec in records):
@@ -461,6 +504,13 @@ def read_peaks(peak_dir: str, ranks: int) -> Optional[dict]:
     elif hosts:
         observed["hosts"] = hosts
     return observed
+
+
+def read_peaks(peak_dir: str, ranks: int) -> Optional[dict]:
+    """Combine the records in ``peak_dir`` into ``task["observed"]`` (see :func:`combine`), then
+    remove the directory."""
+    records = read_records(peak_dir)
+    return None if records is None else combine(records, ranks)
 
 
 class MeasuredResult(NamedTuple):

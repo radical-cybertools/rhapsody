@@ -326,7 +326,7 @@ def _hold(mib):
     return len(buf)
 
 
-def test_measured_call_returns_value_and_growth():
+def test_measured_call_returns_the_peak_and_the_growth():
     before = time.time()
     result = _peak.measured_call(_hold, (256,), {})
     assert isinstance(result, _peak.MeasuredResult)
@@ -339,7 +339,10 @@ def test_measured_call_returns_value_and_growth():
         return
     assert result.observed["approximate"] is True
     assert result.observed["gpu_mem"] is None
-    assert 256 * MIB - SLACK <= result.observed["host_mem"] * (1 << 30) <= 300 * MIB
+    growth = result.observed["host_mem_growth"] * (1 << 30)
+    assert 256 * MIB - SLACK <= growth <= 300 * MIB
+    # host_mem is the whole peak during the call: this process's own size included
+    assert result.observed["host_mem"] * (1 << 30) >= growth + 8 * MIB
 
 
 def test_measured_call_without_memory_reports_only_times():
@@ -578,3 +581,60 @@ def test_a_process_record_is_its_own_lifetime_peak(tmp_path):
     observed = _peak.read_peaks(d, 1)
     assert observed["host_mem"] * (1 << 30) >= 96 * MIB - SLACK
     assert observed["host"] == socket.gethostname()
+
+
+# ============================================================================
+# What a node held: the launcher's floor, absolute peaks (decision-4, D1 and D2)
+# ============================================================================
+
+
+def test_the_launcher_records_its_size_at_fork_as_the_floor(tmp_path):
+    out = tmp_path / "small"
+    assert _launch(out, "sh", "-c", "exit 0").returncode == 0
+    rec = _record(out)
+    assert 1 * MIB <= rec["floor"] * (1 << 30) <= 256 * MIB
+    if LINUX:  # ru_maxrss keeps the child's copy of the launcher: a tiny command shows the floor
+        assert _peak._at_floor(rec)
+        big = tmp_path / "big"
+        _launch(big, *_alloc(64))
+        assert not _peak._at_floor(_record(big))
+
+
+def _rec(host_mem, floor=None, host="h"):
+    return {"host_mem": host_mem, "floor": floor, "host": host, "gpu_mem_devices": {}}
+
+
+def test_ranks_at_the_launchers_floor_count_one_floor_between_them():
+    floor = 10 / 1024
+    # Above the floor, a rank's peak is its command's own: the sum is exact
+    big = _peak.combine([_rec(0.5, floor), _rec(0.25, floor), _rec(0.5, floor)], 3)
+    assert big["host_mem"] == pytest.approx(1.25)
+    assert (big["host_mem_max"], big["ranks"]) == (0.5, 3)
+    # 64 ranks that never grew past the launcher's size: one floor, not 64
+    small = _peak.combine([_rec(floor, floor) for _ in range(64)], 64)
+    assert small["host_mem"] == pytest.approx(floor)
+    assert (small["host_mem_max"], small["ranks"]) == (floor, 64)
+    # Both kinds in one job, and records without a floor (a process's own) count as they are
+    mixed = _peak.combine([_rec(0.5, floor), _rec(floor, floor), _rec(floor * 1.01, floor)], 3)
+    assert mixed["host_mem"] == pytest.approx(0.5 + floor)
+    assert _peak.combine([_rec(0.1), _rec(0.1)], 2)["host_mem"] == pytest.approx(0.2)
+
+
+FORK_AND_RECORD = """
+import os, sys
+held = b"x" * (256 << 20)  # the parent's size, which the child's ru_maxrss would keep
+pid = os.fork()
+if pid == 0:
+    os.execv(sys.executable, [sys.executable, "-c", sys.argv[2], sys.argv[1]])
+os.waitpid(pid, 0)
+"""
+
+
+@pytest.mark.skipif(not LINUX, reason="VmHWM is Linux's")
+def test_a_process_record_does_not_count_the_process_that_forked_it(tmp_path):
+    d = _peak.make_peak_dir(str(tmp_path), "t")
+    subprocess.run(
+        [sys.executable, "-c", FORK_AND_RECORD, d, HOLD_AND_RECORD], check=True, timeout=60
+    )
+    observed = _peak.read_peaks(d, 1)
+    assert 96 * MIB - SLACK <= observed["host_mem"] * (1 << 30) <= 240 * MIB
