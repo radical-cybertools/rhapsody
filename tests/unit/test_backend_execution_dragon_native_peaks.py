@@ -244,8 +244,11 @@ async def test_function_processes_and_group_members_write_their_records(observin
         assert_window(observed, before)
         assert observed["host_mem"] > 0 and observed["gpu_mem"] is None
         assert "approximate" not in observed  # the process's own peak, not a growth
-        # The CPU time of the call, not of the process's whole life (here: pytest's)
-        assert observed["cpu_seconds"] <= observed["ended"] - observed["started"] + 0.5
+        # The CPU time of the call, not of the process's whole life (here: pytest's). In the fake,
+        # each rank is a thread of pytest and counts the whole process's CPU time over its window,
+        # so a group's sum can reach its rank count times the wall time.
+        wall = observed["ended"] - observed["started"]
+        assert observed["cpu_seconds"] <= observed.get("ranks", 1) * wall + 0.5
     # In the fake, processes are threads of pytest: their real peaks are tested in
     # test_backend_execution_peak.py (a process record in a process of its own) and on Dragon.
 
