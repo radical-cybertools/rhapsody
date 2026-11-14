@@ -979,6 +979,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                     w = self._workers_by_puid.pop(puid, None)
                 if w is not None and not self._stopping:
                     self._worker_died(w, f"exited with code {code}")
+            self._flush_sends()  # the tasks given to the workers of a host a death made room on
 
     def _check_stalls(self) -> None:
         """Lift the limit of a node that holds tasks back and has finished none for ``_STALL`` s."""
@@ -998,6 +999,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                     self._recent[host].clear()
                     self._short[host] = 0
                     self._fill(host)
+        self._flush_sends()  # otherwise they wait for the relay's next batch, up to a second
 
     def _relay_lost(self, why: str) -> None:
         """Fail every pool task: none can be sent, or heard from, without the relay.
@@ -1289,6 +1291,7 @@ class DragonNativeExecutionBackend(BaseBackend):
             self._set_state(w, "dead")
             w.task = None
             self._fill(w.host)
+        self._flush_sends()
         error = TimeoutError(
             f"task {rec.uid} exceeded its timeout of {rec.timeout} s; its worker was killed"
         )
@@ -2077,6 +2080,7 @@ class DragonNativeExecutionBackend(BaseBackend):
         for desc in (rec.desc, *rec.repeats):
             self._callback_func(desc, "CANCELED")
         if worker is not None:
+            self._flush_sends()  # the tasks _fill gave to the room the cancel made
             self._ops.submit(self._retire_worker, worker, rec.token)
         elif rec.kind != "pool" and started:
             self._ops.submit(self._kill_process_task, rec)

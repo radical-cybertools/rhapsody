@@ -1773,6 +1773,62 @@ async def test_cancel_timeout_and_death_make_room_under_the_cap(capped, dragon):
     assert capped._busy["n1"] == 0
 
 
+STARTED = threading.Event()
+
+
+def note_start():
+    STARTED.set()
+
+
+@pytest.mark.parametrize("how", ["cancel", "timeout", "stall"])
+async def test_room_made_outside_the_result_thread_is_used_at_once(
+    dragon, tmp_path, monkeypatch, how
+):
+    """A cancel, a timeout or a lifted limit gives a waiting task to the relay at once.
+
+    Those hand-outs used to wait for the relay's next batch, which an idle client gets once a second
+    (five here), so the room went unused until then, or until a message came in, say a replacement
+    worker's READY: replacements start slowly here, as on a real runtime.
+    """
+    STARTED.clear()
+    monkeypatch.setattr(dragon_native, "_TASK_WINDOW", 4)
+    monkeypatch.setattr(dragon_native, "_STALL", 30.0)
+    monkeypatch.setattr(dragon_native, "_WATCH_INTERVAL", 5.0)
+    be = DragonNativeExecutionBackend(
+        workers_per_node=4, short_task_workers=2, inline_stdio=False, kill_grace=0.5
+    )
+    be._work_dir = str(tmp_path)
+    await be
+    launch = be._launch_worker
+
+    def slow_launch(w):
+        time.sleep(3.0)
+        launch(w)
+
+    monkeypatch.setattr(be, "_launch_worker", slow_launch)
+    try:
+        rec = Recorder(be)
+        make_short(be, "n1")
+        timeout = {"task_backend_specific_kwargs": {"timeout": 0.3}} if how == "timeout" else {}
+        first = fn_task(blocked, placement={"host": "n1"}, **timeout)
+        second = fn_task(blocked, placement={"host": "n1"})
+        waiting = fn_task(note_start, placement={"host": "n1"})
+        await be.submit_tasks([first, second, waiting])
+        await asyncio.sleep(0.2)
+        assert not STARTED.is_set()  # held back by the limit of 2
+        if how == "cancel":
+            assert await be.cancel_task(first["uid"]) is True
+        elif how == "stall":
+            monkeypatch.setattr(dragon_native, "_STALL", 0.0)
+            be._check_stalls()  # notes the stall
+            be._check_stalls()  # lifts the limit
+        assert await asyncio.to_thread(STARTED.wait, 2.0)
+        assert await rec.wait(waiting["uid"]) == ["DONE"]
+    finally:
+        GATE.set()
+        await be.shutdown()
+
+
 async def test_workers_paused_by_a_full_pool_do_not_count_as_busy(capped, pool_full, monkeypatch):
     rec = Recorder(capped)
     make_short(capped, "n1")
