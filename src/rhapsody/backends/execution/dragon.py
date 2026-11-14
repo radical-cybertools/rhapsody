@@ -4,6 +4,7 @@ import os
 import shutil
 import threading
 import time
+import uuid
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
@@ -13,6 +14,12 @@ from typing import Union
 from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
+from . import _measure
+from . import _peak
+
+# Run by path so a launch does not import rhapsody (and Dragon) before the task's command.
+PEAK_LAUNCHER = os.path.abspath(_peak.__file__)
+PEAK_SOURCES = ("auto", "dragon", "launcher")
 
 DRAGON_BATCH_INIT_ERROR = None
 
@@ -33,6 +40,18 @@ except ImportError as e:  # pragma: no cover - environment without Dragon
     TaskCancelledError = None
     TaskNotReadyError = None
     DRAGON_BATCH_INIT_ERROR = e
+
+
+def _batch_reports_rusage() -> bool:
+    """True if this Dragon's Batch tasks carry their processes' resource usage (``Task.rusage``).
+
+    Stock dragonhpc 0.14.1 does not; a Dragon with per-process rusage in Batch results does.
+    """
+    try:
+        from dragon.workflows.batch.batch import Task
+    except ImportError:
+        return False
+    return isinstance(getattr(Task, "rusage", None), property)
 
 
 def _get_logger() -> logging.Logger:
@@ -192,6 +211,29 @@ class DragonExecutionBackend(BaseBackend):
               below.
             - ``pool_nodes`` — **no-op in Dragon 0.14.0+**, kept for API compatibility.
 
+        observe_peaks: Report each task's peak memory as ``task["observed"] = {"host_mem": GiB,
+            "gpu_mem": GiB per GPU}`` when it is DONE or FAILED, for AsyncFlow's ``ResourcePolicy``
+            to learn from. Off by default.
+
+            - Executable tasks (process and job), by default: when the Dragon in use reports each
+              process's resource usage with its Batch result (``Task.rusage``), ``host_mem`` is
+              read from there (a job sums its ranks), with no extra process, and ``gpu_mem`` is
+              None. Function tasks with a ``process_template(s)`` then report too.
+            - Otherwise, or with ``peak_source="launcher"``, executable tasks run under a small
+              launcher (:mod:`rhapsody.backends.execution._peak`) that reaps the command with ``wait4``
+              (``ru_maxrss``: the largest single process of its tree) and, if ``pynvml`` is
+              installed, samples its GPU memory every 0.2 s. A job sums its ranks. ``gpu_mem`` is
+              None without NVML or if the task never showed up on a GPU. The launcher writes to
+              ``<work_dir>/rhapsody-peaks.<tag>/<uid>/``, which must be on a file system the
+              nodes share.
+            - Native function tasks share long-lived pool workers, so the OS has no per-task peak:
+              they report the worker's RSS growth during the call, marked ``"approximate": True``,
+              and no ``gpu_mem`` (Linux only).
+            - Function tasks with a ``process_template(s)`` are measured only from Dragon's rusage.
+
+        peak_source: Where ``observe_peaks`` takes executable tasks' peaks from: ``"auto"`` (the
+            default; Dragon's rusage if it reports it, otherwise the launcher), ``"dragon"`` (raise
+            ``ValueError`` if it does not), or ``"launcher"`` (also samples GPU memory).
         size_pool_to_affinity: Batch starts ``os.cpu_count() // 2`` workers on each node,
             even when the job may use only part of the node, as on a Slurm allocation of a few
             CPUs. When True (the default) and ``batch_kwargs`` sets no ``workers_per_node``, the
@@ -271,9 +313,20 @@ class DragonExecutionBackend(BaseBackend):
         name: Optional[str] = "dragon",
         size_pool_to_affinity: bool = True,
         pmi: Optional[Union[str, "PMIBackend"]] = None,
+        *,
+        observe_peaks: bool = False,
+        peak_source: str = "auto",
     ):
         if not Batch:
             raise RuntimeError(DRAGON_BATCH_INIT_ERROR)
+        if peak_source not in PEAK_SOURCES:
+            raise ValueError(f"peak_source must be one of {PEAK_SOURCES}, not {peak_source!r}")
+        dragon_rusage = _batch_reports_rusage()
+        if observe_peaks and peak_source == "dragon" and not dragon_rusage:
+            raise ValueError(
+                "peak_source='dragon' needs a Dragon whose Batch tasks report rusage; "
+                "use 'auto' or 'launcher' with this one"
+            )
 
         # PMI kwargs for Batch.options() of MPI jobs, checked before Batch starts.
         self._job_pmi_options = _pmi_options(pmi)
@@ -281,6 +334,25 @@ class DragonExecutionBackend(BaseBackend):
         super().__init__(name=name)
 
         self.logger = _get_logger()
+        self._observe_peaks = observe_peaks
+        if observe_peaks:
+            # Batch cloudpickles a function task's target: with this, _measure travels by value,
+            # and a pool worker measures a call without importing rhapsody
+            try:
+                import cloudpickle  # noqa: PLC0415 - Dragon depends on it
+
+                cloudpickle.register_pickle_by_value(_measure)
+            except ImportError:
+                pass
+        self._peaks_from_dragon = observe_peaks and peak_source != "launcher" and dragon_rusage
+        if observe_peaks:
+            source = "Dragon's Batch rusage" if self._peaks_from_dragon else "the peak launcher"
+            self.logger.info(f"observe_peaks: executable task peaks from {source}")
+        # Launcher output goes to <work_dir>/rhapsody-peaks.<tag>/<uid>/: the tag keeps a reused
+        # work dir's leftovers out of the sums; shutdown removes the roots with what cancelled
+        # tasks left there.
+        self._peak_tag = uuid.uuid4().hex[:8]
+        self._peak_roots: set[str] = set()
         effective_kwargs = {"task_logs": True, **(batch_kwargs or {})}
         if not effective_kwargs.get("task_logs", True):
             self.logger.warning(
@@ -440,6 +512,8 @@ class DragonExecutionBackend(BaseBackend):
                         # Exit codes of process/job tasks pass through unchanged;
                         # _deliver_batch maps them to exit_code and DONE/FAILED.
                         task_reg = self._task_registry.get(uid)
+                        if task_reg:
+                            result = self._collect_observed(task_reg, result, raised, batch_task)
                         capture_stdio = (
                             task_reg.get("description", {}).get("capture_stdio")
                             if task_reg
@@ -466,6 +540,43 @@ class DragonExecutionBackend(BaseBackend):
 
         self.logger.debug("Dragon batch monitor loop stopped")
 
+    def _collect_observed(self, task_reg: dict, result: Any, raised: bool, batch_task) -> Any:
+        """Store a finished task's peaks as ``task_reg["observed"]``; return its unwrapped result.
+
+        Runs on the monitor thread, so reading the launcher's files stays off the event loop. A
+        measured function's ``(value, observed)``, or its ``MeasuredError``, is unwrapped. Whatever
+        goes wrong here costs the task its ``observed``, never its result.
+        """
+        if task_reg.get("measured"):
+            if raised:
+                result, observed = _measure.split_error(result)
+            elif isinstance(result, tuple) and len(result) == 2:
+                result, observed = result
+            else:
+                observed = None
+            if isinstance(observed, dict):
+                task_reg["observed"] = observed
+            return result
+        try:
+            self._collect_records(task_reg, batch_task)
+        except Exception:
+            self.logger.exception(f"Could not read what {task_reg.get('uid')} used")
+        return result
+
+    def _collect_records(self, task_reg: dict, batch_task) -> None:
+        """``observed`` from Dragon's rusage, or from the records the launcher wrote."""
+        peak_dir = task_reg.get("peak_dir")
+        if task_reg.get("dragon_rusage"):
+            try:
+                rusage = batch_task.rusage  # cached by get(); no extra round trip
+            except Exception:
+                rusage = None
+            task_reg["observed"] = _observed_from_rusage(rusage)
+        elif peak_dir is not None:
+            task_reg["observed"] = _read_peaks(peak_dir, task_reg["peak_ranks"])
+            if task_reg["observed"] is None:
+                self.logger.debug(f"No complete peaks for {task_reg['uid']} in {peak_dir}")
+
     def _deliver_batch(self, completions: list) -> None:
         """Deliver a batch of completed tasks. Runs on the asyncio event loop (via
         call_soon_threadsafe).
@@ -481,6 +592,8 @@ class DragonExecutionBackend(BaseBackend):
                 self._cancelled_tasks.discard(uid)
                 continue
             task_desc = task_info["description"]
+            if task_info.get("observed") is not None:
+                task_desc["observed"] = task_info["observed"]
             if raised:
                 task_desc["exception"] = result
                 task_desc["stderr"] = stderr if stderr else (tb if tb else str(result))
@@ -638,6 +751,28 @@ class DragonExecutionBackend(BaseBackend):
             stdout_path = os.path.join(self._work_dir, f"{uid}.stdout")
             stderr_path = os.path.join(self._work_dir, f"{uid}.stderr")
 
+        # observe_peaks: an executable runs under the peak launcher, which writes one record per
+        # process (rank) to peak_dir; a native function is wrapped to measure its pool worker.
+        peak_dir = None
+        peak_ranks = 0
+        measured = self._observe_peaks and is_native_function
+        dragon_rusage = self._peaks_from_dragon and not is_native_function
+        if self._observe_peaks and not is_function and not dragon_rusage:
+            peak_root = os.path.abspath(
+                os.path.join(self._work_dir, f"rhapsody-peaks.{self._peak_tag}")
+            )
+            self._peak_roots.add(peak_root)
+            peak_dir = _peak.make_peak_dir(peak_root, uid)
+            peak_ranks = (
+                sum(nranks for nranks, _ in process_templates_config)
+                if process_templates_config is not None
+                else 1
+            )
+            # python -I _peak.py --out-dir DIR -- target args...
+            launcher = _peak.launcher_argv(peak_dir)
+            task_args = (*launcher[1:], target, *task_args)
+            target = launcher[0]
+
         def _build_process_template_kwargs(template_cfg: dict[str, Any]) -> dict[str, Any]:
             """Build ProcessTemplate kwargs from user config."""
             return {**template_cfg, "args": task_args, "kwargs": task_kwargs}
@@ -668,6 +803,13 @@ class DragonExecutionBackend(BaseBackend):
                 ProcessTemplate(target, **_build_process_template_kwargs(process_template_config))
             )
 
+        elif measured:
+            # Priority 3, measured: returns (value, observed) or raises MeasuredError, unwrapped by
+            # _collect_observed. _measure travels by value, so the worker imports no rhapsody.
+            batch_task = task_opts.function(
+                _measure.measure, target, tuple(task_args), dict(task_kwargs or {})
+            )
+
         elif is_function:
             # Priority 3: Function native (batch.function — returns Python value, not exit code)
             batch_task = task_opts.function(target, *task_args, **task_kwargs)
@@ -684,6 +826,10 @@ class DragonExecutionBackend(BaseBackend):
             "description": task,
             "batch_task": batch_task,
             "is_native_function": is_native_function,
+            "peak_dir": peak_dir,
+            "peak_ranks": peak_ranks,
+            "measured": measured,
+            "dragon_rusage": dragon_rusage,
         }
         self._monitored_batches[batch_task.uid] = (batch_task, uid)
 
@@ -839,6 +985,10 @@ class DragonExecutionBackend(BaseBackend):
             except Exception as e:
                 self.logger.warning(f"Failed to remove Dragon task_logs directory: {e}")
 
+        for peak_root in self._peak_roots:
+            shutil.rmtree(peak_root, ignore_errors=True)
+        self._peak_roots.clear()
+
         self._task_registry.clear()
         self._pending_tuids.clear()
         self._cancelled_tuids.clear()
@@ -869,10 +1019,49 @@ class DragonExecutionBackend(BaseBackend):
         cls,
         batch_kwargs: Optional[dict] = None,
         pmi: Optional[Union[str, "PMIBackend"]] = None,
+        *,
+        observe_peaks: bool = False,
+        peak_source: str = "auto",
     ):
         """Create and initialize a DragonExecutionBackend."""
-        backend = cls(batch_kwargs=batch_kwargs, pmi=pmi)
+        backend = cls(
+            batch_kwargs=batch_kwargs,
+            observe_peaks=observe_peaks,
+            peak_source=peak_source,
+            pmi=pmi,
+        )
         return await backend
+
+
+def _observed_from_rusage(rusage) -> Optional[dict]:
+    """``task["observed"]`` from a Batch task's ``rusage``: a dict, or a job's list of them.
+
+    A job's processes add up (an upper bound: their peaks need not coincide), each with the floor
+    ``ru_maxrss`` keeps of the process that forked it; ``host_mem_max`` is the largest and ``ranks``
+    the number of processes. None unless every process reported. Dragon reports no GPU memory. ``cpu_seconds`` sums ``utime`` and ``stime``;
+    a Dragon that also reports each process's ``start`` and ``end`` (wall clock, from Local
+    Services) gives ``started`` (the earliest) and ``ended`` (the latest).
+    """
+    entries = rusage if isinstance(rusage, list) else [rusage]
+    if not entries or any(not isinstance(e, dict) or e.get("max_rss") is None for e in entries):
+        return None
+    observed = {
+        "host_mem": sum(e["max_rss"] for e in entries) / _peak.GIB,
+        "host_mem_max": max(e["max_rss"] for e in entries) / _peak.GIB,
+        "ranks": len(entries),
+        "gpu_mem": None,
+    }
+    if all(e.get("utime") is not None and e.get("stime") is not None for e in entries):
+        observed["cpu_seconds"] = sum(e["utime"] + e["stime"] for e in entries)
+    if all(e.get("start") is not None for e in entries):
+        observed["started"] = min(e["start"] for e in entries)
+    if all(e.get("end") is not None for e in entries):
+        observed["ended"] = max(e["end"] for e in entries)
+    return observed
+
+
+# The launcher's records are read the same way by every backend that runs it.
+_read_peaks = _peak.read_peaks
 
 
 def __getattr__(name: str):

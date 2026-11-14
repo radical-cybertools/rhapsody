@@ -59,6 +59,26 @@ task = ComputeTask(
     inside your task function — for example, call `torch.cuda.set_device(gpu_id)` at
     the start of your callable, or use `os.sched_setaffinity` for CPU pinning.
 
+### What a task used (`observe_peaks`)
+
+`ConcurrentExecutionBackend(executor, observe_peaks=True)` reports what each task used as
+`task["observed"]` before its DONE or FAILED callback, with the same keys as the Dragon backend
+(see [Peak memory](#peak-memory-observe_peaks)):
+
+| Task | `host_mem` | `gpu_mem` | `started`, `ended`, `host` | `cpu_seconds` |
+|------|------------|-----------|----------------------------|---------------|
+| Executable | peak RSS from `wait4`, under the peak launcher | with `pynvml` | the command's | yes |
+| Function, `ProcessPoolExecutor` | the worker's peak RSS during the call, its own size included; the growth during the call in `host_mem_growth`; `"approximate": True` (Linux only) | not measured | the call's, in the worker | the worker process's, during the call |
+| Function, `ThreadPoolExecutor` | not measured (threads share one process) | not measured | the call's, in the worker | the calling thread's (not threads or processes the function starts); marked `"approximate": True` |
+
+`started` and `ended` are wall-clock times taken where the task ran, so they show when it really
+ran. The backend reports RUNNING when it hands the task to the executor or starts the launcher,
+which can be earlier when the executor is busy. A FAILED task reports `observed` too: an
+executable through its launcher, and a function that raised with what was measured until it
+raised. Each executable starts one extra Python process, the launcher (`python -I`, so the
+task's `PYTHON*` variables cannot break it). A command that is not found then exits with code 127
+instead of raising.
+
 ---
 
 ## Dask Backend
@@ -351,3 +371,77 @@ task = ComputeTask(
     },
 )
 ```
+
+### Peak memory (`observe_peaks`)
+
+With `observe_peaks=True`, the backend reports each task's peak memory as
+`task["observed"] = {"host_mem": GiB, "gpu_mem": GiB per GPU}` when the task is DONE or
+FAILED. AsyncFlow's `ResourcePolicy` learns the memory demand of a kind of task from it, and
+AsyncFlow's policy telemetry carries it in `asyncflow.TaskReleased`. `DragonNativeExecutionBackend`
+takes the same option and reports the same keys, always through the launcher for executables
+(see its [guide](../execution/dragon-native.md#what-a-task-used-observe_peaks)).
+
+When known, `observed` also has the task's execution window and CPU time:
+
+- `started`, `ended`: wall-clock seconds, from where the task ran. The launcher stamps them
+  around the command; a native function's wrapper, around the call. A job gives its earliest
+  start and latest end. Dragon's `Task.rusage` gives them only when Dragon reports each
+  process's `start` and `end`. RUNNING is reported when the task is handed to Batch, so these
+  are the times to use for when a task really ran.
+- `host` (or `hosts`, for a job on several nodes) and `cpu_seconds` (user plus system time,
+  summed over a job's ranks; for a native function, the pool worker's during the call).
+- A native function that raises still reports what was measured until it raised.
+
+```python
+backend = await DragonExecutionBackend(observe_peaks=True)  # peak_source="auto"
+```
+
+Executable tasks take their peaks from one of two sources, chosen by `peak_source`:
+
+- `"dragon"`: a Dragon whose Batch tasks carry their processes' resource usage
+  (`Task.rusage`; stock dragonhpc 0.14.1 does not) reports `max_rss` with each exit code. No
+  extra process runs. It reports no GPU memory.
+- `"launcher"`: each command runs under a small launcher that reaps it with `wait4` and samples
+  NVML every 0.2 s. Works on stock Dragon, and also measures GPU memory.
+- `"auto"` (the default) uses Dragon's rusage when the Dragon in use reports it, and the
+  launcher otherwise. Pass `peak_source="launcher"` for GPU tasks.
+
+| Task | How | `host_mem` | `gpu_mem` |
+|------|-----|------------|-----------|
+| Executable (process, `process_template`) | Dragon's `Task.rusage`, or the launcher | `ru_maxrss`: the largest single process of the command's tree | launcher only: largest per-GPU sum over the tree's processes; needs `pynvml` |
+| Executable job (`process_templates`) | per rank, as above | sum over ranks (an upper bound); with the launcher, ranks that stayed at its floor count as one, the largest of them; `host_mem_max` is the largest rank, `ranks` their number | launcher only: per GPU, summed over the ranks that share it |
+| Native function | the call is wrapped in the pool worker | the worker's peak RSS during the call, its own size included; the growth during the call in `host_mem_growth`; marked `"approximate": True` (Linux only) | not measured |
+| Function with `process_template(s)` | Dragon's `Task.rusage` only | as for an executable | not measured |
+
+Limits:
+
+- `ru_maxrss` is a high-water mark kept across `exec`, so it includes the resident size of the
+  process that forked the command: about 10 MiB with the launcher, and the size of Dragon's Local
+  Services (about 140 MiB) with Dragon's rusage. A command that stays below it reports that size;
+  larger peaks are exact. The launcher writes its size as the record's `floor`, so a job's ranks
+  that stayed at or below it count as one, the largest of them, not one each. With Dragon's
+  rusage, every rank counts its floor.
+- `gpu_mem` is `None` without `pynvml`, without a GPU, or when NVML never listed the task's
+  processes on a GPU. NVML reports host PIDs, so a task in its own PID namespace (some
+  containers) is not seen.
+- GPU memory is sampled every 0.2 s, so a GPU peak that lasts less than that can be missed
+  or under-stated: a 0.3 s task that allocated 1 GiB reported 12 MiB.
+- The launcher writes one small record per process to a directory the backend makes for each
+  run, `<work_dir>/rhapsody-peaks.<tag>/<uid>.<random>/` (made absolute), which must be on a file
+  system the nodes share. A job reports nothing unless exactly every rank wrote its record; a
+  record written after the backend read the directory is dropped.
+- The launcher runs the command with every signal at its default disposition and, outside a
+  terminal's foreground, in a process group of its own. A signal to the launcher, or to its
+  group, reaches the command's group once.
+- NVML is set up in the launcher's sampler thread: a slow or broken NVML (or `pynvml`) neither
+  delays the command nor fails the task; GPU memory NVML cannot tell (MIG) is unknown, not zero.
+- A native function's `host_mem` is what its node held for it: the worker's own size (60 to
+  100 MiB on Dragon) and the call's arguments included, so small calls are over-stated by about
+  the worker's size. `host_mem_growth`, the growth during the call, misses memory the allocator
+  kept from earlier calls in the same worker. Both count other threads of the worker, including
+  threads an earlier call left running. The measurement travels to the worker by value, so the worker does not import
+  rhapsody.
+- A Dragon function that times out reports nothing: Dragon replaces its exception with a
+  `TimeoutError` of its own.
+- A task cancelled with `cancel_task()` reports nothing. A Dragon `timeout` ends as FAILED and
+  still reports: the launcher passes the signal to the command and reaps it.
