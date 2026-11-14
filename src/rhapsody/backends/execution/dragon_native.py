@@ -97,6 +97,9 @@ _BLOCK_SIZE = 4096
 # one batch: while the client handles it, the relay gathers the next.
 _CONTROL_SIZE = 1024
 _INBOUND_SIZE = 1
+# Most seconds the relay waits, after the client sent tasks with its acknowledgement of a batch,
+# before it forwards the next: short tasks then come back in that batch, not one batch each.
+_RELAY_LINGER = 0.001
 # Seconds between the worker watcher's non-blocking checks for dead workers, and the longest the
 # result thread blocks on an empty queue.
 _WATCH_INTERVAL = 1.0
@@ -547,7 +550,14 @@ class DragonNativeExecutionBackend(BaseBackend):
         try:
             relay = Process(
                 _worker.relay_main,
-                args=(self._control, self._results, self._inbound, _WATCH_INTERVAL, _SEND_TIMEOUT),
+                args=(
+                    self._control,
+                    self._results,
+                    self._inbound,
+                    _WATCH_INTERVAL,
+                    _SEND_TIMEOUT,
+                    _RELAY_LINGER,
+                ),
                 policy=here,
             )
             relay.start()
@@ -697,6 +707,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                     return
             except Exception:
                 self.logger.exception("Could not handle result messages")
+                self._flush_sends(ack=True)  # the relay sends nothing more until it has one
             if drained_at is not None:
                 self._caught_up = drained_at
 
@@ -719,7 +730,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                     self._apply_message(msg, completions)
                 except Exception:
                     self.logger.exception(f"Could not apply a {msg[0]} message")
-        self._flush_sends()
+        self._flush_sends(ack=True)
         self._emit_all(completions)
         return stop
 
@@ -979,14 +990,17 @@ class DragonNativeExecutionBackend(BaseBackend):
         if rec.timeout is not None:
             self._add_timer(rec, rec.timeout)
 
-    def _flush_sends(self) -> None:
+    def _flush_sends(self, ack: bool = False) -> None:
         """Send the relay, in one batch, the tasks given to workers since the last batch.
 
-        Call without _lock held.
+        With ``ack``, the batch also tells the relay that the client has handled the batch of
+        results it took last, so it may send the next. Call without _lock held.
         """
         with self._control_lock:
             with self._lock:
                 ops, self._outgoing = self._outgoing, []
+            if ack:
+                ops.append(("ack",))
             if ops:
                 self._send_control(ops, locked=True)
 

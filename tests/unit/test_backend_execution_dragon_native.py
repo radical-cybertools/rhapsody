@@ -1948,7 +1948,9 @@ def test_relay_forwards_what_it_has_in_one_batch(dragon):
     for i in range(5):
         results.put(cloudpickle.dumps(("message", i)))
     relay = threading.Thread(
-        target=worker_module.relay_main, args=(control, results, inbound, 0.05, 1.0), daemon=True
+        target=worker_module.relay_main,
+        args=(control, results, inbound, 0.05, 1.0, 0.001),
+        daemon=True,
     )
     relay.start()
     batch, drained_at = cloudpickle.loads(inbound.get(timeout=5))
@@ -1958,8 +1960,33 @@ def test_relay_forwards_what_it_has_in_one_batch(dragon):
     control.put(None)
     while (raw := inbound.get(timeout=5)) is not None:
         assert cloudpickle.loads(raw)[0] == []  # idle: no messages, the time it found none
+        control.put(cloudpickle.dumps([("ack",)]))
     relay.join(5)
     assert not relay.is_alive()
+
+
+def test_relay_forwards_the_next_batch_once_the_client_has_handled_the_last(dragon):
+    """What comes meanwhile waits, so the next batch holds all of it."""
+    results, control, inbound = dragon.Queue(4096), dragon.Queue(16), dragon.Queue(1)
+    relay = threading.Thread(
+        target=worker_module.relay_main,
+        args=(control, results, inbound, 5.0, 1.0, 0.001),
+        daemon=True,
+    )
+    relay.start()
+    results.put(cloudpickle.dumps(("message", 0)))
+    assert len(cloudpickle.loads(inbound.get(timeout=5))[0]) == 1
+    for i in (1, 2, 3):
+        results.put(cloudpickle.dumps(("message", i)))
+    with pytest.raises(queue.Empty):
+        inbound.get(timeout=0.2)
+    control.put(cloudpickle.dumps([("ack",)]))
+    batch, _ = cloudpickle.loads(inbound.get(timeout=5))
+    assert [cloudpickle.loads(raw)[1] for raw in batch] == [1, 2, 3]
+    control.put(None)
+    results.put(None)
+    assert inbound.get(timeout=5) is None
+    relay.join(5)
 
 
 async def test_a_relay_that_dies_fails_the_pool_tasks_and_new_ones(backend):

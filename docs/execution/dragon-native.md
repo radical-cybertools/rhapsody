@@ -54,13 +54,16 @@ Install it with the `dragon` extra, and start your script with the Dragon launch
   Workers stay up for the backend's life. On a host, tasks placed there go before unplaced ones.
 - **The relay.** A relay process on the client's node puts each task on its worker's inbox and
   takes each result off the result queue, and the client trades batches with it: the tasks it gave
-  to workers in one pass, and the results the relay gathered while the client handled the last
-  batch. The client's threads share the GIL of the client's process, often an agent or workflow
-  that keeps it busy. Each queue call gives the GIL up about twice, and getting it back from a
-  thread that does not let go can take a switch interval (5 ms) each time: with one put and one get
-  per task, the pool started about 50 tasks a second next to such a thread. In batches, the client
-  makes a few calls per pass, however many tasks the pass holds, and the relay's process has its
-  GIL to itself. The busier the client, the larger the batches.
+  to workers in one pass, and the results that came while it handled the last batch. The relay
+  forwards a batch only once the client has acknowledged the last one, and after the client sent
+  tasks it waits briefly for them (a tenth of the client's last pass, at most 1 ms), so short tasks
+  come back in the next batch rather than one batch each. The client's threads share the GIL of the
+  client's process, often an agent or workflow that keeps it busy. Each queue call gives the GIL up
+  about twice, and getting it back from a thread that does not let go can take a switch interval
+  (5 ms) each time: with one put and one get per task, the pool started about 50 tasks a second
+  next to such a thread. In batches, the client makes three such calls per pass, however many
+  tasks the pass holds, and the relay's process has its GIL to itself. The busier the client, the
+  larger the batches.
 - **Results.** A worker pickles its message with cloudpickle and puts the bytes on the result
   queue. One client thread takes the relay's batches, applies each under one lock, sends the relay
   the next tasks for the workers that are free, and hands the state changes to the asyncio loop
