@@ -358,12 +358,16 @@ AsyncFlow's `ResourcePolicy` in `node` mode picks the node and GPUs for each tas
 and writes them into the task description:
 
 ```python
-task["placement"] = {"node": 0, "host": "gpua001", "gpus": [2]}
+task["placement"] = {"node_id": "gpua001", "host": "gpua001", "cores": 1, "gpu_ids": [2]}
 ```
 
-When `placement` has a `host`, `DragonExecutionBackend` runs the task on that host
-and pins it to those GPUs with
-`Policy(placement=Policy.Placement.HOST_NAME, host_name=host, gpu_affinity=gpus)`:
+These are the keys RHAPSODY's telemetry reads for where a task ran (`node_id`, `cores`,
+`gpu_ids`), plus `host`. When `placement` has a `host` (else a `node_id`),
+`DragonExecutionBackend` runs the task on that host and pins it to the `gpu_ids` GPUs
+with `Policy(placement=Policy.Placement.HOST_NAME, host_name=host, gpu_affinity=gpu_ids)`.
+`cores` is not used: Dragon places a process on a host, not on cores. A placement
+without a host name (AsyncFlow writes None for a node it has no name for) leaves the
+choice to Dragon:
 
 - **Process and job tasks** (executables, or any task with `process_template` /
   `process_templates`): the policy goes on every process template.
@@ -373,7 +377,7 @@ and pins it to those GPUs with
   backend work directory, which must be on a file system the nodes share.
 
 `host` must be the name Dragon gives the node (`Node(h_uid).hostname` for
-`h_uid in System().nodes`), and `gpus` must be device ids of that node. In
+`h_uid in System().nodes`), and `gpu_ids` must be device ids of that node. In
 single-node mode (`dragon -s`, or a local run) Dragon calls its node `localhost`;
 started through a workload manager (`dragon -w slurm`), even on one node, it uses
 the node's host name. The backend checks both before submitting:

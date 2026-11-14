@@ -132,16 +132,21 @@ def _workers_per_node_for_affinity(
 def _placement_policy(placement: Optional[dict]):
     """Translate a task's ``placement`` into a Dragon host-name policy.
 
-    ``placement`` is ``{"node": index, "host": name, "gpus": [device, ...]}``, as written by
-    AsyncFlow's ``ResourcePolicy`` in node mode. Returns None when there is no placement or no
-    host, so Dragon keeps choosing the node.
+    ``placement`` is ``{"node_id": name, "host": name, "cores": cpus, "gpu_ids": [device, ...]}``,
+    as written by AsyncFlow's ``ResourcePolicy`` in node mode, in the keys RHAPSODY's telemetry
+    reads. The host is ``host``, else ``node_id``; the GPUs are ``gpu_ids``. ``cores`` is not
+    used: Dragon places a process on a host, not on cores. Returns None when there is no
+    placement or no host name, so Dragon keeps choosing the node.
     """
-    if not placement or not placement.get("host"):
+    if not placement:
+        return None
+    host = placement.get("host") or placement.get("node_id")
+    if not host:
         return None
     return Policy(
         placement=Policy.Placement.HOST_NAME,
-        host_name=placement["host"],
-        gpu_affinity=list(placement.get("gpus") or []),
+        host_name=host,
+        gpu_affinity=list(placement.get("gpu_ids") or []),
     )
 
 
@@ -362,9 +367,10 @@ class DragonExecutionBackend(BaseBackend):
             )
 
     Note on placement:
-        A task description may carry ``placement = {"node": i, "host": name, "gpus": [...]}``
-        (AsyncFlow's ``ResourcePolicy`` in node mode writes it). With a host, the task runs on
-        that host, pinned to those GPUs, through a Dragon ``Policy`` on its process template(s).
+        A task description may carry ``placement = {"node_id": name, "host": name, "cores": n,
+        "gpu_ids": [...]}`` (AsyncFlow's ``ResourcePolicy`` in node mode writes it). With a host
+        (``host``, else ``node_id``), the task runs on that host, pinned to the ``gpu_ids``
+        GPUs, through a Dragon ``Policy`` on its process template(s).
         ``Batch.function()`` takes no policy, so a placed function task without templates runs
         as one Dragon process, and its result comes back through ``<work_dir>/<uid>.result``.
         A host or GPU that Dragon does not have fails the task. A ``policy`` the user set in a
@@ -802,9 +808,10 @@ class DragonExecutionBackend(BaseBackend):
         - Executable Job: batch.job() - executable in MPI job via process_templates
 
         Placement:
-            ``task["placement"]`` with a ``host`` adds ``Policy(placement=HOST_NAME,
-            host_name=host, gpu_affinity=gpus)`` to every process template that has no
-            ``policy`` of its own. A user-set template ``policy`` wins, with a warning.
+            ``task["placement"]`` with a ``host`` (else a ``node_id``) adds
+            ``Policy(placement=HOST_NAME, host_name=host, gpu_affinity=gpu_ids)`` to every
+            process template that has no ``policy`` of its own. A user-set template ``policy``
+            wins, with a warning.
 
         Setting cwd (working directory):
             Pass ``cwd`` inside ``process_template`` or each entry of ``process_templates``

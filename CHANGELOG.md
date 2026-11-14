@@ -5,8 +5,9 @@
 ### Added
 
 - **`DragonExecutionBackend` honours `task["placement"]`** — AsyncFlow's
-  `ResourcePolicy` in node mode writes `{"node", "host", "gpus"}` into each task it
-  admits. With a host, the task now runs on that host, pinned to those GPUs,
+  `ResourcePolicy` in node mode writes `{"node_id", "host", "cores", "gpu_ids"}` into
+  each task it admits, in the keys RHAPSODY's telemetry reads. With a host (`host`,
+  else `node_id`), the task now runs on that host, pinned to the `gpu_ids` GPUs,
   through a Dragon `Policy(placement=HOST_NAME, host_name=..., gpu_affinity=...)`
   on its process template(s). `Batch.function()` takes no policy, so a placed
   function task without templates runs as one placed Dragon process and returns

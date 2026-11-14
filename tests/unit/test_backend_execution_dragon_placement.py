@@ -1,7 +1,7 @@
 """DragonExecutionBackend placement, tested without a Dragon install.
 
-AsyncFlow's ``ResourcePolicy`` in node mode writes ``task["placement"] = {"node", "host", "gpus"}``
-into the task description. ``build_task`` turns it into a Dragon host-name ``Policy`` on the task's
+AsyncFlow's ``ResourcePolicy`` in node mode writes ``task["placement"] = {"node_id", "host",
+"cores", "gpu_ids"}`` into the task description. ``build_task`` turns it into a Dragon host-name ``Policy`` on the task's
 process template(s); a native function task becomes one placed process. These tests swap Batch,
 ProcessTemplate and Policy for fakes, so they also run where Dragon is absent (the main Dragon test
 module skips there).
@@ -123,7 +123,7 @@ def _fail():
     raise ValueError("boom")
 
 
-PLACEMENT = {"node": 1, "host": "gpua042", "gpus": [2, 3]}
+PLACEMENT = {"node_id": "gpua042", "host": "gpua042", "cores": 2, "gpu_ids": [2, 3]}
 
 
 def _assert_placed(policy, host="gpua042", gpus=(2, 3)):
@@ -149,7 +149,9 @@ async def test_function_without_placement_stays_native(backend):
 
 
 async def test_placement_without_host_stays_native(backend):
-    await backend.build_task(_task(placement={"node": 0, "host": None, "gpus": [0]}))
+    await backend.build_task(
+        _task(placement={"node_id": None, "host": None, "cores": 1, "gpu_ids": [0]})
+    )
 
     [(kind, _)] = backend.batch.calls
     assert kind == "function"
@@ -201,11 +203,28 @@ async def test_placed_function_runs_as_one_placed_process(backend, tmp_path):
 
 
 async def test_placed_function_without_gpus_pins_host_only(backend):
-    await backend.build_task(_task(placement={"node": 0, "host": "cn001", "gpus": []}))
+    await backend.build_task(_task(placement={"node_id": "cn001", "host": "cn001", "gpu_ids": []}))
 
     [(kind, (pt,))] = backend.batch.calls
     assert kind == "process"
     _assert_placed(pt.policy, host="cn001", gpus=())
+
+
+@pytest.mark.parametrize(
+    "placement",
+    [
+        {"node_id": "gpua042", "gpu_ids": [2, 3]},  # telemetry's name alone
+        {"host": "gpua042", "gpu_ids": [2, 3]},
+        {"node_id": "gpua042", "host": None, "gpu_ids": [2, 3]},
+        {"node_id": "cn001", "host": "gpua042", "gpu_ids": [2, 3]},  # host first
+    ],
+)
+async def test_the_host_is_host_else_node_id(backend, placement):
+    await backend.build_task(_task(placement=placement))
+
+    [(kind, (pt,))] = backend.batch.calls
+    assert kind == "process"
+    _assert_placed(pt.policy)
 
 
 async def test_placed_executable_gets_policy(backend):
@@ -270,7 +289,9 @@ async def test_user_policy_wins_with_warning(backend, caplog):
 
 async def test_unknown_host_fails_the_task_only(backend):
     with pytest.raises(ValueError, match="not a Dragon node"):
-        await backend.build_task(_task(placement={"node": 0, "host": "three", "gpus": []}))
+        await backend.build_task(
+            _task(placement={"node_id": "three", "host": "three", "gpu_ids": []})
+        )
 
     assert backend.batch.calls == []
     assert backend._task_registry == {}
@@ -278,7 +299,9 @@ async def test_unknown_host_fails_the_task_only(backend):
 
 async def test_unknown_gpu_fails_the_task_only(backend):
     with pytest.raises(ValueError, match=r"GPUs \[4\]"):
-        await backend.build_task(_task(placement={"node": 1, "host": "gpua042", "gpus": [3, 4]}))
+        await backend.build_task(
+            _task(placement={"node_id": "gpua042", "host": "gpua042", "gpu_ids": [3, 4]})
+        )
 
     assert backend.batch.calls == []
     assert backend._task_registry == {}
@@ -287,7 +310,9 @@ async def test_unknown_gpu_fails_the_task_only(backend):
 async def test_gpus_on_a_node_without_listed_gpus_name_the_cause(backend):
     # Dragon 0.15 lists no GPUs when the CUDA runtime does not load, or the job has none
     with pytest.raises(ValueError, match=r"GPUs \[0\].*its GPUs: \[\]. Dragon lists no GPUs") as e:
-        await backend.build_task(_task(placement={"node": 0, "host": "cn001", "gpus": [0]}))
+        await backend.build_task(
+            _task(placement={"node_id": "cn001", "host": "cn001", "gpu_ids": [0]})
+        )
 
     assert "libcudart.so" in str(e.value)
     assert "--gres" in str(e.value)
@@ -296,7 +321,9 @@ async def test_gpus_on_a_node_without_listed_gpus_name_the_cause(backend):
 
 async def test_unknown_gpu_on_a_gpu_node_has_no_cuda_hint(backend):
     with pytest.raises(ValueError) as e:
-        await backend.build_task(_task(placement={"node": 1, "host": "gpua042", "gpus": [9]}))
+        await backend.build_task(
+            _task(placement={"node_id": "gpua042", "host": "gpua042", "gpu_ids": [9]})
+        )
 
     assert "libcudart" not in str(e.value)
 
@@ -318,8 +345,8 @@ async def test_dragon_nodes_are_looked_up_once(backend):
         patch.object(dragon_module, "System", FakeSystem),
         patch.object(dragon_module, "Node", FakeNode),
     ):
-        await backend.build_task(_task(uid="t.1", placement={"host": "gpua042", "gpus": [1]}))
-        await backend.build_task(_task(uid="t.2", placement={"host": "cn001", "gpus": []}))
+        await backend.build_task(_task(uid="t.1", placement={"host": "gpua042", "gpu_ids": [1]}))
+        await backend.build_task(_task(uid="t.2", placement={"host": "cn001", "gpu_ids": []}))
 
     assert FakeSystem.calls == 1
     assert backend._node_gpus == {"gpua042": {0, 1}, "cn001": set()}
@@ -423,7 +450,7 @@ async def test_without_libcuda_or_nvidia_smi_only_names_libcuda(backend, probe, 
 
 
 async def test_no_probe_without_gpus_in_the_placement(backend, probe):
-    await backend.build_task(_task(placement={"node": 0, "host": "cn001", "gpus": []}))
+    await backend.build_task(_task(placement={"node_id": "cn001", "host": "cn001", "gpu_ids": []}))
 
     assert probe.calls == 0
     assert backend._gpus_probed is False
@@ -524,7 +551,7 @@ def test_placed_function_exception_round_trips(tmp_path):
 
 def test_placed_function_unpicklable_value_fails(tmp_path):
     path = str(tmp_path / "t.result")
-    dragon_module._run_placed_function(path, lambda: (lambda: None), (), {})
+    dragon_module._run_placed_function(path, lambda: lambda: None, (), {})
 
     result, raised, _ = dragon_module._read_placed_result(path, 0, False, None)
     assert raised is True
