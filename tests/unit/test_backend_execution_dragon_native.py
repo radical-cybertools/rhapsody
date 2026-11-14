@@ -2020,10 +2020,14 @@ async def test_shutdown_lets_only_a_window_of_processes_out_at_once(dragon, tmp_
         put(None)  # the fake workers' threads
 
 
-async def test_shutdown_kills_a_process_that_ignores_sigterm_after_kill_grace(backend, dragon):
-    task = exe_task("/bin/sh", "-c", "trap '' TERM; exec sleep 30")
+async def test_shutdown_kills_a_process_that_ignores_sigterm_after_kill_grace(
+    backend, dragon, tmp_path
+):
+    # The SIGTERM must come after the trap: a loaded machine can start the shell late.
+    trapped = tmp_path / "trapped"
+    task = exe_task("/bin/sh", "-c", f"trap '' TERM; : >{trapped}; exec sleep 30")
     await backend.submit_tasks([task])
-    await until(lambda: len(backend._watched) == 1)
+    await until(trapped.exists)
     t0 = time.monotonic()
     await backend.shutdown()
     assert 0.5 <= time.monotonic() - t0 < 3.0
