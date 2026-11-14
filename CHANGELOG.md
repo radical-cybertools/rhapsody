@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`DragonExecutionBackend(observe_peaks=True)`** reports each task's peak memory as
+  `task["observed"] = {"host_mem": GiB, "gpu_mem": GiB per GPU}`, which AsyncFlow's
+  `ResourcePolicy` learns memory demand from. Executable tasks run under a small launcher
+  (`rhapsody.backends.execution._peak`) that reaps the command with `wait4` for its peak RSS
+  and, when `pynvml` is installed, samples its per-process GPU memory through NVML; a job sums
+  its ranks, with `host_mem_max` (the largest) and `ranks`, and ranks that stayed at the
+  launcher's own size count as one, the largest of them. Native function tasks share pool workers, so
+  they report the worker's peak RSS during the call (its growth as `host_mem_growth`), marked
+  `"approximate": True`. Off by default. With a Dragon whose Batch
+  tasks report their processes' resource usage (`Task.rusage`), executable peaks are read from
+  there instead of running the launcher; `peak_source` (`"auto"`, `"dragon"`, `"launcher"`)
+  chooses. See
+  `docs/getting-started/resource-specification.md#peak-memory-observe_peaks`.
+- **`ConcurrentExecutionBackend(observe_peaks=True)`** reports `task["observed"]` with the
+  same keys: executables run under the same launcher (peak RSS, GPU memory with `pynvml`);
+  functions report the call's times, and in a `ProcessPoolExecutor` on Linux the worker's
+  peak RSS during the call (`"approximate": True`). Off by default.
+- **`observed` carries the task's execution window** — `started` and `ended` (wall clock, where
+  the task ran), `host`/`hosts` and `cpu_seconds`, from the launcher, from a native function's
+  wrapper, and from Dragon's rusage when Dragon reports them. Backends report RUNNING when they
+  hand a task over, which can be well before it runs; these times say when it ran. A function
+  task that raises reports what was measured until it raised, so FAILED tasks carry
+  `observed` too. The new options are keyword-only, after the existing parameters, so
+  positional calls keep their meaning. The launcher runs with `python -I`, gives the command
+  default signal dispositions and a process group of its own, and sets NVML up off the
+  command's path; records go to a fresh directory per run.
+- **Telemetry: `TaskCompleted` and `TaskFailed` carry what the task used** — with
+  `observe_peaks`, `task["observed"]` is flattened into the event's attributes and onto the task
+  span, memory in bytes (`memory_peak_bytes`, `cpu_seconds`, `exec_start`, `exec_end`,
+  `exec_host`, ...). See `docs/telemetry/reference.md`.
+
 ### Changed
 
 - **Telemetry (experimental): task and resource metrics are recorded by a task instrumentation**

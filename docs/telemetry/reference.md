@@ -143,6 +143,29 @@ attributes = {
 
 The task span is **closed** at this point. `span_id` in the JSONL is the closed span's ID.
 
+#### What the task used (`observe_peaks`)
+
+A backend started with `observe_peaks=True` reports what each task used as `task["observed"]`
+(see [Peak memory](../getting-started/resource-specification.md#peak-memory-observe_peaks)).
+`TaskCompleted` and `TaskFailed` then carry it in `attributes`, flattened, with memory in bytes,
+and the task span gets the same attributes. A key is left out when the backend did not measure it.
+
+| Attribute | From `observed` | Meaning |
+|---|---|---|
+| `memory_peak_bytes` | `host_mem` | peak host memory: a job's ranks summed |
+| `memory_peak_rank_max_bytes` | `host_mem_max` | the largest rank's peak |
+| `memory_growth_bytes` | `host_mem_growth` | a pool function's growth during the call |
+| `gpu_memory_peak_bytes` | `gpu_mem` | the busiest GPU's peak |
+| `cpu_seconds`, `cpu_loadavg` | `cpu_seconds` | CPU time, and the average busy cores over the run |
+| `exec_start`, `exec_end` | `started`, `ended` | wall-clock times where the task ran |
+| `exec_host` or `exec_hosts` | `host` or `hosts` | where it ran |
+| `ranks` | `ranks` | a job's processes |
+| `killed_signal`, `timed_out` | `killed`, `timed_out` | a task whose process or worker was killed |
+| `resource_usage_scope` | `approximate` | `"job"`: the figures cover the task alone; `"worker"`: measured in a pool worker the task shared with earlier tasks |
+
+`exec_start` and `exec_end` say when the task really ran; `duration_seconds` runs from the
+`RUNNING` callback, which a backend sends when it hands the task over.
+
 ---
 
 ### `TaskFailed`
