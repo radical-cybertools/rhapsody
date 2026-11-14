@@ -485,7 +485,7 @@ def test_observed_from_rusage():
     }
     three = _observed_from_rusage([one, one, one])
     assert three["host_mem"] == 3.0 and three["cpu_seconds"] == pytest.approx(0.3)
-    # Dragon's rusage has no floor to subtract: each process counts its own (decision-4, D1)
+    # Dragon's rusage has no floor to subtract: each process counts its own
     assert (three["host_mem_max"], three["ranks"]) == (1.0, 3)
     # A Dragon that reports when Local Services spawned and reaped each process
     timed = [{**one, "start": 10.0, "end": 12.0}, {**one, "start": 9.5, "end": 11.0}]
@@ -517,7 +517,7 @@ async def test_dragon_rusage_reaches_callback(tmp_path):
 
 
 # ============================================================================
-# Review findings (MTU-51): each test fails without its fix
+# Review findings: each test fails without its fix
 # ============================================================================
 
 
