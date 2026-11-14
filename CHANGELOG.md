@@ -10,7 +10,7 @@
   (`rhapsody.backends.execution._peak`) that reaps the command with `wait4` for its peak RSS
   and, when `pynvml` is installed, samples its per-process GPU memory through NVML; a job sums
   its ranks, with `host_mem_max` (the largest) and `ranks`, and ranks that stayed at the
-  launcher's own size count it once between them. Native function tasks share pool workers, so
+  launcher's own size count as one, the largest of them. Native function tasks share pool workers, so
   they report the worker's peak RSS during the call (its growth as `host_mem_growth`), marked
   `"approximate": True`. Off by default. With a Dragon whose Batch
   tasks report their processes' resource usage (`Task.rusage`), executable peaks are read from

@@ -409,7 +409,7 @@ Executable tasks take their peaks from one of two sources, chosen by `peak_sourc
 | Task | How | `host_mem` | `gpu_mem` |
 |------|-----|------------|-----------|
 | Executable (process, `process_template`) | Dragon's `Task.rusage`, or the launcher | `ru_maxrss`: the largest single process of the command's tree | launcher only: largest per-GPU sum over the tree's processes; needs `pynvml` |
-| Executable job (`process_templates`) | per rank, as above | sum over ranks (an upper bound); with the launcher, ranks that stayed at its floor count one floor between them; `host_mem_max` is the largest rank, `ranks` their number | launcher only: per GPU, summed over the ranks that share it |
+| Executable job (`process_templates`) | per rank, as above | sum over ranks (an upper bound); with the launcher, ranks that stayed at its floor count as one, the largest of them; `host_mem_max` is the largest rank, `ranks` their number | launcher only: per GPU, summed over the ranks that share it |
 | Native function | the call is wrapped in the pool worker | the worker's peak RSS during the call, its own size included; the growth during the call in `host_mem_growth`; marked `"approximate": True` (Linux only) | not measured |
 | Function with `process_template(s)` | Dragon's `Task.rusage` only | as for an executable | not measured |
 
@@ -419,8 +419,8 @@ Limits:
   process that forked the command: about 10 MiB with the launcher, and the size of Dragon's Local
   Services (about 140 MiB) with Dragon's rusage. A command that stays below it reports that size;
   larger peaks are exact. The launcher writes its size as the record's `floor`, so a job's ranks
-  that stayed at it count one floor between them, not one each. With Dragon's rusage, every
-  rank counts its floor.
+  that stayed at or below it count as one, the largest of them, not one each. With Dragon's
+  rusage, every rank counts its floor.
 - `gpu_mem` is `None` without `pynvml`, without a GPU, or when NVML never listed the task's
   processes on a GPU. NVML reports host PIDs, so a task in its own PID namespace (some
   containers) is not seen.
