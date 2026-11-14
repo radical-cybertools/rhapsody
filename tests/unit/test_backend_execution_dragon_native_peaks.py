@@ -22,6 +22,7 @@ from test_backend_execution_dragon_native import Recorder  # noqa: E402
 from test_backend_execution_dragon_native import _gate  # noqa: E402, F401 - autouse fixture
 from test_backend_execution_dragon_native import asquare  # noqa: E402
 from test_backend_execution_dragon_native import backend  # noqa: E402, F401 - fixture
+from test_backend_execution_dragon_native import blocked  # noqa: E402
 from test_backend_execution_dragon_native import boom  # noqa: E402
 from test_backend_execution_dragon_native import dragon  # noqa: E402, F401 - fixture
 from test_backend_execution_dragon_native import exe_task  # noqa: E402
@@ -325,10 +326,14 @@ print(json.dumps(observed))
 """
 
 
-@pytest.mark.skipif(not LINUX, reason="RSS growth is measured on Linux only")
-def test_a_pool_call_reports_its_rss_growth_in_a_process_of_its_own():
+@pytest.mark.skipif(not LINUX, reason="RSS is measured on Linux only")
+def test_a_pool_call_reports_its_peak_and_its_growth_in_a_process_of_its_own():
     """In the fake, workers are threads of pytest; here the worker's measurement runs in a real
-    process, as on Dragon."""
+    process, as on Dragon.
+
+    ``host_mem`` is the worker's whole peak during the call (decision-4,
+    D2), ``host_mem_growth`` the call's growth.
+    """
     import json
     import subprocess
 
@@ -337,7 +342,9 @@ def test_a_pool_call_reports_its_rss_growth_in_a_process_of_its_own():
     )
     observed = json.loads(out.stdout)
     assert observed["approximate"] is True
-    assert observed["host_mem"] * (1 << 30) >= 128 * MIB - SLACK
+    growth = observed["host_mem_growth"] * (1 << 30)
+    assert growth >= 128 * MIB - SLACK
+    assert observed["host_mem"] * (1 << 30) >= growth + 8 * MIB  # the worker's own size
 
 
 WORKER_WITHOUT_RHAPSODY = """
@@ -532,10 +539,10 @@ async def test_a_bad_record_costs_the_observation_not_the_task(
 ):
     from rhapsody.backends.execution import dragon_native
 
-    def broken(peak_dir, ranks):
+    def broken(records, ranks):
         raise KeyError("host_mem")
 
-    monkeypatch.setattr(dragon_native._peak, "read_peaks", broken)
+    monkeypatch.setattr(dragon_native._peak, "combine", broken)
     be = await make(tmp_path)
     try:
         task = exe_task("/bin/echo", "x")
@@ -554,3 +561,127 @@ async def test_records_stay_gone_once_read(dragon, tmp_path):  # noqa: F811
         assert os.listdir(root) == []
     finally:
         await be.shutdown()
+
+
+# ============================================================================
+# Tasks that die with their process (decision-4, D3), and what workers say about themselves
+# ============================================================================
+
+
+def assert_killed(observed, before, killed, code, timed_out=False):
+    assert observed["host_mem"] is None and observed["gpu_mem"] is None
+    assert before <= observed["started"] <= observed["ended"] <= time.time()
+    assert (observed["killed"], observed["exit_code"]) == (killed, code)
+    assert observed.get("timed_out", False) is timed_out
+
+
+async def test_a_task_whose_worker_died_reports_what_is_known(dragon, tmp_path):  # noqa: F811
+    import signal
+
+    be = await make(tmp_path)
+    try:
+        before = time.time()
+        task = fn_task(blocked, placement={"host": "n0"})
+        await be.submit_tasks([task])
+        rec = Recorder(be)
+        await until(lambda: be._tasks[task["uid"]].worker is not None)
+        be._tasks[task["uid"]].worker.proc._exit(-signal.SIGKILL)  # say, the OOM killer
+        assert (await rec.wait(task["uid"], 10))[0] == "FAILED"
+    finally:
+        await be.shutdown()
+    assert_killed(task["observed"], before, "SIGKILL", -signal.SIGKILL)
+    assert task["observed"]["host"] == socket.gethostname()  # the worker's own name
+
+
+async def test_a_pool_task_that_timed_out_reports_what_is_known(dragon, tmp_path):  # noqa: F811
+    import signal
+
+    be = await make(tmp_path)
+    try:
+        before = time.time()
+        task = fn_task(blocked, task_backend_specific_kwargs={"timeout": 0.2})
+        assert await run(be, [task], timeout=10) == ["FAILED"]
+    finally:
+        await be.shutdown()
+    assert isinstance(task["exception"], TimeoutError)
+    assert_killed(task["observed"], before, "SIGKILL", -signal.SIGKILL, timed_out=True)
+
+
+async def test_a_process_task_killed_before_its_record_reports_what_is_known(dragon, tmp_path):  # noqa: F811
+    """In the fake, a function process is a thread: SIGTERM ends it without its record."""
+    import signal
+
+    be = await make(tmp_path)
+    try:
+        before = time.time()
+        kwargs = {"process_template": {}, "timeout": 0.3}
+        task = fn_task(blocked, task_backend_specific_kwargs=kwargs)
+        assert await run(be, [task], timeout=10) == ["FAILED"]
+    finally:
+        await be.shutdown()
+    assert_killed(task["observed"], before, "SIGTERM", -signal.SIGTERM, timed_out=True)
+
+
+async def test_without_observe_peaks_a_dead_workers_task_reports_nothing(dragon, tmp_path):  # noqa: F811
+    be = await make(tmp_path, observe=False)
+    try:
+        task = fn_task(blocked, task_backend_specific_kwargs={"timeout": 0.2})
+        assert await run(be, [task], timeout=10) == ["FAILED"]
+    finally:
+        await be.shutdown()
+    assert "observed" not in task
+
+
+async def test_the_client_keeps_what_ready_says_and_numbers_each_workers_tasks(
+    dragon,  # noqa: F811
+    tmp_path,
+):
+    be = await make(tmp_path)
+    try:
+        workers = list(be._workers.values())
+        assert all(w.pid == os.getpid() for w in workers)  # the fake's workers are threads
+        assert all(w.node == socket.gethostname() for w in workers)
+        if LINUX:
+            assert all(w.oom_score_adj >= 500 for w in workers)
+        tasks = [fn_task(square, i, placement={"host": "n0"}) for i in range(3)]
+        assert await run(be, tasks) == ["DONE"] * 3
+        (w,) = [w for w in be._workers.values() if w.host == "n0"]
+        assert w.sent == 3
+    finally:
+        await be.shutdown()
+
+
+def test_the_worker_numbers_its_tasks_and_reports_ready_with_its_pid():
+    import queue
+
+    class Results(list):
+        def put(self, raw, flush=False):
+            self.append(cloudpickle.loads(raw))
+
+    inbox, results = queue.Queue(), Results()
+    body = cloudpickle.dumps(("tok", square, (3,), {}, None, None, False, False))
+    for uid in ("a", "b"):
+        inbox.put(cloudpickle.dumps((uid, body)))
+    inbox.put(cloudpickle.dumps(("c", b"not a pickle")))
+    inbox.put(None)
+    worker_module.worker_main(7, inbox, results)
+    ready, *done = results
+    assert ready == (worker_module.READY, 7, socket.gethostname(), os.getpid(), None)
+    assert [(m[2], m[3], m[-1]) for m in done] == [("a", True, 1), ("b", True, 2), ("c", False, 3)]
+
+
+RAISE_OOM_SCORE = """
+from rhapsody.backends.execution._dragon_native_worker import raise_oom_score
+print(raise_oom_score(500), raise_oom_score(100), open("/proc/self/oom_score_adj").read().strip())
+"""
+
+
+@pytest.mark.skipif(not LINUX, reason="oom_score_adj is Linux's")
+def test_a_worker_raises_its_oom_score_and_never_lowers_it():
+    import subprocess
+
+    out = subprocess.run(
+        [sys.executable, "-c", RAISE_OOM_SCORE], capture_output=True, text=True, timeout=60
+    )
+    first, second, now = (int(v) for v in out.stdout.split())
+    assert first == second == now >= 500, out.stderr

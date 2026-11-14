@@ -1608,7 +1608,7 @@ async def test_unplaced_tasks_fail_when_no_worker_is_left(dragon, tmp_path, monk
         await be.shutdown()
 
 
-def never_ready(wid, inbox, results):
+def never_ready(wid, inbox, results, oom_score_adj=None):
     """A worker whose process runs but never reports ready, as on a hung node."""
     GATE.wait(30)
 

@@ -42,12 +42,17 @@
   `tests/integration/test-hpc/benchmarks/dragon_throughput.py` measures it with
   `--with-rhapsody-dragon-native`, and `--workers_per_node` sets its pool size.
 - **`DragonNativeExecutionBackend(observe_peaks=True)`** reports `task["observed"]` with the
-  keys and rules of the other backends: pool functions measure their call in the worker (RSS
-  growth, `"approximate": True`); executables run under the peak launcher, per rank in a
-  `process_templates` group; functions that run as their own process, or as group members,
-  write the launcher's record from inside. Every task reports `started`, `ended`, `host` and
-  `cpu_seconds`, also when FAILED. Dragon's native API has no per-task `rusage`, so
+  keys and rules of the other backends: pool functions measure their call in the worker (the
+  worker's peak RSS during the call, `"approximate": True`); executables run under the peak
+  launcher, per rank in a `process_templates` group; functions that run as their own process, or
+  as group members, write the launcher's record from inside. Every task reports `started`,
+  `ended`, `host` and `cpu_seconds`, also when FAILED. A task that died with its worker or
+  process (killed for memory, or for its timeout) reports what is known: `killed`, `exit_code`,
+  `timed_out`, with `host_mem` None. Dragon's native API has no per-task `rusage`, so
   `peak_source="auto"` means the launcher. Off by default.
+- **`DragonNativeExecutionBackend(worker_oom_score_adj=500)`**: pool workers raise their own
+  `oom_score_adj`, so the kernel kills a worker before Dragon's services under memory pressure.
+  The client keeps each worker's pid from its ready message, and numbers each worker's tasks.
 - **Telemetry: `TaskCompleted` and `TaskFailed` carry what the task used** — with
   `observe_peaks`, `task["observed"]` is flattened into the event's attributes and onto the task
   span, memory in bytes (`memory_peak_bytes`, `cpu_seconds`, `exec_start`, `exec_end`,

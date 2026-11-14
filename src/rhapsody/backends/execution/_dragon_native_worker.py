@@ -47,6 +47,27 @@ RESULT = "result"
 PUT_PATIENCE = 60.0
 
 
+def raise_oom_score(adj):
+    """Raise this process's ``oom_score_adj`` to ``adj`` (Linux); return the value it has.
+
+    Under memory pressure the kernel then kills a pool worker before Dragon's services, whose death
+    would end the whole runtime. Any process may raise its own value, and its children inherit it;
+    lowering it needs privileges, so a higher value is kept. None where it cannot be read.
+    """
+    if adj is None:
+        return None
+    try:
+        with open("/proc/self/oom_score_adj") as f:
+            current = int(f.read())
+        if current < adj:
+            with open("/proc/self/oom_score_adj", "w") as f:
+                f.write(str(adj))
+            return adj
+        return current
+    except (OSError, ValueError):
+        return None
+
+
 def call(fn, args, kwargs):
     """Call ``fn``; drive the result with ``asyncio.run`` when ``fn`` is async."""
     result = fn(*args, **kwargs)
@@ -142,7 +163,7 @@ def send(results, msg, value_index, flush=False, measured=False):
         inner = measured and isinstance(value, tuple) and len(value) == 2
         fields[value_index] = (error, value[1]) if inner else error
         fields[value_index - 1] = False
-        fields[value_index + 2 :] = [""] * len(fields[value_index + 2 :])  # the output may be why
+        fields[value_index + 2 : value_index + 4] = ["", ""][: len(fields) - value_index - 2]
         put_waiting(results, pack(tuple(fields), value_index, measured), flush)
 
 
@@ -243,31 +264,37 @@ def run_task(token, fn, args, kwargs, out_path, err_path, inline, measure=False)
                 os.chdir(cwd)
 
 
-def worker_main(wid, inbox, results):
+def worker_main(wid, inbox, results, oom_score_adj=None):
     """A pool worker: report ready, then run tasks from ``inbox`` until it receives ``None``.
 
-    Each inbox item is a pickled ``(uid, body)``, where ``body`` is a pickled
-    ``(token, fn, args, kwargs, out_path, err_path, inline, measure)``: a body that cannot be
-    unpickled here (say, its function's module is missing on this node) still fails only its own
-    task. Each result is a pickled ``(DONE, wid, uid, ok, value, traceback, stdout, stderr)``; with
+    It first raises its ``oom_score_adj`` (see :func:`raise_oom_score`), and reports ready as
+    ``(READY, wid, hostname, pid, oom_score_adj)``. Each inbox item is a pickled ``(uid, body)``,
+    where ``body`` is a pickled ``(token, fn, args, kwargs, out_path, err_path, inline, measure)``:
+    a body that cannot be unpickled here (say, its function's module is missing on this node) still
+    fails only its own task. Each item bumps the worker's sequence number, which starts at 1, so
+    ``(wid, seq)`` names a task where the uid is not known, as in a per-node memory sample. Each
+    result is a pickled ``(DONE, wid, uid, ok, value, traceback, stdout, stderr, seq)``; with
     ``measure``, ``value`` is ``(value or error, observed)`` (see :func:`outcome`).
     """
-    results.put(cloudpickle.dumps((READY, wid, socket.gethostname(), os.getpid())))
+    adj = raise_oom_score(oom_score_adj)
+    results.put(cloudpickle.dumps((READY, wid, socket.gethostname(), os.getpid(), adj)))
+    seq = 0
     while True:
         raw = inbox.get()
         if raw is None:
             return
+        seq += 1
         uid, body = cloudpickle.loads(raw)
         try:
             token, fn, args, kwargs, out_path, err_path, inline, measure = cloudpickle.loads(body)
         except BaseException as exc:  # noqa: BLE001 - the error goes back to the client
-            send(results, (DONE, wid, uid, False, exc, traceback.format_exc(), "", ""), 4)
+            send(results, (DONE, wid, uid, False, exc, traceback.format_exc(), "", "", seq), 4)
             continue
         del body
         ok, value, tb, out, err = run_task(
             token, fn, args, kwargs, out_path, err_path, inline, measure
         )
-        send(results, (DONE, wid, uid, ok, value, tb, out, err), 4, measured=measure)
+        send(results, (DONE, wid, uid, ok, value, tb, out, err, seq), 4, measured=measure)
 
 
 def _redirect_for_good(out_path, err_path):

@@ -223,6 +223,12 @@ MPI, so set `"pmi": "none"` for jobs that don't: it logs neither warning.
   an unknown host and silently drops unknown GPU ids.
 - **A uid in use fails its task.** A task submitted while another task with its uid has not
   finished fails with `ValueError`, and the first runs on.
+- **Workers go first under memory pressure.** Each pool worker raises its own `oom_score_adj` to
+  `worker_oom_score_adj` (500 by default, Linux), so the kernel's out-of-memory killer picks a
+  worker, which fails one task, before one of Dragon's services, whose death ends the runtime.
+  The client keeps each worker's pid and host name from its ready message, and numbers the tasks
+  it sends each worker as the worker does, so `(worker, number)` names a task where its uid is
+  not known.
 - **Dead workers are noticed.** A worker that dies on its own fails its task with the exit code,
   and is replaced (once: a replacement that dies before it is ready is not replaced again). A
   replacement or GPU worker that is not ready `worker_start_timeout` after its launch counts as
@@ -254,10 +260,10 @@ nothing changes.
 
 | Task | How | `host_mem` | `gpu_mem` |
 |------|-----|------------|-----------|
-| Function in the pool | the worker measures the call | the worker's RSS growth during the call, `"approximate": True` (Linux only) | not measured |
+| Function in the pool | the worker measures the call | the worker's peak RSS during the call, its own size included; the growth in `host_mem_growth`; `"approximate": True` (Linux only) | not measured |
 | Executable (one `Process`) | the peak launcher reaps it with `wait4` | `ru_maxrss`: the largest single process of the command's tree | with `pynvml`: largest per-GPU sum over the tree's processes |
-| `process_templates` of executables | the launcher, per rank | the ranks' sum (an upper bound) | per GPU, summed over the ranks that share it |
-| Function with a `process_template`, or in `process_templates` | the process writes its own record | its lifetime peak RSS or its children's, the larger, so it includes the Dragon process it runs in; a group sums its members | not measured |
+| `process_templates` of executables | the launcher, per rank | the ranks' sum (an upper bound), ranks that stayed at the launcher's own size counting it once; `host_mem_max`, `ranks` | per GPU, summed over the ranks that share it |
+| Function with a `process_template`, or in `process_templates` | the process writes its own record | its own peak RSS (`VmHWM`, so without the process that forked it) or its children's, the larger; a group sums its members | not measured |
 
 Every task also reports `started` and `ended` (wall clock, where it ran: around the call, or from
 just before the launcher starts the command to just after it reaped it), `cpu_seconds`, and
@@ -269,8 +275,14 @@ task, which can be well before a worker or process runs it; `started` says when 
   both use the launcher, and `"dragon"` raises `ValueError`.
 - **A FAILED task reports too**: a command through its launcher, a function with what was measured
   until it raised (also on `SystemExit`). A process task killed for a timeout reports what its
-  launcher, or its function process on SIGTERM, saw. A cancelled task reports nothing, and
-  neither does a pool task that timed out or whose worker died (killed for memory, for instance).
+  launcher, or its function process on SIGTERM, saw. A cancelled task reports nothing.
+- **A task that died with its process reports what is known**: a pool task whose worker died
+  (killed for memory, for instance) or was killed for the task's timeout, and a process task
+  killed before it wrote its record. `observed` then has `started` (when the task was sent to
+  its worker, or its process started; the client's clock), `ended` (when the death was seen),
+  `host`, `killed` (the signal's name, or None for an exit on its own) and `exit_code`, plus
+  `timed_out: True` for a timeout. `host_mem` is None: unknown, not zero. An out-of-memory kill
+  looks like any SIGKILL here; telling them apart needs a per-node sampler.
 - **The launcher costs one Python process per executable.** It runs with the client's Python
   (`python -I`, so the task's `PYTHON*` variables cannot break it), the same path on every node.
   Records go to a directory the backend makes for each run,
@@ -279,8 +291,9 @@ task, which can be well before a worker or process runs it; `started` says when 
 - **Placement, environment, working directory and output** are the launcher's, and its command
   inherits them; the command runs in a process group of its own.
 - **Pool workers import no `rhapsody` to measure**: the measurement travels with the workers'
-  code. A pool function's figures are approximate: they miss memory the allocator kept from
-  earlier calls, and count threads an earlier call left running.
+  code. A pool function's figures are approximate: `host_mem` includes the worker's own size
+  (60 to 100 MiB), `host_mem_growth` misses memory the allocator kept from earlier calls, and both
+  count threads an earlier call left running.
 
 ## What it does not do yet
 
@@ -310,6 +323,7 @@ task, which can be well before a worker or process runs it; `started` says when 
 | `pmi` | `None` | PMI of every `process_templates` group whose task sets none |
 | `observe_peaks` | `False` | report what each task used as `task["observed"]` |
 | `peak_source` | `"auto"` | `"auto"` or `"launcher"`, the same here; `"dragon"` raises |
+| `worker_oom_score_adj` | 500 | the `oom_score_adj` pool workers raise themselves to; `None` leaves it |
 
 `num_workers` is the number of live CPU workers over all nodes: fewer than at start once a
 replacement has failed to start. `topology()` lists each node's CPUs and GPUs.

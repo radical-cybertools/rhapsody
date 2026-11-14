@@ -26,6 +26,7 @@ import os
 import queue
 import resource
 import shutil
+import signal
 import threading
 import time
 import uuid
@@ -142,6 +143,10 @@ class _Worker:
         "initial",
         "retry",
         "backoff",
+        "pid",
+        "node",
+        "oom_score_adj",
+        "sent",
     )
 
     def __init__(self, wid: int, host: str, cpus: tuple, gpus: tuple, initial: bool, retry: bool):
@@ -158,6 +163,12 @@ class _Worker:
         # A replacement for a worker that died: if it dies before it is ready, it is not replaced.
         self.retry = retry
         self.backoff = _RETRY_FIRST
+        # From its READY: its OS pid and host name, and the oom_score_adj it runs with.
+        self.pid: int | None = None
+        self.node: str | None = None
+        self.oom_score_adj: int | None = None
+        # Tasks put on its inbox: the worker numbers them the same way, from 1.
+        self.sent = 0
 
     @property
     def key(self) -> tuple:
@@ -196,6 +207,9 @@ class _Task:
         "put_failed_on",
         "measured",
         "peak_dir",
+        "seq",
+        "sent_at",
+        "started_at",
     )
 
     def __init__(self, uid: str, desc: dict, kind: str, timeout: float | None, token: str):
@@ -231,6 +245,11 @@ class _Task:
         # task's processes write their records to peak_dir, read when it ends.
         self.measured = False
         self.peak_dir: str | None = None
+        # A pool task's number on its worker, and when it was sent there; a process task's start.
+        # Wall clock: what observe_peaks reports for a task that died with its process.
+        self.seq: int | None = None
+        self.sent_at: float | None = None
+        self.started_at: float | None = None
 
 
 def _read_siblings(cpu: int) -> str:
@@ -329,6 +348,40 @@ def _read_and_remove(path: str | None) -> str:
     return text
 
 
+def _signal_name(code: Any) -> str | None:
+    """The name of the signal a negative exit code stands for; None for an exit on its own."""
+    if not isinstance(code, int) or isinstance(code, bool) or code >= 0:
+        return None
+    try:
+        return signal.Signals(-code).name
+    except ValueError:
+        return f"signal {-code}"
+
+
+def _killed_observed(
+    started: float | None, host: str | None, hosts: list | None, code: Any, timed_out: bool
+) -> dict:
+    """``observed`` for a task that died with its process, which took its measurement along.
+
+    What the backend knows: when the task was sent or started, when its death was seen, where, and
+    how it ended. ``host_mem`` is None: unknown, not zero.
+    """
+    observed: dict = {"host_mem": None, "gpu_mem": None, "started": started, "ended": time.time()}
+    if host:
+        observed["host"] = host
+    elif hosts:
+        if len(hosts) == 1:
+            observed["host"] = hosts[0]
+        else:
+            observed["hosts"] = list(hosts)
+    observed["killed"] = _signal_name(code)
+    if isinstance(code, int) and not isinstance(code, bool):
+        observed["exit_code"] = code
+    if timed_out:
+        observed["timed_out"] = True
+    return observed
+
+
 class DragonNativeExecutionBackend(BaseBackend):
     """Dragon backend on the native API: a placed worker pool, native processes, process groups.
 
@@ -401,12 +454,20 @@ class DragonNativeExecutionBackend(BaseBackend):
             - Function tasks that run as their own process, or as group members, write the same
               record from inside the process: its lifetime peak RSS or its children's, and its
               CPU time during the call; no ``gpu_mem``.
+            - A pool task whose worker died or was killed for its timeout, and a process task
+              killed before it wrote its records, report what is known: ``started`` (when it was
+              sent or started), ``ended``, ``host``, ``killed`` (the signal's name, or None) and
+              ``exit_code``, plus ``timed_out`` for a timeout; ``host_mem`` is None.
             - The records go to a fresh directory per run under
               ``<work_dir>/rhapsody-peaks.<tag>/``, which must be on a file system the nodes
               share, and the launcher runs with this Python (``-I``).
         peak_source: ``"auto"`` (the default) or ``"launcher"``: both use the launcher. Dragon's
             native API reports no per-process resource usage (``Task.rusage`` is Batch's), so
             ``"dragon"`` raises ``ValueError`` with ``observe_peaks``.
+        worker_oom_score_adj: The ``oom_score_adj`` pool workers raise themselves to (Linux), so
+            that under memory pressure the kernel kills a worker, and fails its task, before one
+            of Dragon's services, which would end the runtime. A worker keeps a higher value it
+            inherited. None leaves it as Dragon starts it.
     """
 
     @classmethod
@@ -426,6 +487,7 @@ class DragonNativeExecutionBackend(BaseBackend):
         name: str | None = "dragon_native",
         observe_peaks: bool = False,
         peak_source: str = "auto",
+        worker_oom_score_adj: int | None = 500,
     ):
         if Process is None:
             raise RuntimeError(DRAGON_NATIVE_INIT_ERROR)
@@ -455,6 +517,7 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._warned_job_pmi = False
         self._warned_job_timeout = False
         self._observe_peaks = observe_peaks
+        self._worker_oom_score_adj = worker_oom_score_adj
         # Records go to <work_dir>/rhapsody-peaks.<tag>/<uid>/: the tag keeps a reused work dir's
         # leftovers out of the sums; shutdown removes the roots with what cancelled tasks left.
         self._peak_tag = uuid.uuid4().hex[:8]
@@ -673,7 +736,7 @@ class DragonNativeExecutionBackend(BaseBackend):
             )
             proc = Process(
                 _worker.worker_main,
-                args=(w.wid, w.inbox, self._results),
+                args=(w.wid, w.inbox, self._results, self._worker_oom_score_adj),
                 policy=self._host_policy(w.host, w.cpus, w.gpus),
             )
             proc.start()
@@ -772,10 +835,12 @@ class DragonNativeExecutionBackend(BaseBackend):
                 rec.result_event.set()
 
     def _on_ready(self, msg) -> None:
-        _, wid, _hostname, _pid = msg
+        _, wid, hostname, pid, *rest = msg
         w = self._workers.get(wid)
         if w is None or w.state != "starting":
             return
+        w.node, w.pid = hostname, pid
+        w.oom_score_adj = rest[0] if rest else None
         if w.initial and self._initial_left > 0:
             self._initial_left -= 1
             if self._initial_left == 0:
@@ -783,11 +848,13 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._feed(w)
 
     def _on_done(self, msg, completions: list) -> None:
-        _, wid, uid, ok, value, tb, out, err = msg
+        _, wid, uid, ok, value, tb, out, err, *rest = msg
         w = self._workers.get(wid)
         if w is None or w.state == "dead":
             return  # killed for a cancel or timeout; its task was already reported
         rec, w.task = w.task, None
+        if rec is not None and rest and rest[0] != rec.seq:
+            self.logger.debug(f"Worker {wid} numbered {uid} {rest[0]}, not {rec.seq}")
         if rec is not None and rec.uid == uid and self._tasks.get(uid) is rec:
             del self._tasks[uid]
             rec.state = "done"
@@ -886,7 +953,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                 with self._lock:
                     w = self._workers_by_puid.pop(puid, None)
                 if w is not None and not self._stopping:
-                    self._worker_died(w, f"exited with code {code}")
+                    self._worker_died(w, f"exited with code {code}", code)
 
     # ------------------------------------------------------------------
     # Pool scheduling (call with _lock held)
@@ -975,6 +1042,9 @@ class DragonNativeExecutionBackend(BaseBackend):
         w.state = "busy"
         w.task = rec
         w.backoff = _RETRY_FIRST
+        w.sent += 1
+        rec.seq = w.sent
+        rec.sent_at = time.time()
         rec.worker = w
         rec.state = "running"
         rec.payload = None
@@ -1021,8 +1091,11 @@ class DragonNativeExecutionBackend(BaseBackend):
             w = self._new_worker(host, (), gpus, initial=False)
             self._ops.submit(self._launch_worker, w)
 
-    def _worker_died(self, w: _Worker, why: str) -> None:
-        """Handle a worker that died without being asked to: fail its task, maybe replace it."""
+    def _worker_died(self, w: _Worker, why: str, code: int | None = None) -> None:
+        """Handle a worker that died without being asked to: fail its task, maybe replace it.
+
+        ``code`` is its exit code, when known (negative: the signal that killed it).
+        """
         failed = []
         replace = None
         host_lost = False
@@ -1044,7 +1117,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                 error = RuntimeError(
                     f"Dragon worker {w.wid} on {w.host} {why} while running {rec.uid}"
                 )
-                failed.append((rec, error))
+                failed.append((rec, error, self._died_observed(rec, w, code)))
             if was == "starting":
                 if w.initial and self._initial_left > 0:
                     self._start_error = f"worker {w.wid} on {w.host} {why} before it was ready"
@@ -1062,7 +1135,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                             error = RuntimeError(
                                 f"no Dragon worker for {key}: worker {w.wid} {why}"
                             )
-                            failed.append((pending, error))
+                            failed.append((pending, error, None))
             elif not self._stopping and (not w.gpus or self._pending.get(w.key)):
                 replace = self._new_worker(w.host, w.cpus, w.gpus, w.initial, retry=True)
             if was == "starting" and w.retry:
@@ -1072,8 +1145,11 @@ class DragonNativeExecutionBackend(BaseBackend):
             self.logger.error(
                 f"No pool worker is left on {w.host}: function tasks placed there now fail"
             )
-        for rec, error in failed:
-            self._emit(rec, "FAILED", {"exception": error, "stderr": str(error)})
+        for rec, error, observed in failed:
+            fields = {"exception": error, "stderr": str(error)}
+            if observed is not None:
+                fields["observed"] = observed
+            self._emit(rec, "FAILED", fields)
         self._ops.submit(self._discard_worker_queue, w)
         if replace is not None:
             self._ops.submit(self._launch_worker, replace)
@@ -1122,8 +1198,21 @@ class DragonNativeExecutionBackend(BaseBackend):
         error = TimeoutError(
             f"task {rec.uid} exceeded its timeout of {rec.timeout} s; its worker was killed"
         )
-        self._emit(rec, "FAILED", {"exception": error, "stderr": str(error)})
+        fields = {"exception": error, "stderr": str(error)}
+        observed = self._died_observed(rec, w, -signal.SIGKILL, timed_out=True)
+        if observed is not None:
+            fields["observed"] = observed
+        self._emit(rec, "FAILED", fields)
         self._ops.submit(self._retire_worker, w, rec.token)
+
+    @staticmethod
+    def _died_observed(
+        rec: _Task, w: _Worker, code: int | None, timed_out: bool = False
+    ) -> dict | None:
+        """What is known of a pool task whose worker died or was killed (``observe_peaks``)."""
+        if not rec.measured:
+            return None
+        return _killed_observed(rec.sent_at, w.node or w.host, None, code, timed_out)
 
     # ------------------------------------------------------------------
     # Process and group tasks
@@ -1188,13 +1277,20 @@ class DragonNativeExecutionBackend(BaseBackend):
     def _collect_observed(self, rec: _Task, state: str, fields: dict) -> None:
         """Combine the records a process or group task's processes wrote into ``observed``.
 
-        Removes the task's record directory either way. A task that did not get a record from each
-        of its processes (killed, or never started) reports none.
+        Removes the task's record directory either way. A FAILED task that did not get a record from
+        each of its processes, say one killed with SIGKILL, reports what is known instead: its
+        start, its end, the hosts that wrote a record, and how it ended.
         """
-        observed = _peak.read_peaks(rec.peak_dir, rec.ranks)  # type: ignore[arg-type]
+        records = _peak.read_records(rec.peak_dir) or []  # type: ignore[arg-type]
+        observed = _peak.combine(records, rec.ranks)
         if observed is None:
             if state in ("DONE", "FAILED"):
                 self.logger.debug(f"No complete peaks for {rec.uid} in {rec.peak_dir}")
+            if state == "FAILED" and rec.started_at is not None:
+                hosts = sorted({r["host"] for r in records if r.get("host")})
+                fields["observed"] = _killed_observed(
+                    rec.started_at, None, hosts, fields.get("exit_code"), rec.timed_out
+                )
         elif state in ("DONE", "FAILED"):
             fields["observed"] = observed
 
@@ -1223,6 +1319,7 @@ class DragonNativeExecutionBackend(BaseBackend):
         with self._lock:
             if rec.cancelled:
                 return "CANCELED", {}
+        rec.started_at = time.time()
         proc.start()
         with self._lock:
             cancelled = rec.cancelled
@@ -1295,6 +1392,7 @@ class DragonNativeExecutionBackend(BaseBackend):
             group.add_process(nranks, template)
         group.init()
         try:
+            rec.started_at = time.time()
             group.start()
             puids = list(group.puids)
             with self._lock:
