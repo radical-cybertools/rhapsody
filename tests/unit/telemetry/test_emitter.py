@@ -1,5 +1,6 @@
 """Emitter handed to backends: no-op default, real emitter, handoff by attach_backend()."""
 
+import asyncio
 import json
 import pickle
 import subprocess
@@ -39,7 +40,7 @@ def _attach(manager, backend, name="b"):
 
 
 async def _drain(manager):
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
 
 
 # ---------------------------------------------------------------- no-op emitter
@@ -77,7 +78,9 @@ async def test_emitter_follows_the_manager_lifecycle():
     assert emitter.enabled is True
     await manager.stop()
     assert emitter.enabled is False
+    before = manager._queue.qsize()
     emitter.emit("rhapsody.x.Y")  # stopped: dropped, no error
+    assert manager._queue.qsize() == before  # and not queued
 
 
 async def test_emit_builds_an_event_with_session_backend_and_payload():
