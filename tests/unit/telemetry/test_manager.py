@@ -1200,6 +1200,72 @@ class TestTaskPlacementPropagation:
         assert "placement" not in started[0].attributes
 
 
+class TestObservedPropagation:
+    """Task["observed"] (observe_peaks) reaches the terminal events and spans, flattened."""
+
+    OBSERVED = {
+        "host_mem": 0.5,
+        "host_mem_max": 0.25,
+        "ranks": 2,
+        "gpu_mem": None,
+        "started": 100.0,
+        "ended": 104.0,
+        "cpu_seconds": 6.0,
+        "hosts": ["a", "b"],
+    }
+
+    async def _finish(self, manager, state, observed):
+        received = []
+        manager.subscribe(received.append)
+        task = {"uid": f"t-{state}", "backend": "dragon", "task_type": "ComputeTask"}
+        manager._on_task_state_change(task, "RUNNING")
+        task["observed"] = observed
+        if state == "FAILED":
+            task["exception"] = RuntimeError("x")
+        manager._on_task_state_change(task, state)
+        await asyncio.sleep(0.1)
+        return [e for e in received if e.event_type in ("TaskCompleted", "TaskFailed")]
+
+    @pytest.mark.parametrize("state", ["DONE", "FAILED"])
+    async def test_observed_is_flattened_onto_the_terminal_event_and_span(self, manager, state):
+        (event,) = await self._finish(manager, state, self.OBSERVED)
+        attrs = event.attributes
+        assert attrs["memory_peak_bytes"] == 1 << 29
+        assert attrs["memory_peak_rank_max_bytes"] == 1 << 28
+        assert (attrs["ranks"], attrs["exec_start"], attrs["exec_end"]) == (2, 100.0, 104.0)
+        assert attrs["cpu_seconds"] == 6.0 and attrs["cpu_loadavg"] == 1.5
+        assert attrs["exec_hosts"] == ["a", "b"] and "exec_host" not in attrs
+        assert attrs["resource_usage_scope"] == "job"
+        assert "gpu_memory_peak_bytes" not in attrs  # None: not measured
+        (span,) = [s for s in manager.read_traces() if s.name == "task"]
+        assert span.attributes["memory_peak_bytes"] == 1 << 29
+        assert tuple(span.attributes["exec_hosts"]) == ("a", "b")
+        assert span.attributes["resource_usage_scope"] == "job"
+
+    async def test_pool_and_killed_figures(self, manager):
+        observed = {
+            "host_mem": 0.125,
+            "host_mem_growth": 0.0625,
+            "approximate": True,
+            "host": "a",
+            "killed": "SIGKILL",
+            "timed_out": True,
+        }
+        (event,) = await self._finish(manager, "FAILED", observed)
+        attrs = event.attributes
+        assert attrs["memory_growth_bytes"] == 1 << 26
+        assert attrs["resource_usage_scope"] == "worker"
+        assert (attrs["exec_host"], attrs["killed_signal"], attrs["timed_out"]) == (
+            "a",
+            "SIGKILL",
+            True,
+        )
+
+    async def test_no_observed_adds_nothing(self, manager):
+        (event,) = await self._finish(manager, "DONE", None)
+        assert set(event.attributes) == {"executable", "task_type"}
+
+
 class TestTaskQueuedSpanEvent:
     async def test_task_queued_adds_span_event(self, manager):
         manager.emit(

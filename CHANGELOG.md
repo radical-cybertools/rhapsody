@@ -30,6 +30,10 @@
   positional calls keep their meaning. The launcher runs with `python -I`, gives the command
   default signal dispositions and a process group of its own, and sets NVML up off the
   command's path; records go to a fresh directory per run.
+- **Telemetry: `TaskCompleted` and `TaskFailed` carry what the task used** — with
+  `observe_peaks`, `task["observed"]` is flattened into the event's attributes and onto the task
+  span, memory in bytes (`memory_peak_bytes`, `cpu_seconds`, `exec_start`, `exec_end`,
+  `exec_host`, ...). See `docs/telemetry/reference.md`.
 
 ### Changed
 
