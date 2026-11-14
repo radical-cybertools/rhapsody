@@ -604,19 +604,21 @@ def _rec(host_mem, floor=None, host="h"):
     return {"host_mem": host_mem, "floor": floor, "host": host, "gpu_mem_devices": {}}
 
 
-def test_ranks_at_the_launchers_floor_count_one_floor_between_them():
-    floor = 10 / 1024
+def test_ranks_at_the_launchers_floor_count_as_one():
+    floor = 14 / 1024  # the launcher's VmRSS; a forked child keeps less of it (5 to 15 MiB)
     # Above the floor, a rank's peak is its command's own: the sum is exact
     big = _peak.combine([_rec(0.5, floor), _rec(0.25, floor), _rec(0.5, floor)], 3)
     assert big["host_mem"] == pytest.approx(1.25)
     assert (big["host_mem_max"], big["ranks"]) == (0.5, 3)
-    # 64 ranks that never grew past the launcher's size: one floor, not 64
-    small = _peak.combine([_rec(floor, floor) for _ in range(64)], 64)
-    assert small["host_mem"] == pytest.approx(floor)
-    assert (small["host_mem_max"], small["ranks"]) == (floor, 64)
-    # Both kinds in one job, and records without a floor (a process's own) count as they are
-    mixed = _peak.combine([_rec(0.5, floor), _rec(floor, floor), _rec(floor * 1.01, floor)], 3)
-    assert mixed["host_mem"] == pytest.approx(0.5 + floor)
+    # 64 ranks that never grew past what the child kept of the launcher: one rank, not 64
+    tiny = 5 / 1024
+    small = _peak.combine([_rec(tiny, floor) for _ in range(64)], 64)
+    assert small["host_mem"] == pytest.approx(tiny)
+    assert (small["host_mem_max"], small["ranks"]) == (tiny, 64)
+    # Both kinds in one job: the small ones count as their largest
+    mixed = _peak.combine([_rec(0.5, floor), _rec(tiny, floor), _rec(floor * 1.01, floor)], 3)
+    assert mixed["host_mem"] == pytest.approx(0.5 + floor * 1.01)
+    # Records without a floor (a process's own) count as they are
     assert _peak.combine([_rec(0.1), _rec(0.1)], 2)["host_mem"] == pytest.approx(0.2)
 
 

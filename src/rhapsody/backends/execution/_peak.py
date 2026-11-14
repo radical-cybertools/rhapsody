@@ -8,8 +8,8 @@ The command runs as a child of this process, which reaps it with ``os.wait4`` to
 resident set size (``ru_maxrss``: the largest single process of the command's tree, not a sum).
 ``ru_maxrss`` is a high-water mark kept across ``exec``, so it includes the copy of this process
 the child was before it ran the command: a command whose own peak stays below this process's size
-at fork (about 10 MiB) reports that size. The record keeps it as ``floor``, so that
-:func:`read_peaks` can tell such ranks apart. When ``pynvml`` is importable, a thread also
+at fork reports what the child kept of it (about 5 to 15 MiB). The record keeps this process's
+size as ``floor``, so that :func:`read_peaks` can tell such ranks apart. When ``pynvml`` is importable, a thread also
 samples, every ``--interval`` seconds, the memory that NVML reports for the command's processes on
 each GPU. This process then writes ``DIR/<host>.<pid>.json``::
 
@@ -469,9 +469,10 @@ def combine(records: list[dict], ranks: int) -> Optional[dict]:
     A partial sum would understate the demand, and an extra record is not this run's.
 
     - ``host_mem`` adds the ranks up (an upper bound: their peaks need not coincide). A rank whose
-      peak stayed at its ``floor`` (the launcher's size when it forked the command, which
-      ``ru_maxrss`` keeps) used at most that much, so all such ranks count one floor between them
-      instead of one each. Every other rank's peak is its command's own.
+      peak is above its ``floor`` (the launcher's size when it forked the command) reports its
+      command's own peak. One at or below it may report only the copy of the launcher it was
+      before it ran the command, which ``ru_maxrss`` keeps: all such ranks count as one, the
+      largest of them, instead of one each.
     - ``host_mem_max`` is the largest rank's peak, and ``ranks`` the number of records.
     - ``gpu_mem`` is the busiest GPU's, the ranks sharing a GPU adding up.
     - When every record has them, ``started`` is the earliest start, ``ended`` the latest end,
@@ -484,10 +485,10 @@ def combine(records: list[dict], ranks: int) -> Optional[dict]:
         devices = rec.get("gpu_mem_devices")
         for device, gib in (devices if isinstance(devices, dict) else {}).items():
             gpu[device] = gpu.get(device, 0.0) + gib
-    floors = [rec["floor"] for rec in records if _at_floor(rec)]
+    small = [rec["host_mem"] for rec in records if _at_floor(rec)]
     above = sum(rec["host_mem"] for rec in records if not _at_floor(rec))
     observed = {
-        "host_mem": above + (max(floors) if floors else 0.0),
+        "host_mem": above + (max(small) if small else 0.0),
         "host_mem_max": max(rec["host_mem"] for rec in records),
         "ranks": len(records),
         "gpu_mem": max(gpu.values()) if gpu else None,
