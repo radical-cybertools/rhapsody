@@ -47,6 +47,17 @@
   `cpu_seconds`, also when FAILED. Dragon's native API has no per-task `rusage`, so
   `peak_source="auto"` means the launcher. Off by default.
 
+### Changed
+
+- **Telemetry (experimental): task and resource metrics are recorded by a task instrumentation**
+  instead of the `TelemetryManager`. Instrument names, descriptions, attributes, values, the
+  `rhapsody` meter scope and `task_count()` / `summary()` are unchanged (a golden test pins them).
+  The manager now hosts instrumentations and routes events to them. Three small differences: a
+  failing metric update no longer skips that event's task span update, and the reverse; a failing
+  metric update is logged as a warning once per backend and instrumentation, then at debug level,
+  instead of one error per event; and a restarted manager no longer carries running-task and
+  node-resource state over from the previous run.
+
 ### Fixed
 
 - **BEHAVIOUR CHANGE: `DragonVllmInferenceBackend` reports a timed-out AITask as FAILED, not DONE** —

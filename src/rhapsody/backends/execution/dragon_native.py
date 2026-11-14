@@ -378,7 +378,8 @@ class DragonNativeExecutionBackend(BaseBackend):
             the work directory, which must be on a file system the nodes share.
         kill_grace: Seconds between SIGTERM and SIGKILL when a process task is cancelled or times
             out. Pool workers get SIGKILL at once.
-        worker_start_timeout: Seconds to wait for the pool to start.
+        worker_start_timeout: Seconds to wait for the pool to start, and for each replacement or
+            GPU worker to be ready; one that is not is killed and counts as dead.
         pmi: The PMI of every ``process_templates`` group whose task sets none: ``"pmix"``,
             ``"cray"``, ``"none"`` or a Dragon ``PMIBackend``. An unknown name raises
             ``ValueError`` before anything starts.
@@ -476,7 +477,6 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._client_host: str | None = None
         self._results: Any = None
         self._max_process_ranks = 0
-        self._pool_size = 0
 
         # Everything below is guarded by _lock.
         self._lock = threading.RLock()
@@ -545,8 +545,12 @@ class DragonNativeExecutionBackend(BaseBackend):
 
     @property
     def num_workers(self) -> int:
-        """Number of CPU workers in the pool, over all nodes."""
-        return self._pool_size
+        """Number of live CPU workers in the pool, over all nodes.
+
+        It falls below the pool's size at start when a replacement fails to start.
+        """
+        with self._lock:
+            return sum(n for (_, gpus), n in self._live_by_key.items() if not gpus)
 
     def _host_policy(self, host: str, cpus=(), gpus=()):
         return Policy(
@@ -602,7 +606,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                     n = len(cores) or info["num_cpus"]
                 for cpus in _split_cpus(cores, n):
                     workers.append(self._new_worker(host, cpus, (), initial=True))
-            self._initial_left = self._pool_size = len(workers)
+            self._initial_left = len(workers)
             if not workers:
                 self._ready_event.set()
         self._check_descriptors(workers)
@@ -655,10 +659,14 @@ class DragonNativeExecutionBackend(BaseBackend):
     def _launch_worker(self, w: _Worker) -> None:
         """Create a worker's inbox on its node and start its process.
 
-        Runs off the loop.
+        A worker launched after the pool started, a replacement or a GPU worker, must report ready
+        within ``worker_start_timeout``, as the pool had to at start. Runs off the loop.
         """
         if self._stopping:
             return
+        if self._started:
+            timer = next(self._timer_seq)
+            self._push_timer(self._worker_start_timeout, timer, self._start_expired, w.wid)
         try:
             w.inbox = Queue(
                 maxsize=_INBOX_SIZE, block_size=_BLOCK_SIZE, policy=self._host_policy(w.host)
@@ -842,6 +850,21 @@ class DragonNativeExecutionBackend(BaseBackend):
             if w is not None and w.state == "paused":
                 self._feed(w)
 
+    def _start_expired(self, wid: int, _timer: int) -> None:
+        """Count a worker that is still starting at its deadline as dead, and kill it.
+
+        Its process may be alive but stuck, say on a hung node: until it is gone, it would count as
+        live, and the tasks queued for it would wait for good.
+        """
+        with self._lock:
+            w = self._workers.get(wid)
+            if w is None or w.state != "starting" or self._stopping:
+                return
+            self._worker_died(w, f"was not ready {self._worker_start_timeout} s after its launch")
+        if w.proc is not None:
+            with contextlib.suppress(Exception):
+                w.proc.kill()
+
     def _watch_workers(self) -> None:
         """Find workers that died on their own, with a non-blocking join once a second.
 
@@ -1002,6 +1025,7 @@ class DragonNativeExecutionBackend(BaseBackend):
         """Handle a worker that died without being asked to: fail its task, maybe replace it."""
         failed = []
         replace = None
+        host_lost = False
         with self._lock:
             if w.state == "dead":
                 return  # retired for a cancel, a timeout or its inbox, or found dead already
@@ -1027,6 +1051,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                     self._ready_event.set()
                 # Nothing left to serve this key: fail what waits for it.
                 if self._live_by_key[w.key] == 0 and not self._stopping:
+                    host_lost = not w.gpus and self._started
                     keys = [w.key]
                     if not self._can_serve((None, ())):
                         keys.append((None, ()))
@@ -1043,6 +1068,10 @@ class DragonNativeExecutionBackend(BaseBackend):
             if was == "starting" and w.retry:
                 self.logger.error(f"Replacement worker {w.wid} on {w.host} {why}; not replacing it")
         self.logger.warning(f"Dragon worker {w.wid} on {w.host} {why}")
+        if host_lost:
+            self.logger.error(
+                f"No pool worker is left on {w.host}: function tasks placed there now fail"
+            )
         for rec, error in failed:
             self._emit(rec, "FAILED", {"exception": error, "stderr": str(error)})
         self._ops.submit(self._discard_worker_queue, w)
@@ -1200,7 +1229,11 @@ class DragonNativeExecutionBackend(BaseBackend):
             rec.puids = [proc.puid]
         if cancelled:
             self._kill_process_task(rec)
-        code = proc.join(timeout=rec.timeout)
+        try:
+            code = proc.join(timeout=rec.timeout)
+        except Exception:  # the task fails with the error: its process must not run on
+            self._kill_process_task(rec)
+            raise
         if code is None:
             with self._lock:
                 rec.timed_out = not rec.cancelled
@@ -1274,6 +1307,9 @@ class DragonNativeExecutionBackend(BaseBackend):
                 group.join(timeout=rec.timeout)
             except Exception:  # a timeout, as TimeoutError or as a manager error
                 if rec.timeout is None:
+                    # The task fails with the error. close() stops the group without a SIGKILL,
+                    # and does not reach the ranks' children: kill and reap them first.
+                    self._kill_process_task(rec)
                     raise
                 with self._lock:
                     rec.timed_out = not rec.cancelled

@@ -224,7 +224,10 @@ MPI, so set `"pmi": "none"` for jobs that don't: it logs neither warning.
 - **A uid in use fails its task.** A task submitted while another task with its uid has not
   finished fails with `ValueError`, and the first runs on.
 - **Dead workers are noticed.** A worker that dies on its own fails its task with the exit code,
-  and is replaced (once: a replacement that dies before it is ready is not replaced again).
+  and is replaced (once: a replacement that dies before it is ready is not replaced again). A
+  replacement or GPU worker that is not ready `worker_start_timeout` after its launch counts as
+  dead, and is killed. When no worker is left for a host, or a GPU set, the tasks waiting for one
+  fail, and losing a host's last pool worker is logged as an error.
 - **The garbage collector.** Dragon's `gs_request` turns Python's garbage collector off at the start
   of every Global Services request and back on at the end of any, for the whole process, so a
   thread blocked in `Process.join()` keeps it off until another request ends. The worker watcher
@@ -303,12 +306,13 @@ task, which can be well before a worker or process runs it; `started` says when 
 | `max_process_ranks` | the runtime's CPUs | processes of process and group tasks that may run at once |
 | `inline_stdio` | `True` | return the output of tasks without `capture_stdio` as text |
 | `kill_grace` | 2.0 s | SIGTERM to SIGKILL for process tasks |
-| `worker_start_timeout` | 300 s | time allowed for the pool to start |
+| `worker_start_timeout` | 300 s | time allowed for the pool to start, and for each replacement or GPU worker to be ready |
 | `pmi` | `None` | PMI of every `process_templates` group whose task sets none |
 | `observe_peaks` | `False` | report what each task used as `task["observed"]` |
 | `peak_source` | `"auto"` | `"auto"` or `"launcher"`, the same here; `"dragon"` raises |
 
-`num_workers` is the pool's size over all nodes. `topology()` lists each node's CPUs and GPUs.
+`num_workers` is the number of live CPU workers over all nodes: fewer than at start once a
+replacement has failed to start. `topology()` lists each node's CPUs and GPUs.
 
 ## Tests
 
