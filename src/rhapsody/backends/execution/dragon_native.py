@@ -144,6 +144,13 @@ _STOP_PARALLEL = 8
 _OWN_TEMPLATE_KEYS = ("target", "args", "kwargs")
 # Where a result message holds the task's pickled value.
 _VALUE_INDEX = {_worker.DONE: 4, _worker.RESULT: 3}
+# A pool task that ran for less than this many seconds is short. While more than half of a node's
+# last _TASK_WINDOW pool tasks were short, at most short_task_workers of its workers run at once.
+_SHORT_TASK = 0.01
+_TASK_WINDOW = 64
+# Seconds a node may hold tasks back under that limit without finishing any. After that its running
+# tasks count as long: tasks that wait on tasks held back behind them would otherwise wait for good.
+_STALL = 1.0
 # Descriptors Local Services holds, per node and per Python process it starts; 1 per executable.
 _FDS_PER_NODE = 40
 _FDS_PER_PYTHON_PROCESS = 3
@@ -390,6 +397,10 @@ class DragonNativeExecutionBackend(BaseBackend):
             CPUs in the job (``Node.cpus``). Each worker is pinned to its share of those CPUs, in
             whole physical cores while there are enough. It is a default, not a limit: any other
             number, above or below, is used as given.
+        short_task_workers: Pool workers per node that run at once while most of that node's
+            recent tasks are short, under 10 ms each. Short tasks contend for a lock that every
+            process on a node shares, and the rate collapses when too many run at once. The other
+            workers wait until the node's tasks run longer. None lets every worker run.
         gpu_workers_per_set: Pool workers started, on demand, for each host and GPU set that
             function tasks ask for. Tasks beyond that wait for a worker of their set.
         max_process_ranks: Processes of process and group tasks that may run at once, over all
@@ -416,6 +427,7 @@ class DragonNativeExecutionBackend(BaseBackend):
     def __init__(
         self,
         workers_per_node: int | None = None,
+        short_task_workers: int | None = 32,
         gpu_workers_per_set: int = 1,
         max_process_ranks: int | None = None,
         inline_stdio: bool = True,
@@ -428,6 +440,8 @@ class DragonNativeExecutionBackend(BaseBackend):
             raise RuntimeError(DRAGON_NATIVE_INIT_ERROR)
         if workers_per_node is not None and workers_per_node < 0:
             raise ValueError("workers_per_node must be >= 0")
+        if short_task_workers is not None and short_task_workers < 1:
+            raise ValueError("short_task_workers must be >= 1 or None")
         if gpu_workers_per_set < 1:
             raise ValueError("gpu_workers_per_set must be >= 1")
         _group_pmi(pmi)
@@ -436,6 +450,7 @@ class DragonNativeExecutionBackend(BaseBackend):
         self.logger = _get_logger()
 
         self._workers_per_node = workers_per_node
+        self._short_task_workers = short_task_workers
         self._gpu_workers_per_set = gpu_workers_per_set
         self._max_process_ranks_arg = max_process_ranks
         self._inline_stdio = inline_stdio
@@ -481,6 +496,12 @@ class DragonNativeExecutionBackend(BaseBackend):
         # Sends decided since the relay was last sent a batch.
         self._outgoing: list = []
         self._live_by_key: dict[tuple, int] = defaultdict(int)
+        # Busy CPU workers per host, and whether each of its last _TASK_WINDOW tasks was short.
+        self._busy: Counter = Counter()
+        self._recent: dict[str, deque[bool]] = defaultdict(lambda: deque(maxlen=_TASK_WINDOW))
+        self._short: Counter = Counter()
+        self._finished: Counter = Counter()
+        self._stalled: dict[str, tuple[int, float]] = {}
         self._proc_queue: deque = deque()
         self._running_ranks = 0
         # Process tasks whose process runs, by puid; those that exited and wait for their result.
@@ -804,10 +825,12 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._feed(w)
 
     def _on_done(self, msg, completions: list) -> None:
-        _, wid, uid, ok, value, tb, out, err = msg
+        _, wid, uid, ok, value, tb, out, err, seconds = msg
         w = self._workers.get(wid)
         if w is None or w.state == "dead":
             return  # killed for a cancel or timeout; its task was already reported
+        if not w.gpus:
+            self._record(w.host, seconds)
         rec, w.task = w.task, None
         w.backoff = _RETRY_FIRST
         if rec is not None and rec.uid == uid and self._tasks.get(uid) is rec:
@@ -820,6 +843,8 @@ class DragonNativeExecutionBackend(BaseBackend):
                 fields = {"exception": value, "stdout": out, "stderr": err or tb or str(value)}
                 completions.append((rec, "FAILED", fields))
         self._feed(w)
+        if not w.gpus:
+            self._fill(w.host)  # the host's tasks may have turned long
 
     def _on_unsent(self, msg) -> None:
         """Take back a task the relay could not put on its worker's inbox, and do what ``_send``
@@ -841,7 +866,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                 self._feed(w)
                 return
             self._pending[rec.key].appendleft(rec)
-            w.state = "paused"
+            self._set_state(w, "paused")
             self._add_retry(w)
             return
         if kind == "timeout":
@@ -851,13 +876,15 @@ class DragonNativeExecutionBackend(BaseBackend):
         else:
             error = RuntimeError(f"cannot send to worker {w.wid} on {w.host}: {error_text}")
         self.logger.warning(f"Worker {w.wid} on {w.host} cannot be sent tasks: {error}")
-        w.state = "dead"
+        self._set_state(w, "dead")
         self._ops.submit(self._retire_worker, w, None)
         if rec.put_failed_on is not None:
             self._fail_unsent(rec, error)
-            return
-        rec.put_failed_on = w.host
-        self._route(rec, first=True)
+        else:
+            rec.put_failed_on = w.host
+            self._route(rec, first=True)
+        if not w.gpus:
+            self._fill(w.host)  # one busy worker fewer: the host may take more tasks
 
     def _watch_timers(self) -> None:
         """Time out pool tasks at their deadline, and send paused workers their next task.
@@ -928,6 +955,7 @@ class DragonNativeExecutionBackend(BaseBackend):
         waits: Dragon's ``gs_request`` disables it for the duration of every request.
         """
         while not self._stop_event.wait(_WATCH_INTERVAL):
+            self._check_stalls()
             with self._lock:
                 puids = list(self._workers_by_puid)
             relay = None
@@ -951,6 +979,27 @@ class DragonNativeExecutionBackend(BaseBackend):
                     w = self._workers_by_puid.pop(puid, None)
                 if w is not None and not self._stopping:
                     self._worker_died(w, f"exited with code {code}")
+            self._flush_sends()  # the tasks given to the workers of a host a death made room on
+
+    def _check_stalls(self) -> None:
+        """Lift the limit of a node that holds tasks back and has finished none for ``_STALL`` s."""
+        now = time.monotonic()
+        with self._lock:
+            for host in self._host_order:
+                waiting = self._pending.get((host, ())) or self._pending.get((None, ()))
+                if not waiting or not self._full(host):
+                    self._stalled.pop(host, None)
+                    continue
+                seen = self._stalled.get(host)
+                if seen is None or seen[0] != self._finished[host]:
+                    self._stalled[host] = (self._finished[host], now)
+                elif now - seen[1] >= _STALL:
+                    self.logger.debug(f"No task finished on {host} in {_STALL} s: all workers run")
+                    del self._stalled[host]
+                    self._recent[host].clear()
+                    self._short[host] = 0
+                    self._fill(host)
+        self._flush_sends()  # otherwise they wait for the relay's next batch, up to a second
 
     def _relay_lost(self, why: str) -> None:
         """Fail every pool task: none can be sent, or heard from, without the relay.
@@ -980,6 +1029,36 @@ class DragonNativeExecutionBackend(BaseBackend):
     # Pool scheduling (call with _lock held)
     # ------------------------------------------------------------------
 
+    def _set_state(self, w: _Worker, state: str) -> None:
+        """Set a worker's state; every change in or out of "busy" goes through here."""
+        if not w.gpus and (w.state == "busy") != (state == "busy"):
+            self._busy[w.host] += 1 if state == "busy" else -1
+        w.state = state
+
+    def _full(self, host: str) -> bool:
+        """Whether ``host`` runs as many CPU workers at once as its recent tasks allow."""
+        cap = self._short_task_workers
+        return cap is not None and self._busy[host] >= cap and 2 * self._short[host] > _TASK_WINDOW
+
+    def _record(self, host: str, seconds: float) -> None:
+        """Add a finished CPU task's run time to its host's window."""
+        recent = self._recent[host]
+        if len(recent) == _TASK_WINDOW:
+            self._short[host] -= recent[0]
+        short = seconds < _SHORT_TASK
+        recent.append(short)
+        self._short[host] += short
+        self._finished[host] += 1
+
+    def _fill(self, host: str) -> None:
+        """Give idle CPU workers of ``host`` waiting tasks, as far as ``_full`` allows."""
+        idle = self._idle.get((host, ()))
+        while idle and not self._full(host):
+            rec = self._next_for(idle[0])
+            if rec is None:
+                return
+            self._send(idle.popleft(), rec)
+
     def _idle_pop(self, key: tuple, avoid: str | None = None) -> _Worker | None:
         """Take an idle worker for ``key``.
 
@@ -988,13 +1067,13 @@ class DragonNativeExecutionBackend(BaseBackend):
         host, gpus = key
         if gpus or host is not None:
             idle = self._idle.get(key)
-            return idle.popleft() if idle else None
+            return idle.popleft() if idle and (gpus or not self._full(host)) else None
         hosts = self._host_order
         if avoid is not None:
             hosts = [h for h in hosts if h != avoid] + [avoid]
         for h in hosts:
             idle = self._idle.get((h, ()))
-            if idle:
+            if idle and not self._full(h):
                 return idle.popleft()
         return None
 
@@ -1007,13 +1086,12 @@ class DragonNativeExecutionBackend(BaseBackend):
         return None
 
     def _feed(self, w: _Worker) -> None:
-        """Give ``w`` its next task, or mark it idle."""
+        """Give ``w`` its next task, or mark it idle, as it stays while its host is full."""
+        self._set_state(w, "idle")
         if self._stopping:
-            w.state = "idle"
             return
-        rec = self._next_for(w)
+        rec = None if not w.gpus and self._full(w.host) else self._next_for(w)
         if rec is None:
-            w.state = "idle"
             self._idle[w.key].append(w)
             return
         self._send(w, rec)
@@ -1025,7 +1103,7 @@ class DragonNativeExecutionBackend(BaseBackend):
         ``UNSENT`` message takes the task back (``_on_unsent``).
         """
         self._outgoing.append(("send", w.wid, rec.uid, rec.payload))
-        w.state = "busy"
+        self._set_state(w, "busy")
         w.task = rec
         rec.worker = w
         rec.state = "running"
@@ -1119,7 +1197,7 @@ class DragonNativeExecutionBackend(BaseBackend):
             if w.state == "dead":
                 return  # retired for a cancel, a timeout or its inbox, or found dead already
             was = w.state
-            w.state = "dead"
+            self._set_state(w, "dead")
             self._workers.pop(w.wid, None)
             self._live_by_key[w.key] -= 1
             if w.proc is not None:
@@ -1156,6 +1234,8 @@ class DragonNativeExecutionBackend(BaseBackend):
                 replace = self._new_worker(w.host, w.cpus, w.gpus, w.initial, retry=True)
             if was == "starting" and w.retry:
                 self.logger.error(f"Replacement worker {w.wid} on {w.host} {why}; not replacing it")
+            if was == "busy" and not w.gpus and not self._stopping:
+                self._fill(w.host)
         self.logger.warning(f"Dragon worker {w.wid} on {w.host} {why}")
         if host_lost:
             self.logger.error(
@@ -1208,8 +1288,10 @@ class DragonNativeExecutionBackend(BaseBackend):
             del self._tasks[uid]
             rec.state = "done"
             w, rec.worker = rec.worker, None
-            w.state = "dead"
+            self._set_state(w, "dead")
             w.task = None
+            self._fill(w.host)
+        self._flush_sends()
         error = TimeoutError(
             f"task {rec.uid} exceeded its timeout of {rec.timeout} s; its worker was killed"
         )
@@ -1990,13 +2072,15 @@ class DragonNativeExecutionBackend(BaseBackend):
                     pending.remove(rec)
             elif rec.kind == "pool":
                 worker, rec.worker = rec.worker, None
-                worker.state = "dead"
+                self._set_state(worker, "dead")
                 worker.task = None
+                self._fill(worker.host)
             rec.state = "done"
             started = bool(rec.puids)
         for desc in (rec.desc, *rec.repeats):
             self._callback_func(desc, "CANCELED")
         if worker is not None:
+            self._flush_sends()  # the tasks _fill gave to the room the cancel made
             self._ops.submit(self._retire_worker, worker, rec.token)
         elif rec.kind != "pool" and started:
             self._ops.submit(self._kill_process_task, rec)
@@ -2043,7 +2127,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                 rec.cancelled = True
                 if rec.kind == "pool" and rec.worker is not None:
                     busy.append(rec.worker)
-                    rec.worker.state = "dead"
+                    self._set_state(rec.worker, "dead")
                     rec.worker.task = None
             workers = list(self._workers.values())
         if self._loop is not None:

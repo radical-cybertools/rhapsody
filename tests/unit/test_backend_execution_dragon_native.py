@@ -1610,6 +1610,259 @@ async def test_timed_out_process_that_outlives_its_kill_ends_without_an_exit_cod
 
 
 # ============================================================================
+# Short tasks and the busy cap
+# ============================================================================
+
+
+def nap(seconds):
+    time.sleep(seconds)
+    return seconds
+
+
+@pytest.fixture
+async def capped(dragon, tmp_path, monkeypatch):
+    """4 workers per node, at most 2 busy per node while its tasks are short; a window of 4."""
+    monkeypatch.setattr(dragon_native, "_TASK_WINDOW", 4)
+    monkeypatch.setattr(dragon_native, "_STALL", 30.0)
+    be = DragonNativeExecutionBackend(
+        workers_per_node=4, short_task_workers=2, inline_stdio=False, kill_grace=0.5
+    )
+    be._work_dir = str(tmp_path)
+    await be
+    yield be
+    await be.shutdown()
+
+
+def make_short(backend, host):
+    with backend._lock:
+        for _ in range(dragon_native._TASK_WINDOW):
+            backend._record(host, 0.0)
+
+
+def running_on(backend, host):
+    return sum(1 for w in backend._workers.values() if w.host == host and w.state == "busy")
+
+
+async def test_short_task_workers_must_be_positive(dragon):
+    with pytest.raises(ValueError, match="short_task_workers"):
+        DragonNativeExecutionBackend(short_task_workers=0)
+
+
+def test_a_host_is_full_while_more_than_half_its_window_is_short(capped):
+    capped._busy["n1"] = 2
+    assert not capped._full("n1")  # no tasks yet: every worker may run
+    with capped._lock:
+        for seconds in (1.0, 1.0, 0.0, 0.0):
+            capped._record("n1", seconds)
+    assert not capped._full("n1")  # half short is not enough
+    with capped._lock:
+        capped._record("n1", 0.0)  # pushes out a long one: three short of four
+    assert capped._full("n1")
+    capped._busy["n1"] = 1
+    assert not capped._full("n1")
+
+
+async def test_workers_report_how_long_their_tasks_ran(capped, monkeypatch):
+    monkeypatch.setattr(dragon_native, "_SHORT_TASK", 0.05)
+    rec = Recorder(capped)
+    tasks = [
+        fn_task(nap, 0.0, placement={"host": "n1"}),
+        fn_task(nap, 0.2, placement={"host": "n1"}),
+    ]
+    await capped.submit_tasks(tasks)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert sorted(capped._recent["n1"]) == [False, True]
+
+
+async def test_short_tasks_run_on_at_most_short_task_workers_of_a_node(capped):
+    rec = Recorder(capped)
+    make_short(capped, "n1")
+    tasks = [fn_task(blocked, placement={"host": "n1"}) for _ in range(4)]
+    await capped.submit_tasks(tasks)
+    assert running_on(capped, "n1") == 2
+    assert [capped._tasks[t["uid"]].state for t in tasks].count("queued") == 2
+    GATE.set()
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert capped._busy["n1"] == 0
+
+
+async def test_unplaced_short_tasks_go_to_a_node_with_room(capped):
+    """The client's node is filled first, up to its cap, and then the next node."""
+    rec = Recorder(capped)
+    make_short(capped, "n0")
+    tasks = [fn_task(blocked) for _ in range(4)]
+    await capped.submit_tasks(tasks)
+    hosts = sorted(capped._tasks[t["uid"]].worker.host for t in tasks)
+    assert hosts == ["n0", "n0", "n1", "n1"]
+    GATE.set()
+    for task in tasks:
+        await rec.wait(task["uid"])
+
+
+async def test_long_tasks_lift_the_cap(capped, monkeypatch):
+    """Once a node's tasks run long, the waiting tasks go to its idle workers too."""
+    monkeypatch.setattr(dragon_native, "_SHORT_TASK", 0.05)
+    rec = Recorder(capped)
+    make_short(capped, "n1")
+    tasks = [fn_task(nap, 0.3, placement={"host": "n1"}) for _ in range(8)]
+    await capped.submit_tasks(tasks)
+    assert running_on(capped, "n1") == 2
+    await until(lambda: running_on(capped, "n1") == 4)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert capped._busy["n1"] == 0
+
+
+async def test_a_node_whose_running_tasks_all_wait_lifts_its_limit(capped, monkeypatch):
+    """Tasks that wait on tasks held back behind them would otherwise wait for good."""
+    monkeypatch.setattr(dragon_native, "_STALL", 0.2)
+    rec = Recorder(capped)
+    make_short(capped, "n1")
+    tasks = [fn_task(blocked, placement={"host": "n1"}) for _ in range(4)]
+    await capped.submit_tasks(tasks)
+    assert running_on(capped, "n1") == 2
+    await until(lambda: running_on(capped, "n1") == 4)
+    GATE.set()
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert capped._busy["n1"] == 0
+
+
+async def test_no_cap_runs_every_worker(dragon, tmp_path):
+    be = DragonNativeExecutionBackend(workers_per_node=4, short_task_workers=None)
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        rec = Recorder(be)
+        make_short(be, "n1")
+        tasks = [fn_task(blocked, placement={"host": "n1"}) for _ in range(4)]
+        await be.submit_tasks(tasks)
+        assert running_on(be, "n1") == 4
+        GATE.set()
+        for task in tasks:
+            await rec.wait(task["uid"])
+    finally:
+        await be.shutdown()
+
+
+async def test_cancel_timeout_and_death_make_room_under_the_cap(capped, dragon):
+    """Each frees its worker's place at once, and the count of busy workers stays exact."""
+    rec = Recorder(capped)
+    make_short(capped, "n1")
+    cancelled = fn_task(blocked, placement={"host": "n1"})
+    timed_out = fn_task(
+        blocked, task_backend_specific_kwargs={"timeout": 0.3}, placement={"host": "n1"}
+    )
+    waiting = [fn_task(blocked, placement={"host": "n1"}) for _ in range(2)]
+    await capped.submit_tasks([cancelled, timed_out, *waiting])
+    assert [capped._tasks[t["uid"]].state for t in waiting] == ["queued", "queued"]
+
+    assert await capped.cancel_task(cancelled["uid"]) is True
+    assert capped._tasks[waiting[0]["uid"]].state == "running"
+    assert await rec.wait(timed_out["uid"]) == ["FAILED"]
+    await until(lambda: capped._tasks[waiting[1]["uid"]].state == "running")
+    assert capped._busy["n1"] == running_on(capped, "n1") == 2
+
+    capped._tasks[waiting[0]["uid"]].worker.proc._exit(-11)
+    assert await rec.wait(waiting[0]["uid"]) == ["FAILED"]
+    assert capped._busy["n1"] == running_on(capped, "n1") == 1
+    GATE.set()
+    assert await rec.wait(waiting[1]["uid"]) == ["DONE"]
+    assert capped._busy["n1"] == 0
+
+
+STARTED = threading.Event()
+
+
+def note_start():
+    STARTED.set()
+
+
+@pytest.mark.parametrize("how", ["cancel", "timeout", "stall"])
+async def test_room_made_outside_the_result_thread_is_used_at_once(
+    dragon, tmp_path, monkeypatch, how
+):
+    """A cancel, a timeout or a lifted limit gives a waiting task to the relay at once.
+
+    Those hand-outs used to wait for the relay's next batch, which an idle client gets once a second
+    (five here), so the room went unused until then, or until a message came in, say a replacement
+    worker's READY: replacements start slowly here, as on a real runtime.
+    """
+    STARTED.clear()
+    monkeypatch.setattr(dragon_native, "_TASK_WINDOW", 4)
+    monkeypatch.setattr(dragon_native, "_STALL", 30.0)
+    monkeypatch.setattr(dragon_native, "_WATCH_INTERVAL", 5.0)
+    be = DragonNativeExecutionBackend(
+        workers_per_node=4, short_task_workers=2, inline_stdio=False, kill_grace=0.5
+    )
+    be._work_dir = str(tmp_path)
+    await be
+    launch = be._launch_worker
+
+    def slow_launch(w):
+        time.sleep(3.0)
+        launch(w)
+
+    monkeypatch.setattr(be, "_launch_worker", slow_launch)
+    try:
+        rec = Recorder(be)
+        make_short(be, "n1")
+        timeout = {"task_backend_specific_kwargs": {"timeout": 0.3}} if how == "timeout" else {}
+        first = fn_task(blocked, placement={"host": "n1"}, **timeout)
+        second = fn_task(blocked, placement={"host": "n1"})
+        waiting = fn_task(note_start, placement={"host": "n1"})
+        await be.submit_tasks([first, second, waiting])
+        await asyncio.sleep(0.2)
+        assert not STARTED.is_set()  # held back by the limit of 2
+        if how == "cancel":
+            assert await be.cancel_task(first["uid"]) is True
+        elif how == "stall":
+            monkeypatch.setattr(dragon_native, "_STALL", 0.0)
+            be._check_stalls()  # notes the stall
+            be._check_stalls()  # lifts the limit
+        assert await asyncio.to_thread(STARTED.wait, 2.0)
+        assert await rec.wait(waiting["uid"]) == ["DONE"]
+    finally:
+        GATE.set()
+        await be.shutdown()
+
+
+async def test_workers_paused_by_a_full_pool_do_not_count_as_busy(capped, pool_full, monkeypatch):
+    rec = Recorder(capped)
+    make_short(capped, "n1")
+    failures = iter(range(8))
+    for w in [w for w in capped._workers.values() if w.host == "n1"]:
+        monkeypatch.setattr(
+            w.inbox, "put", full_until(w.inbox, lambda: next(failures, None) is not None)
+        )
+    tasks = [fn_task(square, i, placement={"host": "n1"}) for i in range(6)]
+    await capped.submit_tasks(tasks)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert capped._busy["n1"] == 0
+    assert all(w.state == "idle" for w in capped._workers.values() if w.host == "n1")
+
+
+async def test_fill_keeps_a_worker_whose_task_failed_to_send(capped, pool_full, monkeypatch):
+    """The task waited out the full pool; its worker stays idle for the next one."""
+    rec = Recorder(capped)
+    task = fn_task(square, 2, placement={"host": "n1"})
+    record = capped.build_task(task)
+    record.put_deadline = time.monotonic()
+    idle = capped._idle[("n1", ())]
+    w = idle[0]
+    monkeypatch.setattr(w.inbox, "put", full_until(w.inbox, lambda: True))
+    with capped._lock:
+        capped._tasks[record.uid] = record
+        capped._pending[record.key].append(record)
+        capped._fill("n1")
+    assert await rec.wait(task["uid"]) == ["FAILED"]
+    assert w in idle and w.state == "idle"
+
+
+# ============================================================================
 # Cancel, timeout, dead workers, shutdown
 # ============================================================================
 
@@ -2323,7 +2576,7 @@ class FullPool:
 
 
 def done_message(value):
-    return (worker_module.DONE, 1, "u", True, value, None, "out", "err")
+    return (worker_module.DONE, 1, "u", True, value, None, "out", "err", 0.0)
 
 
 @pytest.fixture
@@ -2336,7 +2589,7 @@ def test_worker_waits_for_room_on_a_full_pool(pool_full):
     results = FullPool(PoolFullError("pool is full"), failures=3)
     worker_module.send(results, done_message(5), 4)
     msg = dragon_native._load_value(results.items[0])
-    assert msg == (worker_module.DONE, 1, "u", True, 5, None, "out", "err")
+    assert msg == (worker_module.DONE, 1, "u", True, 5, None, "out", "err", 0.0)
 
 
 def test_worker_reports_a_pool_that_stays_full(pool_full, monkeypatch):
@@ -2345,7 +2598,7 @@ def test_worker_reports_a_pool_that_stays_full(pool_full, monkeypatch):
     worker_module.send(results, done_message(b"x" * 2000), 4)
     msg = dragon_native._load_value(results.items[0])
     assert msg[3] is False and "pool is full" in str(msg[4])
-    assert msg[6:] == ("", "")
+    assert msg[6:] == ("", "", 0.0)
 
 
 def test_function_process_flushes_its_result_before_it_exits():

@@ -134,10 +134,10 @@ gave about 15,500 and about 4,100 tasks/s.
 | Sleep 5 ms | 4,170–4,284 | 2,658–3,226 |
 | Sleep 20 ms | 1,417–1,440 | 2,041–2,286 |
 
-- **Many tasks under about 10 ms:** a smaller pool can do better, even one below the core count.
-  Bridges-2 RM nodes have no hardware threads, so the default fills them. On two of those nodes,
-  tasks that did nothing ran at about 13,100 tasks/s with 32 workers per node, and about 3,800 with
-  128.
+- **Many tasks under about 10 ms:** fewer workers running at once can do better, even fewer than
+  the cores. The backend limits them itself, as the next section says. Bridges-2 RM nodes have no
+  hardware threads, so the default fills them. On two of those nodes, before that limit, tasks
+  that did nothing ran at about 13,100 tasks/s with 32 workers per node, and about 3,800 with 128.
 - **Tasks that sleep or wait, about 20 ms or longer:** more workers than cores did better, as the
   table shows.
 - **CPU-bound tasks:** not measured.
@@ -146,6 +146,30 @@ Short tasks suffer because each one allocates and frees its messages in the node
 pool, and every process on the node shares that pool's lock. On the node above, each of those calls
 took microseconds with 32 workers and up to about 1 ms with 64. Contention on that lock is our
 reading of these timings, not something we traced directly.
+
+### Short tasks run on fewer workers
+
+What collapses the rate is how many workers run at once, not how many there are: a worker waiting for
+a task makes no calls on the pool. So while most of a node's recent tasks are short, the backend runs
+at most `short_task_workers` of that node's workers at once, 32 by default. Its other tasks wait for
+one of those workers, or go to another node with room. A task is short when its function ran for less
+than 10 ms, and a node's tasks are short while more than half of its last 64 were. Once they run
+longer, every worker runs again. So does a node that holds tasks back and finishes none for a second:
+its running tasks are long after all, and tasks that wait on tasks held behind them would otherwise
+wait for good.
+
+On the node above, with a pool of 64:
+
+| Workers running at once | Nothing (tasks/s) | Sleep 5 ms (tasks/s) |
+|---|---|---|
+| all 64 | 2,228–2,340 | 3,173–3,273 |
+| at most 32 | 8,918–8,960 | 3,554–4,161 |
+| at most 48 | 7,484–10,601 | 4,468–5,294 |
+| a pool of 32, for comparison | 10,045–10,567 | 4,332–4,389 |
+
+A node with 32 workers or fewer never reaches the default limit. The limit of 32 comes from this node
+and from the 32 workers per node that did well on Bridges-2 RM and on a 16-node cluster. It hasn't
+been measured on a node with more workers. `short_task_workers=None` turns the limit off.
 
 ## MPI jobs: PMI and timeout
 
@@ -294,6 +318,7 @@ group on the runtime's nodes and does not use Batch. See [Telemetry](../telemetr
 | Argument | Default | Meaning |
 |---|---|---|
 | `workers_per_node` | one per physical core | pool workers per node, each pinned to its share of the node's CPUs |
+| `short_task_workers` | 32 | pool workers per node that run at once while its tasks are short; `None` for all |
 | `gpu_workers_per_set` | 1 | workers started on demand for each host and GPU set |
 | `max_process_ranks` | the runtime's CPUs | processes of process and group tasks that may run at once |
 | `inline_stdio` | `True` | return the output of tasks without `capture_stdio` as text |

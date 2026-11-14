@@ -18,6 +18,11 @@
   `tests/integration/test-hpc/benchmarks/dragon_throughput.py` measures it with
   `--with-rhapsody-dragon-native`, and `--workers_per_node` sets its pool size;
   `tests/performance/dragon_native_busy_client.py` measures it next to a busy thread.
+- **`short_task_workers`** for `DragonNativeExecutionBackend` — while most of a
+  node's recent pool tasks ran under 10 ms, at most this many of its workers run at
+  once (32 by default; `None` turns it off). Short tasks contend for a lock in each
+  node's Dragon memory pool, and running them all at once collapsed the rate. Workers
+  now report how long each task ran.
 
 ### Changed
 
