@@ -963,6 +963,9 @@ class DragonNativeExecutionBackend(BaseBackend):
             if self._relay_error is not None:
                 return
             self._relay_error = str(error)
+            if not self._ready_event.is_set():  # the pool's READY messages come through it
+                self._start_error = f"its relay process {why} before the pool was ready"
+                self._ready_event.set()
             lost = [rec for rec in self._tasks.values() if rec.kind == "pool"]
             for rec in lost:
                 del self._tasks[rec.uid]
@@ -1364,9 +1367,9 @@ class DragonNativeExecutionBackend(BaseBackend):
             ended = []
             with self._lock:
                 for puid, code, error in found:
-                    rec = self._watched.pop(puid, None)
-                    if rec is None:
-                        continue
+                    if puid not in self._watched:
+                        continue  # given up on, or found already
+                    rec = self._watched.pop(puid)
                     rec.exit_code, rec.exited_at = code, now
                     if error is None:
                         self._release(rec)
@@ -1379,7 +1382,7 @@ class DragonNativeExecutionBackend(BaseBackend):
             interval = _JOIN_FIRST if found else min(2 * interval, _JOIN_MAX)
             self._stop_event.wait(interval)
 
-    def _poll_exits(self, puids: list) -> list:
+    def _poll_exits(self, puids: list) -> list[tuple[int, int | None, Exception | None]]:
         """``(puid, exit code, error)`` for each process of ``puids`` that exited, or that Global
         Services cannot join; when the poll itself fails, its error for every one."""
         try:
@@ -1389,7 +1392,9 @@ class DragonNativeExecutionBackend(BaseBackend):
                 return []
             self.logger.warning(f"Process check failed: {exc!r}")
             return [(puid, None, exc) for puid in puids]
-        found = [(puid, code, None) for puid, code in exited or ()]
+        found: list[tuple[int, int | None, Exception | None]] = [
+            (puid, code, None) for puid, code in exited or ()
+        ]
         for key, (err, info) in (status or {}).items():
             if err != _JOIN_EXITED and err not in _JOIN_RUNNING:
                 error = RuntimeError(f"Global Services cannot join process {key}: {info}")
@@ -1398,16 +1403,17 @@ class DragonNativeExecutionBackend(BaseBackend):
         return found
 
     def _result_known(self, rec: _Task) -> bool:
-        """Whether an exited function process's result has come, or never will.
+        """Whether an exited function process's result has come, or never will, or does not count.
 
         The process flushed its result onto the result queue before it exited. The result can still
         wait behind a backlog of others, however long, but once the result thread has been through
         everything queued before the process was found exited, a result that has not come never
-        will.
+        will. A task that timed out or was cancelled ends so whatever its result.
         """
         return (
             rec.result_event.is_set()
-            or self._caught_up > rec.exited_at  # type: ignore[operator]
+            or (rec.exited_at is not None and self._caught_up > rec.exited_at)
+            or rec.timed_out
             or rec.cancelled
             or self._stop_event.is_set()
             or self._relay_error is not None
@@ -1466,7 +1472,7 @@ class DragonNativeExecutionBackend(BaseBackend):
         return rec.stdio[0] or "", rec.stdio[1] or ""
 
     @staticmethod
-    def _exit_error(rec: _Task, code: int, stderr: str) -> TaskExecutionError:
+    def _exit_error(rec: _Task, code: int | None, stderr: str) -> TaskExecutionError:
         """The error a ``Session`` raises for a non-zero exit, set on the task itself.
 
         AsyncFlow reads only ``exception`` and ``stderr``, so without it an executable that fails
@@ -1486,7 +1492,7 @@ class DragonNativeExecutionBackend(BaseBackend):
         if rec.cancelled:
             return "CANCELED", {}
         stdout, stderr = self._stdio_of(rec)
-        fields = {"stdout": stdout, "stderr": stderr, "exit_code": code}
+        fields: dict[str, Any] = {"stdout": stdout, "stderr": stderr, "exit_code": code}
         if rec.timed_out:
             fields["exception"] = TimeoutError(
                 f"task {rec.uid} exceeded its timeout of {rec.timeout} s (exit code {code})"
