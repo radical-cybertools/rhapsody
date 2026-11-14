@@ -6,7 +6,9 @@ and runs them on Dragon's ``Process``, ``ProcessGroup``, ``Policy`` and ``Queue`
 - **Function tasks** run in a persistent pool of worker processes, each pinned to its host and
   CPUs, each with its own inbox queue on its node. Results come back on one queue on the client's
   node. A task with a placement goes to a free worker on that host; a task that asks for GPUs goes
-  to a worker started for that host and GPU set.
+  to a worker started for that host and GPU set. A relay process on the client's node puts each
+  task on its inbox and takes each result, and trades them with the client in batches, so a busy
+  client process, whose GIL the backend's threads share, does not slow every task down.
 - **Executable tasks**, and function tasks with a ``process_template``, run as one placed native
   ``Process`` each.
 - **Tasks with ``process_templates``** run as one ``ProcessGroup`` each, with the PMI the task or
@@ -91,6 +93,13 @@ def _get_logger() -> logging.Logger:
 _INBOX_SIZE = 8
 _RESULT_SIZE = 4096
 _BLOCK_SIZE = 4096
+# Batches of operations the client may queue for the relay. The relay's queue to the client holds
+# one batch: while the client handles it, the relay gathers the next.
+_CONTROL_SIZE = 1024
+_INBOUND_SIZE = 1
+# Most seconds the relay waits, after the client sent tasks with its acknowledgement of a batch,
+# before it forwards the next: short tasks then come back in that batch, not one batch each.
+_RELAY_LINGER = 0.001
 # Seconds between the worker watcher's non-blocking checks for dead workers, and the longest the
 # result thread blocks on an empty queue.
 _WATCH_INTERVAL = 1.0
@@ -198,11 +207,14 @@ class _Task:
         "timer",
         "put_deadline",
         "put_failed_on",
+        "repeats",
     )
 
     def __init__(self, uid: str, desc: dict, kind: str, timeout: float | None, token: str):
         self.uid = uid
         self.desc = desc
+        # Descriptions submitted with this uid while the task ran: they get its states, in order.
+        self.repeats: list = []
         self.kind = kind  # pool, process, group
         self.key: tuple = (None, ())
         self.timeout = timeout
@@ -433,6 +445,13 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._client_host: str | None = None
         self._results: Any = None
         self._max_process_ranks = 0
+        # The relay, its queue of operations from the client, and its queue of results to it.
+        self._relay: Any = None
+        self._control: Any = None
+        self._inbound: Any = None
+        self._control_lock = threading.Lock()
+        # Set when the relay has died: no pool task can be sent or heard from again.
+        self._relay_error: str | None = None
 
         # Everything below is guarded by _lock.
         self._lock = threading.RLock()
@@ -442,6 +461,8 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._wids = itertools.count()
         self._idle: dict[tuple, deque[_Worker]] = defaultdict(deque)
         self._pending: dict[tuple, deque[_Task]] = defaultdict(deque)
+        # Sends decided since the relay was last sent a batch.
+        self._outgoing: list = []
         self._live_by_key: dict[tuple, int] = defaultdict(int)
         # Busy CPU workers per host, and whether each of its last _TASK_WINDOW tasks was short.
         self._busy: Counter = Counter()
@@ -543,11 +564,30 @@ class DragonNativeExecutionBackend(BaseBackend):
 
         # The workers' code travels by value, so they never import rhapsody.
         cloudpickle.register_pickle_by_value(_worker)
-        self._results = Queue(
-            maxsize=_RESULT_SIZE,
-            block_size=_BLOCK_SIZE,
-            policy=self._host_policy(self._client_host),
-        )
+        here = self._host_policy(self._client_host)
+        self._results = Queue(maxsize=_RESULT_SIZE, block_size=_BLOCK_SIZE, policy=here)
+        self._control = Queue(maxsize=_CONTROL_SIZE, block_size=_BLOCK_SIZE, policy=here)
+        self._inbound = Queue(maxsize=_INBOUND_SIZE, block_size=_BLOCK_SIZE, policy=here)
+        try:
+            relay = Process(
+                _worker.relay_main,
+                args=(
+                    self._control,
+                    self._results,
+                    self._inbound,
+                    _WATCH_INTERVAL,
+                    _SEND_TIMEOUT,
+                    _RELAY_LINGER,
+                ),
+                policy=here,
+            )
+            relay.start()
+        except Exception as exc:
+            self._stop()
+            raise RuntimeError(
+                f"DragonNativeExecutionBackend failed to start: its relay did not start: {exc!r}"
+            ) from exc
+        self._relay = relay
         for target, name in (
             (self._drain_results, "dragon_native_results"),
             (self._watch_timers, "dragon_native_timers"),
@@ -632,6 +672,8 @@ class DragonNativeExecutionBackend(BaseBackend):
             w.inbox = Queue(
                 maxsize=_INBOX_SIZE, block_size=_BLOCK_SIZE, policy=self._host_policy(w.host)
             )
+            # Before the worker can report ready: the relay must know its inbox by then.
+            self._send_control([("inbox", w.wid, w.inbox)])
             proc = Process(
                 _worker.worker_main,
                 args=(w.wid, w.inbox, self._results),
@@ -658,17 +700,16 @@ class DragonNativeExecutionBackend(BaseBackend):
     # ------------------------------------------------------------------
 
     def _drain_results(self) -> None:
-        """Block on the result queue, handle what arrived, and repeat until a ``None`` arrives.
+        """Take the relay's batches of results, handle each, and repeat until a ``None`` arrives.
 
-        Everything already queued is handled in one pass, so the asyncio loop is woken once per
-        pass, not once per task. Each time the queue is found empty, ``_caught_up`` moves on.
+        One batch is handled in one pass: one get, one batch of sends to the relay, and one wake
+        of the asyncio loop, however many tasks it holds. ``_caught_up`` moves on to the time the
+        relay found the result queue empty, once everything it took before then is handled.
         """
         while True:
-            empty_at = time.monotonic()
             try:
-                items = [self._results.get(timeout=_WATCH_INTERVAL)]
+                raw = self._inbound.get(timeout=_WATCH_INTERVAL)
             except queue.Empty:
-                self._caught_up = empty_at
                 if self._stop_event.is_set():
                     return
                 continue
@@ -678,21 +719,16 @@ class DragonNativeExecutionBackend(BaseBackend):
                 self.logger.exception(f"Result queue get failed: {exc}")
                 time.sleep(0.1)
                 continue
-            drained_at: float | None = None
-            while len(items) < 1024:
-                now = time.monotonic()
-                try:
-                    items.append(self._results.get(block=False))
-                except queue.Empty:
-                    drained_at = now
-                    break
-                except Exception:
-                    break
+            if raw is None:
+                return
+            drained_at = None
             try:
+                items, drained_at = cloudpickle.loads(raw)
                 if self._handle_messages(items):
                     return
             except Exception:
                 self.logger.exception("Could not handle result messages")
+                self._flush_sends(ack=True)  # the relay sends nothing more until it has one
             if drained_at is not None:
                 self._caught_up = drained_at
 
@@ -715,8 +751,8 @@ class DragonNativeExecutionBackend(BaseBackend):
                     self._apply_message(msg, completions)
                 except Exception:
                     self.logger.exception(f"Could not apply a {msg[0]} message")
-        for rec, state, fields in completions:
-            self._emit(rec, state, fields)
+        self._flush_sends(ack=True)
+        self._emit_all(completions)
         return stop
 
     def _apply_message(self, msg: tuple, completions: list) -> None:
@@ -725,6 +761,8 @@ class DragonNativeExecutionBackend(BaseBackend):
             self._on_done(msg, completions)
         elif kind == _worker.READY:
             self._on_ready(msg)
+        elif kind == _worker.UNSENT:
+            self._on_unsent(msg)
         elif kind == _worker.RESULT:
             _, uid, ok, value, tb = msg
             rec = self._tasks.get(uid)
@@ -751,6 +789,7 @@ class DragonNativeExecutionBackend(BaseBackend):
         if not w.gpus:
             self._record(w.host, seconds)
         rec, w.task = w.task, None
+        w.backoff = _RETRY_FIRST
         if rec is not None and rec.uid == uid and self._tasks.get(uid) is rec:
             del self._tasks[uid]
             rec.state = "done"
@@ -763,6 +802,46 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._feed(w)
         if not w.gpus:
             self._fill(w.host)  # the host's tasks may have turned long
+
+    def _on_unsent(self, msg) -> None:
+        """Take back a task the relay could not put on its worker's inbox, and do what ``_send``
+        did with a failed put before the relay: wait for room, or replace the worker."""
+        _, wid, uid, kind, error_text, payload = msg
+        w = self._workers.get(wid)
+        if w is None or w.state != "busy" or w.task is None or w.task.uid != uid:
+            return  # its worker was killed for a cancel or a timeout, or died: handled there
+        rec, w.task = w.task, None
+        rec.worker = None
+        rec.timer = None  # its timeout started with a send that did not happen
+        rec.state = "queued"
+        rec.payload = payload
+        if kind == "full":
+            if rec.put_deadline is None:
+                rec.put_deadline = time.monotonic() + _worker.PUT_PATIENCE
+            if time.monotonic() >= rec.put_deadline:
+                self._fail_unsent(rec, MemoryError(f"task {uid} could not be sent: {error_text}"))
+                self._feed(w)
+                return
+            self._pending[rec.key].appendleft(rec)
+            self._set_state(w, "paused")
+            self._add_retry(w)
+            return
+        if kind == "timeout":
+            error: Exception = TimeoutError(
+                f"sending to worker {w.wid} on {w.host} took over {_SEND_TIMEOUT} s"
+            )
+        else:
+            error = RuntimeError(f"cannot send to worker {w.wid} on {w.host}: {error_text}")
+        self.logger.warning(f"Worker {w.wid} on {w.host} cannot be sent tasks: {error}")
+        self._set_state(w, "dead")
+        self._ops.submit(self._retire_worker, w, None)
+        if rec.put_failed_on is not None:
+            self._fail_unsent(rec, error)
+        else:
+            rec.put_failed_on = w.host
+            self._route(rec, first=True)
+        if not w.gpus:
+            self._fill(w.host)  # one busy worker fewer: the host may take more tasks
 
     def _watch_timers(self) -> None:
         """Time out pool tasks at their deadline, and send paused workers their next task.
@@ -808,6 +887,7 @@ class DragonNativeExecutionBackend(BaseBackend):
             w = self._workers.get(wid)
             if w is not None and w.state == "paused":
                 self._feed(w)
+        self._flush_sends()
 
     def _start_expired(self, wid: int, _timer: int) -> None:
         """Count a worker that is still starting at its deadline as dead, and kill it.
@@ -825,7 +905,8 @@ class DragonNativeExecutionBackend(BaseBackend):
                 w.proc.kill()
 
     def _watch_workers(self) -> None:
-        """Find workers that died on their own, with a non-blocking join once a second.
+        """Find workers, and the relay, that died on their own, with a non-blocking join once a
+        second.
 
         A blocking join would keep Python's garbage collector off in this whole process while it
         waits: Dragon's ``gs_request`` disables it for the duration of every request.
@@ -834,6 +915,10 @@ class DragonNativeExecutionBackend(BaseBackend):
             self._check_stalls()
             with self._lock:
                 puids = list(self._workers_by_puid)
+            relay = None
+            if self._relay is not None and self._relay_error is None:
+                relay = self._relay.puid
+                puids.append(relay)
             if not puids:
                 continue
             try:
@@ -843,6 +928,10 @@ class DragonNativeExecutionBackend(BaseBackend):
                     self.logger.warning(f"Worker check failed: {exc!r}")
                 continue
             for puid, code in exited or ():
+                if puid == relay:
+                    if not self._stopping:
+                        self._relay_lost(f"exited with code {code}")
+                    continue
                 with self._lock:
                     w = self._workers_by_puid.pop(puid, None)
                 if w is not None and not self._stopping:
@@ -866,6 +955,30 @@ class DragonNativeExecutionBackend(BaseBackend):
                     self._recent[host].clear()
                     self._short[host] = 0
                     self._fill(host)
+
+    def _relay_lost(self, why: str) -> None:
+        """Fail every pool task: none can be sent, or heard from, without the relay.
+
+        Pool tasks submitted from now on fail at once, and so do function processes, whose results
+        came through the relay too. Executables and process groups still run.
+        """
+        error = RuntimeError(f"the Dragon native backend's relay process {why}")
+        with self._lock:
+            if self._relay_error is not None:
+                return
+            self._relay_error = str(error)
+            lost = [rec for rec in self._tasks.values() if rec.kind == "pool"]
+            for rec in lost:
+                del self._tasks[rec.uid]
+                rec.state = "done"
+                if rec.worker is not None:
+                    rec.worker.task = None
+            for pending in self._pending.values():
+                pending.clear()
+        self.logger.error(f"{error}: its pool tasks fail, and so will new ones")
+        self._emit_all(
+            [(rec, "FAILED", {"exception": error, "stderr": str(error)}) for rec in lost]
+        )
 
     # ------------------------------------------------------------------
     # Pool scheduling (call with _lock held)
@@ -899,12 +1012,7 @@ class DragonNativeExecutionBackend(BaseBackend):
             rec = self._next_for(idle[0])
             if rec is None:
                 return
-            w = idle.popleft()
-            sent = self._send(w, rec)
-            if sent == "failed":
-                idle.appendleft(w)  # its task failed for good: it is still idle
-            elif sent == "broken" and rec.state != "done":
-                self._route(rec, first=True)
+            self._send(idle.popleft(), rec)
 
     def _idle_pop(self, key: tuple, avoid: str | None = None) -> _Worker | None:
         """Take an idle worker for ``key``.
@@ -933,67 +1041,67 @@ class DragonNativeExecutionBackend(BaseBackend):
         return None
 
     def _feed(self, w: _Worker) -> None:
-        """Give ``w`` its next task, or mark it idle.
-
-        A loop, not a recursion: each task whose send fails for good is followed by the next.
-        """
+        """Give ``w`` its next task, or mark it idle, as it stays while its host is full."""
         self._set_state(w, "idle")
-        while not self._stopping:
-            rec = None if not w.gpus and self._full(w.host) else self._next_for(w)
-            if rec is None:
-                self._idle[w.key].append(w)
-                return
-            sent = self._send(w, rec)
-            if sent == "broken" and rec.state != "done":
-                self._route(rec, first=True)
-            if sent != "failed":
-                return
+        if self._stopping:
+            return
+        rec = None if not w.gpus and self._full(w.host) else self._next_for(w)
+        if rec is None:
+            self._idle[w.key].append(w)
+            return
+        self._send(w, rec)
 
-    def _send(self, w: _Worker, rec: _Task) -> str:
-        """Put ``rec`` on ``w``'s inbox, and say what happened.
+    def _send(self, w: _Worker, rec: _Task) -> None:
+        """Give ``rec`` to ``w``: the relay puts it on ``w``'s inbox with the next batch.
 
-        - ``"sent"``: ``w`` runs ``rec``.
-        - ``"paused"``: Dragon's memory pool is full. ``rec`` goes back to the head of its queue,
-          and ``w`` is sent a task again after a backoff. Once ``rec`` has waited ``PUT_PATIENCE``
-          for room, it fails instead, and the answer is ``"failed"``: ``w`` is still free.
-        - ``"broken"``: the put failed otherwise, or took longer than ``_SEND_TIMEOUT``. ``w`` is
-          replaced, and ``rec`` is the caller's to send to another worker, unless this was its
-          second such failure, on another worker: then ``rec`` is what cannot be sent, and fails.
+        ``w`` runs ``rec`` from now on, as far as the backend knows. If the relay's put fails, its
+        ``UNSENT`` message takes the task back (``_on_unsent``).
         """
-        try:
-            w.inbox.put(rec.payload, timeout=_SEND_TIMEOUT)
-        except _worker.PoolFull as exc:
-            if rec.put_deadline is None:
-                rec.put_deadline = time.monotonic() + _worker.PUT_PATIENCE
-            if time.monotonic() >= rec.put_deadline:
-                self._fail_unsent(rec, exc)
-                return "failed"
-            self._pending[rec.key].appendleft(rec)
-            self._set_state(w, "paused")
-            self._add_retry(w)
-            return "paused"
-        except Exception as exc:
-            error: Exception = exc
-            if isinstance(exc, queue.Full):
-                error = TimeoutError(
-                    f"sending to worker {w.wid} on {w.host} took over {_SEND_TIMEOUT} s"
-                )
-            self.logger.warning(f"Worker {w.wid} on {w.host} cannot be sent tasks: {error!r}")
-            self._set_state(w, "dead")
-            self._ops.submit(self._retire_worker, w, None)
-            if rec.put_failed_on is not None:
-                self._fail_unsent(rec, error)
-            rec.put_failed_on = w.host
-            return "broken"
+        self._outgoing.append(("send", w.wid, rec.uid, rec.payload))
         self._set_state(w, "busy")
         w.task = rec
-        w.backoff = _RETRY_FIRST
         rec.worker = w
         rec.state = "running"
         rec.payload = None
         if rec.timeout is not None:
             self._add_timer(rec, rec.timeout)
-        return "sent"
+
+    def _flush_sends(self, ack: bool = False) -> None:
+        """Send the relay, in one batch, the tasks given to workers since the last batch.
+
+        With ``ack``, the batch also tells the relay that the client has handled the batch of
+        results it took last, so it may send the next. Call without _lock held.
+        """
+        with self._control_lock:
+            with self._lock:
+                ops, self._outgoing = self._outgoing, []
+            if ack:
+                ops.append(("ack",))
+            if ops:
+                self._send_control(ops, locked=True)
+
+    def _send_control(self, ops: list, locked: bool = False) -> None:
+        """Put one batch of operations on the relay's queue; a relay that cannot take it is lost.
+
+        A full memory pool is waited out, as workers wait for room for their results.
+        """
+        if self._relay_error is not None:
+            return
+        raw = cloudpickle.dumps(ops)
+        with contextlib.nullcontext() if locked else self._control_lock:
+            try:
+                deadline = time.monotonic() + _worker.PUT_PATIENCE
+                while True:
+                    try:
+                        self._control.put(raw, timeout=_SEND_TIMEOUT)
+                        return
+                    except _worker.PoolFull:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(_RETRY_FIRST)
+            except Exception as exc:
+                if not self._stopping:
+                    self._relay_lost(f"cannot be sent tasks: {exc!r}")
 
     def _fail_unsent(self, rec: _Task, error: BaseException) -> None:
         """Fail a pool task that no worker has."""
@@ -1012,15 +1120,16 @@ class DragonNativeExecutionBackend(BaseBackend):
         """Send ``rec`` to an idle worker that can run it, or queue it, at the head when ``first``.
 
         Idle workers do not look at the queue, so a task waits there only while none of them can
-        take it: one whose inbox is broken passes the task on to the next, on another host when
-        the task is not placed.
+        take it. A task whose inbox turned out broken comes back here, and goes to another host when
+        it is not placed.
         """
-        while (w := self._idle_pop(rec.key, rec.put_failed_on)) is not None:
-            sent = self._send(w, rec)
-            if sent == "failed":
-                self._feed(w)
-            if sent != "broken" or rec.state == "done":
-                return
+        if self._relay_error is not None:
+            self._fail_unsent(rec, RuntimeError(self._relay_error))
+            return
+        w = self._idle_pop(rec.key, rec.put_failed_on)
+        if w is not None:
+            self._send(w, rec)
+            return
         host, gpus = rec.key
         if not gpus and not self._can_serve(rec.key):
             error = RuntimeError(f"task {rec.uid}: no pool worker on {host or 'any node'}")
@@ -1095,6 +1204,8 @@ class DragonNativeExecutionBackend(BaseBackend):
 
     def _discard_worker_queue(self, w: _Worker) -> None:
         if w.inbox is not None:
+            if not self._stopping:
+                self._send_control([("forget", w.wid)])
             with contextlib.suppress(Exception):
                 w.inbox.destroy()
 
@@ -1278,7 +1389,12 @@ class DragonNativeExecutionBackend(BaseBackend):
         through everything queued before ``exited_at``, a result that has not come never will.
         """
         while not rec.result_event.wait(_WATCH_INTERVAL):
-            if self._caught_up > exited_at or rec.cancelled or self._stop_event.is_set():
+            if (
+                self._caught_up > exited_at
+                or rec.cancelled
+                or self._stop_event.is_set()
+                or self._relay_error is not None
+            ):
                 return rec.result_event.is_set()
         return True
 
@@ -1397,12 +1513,21 @@ class DragonNativeExecutionBackend(BaseBackend):
 
     def _emit(self, rec: _Task, state: str, fields: dict) -> None:
         """Queue a state change for the loop; wake the loop once per batch of changes."""
-        if state != "CANCELED":
-            fields.setdefault("stdout", "")
-            fields.setdefault("stderr", "")
+        self._emit_all([(rec, state, fields)])
+
+    def _emit_all(self, changes: list) -> None:
+        """Queue ``(rec, state, fields)`` changes for the loop, and wake it at most once."""
+        if not changes:
+            return
         loop = self._loop
         with self._outbox_lock:
-            self._outbox.append((rec.desc, state, fields))
+            for rec, state, fields in changes:
+                if state != "CANCELED":
+                    fields.setdefault("stdout", "")
+                    fields.setdefault("stderr", "")
+                self._outbox.append((rec.desc, state, fields))
+                # No repeat joins once a task has left _tasks, which it has before its final state.
+                self._outbox.extend((desc, state, fields) for desc in rec.repeats)
             # A flush scheduled on a loop that has closed, or that is no longer the backend's,
             # may never run: schedule one on the current loop.
             flush_loop = self._flush_loop
@@ -1415,7 +1540,7 @@ class DragonNativeExecutionBackend(BaseBackend):
             with self._outbox_lock:  # the next state wakes the next loop, and this one goes with it
                 if self._flush_loop is loop:
                     self._flush_loop = None
-            self.logger.warning(f"Event loop closed; holding {state} for {rec.uid}")
+            self.logger.warning(f"Event loop closed; holding {len(changes)} task state(s)")
 
     def _flush_outbox(self) -> None:
         """Apply queued state changes and run the callback.
@@ -1684,7 +1809,10 @@ class DragonNativeExecutionBackend(BaseBackend):
         """Submit tasks.
 
         Pool tasks are sent to a free worker or queued for one. A task whose uid belongs to a task
-        still in the backend fails, so that each task gets one final state.
+        still in the backend joins that task: it does not run, and it gets that task's states,
+        RUNNING now and the final state with its result when the task ends. A ``Session`` keeps one
+        future per uid, so failing the repeat would fail the first task's future. Once the task has
+        ended, its uid runs again.
         """
         if self._backend_state == BackendMainStates.SHUTDOWN:
             raise RuntimeError("Cannot submit during shutdown")
@@ -1695,11 +1823,20 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._loop = asyncio.get_running_loop()
 
         for task in tasks:
+            with self._lock:
+                running = self._tasks.get(task["uid"])
+                joins = False
+                if running is not None:
+                    joins = all(task is not d for d in (running.desc, *running.repeats))
+                    if joins:
+                        running.repeats.append(task)
+            if running is not None:
+                # Its final state goes through the loop, after this RUNNING.
+                if joins:
+                    self.logger.debug(f"Task {task['uid']} joins the unfinished task of its uid")
+                    self._callback_func(task, "RUNNING")
+                continue
             try:
-                with self._lock:
-                    in_use = task["uid"] in self._tasks
-                if in_use:
-                    raise ValueError(f"task {task['uid']}: a task with this uid has not finished")
                 rec = self.build_task(task)
             except Exception as exc:
                 self.logger.error(f"Failed to create task {task.get('uid')}: {exc}", exc_info=True)
@@ -1715,6 +1852,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                     self._route(rec)
                 else:
                     self._admit_process(rec)
+        self._flush_sends()
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a task: a queued one is dropped, a running one is killed.
@@ -1740,7 +1878,8 @@ class DragonNativeExecutionBackend(BaseBackend):
                 self._fill(worker.host)
             rec.state = "done"
             started = bool(rec.puids)
-        self._callback_func(rec.desc, "CANCELED")
+        for desc in (rec.desc, *rec.repeats):
+            self._callback_func(desc, "CANCELED")
         if worker is not None:
             self._ops.submit(self._retire_worker, worker, rec.token)
         elif rec.kind != "pool" and started:
@@ -1777,9 +1916,8 @@ class DragonNativeExecutionBackend(BaseBackend):
                     self._set_state(rec.worker, "dead")
                     rec.worker.task = None
             workers = list(self._workers.values())
-        for rec in records:
-            if self._loop is not None:
-                self._emit(rec, "CANCELED", {})
+        if self._loop is not None:
+            self._emit_all([(rec, "CANCELED", {}) for rec in records])
 
         kills = [self._ops.submit(self._kill_worker_now, w, token) for w, token in busy]
         kills += [
@@ -1818,19 +1956,26 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._stop_event.set()
         with self._timer_cv:
             self._timer_cv.notify_all()
-        if self._results is not None:
-            with contextlib.suppress(Exception):
-                self._results.put(None, timeout=1.0)
+        # The relay forwards what is left, then the None that ends the result thread.
+        for q in (self._control, self._results):
+            if q is not None:
+                with contextlib.suppress(Exception):
+                    q.put(None, timeout=1.0)
         for thread in self._threads:
             thread.join(timeout=5.0)
             if thread.is_alive():
                 self.logger.warning(f"Thread {thread.name} did not stop within 5 s")
+        if self._relay is not None:
+            with contextlib.suppress(Exception):
+                if self._relay.join(timeout=5.0) is None:
+                    self._relay.kill()
 
         for w in workers:
             self._discard_worker_queue(w)
-        if self._results is not None:
-            with contextlib.suppress(Exception):
-                self._results.destroy()
+        for q in (self._results, self._control, self._inbound):
+            if q is not None:
+                with contextlib.suppress(Exception):
+                    q.destroy()
         for directory in self._stdio_dirs:
             shutil.rmtree(directory, ignore_errors=True)
         self._ops.shutdown(wait=False, cancel_futures=True)

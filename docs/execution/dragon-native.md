@@ -52,19 +52,32 @@ Install it with the `dragon` extra, and start your script with the Dragon launch
   a worker started, on demand, with `gpu_affinity` set to exactly those GPUs (`gpu_workers_per_set`
   of them, default 1), so Dragon sets the vendor's visible-devices variable once, at worker start.
   Workers stay up for the backend's life. On a host, tasks placed there go before unplaced ones.
+- **The relay.** A relay process on the client's node puts each task on its worker's inbox and
+  takes each result off the result queue, and the client trades batches with it: the tasks it gave
+  to workers in one pass, and the results that came while it handled the last batch. The relay
+  forwards a batch only once the client has acknowledged the last one, and after the client sent
+  tasks it waits briefly for them (a tenth of the client's last pass, at most 1 ms), so short tasks
+  come back in the next batch rather than one batch each. The client's threads share the GIL of the
+  client's process, often an agent or workflow that keeps it busy. Each queue call gives the GIL up
+  about twice, and getting it back from a thread that does not let go can take a switch interval
+  (5 ms) each time: with one put and one get per task, the pool started about 50 tasks a second
+  next to such a thread. In batches, the client makes three such calls per pass, however many
+  tasks the pass holds, and the relay's process has its GIL to itself. The busier the client, the
+  larger the batches.
 - **Results.** A worker pickles its message with cloudpickle and puts the bytes on the result
-  queue. One client thread blocks on that queue, drains what is already there, applies it under one
-  lock, and hands the batch to the asyncio loop with `loop.call_soon_threadsafe`. The backend calls
-  the callback only on the loop. Results travel inline on the queue, so they use Dragon's memory
-  pool until the client takes them: on a full pool a worker waits up to 60 s for room, and a result
-  that does not fit then, or could never fit, fails its task with Dragon's error. Sending a task
-  waits the same way: on a full pool the client holds the task and its worker, tries again with a
-  backoff, and fails the task only after 60 s. A send that fails for any other reason, or takes
-  more than 10 s, replaces the worker, and the task goes to the next idle worker, or waits for one;
-  it fails only if that send fails too. A function with a `process_template` flushes its result
-  onto the queue before it exits, so the client knows when one is missing. The pool is 4 GiB
-  per node by default (`DRAGON_DEFAULT_SEG_SZ`), so workers that finish together should return much
-  less than that between them; write larger results to files.
+  queue. One client thread takes the relay's batches, applies each under one lock, sends the relay
+  the next tasks for the workers that are free, and hands the state changes to the asyncio loop
+  with one `loop.call_soon_threadsafe`. The backend calls the callback only on the loop. Results
+  travel inline on the queue, so they use Dragon's memory pool until the relay takes them: on a
+  full pool a worker waits up to 60 s for room, and a result that does not fit then, or could never
+  fit, fails its task with Dragon's error. Sending a task waits the same way: on a full pool the
+  client holds the task and its worker, tries again with a backoff, and fails the task only after
+  60 s. A send that fails for any other reason, or takes more than 10 s, replaces the worker, and
+  the task goes to the next idle worker, or waits for one; it fails only if that send fails too. A
+  function with a `process_template` flushes its result onto the queue before it exits, so the
+  client knows when one is missing. The pool is 4 GiB per node by default
+  (`DRAGON_DEFAULT_SEG_SZ`), so workers that finish together should return much less than that
+  between them; write larger results to files.
 - **Process tasks.** One thread per running process or group task starts it and joins it. At most
   `max_process_ranks` processes run at once (default: the runtime's CPUs); the rest wait, strictly
   first in, first out, so a large job at the head of the queue holds back smaller tasks behind it.
@@ -210,7 +223,7 @@ MPI, so set `"pmi": "none"` for jobs that don't: it logs neither warning.
 ## How it differs from `DragonExecutionBackend`
 
 - **No Batch.** No Batch manager loop, no results DDict, no polling. A completion reaches the
-  asyncio loop as soon as the result queue delivers it.
+  asyncio loop as soon as the relay delivers it.
 - **Placement is the caller's.** A task's `placement` is honoured: placed functions run in the pool,
   on a worker of that host. `DragonExecutionBackend` ignores it.
 - **Sized from the job.** The pool and the process limit come from `Node.cpus`, so a partial-node
@@ -245,13 +258,19 @@ MPI, so set `"pmi": "none"` for jobs that don't: it logs neither warning.
 - **Bad placements fail only their task.** Hosts and GPU ids in a `placement` or a `policy` are
   checked against Dragon's nodes before anything is submitted: Dragon aborts the whole runtime on
   an unknown host and silently drops unknown GPU ids.
-- **A uid in use fails its task.** A task submitted while another task with its uid has not
-  finished fails with `ValueError`, and the first runs on.
+- **A repeated uid joins its task.** A task submitted while another task with its uid has not
+  finished does not run: it gets that task's states and, when it ends, its result or error. A
+  `Session` keeps one future per uid, so a repeat that failed would fail the first task's future.
+  Once the task has ended, its uid runs again.
 - **Dead workers are noticed.** A worker that dies on its own fails its task with the exit code,
   and is replaced (once: a replacement that dies before it is ready is not replaced again). A
   replacement or GPU worker that is not ready `worker_start_timeout` after its launch counts as
   dead, and is killed. When no worker is left for a host, or a GPU set, the tasks waiting for one
   fail, and losing a host's last pool worker is logged as an error.
+- **A dead relay is noticed too.** If the relay process dies, every pool task fails, and so do pool
+  tasks submitted after it, and functions with a `process_template`, whose results it carried.
+  Executables and groups still run. The relay is not restarted: shut the backend down and start
+  another.
 - **The garbage collector.** Dragon's `gs_request` turns Python's garbage collector off at the start
   of every Global Services request and back on at the end of any, for the whole process, so a
   thread blocked in `Process.join()` keeps it off until another request ends. The worker watcher
@@ -303,8 +322,15 @@ replacement has failed to start. `topology()` lists each node's CPUs and GPUs.
 
 `tests/unit/test_backend_execution_dragon_native.py` runs the backend against a fake Dragon
 (threads for Python processes, real `/bin/sh` for executables), so it needs no Dragon runtime. Its
-last test needs one:
+last tests need one:
 
 ```bash
 dragon python -m pytest tests/unit/test_backend_execution_dragon_native.py
+```
+
+`tests/performance/dragon_native_busy_client.py` measures how fast the pool starts tasks while a
+thread keeps the client's GIL busy (`--busy thread`), or while nothing does (`--busy none`):
+
+```bash
+dragon python tests/performance/dragon_native_busy_client.py --busy thread --workers-per-node 30
 ```
