@@ -386,7 +386,7 @@ def test_measured_call_raises_the_error_with_its_measurement():
 
 
 # ============================================================================
-# Review findings (MTU-51): each test fails without its fix
+# Review findings: each test fails without its fix
 # ============================================================================
 
 
@@ -584,7 +584,7 @@ def test_a_process_record_is_its_own_lifetime_peak(tmp_path):
 
 
 # ============================================================================
-# What a node held: the launcher's floor, absolute peaks (decision-4, D1 and D2)
+# What a node held: the launcher's floor, absolute peaks
 # ============================================================================
 
 

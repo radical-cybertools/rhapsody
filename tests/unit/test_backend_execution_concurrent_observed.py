@@ -157,7 +157,7 @@ async def test_off_by_default_nothing_observed(tmp_path):
 
 
 # ============================================================================
-# Review findings (MTU-51): each test fails without its fix
+# Review findings: each test fails without its fix
 # ============================================================================
 
 
