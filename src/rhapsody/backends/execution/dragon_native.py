@@ -110,6 +110,19 @@ _SEND_TIMEOUT = 10.0
 # each failure up to the maximum.
 _RETRY_FIRST = 0.01
 _RETRY_MAX = 1.0
+# Seconds between the process watcher's checks for process tasks that exited: the first after an
+# exit, doubled while nothing exits, up to the last.
+_JOIN_FIRST = 0.01
+_JOIN_MAX = 0.1
+# Threads that start process tasks and report them once they exit. Each start is a request to
+# Global Services, and one thread per task, each blocked in a request, stalled Dragon at 512.
+_PROC_THREADS = 8
+# Global Services' status for a process in a list join: exited, or not yet with a timeout of 0.
+_JOIN_EXITED = 0
+_JOIN_RUNNING = (2, 4)
+# Seconds a timed-out process task waits for its process to exit after the kill, before it ends
+# without an exit code.
+_KILL_WAIT = 10.0
 # Seconds shutdown gives all kills, on top of kill_grace, and then all task threads.
 _STOP_KILLS = 20.0
 _STOP_THREADS = 15.0
@@ -201,6 +214,8 @@ class _Task:
         "put_deadline",
         "put_failed_on",
         "repeats",
+        "exit_code",
+        "exited_at",
     )
 
     def __init__(self, uid: str, desc: dict, kind: str, timeout: float | None, token: str):
@@ -234,6 +249,9 @@ class _Task:
         # failed once with another error.
         self.put_deadline: float | None = None
         self.put_failed_on: str | None = None
+        # A process task's exit code, and when the process watcher found it exited.
+        self.exit_code: int | None = None
+        self.exited_at: float | None = None
 
 
 def _read_siblings(cpu: int) -> str:
@@ -451,6 +469,9 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._live_by_key: dict[tuple, int] = defaultdict(int)
         self._proc_queue: deque = deque()
         self._running_ranks = 0
+        # Process tasks whose process runs, by puid; those that exited and wait for their result.
+        self._watched: dict[int, _Task] = {}
+        self._awaiting: set[_Task] = set()
         self._initial_left = 0
         self._ready_event = threading.Event()
         self._start_error: str | None = None
@@ -472,8 +493,13 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._flush_loop: asyncio.AbstractEventLoop | None = None
 
         self._stop_event = threading.Event()
+        # Wakes the process watcher when it has nothing to watch.
+        self._watch_wake = threading.Event()
         self._threads: list[threading.Thread] = []
         self._ops = ThreadPoolExecutor(max_workers=8, thread_name_prefix="dragon_native_ops")
+        self._proc_ops = ThreadPoolExecutor(
+            max_workers=_PROC_THREADS, thread_name_prefix="dragon_native_procs"
+        )
 
     # ------------------------------------------------------------------
     # Construction and start
@@ -571,6 +597,7 @@ class DragonNativeExecutionBackend(BaseBackend):
             (self._drain_results, "dragon_native_results"),
             (self._watch_timers, "dragon_native_timers"),
             (self._watch_workers, "dragon_native_workers"),
+            (self._watch_processes, "dragon_native_processes"),
         ):
             thread = threading.Thread(target=target, name=name, daemon=True)
             thread.start()
@@ -1191,15 +1218,25 @@ class DragonNativeExecutionBackend(BaseBackend):
             self._start_process_task(rec)
 
     def _start_process_task(self, rec: _Task) -> None:
-        """Give a process or group task its thread; a task that cannot have one fails."""
-        thread = threading.Thread(
-            target=self._run_process_task, args=(rec,), name=f"dragon_native_{rec.uid}", daemon=True
-        )
+        """Start a process task on a process thread, or a group task on a thread of its own.
+
+        A task that cannot be started that way fails. Call with _lock held.
+        """
         self._running_ranks += rec.ranks
         rec.state = "running"
+        thread = None
         try:
-            thread.start()
-        except RuntimeError as exc:  # the node's limit on threads
+            if rec.kind == "process":
+                self._proc_ops.submit(self._launch_process, rec)
+            else:
+                thread = threading.Thread(
+                    target=self._run_group_task,
+                    args=(rec,),
+                    name=f"dragon_native_{rec.uid}",
+                    daemon=True,
+                )
+                thread.start()
+        except RuntimeError as exc:  # the node's limit on threads, or the backend stopped
             self._running_ranks -= rec.ranks
             self._tasks.pop(rec.uid, None)
             rec.state = "done"
@@ -1207,26 +1244,205 @@ class DragonNativeExecutionBackend(BaseBackend):
             return
         rec.thread = thread
 
-    def _run_process_task(self, rec: _Task) -> None:
-        try:
-            if rec.kind == "group":
-                state, fields = self._run_group(rec)
-            else:
-                state, fields = self._run_single(rec)
-        except Exception as exc:
-            self.logger.debug(f"Task {rec.uid} failed in the backend", exc_info=True)
-            state, fields = "FAILED", {"exception": exc, "stderr": str(exc)}
-        finally:
-            with self._lock:
-                self._running_ranks -= rec.ranks
-                while self._proc_queue and not self._stopping:
-                    if not self._fits(self._proc_queue[0]):
-                        break
-                    self._start_process_task(self._proc_queue.popleft())
+    def _release(self, rec: _Task) -> None:
+        """Free a process or group task's ranks and start what waited for them.
+
+        Call with _lock held.
+        """
+        self._running_ranks -= rec.ranks
+        while self._proc_queue and not self._stopping:
+            if not self._fits(self._proc_queue[0]):
+                break
+            self._start_process_task(self._proc_queue.popleft())
+
+    def _end_process_task(self, rec: _Task, state: str, fields: dict) -> None:
+        """Free a process or group task's ranks, start what waited for them, and report it."""
+        with self._lock:
+            self._release(rec)
+        self._report_process_task(rec, state, fields)
+
+    def _report_process_task(self, rec: _Task, state: str, fields: dict) -> None:
+        """Report a process or group task whose ranks are free."""
         if rec.inline_files and (rec.cancelled or "stdout" not in fields):
             for path in rec.stdio:
                 _read_and_remove(path)
         self._finish(rec, state, fields)
+
+    def _run_group_task(self, rec: _Task) -> None:
+        """Run a group task on its own thread: ``ProcessGroup.join`` asks the group's manager, not
+        Global Services."""
+        try:
+            state, fields = self._run_group(rec)
+        except Exception as exc:
+            self.logger.debug(f"Task {rec.uid} failed in the backend", exc_info=True)
+            state, fields = "FAILED", {"exception": exc, "stderr": str(exc)}
+        self._end_process_task(rec, state, fields)
+
+    def _submit_proc(self, fn: Callable, *args) -> None:
+        """Run ``fn(*args)`` on a process thread; after shutdown, nothing is left to report."""
+        try:
+            self._proc_ops.submit(fn, *args)
+        except RuntimeError:
+            if not self._stopping:
+                raise
+
+    def _launch_process(self, rec: _Task) -> None:
+        """Start a process task's process and give it to the process watcher.
+
+        Runs on a process thread. A task cancelled before its process started ends here; one
+        cancelled while it started is killed, and ends when its process exits.
+        """
+        with self._lock:
+            cancelled = rec.cancelled
+        if cancelled:
+            self._end_process_task(rec, "CANCELED", {})
+            return
+        try:
+            rec.proc.start()
+        except Exception as exc:  # the task fails with the error
+            self.logger.debug(f"Task {rec.uid} failed to start", exc_info=True)
+            self._end_process_task(rec, "FAILED", {"exception": exc, "stderr": str(exc)})
+            return
+        puid = rec.proc.puid
+        with self._lock:
+            rec.puids = [puid]
+            cancelled = rec.cancelled
+            wake = not self._watched
+            self._watched[puid] = rec
+            if rec.timeout is not None and not cancelled:
+                rec.timer = next(self._timer_seq)
+                self._push_timer(rec.timeout, rec.timer, self._timeout_process, rec.uid)
+        if wake:
+            self._watch_wake.set()
+        if cancelled:
+            self._kill_process_task(rec)
+
+    def _watch_processes(self) -> None:
+        """Find the process tasks whose process exited, all of them with one ``multi_join``.
+
+        One thread per task, each blocked in ``Process.join``, made one Global Services request per
+        task: 512 at once from one process stalled Dragon's request path for good. One poll for all
+        keeps the backend's requests few. It does not block, so it does not keep the garbage
+        collector off (see ``_watch_workers``): it repeats ``_JOIN_FIRST`` seconds after an exit,
+        and twice as late each time nothing exits, up to ``_JOIN_MAX``. A process that exited frees
+        its task's ranks here, so the next task starts before the output is read. A function
+        process that exited before its result came waits here for it. The process threads report
+        the tasks.
+        """
+        interval = _JOIN_FIRST
+        while not self._stop_event.is_set():
+            with self._lock:
+                puids = list(self._watched)
+                known = [rec for rec in self._awaiting if self._result_known(rec)]
+                self._awaiting.difference_update(known)
+                idle = not puids and not self._awaiting
+            for rec in known:
+                self._submit_proc(self._complete_process, rec, None)
+            if idle:
+                self._watch_wake.wait(_WATCH_INTERVAL)
+                self._watch_wake.clear()
+                interval = _JOIN_FIRST
+                continue
+            found = self._poll_exits(puids) if puids else []
+            now = time.monotonic()
+            ended = []
+            with self._lock:
+                for puid, code, error in found:
+                    rec = self._watched.pop(puid, None)
+                    if rec is None:
+                        continue
+                    rec.exit_code, rec.exited_at = code, now
+                    if error is None:
+                        self._release(rec)
+                        if rec.is_function and not self._result_known(rec):
+                            self._awaiting.add(rec)
+                            continue
+                    ended.append((rec, error))
+            for rec, error in ended:
+                self._submit_proc(self._complete_process, rec, error)
+            interval = _JOIN_FIRST if found else min(2 * interval, _JOIN_MAX)
+            self._stop_event.wait(interval)
+
+    def _poll_exits(self, puids: list) -> list:
+        """``(puid, exit code, error)`` for each process of ``puids`` that exited, or that Global
+        Services cannot join; when the poll itself fails, its error for every one."""
+        try:
+            exited, status = multi_join(puids, timeout=0, join_all=False)
+        except Exception as exc:
+            if self._stop_event.is_set():
+                return []
+            self.logger.warning(f"Process check failed: {exc!r}")
+            return [(puid, None, exc) for puid in puids]
+        found = [(puid, code, None) for puid, code in exited or ()]
+        for key, (err, info) in (status or {}).items():
+            if err != _JOIN_EXITED and err not in _JOIN_RUNNING:
+                error = RuntimeError(f"Global Services cannot join process {key}: {info}")
+                with contextlib.suppress(ValueError):
+                    found.append((int(key), None, error))
+        return found
+
+    def _result_known(self, rec: _Task) -> bool:
+        """Whether an exited function process's result has come, or never will.
+
+        The process flushed its result onto the result queue before it exited. The result can still
+        wait behind a backlog of others, however long, but once the result thread has been through
+        everything queued before the process was found exited, a result that has not come never
+        will.
+        """
+        return (
+            rec.result_event.is_set()
+            or self._caught_up > rec.exited_at  # type: ignore[operator]
+            or rec.cancelled
+            or self._stop_event.is_set()
+            or self._relay_error is not None
+        )
+
+    def _complete_process(self, rec: _Task, error: BaseException | None) -> None:
+        """Report a process task whose process exited and whose ranks are free.
+
+        With ``error``, the task cannot be joined: it fails, and its process is killed before its
+        ranks are freed. Runs on a process thread.
+        """
+        if error is not None:
+            try:
+                self._kill_process_task(rec)  # the task fails with the error: it must not run on
+            finally:
+                with self._lock:
+                    self._release(rec)
+            self._report_process_task(rec, "FAILED", {"exception": error, "stderr": str(error)})
+            return
+        try:
+            state, fields = self._process_outcome(rec)
+        except Exception as exc:
+            self.logger.debug(f"Task {rec.uid} failed in the backend", exc_info=True)
+            state, fields = "FAILED", {"exception": exc, "stderr": str(exc)}
+        self._report_process_task(rec, state, fields)
+
+    def _timeout_process(self, uid: str, timer: int) -> None:
+        """Kill a process task at its deadline: it fails when its process exits.
+
+        One whose process has not exited ``_KILL_WAIT`` seconds after ``kill_grace`` ends anyway,
+        with no exit code.
+        """
+        with self._lock:
+            rec = self._tasks.get(uid)
+            if rec is None or rec.timer != timer or rec.exited_at is not None:
+                return  # cancelled, a new task of its uid, or exited
+            rec.timed_out = True
+        self._ops.submit(self._kill_process_task, rec)
+        self._push_timer(self._kill_grace + _KILL_WAIT, timer, self._abandon_process, uid)
+
+    def _abandon_process(self, uid: str, timer: int) -> None:
+        with self._lock:
+            rec = self._tasks.get(uid)
+            if rec is None or rec.timer != timer or rec.exited_at is not None:
+                return
+            for puid in rec.puids:
+                self._watched.pop(puid, None)
+            rec.exit_code, rec.exited_at = None, time.monotonic()
+            self._release(rec)
+        self.logger.warning(f"The process of timed-out task {uid} did not exit after its kill")
+        self._submit_proc(self._complete_process, rec, None)
 
     def _stdio_of(self, rec: _Task) -> tuple[str, str]:
         if rec.inline_files:
@@ -1248,28 +1464,9 @@ class DragonNativeExecutionBackend(BaseBackend):
             detail = "stderr not captured"
         return TaskExecutionError(rec.uid, detail, code)
 
-    def _run_single(self, rec: _Task) -> tuple[str, dict]:
-        proc = rec.proc
-        with self._lock:
-            if rec.cancelled:
-                return "CANCELED", {}
-        proc.start()
-        with self._lock:
-            cancelled = rec.cancelled
-            rec.puids = [proc.puid]
-        if cancelled:
-            self._kill_process_task(rec)
-        try:
-            code = proc.join(timeout=rec.timeout)
-        except Exception:  # the task fails with the error: its process must not run on
-            self._kill_process_task(rec)
-            raise
-        if code is None:
-            with self._lock:
-                rec.timed_out = not rec.cancelled
-            self._kill_process_task(rec)
-            code = proc.join(timeout=10.0)
-        exited_at = time.monotonic()
+    def _process_outcome(self, rec: _Task) -> tuple[str, dict]:
+        """The final state and fields of a process task whose process exited."""
+        code = rec.exit_code
         if rec.cancelled:
             return "CANCELED", {}
         stdout, stderr = self._stdio_of(rec)
@@ -1285,7 +1482,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                 return "DONE", fields
             fields["exception"] = self._exit_error(rec, code, stderr)
             return "FAILED", fields
-        if self._result_arrives(rec, exited_at):
+        if rec.result_event.is_set():
             ok, value, tb = rec.result  # type: ignore[misc]
             if ok:
                 fields["return_value"] = value
@@ -1301,23 +1498,6 @@ class DragonNativeExecutionBackend(BaseBackend):
         )
         fields["stderr"] = stderr or str(fields["exception"])
         return "FAILED", fields
-
-    def _result_arrives(self, rec: _Task, exited_at: float) -> bool:
-        """Whether a function process that exited before ``exited_at`` sent a result.
-
-        The process flushed its result into the result queue before it exited. The result can
-        still wait behind a backlog of others, however long, but once the result thread has been
-        through everything queued before ``exited_at``, a result that has not come never will.
-        """
-        while not rec.result_event.wait(_WATCH_INTERVAL):
-            if (
-                self._caught_up > exited_at
-                or rec.cancelled
-                or self._stop_event.is_set()
-                or self._relay_error is not None
-            ):
-                return rec.result_event.is_set()
-        return True
 
     def _run_group(self, rec: _Task) -> tuple[str, dict]:
         with self._lock:
@@ -1874,6 +2054,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                 rec.thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
         self._stop_event.set()
+        self._watch_wake.set()
         with self._timer_cv:
             self._timer_cv.notify_all()
         # The relay forwards what is left, then the None that ends the result thread.
@@ -1899,6 +2080,7 @@ class DragonNativeExecutionBackend(BaseBackend):
         for directory in self._stdio_dirs:
             shutil.rmtree(directory, ignore_errors=True)
         self._ops.shutdown(wait=False, cancel_futures=True)
+        self._proc_ops.shutdown(wait=False, cancel_futures=True)
 
     def _kill_worker_now(self, w: _Worker, token: str) -> None:
         if w.proc is not None:

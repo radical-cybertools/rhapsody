@@ -78,11 +78,15 @@ Install it with the `dragon` extra, and start your script with the Dragon launch
   client knows when one is missing. The pool is 4 GiB per node by default
   (`DRAGON_DEFAULT_SEG_SZ`), so workers that finish together should return much less than that
   between them; write larger results to files.
-- **Process tasks.** One thread per running process or group task starts it and joins it. At most
-  `max_process_ranks` processes run at once (default: the runtime's CPUs); the rest wait, strictly
-  first in, first out, so a large job at the head of the queue holds back smaller tasks behind it.
-  A task that needs more than the limit runs alone. The limit counts only these tasks, over all
-  nodes, not the pool: a node can hold its pool and as many ranks again.
+- **Process tasks.** A few threads start process tasks, and one thread finds those that exited,
+  all at once, with a non-blocking `multi_join` every 10 to 100 ms. Each wait in `Process.join()`
+  is a request to Global Services, and with a thread waiting in one per task, runs of 512 tasks at
+  once have stalled Dragon's request path for good. A group task has a thread of its own, which
+  waits on the group's manager. At most `max_process_ranks` processes run at once (default: the
+  runtime's CPUs); the rest wait, strictly first in, first out, so a large job at the head of the
+  queue holds back smaller tasks behind it. A task that needs more than the limit runs alone. The
+  limit counts only these tasks, over all nodes, not the pool: a node can hold its pool and as
+  many ranks again.
 - **Output.** With `capture_stdio`, output goes to `<work_dir>/<uid>.stdout` and `.stderr`, and
   those paths come back, as with `DragonExecutionBackend`. The files are written on the task's
   node, and the directory is made there if it is missing, so on a work directory the nodes don't
@@ -249,10 +253,9 @@ MPI, so set `"pmi": "none"` for jobs that don't: it logs neither warning.
   another.
 - **The garbage collector.** Dragon's `gs_request` turns Python's garbage collector off at the start
   of every Global Services request and back on at the end of any, for the whole process, so a
-  thread blocked in `Process.join()` keeps it off until another request ends. The worker watcher
-  therefore checks with a non-blocking `multi_join` once a second, which also turns the collector
-  back on while process-task threads block in `join()`. With `workers_per_node=0` there is no
-  watcher to do that.
+  thread blocked in `Process.join()` would keep it off until another request ends. The worker
+  watcher and the process watcher therefore check with a non-blocking `multi_join`, and no backend
+  thread waits in `join()`.
 - **Not here.** `wait()`, `create_ddict()` and `.batch` belong to `DragonExecutionBackend`. Before
   the backend starts, `topology()` returns an empty list.
 
@@ -308,4 +311,11 @@ thread keeps the client's GIL busy (`--busy thread`), or while nothing does (`--
 
 ```bash
 dragon python tests/performance/dragon_native_busy_client.py --busy thread --workers-per-node 30
+```
+
+`tests/performance/dragon_native_many_processes.py` runs many executables at once, and reports the
+rate and the client's threads, or, if the run stalls, where they wait:
+
+```bash
+dragon python tests/performance/dragon_native_many_processes.py --ranks 512 --tasks 2000 --python
 ```

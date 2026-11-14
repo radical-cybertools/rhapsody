@@ -10,6 +10,7 @@ Real-runtime tests are at the end of the module; they need ``dragon python -m py
 """
 
 import asyncio
+import contextlib
 import ctypes
 import enum
 import itertools
@@ -89,7 +90,21 @@ class FakeDragon:
         self.groups = []
         self.puids = itertools.count(1000)
         self.lock = threading.Lock()
+        # Requests to Global Services in flight from the client, and the most at once.
+        self.in_flight = 0
+        self.peak = 0
         dragon = self
+
+        @contextlib.contextmanager
+        def request():
+            with dragon.lock:
+                dragon.in_flight += 1
+                dragon.peak = max(dragon.peak, dragon.in_flight)
+            try:
+                yield
+            finally:
+                with dragon.lock:
+                    dragon.in_flight -= 1
 
         class FakeNode:
             def __init__(self, ident):
@@ -144,6 +159,10 @@ class FakeDragon:
                 return getattr(self.policy, "host_name", "") or "n0"
 
             def start(self):
+                with request():
+                    self._start()
+
+            def _start(self):
                 self.puid = next(dragon.puids)
                 with dragon.lock:
                     dragon.procs[self.puid] = self
@@ -188,7 +207,8 @@ class FakeDragon:
                     self._exit(-sig)
 
             def join(self, timeout=None):
-                return self.code if self.done.wait(timeout) else None
+                with request():
+                    return self.code if self.done.wait(timeout) else None
 
             def kill(self):
                 self.signal(signal.SIGKILL)
@@ -272,16 +292,20 @@ class FakeDragon:
         def multi_join(puids, timeout=None, join_all=False):
             # As in Dragon, None waits for good and 0 checks once.
             deadline = None if timeout is None else time.monotonic() + timeout
-            while True:
-                exited = [(p, dragon.procs[p].code) for p in puids if dragon.procs[p].done.is_set()]
-                if (len(exited) == len(puids)) if join_all else exited:
-                    return exited, {}
-                if deadline is not None and time.monotonic() >= deadline:
-                    return None, {}
-                time.sleep(0.01)
+            with request():
+                while True:
+                    exited = [
+                        (p, dragon.procs[p].code) for p in puids if dragon.procs[p].done.is_set()
+                    ]
+                    if (len(exited) == len(puids)) if join_all else exited:
+                        return exited, {}
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return None, {}
+                    time.sleep(0.01)
 
         def process_kill(puid, sig=signal.SIGKILL, hide_stderr=False):
-            dragon.procs[puid].signal(sig)
+            with request():
+                dragon.procs[puid].signal(sig)
 
         self.Node, self.System, self.Process = FakeNode, FakeSystem, FakeProcess
         self.ProcessTemplate, self.ProcessGroup, self.Queue = (
@@ -1174,18 +1198,8 @@ async def test_function_process_that_exits_non_zero_after_its_result_fails(backe
     )
     rec.result = (True, 4, None)
     rec.result_event.set()
-
-    class DiedAtExit:
-        puid = 7
-
-        def start(self):
-            pass
-
-        def join(self, timeout=None):
-            return 139
-
-    rec.proc = DiedAtExit()
-    state, fields = backend._run_single(rec)
+    rec.exit_code = 139
+    state, fields = backend._process_outcome(rec)
     assert (state, fields["return_value"], fields["exit_code"]) == ("FAILED", 4, 139)
     assert fields["exception"].exit_code == 139
 
@@ -1498,8 +1512,9 @@ async def test_waiting_process_tasks_keep_their_order(dragon, tmp_path):
         await be.shutdown()
 
 
-async def test_task_that_cannot_get_a_thread_fails_alone(backend, monkeypatch):
-    """At the node's thread limit, the task fails, the rest of the list runs, and shutdown works."""
+async def test_group_that_cannot_get_a_thread_fails_alone(backend, monkeypatch):
+    """At the node's thread limit, the group fails, the rest of the list runs, and shutdown
+    works."""
     rec = Recorder(backend)
     start = threading.Thread.start
 
@@ -1508,7 +1523,8 @@ async def test_task_that_cannot_get_a_thread_fails_alone(backend, monkeypatch):
             raise RuntimeError("can't start new thread")
         start(thread)
 
-    tasks = [exe_task("true"), exe_task("true")]
+    one_rank = {"process_templates": [(1, {})], "pmi": "none"}
+    tasks = [exe_task("true", task_backend_specific_kwargs=one_rank) for _ in range(2)]
     with monkeypatch.context() as patch:
         patch.setattr(threading.Thread, "start", limited)
         await backend.submit_tasks(tasks)
@@ -1516,9 +1532,72 @@ async def test_task_that_cannot_get_a_thread_fails_alone(backend, monkeypatch):
         assert await rec.wait(task["uid"]) == ["FAILED"]
         assert "can't start new thread" in task["stderr"]
     assert backend._running_ranks == 0 and backend._tasks == {}
-    after = exe_task("true")
+    after = exe_task("true", task_backend_specific_kwargs=one_rank)
     await backend.submit_tasks([after])
     assert await rec.wait(after["uid"]) == ["DONE"]
+
+
+async def test_process_tasks_keep_requests_to_global_services_few(dragon, tmp_path):
+    """A thread per task, blocked in ``Process.join``, made a request each: 512 stalled Dragon.
+
+    Process tasks start on a few threads, and one poll finds all their exits.
+    """
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, max_process_ranks=128)
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        rec = Recorder(be)
+        dragon.peak = 0
+        tasks = [exe_task("/bin/sleep", "0.5") for _ in range(128)]
+        await be.submit_tasks(tasks)
+        await until(lambda: len(be._watched) == 128, 20)
+        for task in tasks:
+            assert await rec.wait(task["uid"], 30) == ["DONE"]
+        assert 0 < dragon.peak <= dragon_native._PROC_THREADS + 2
+        assert be._running_ranks == 0 and be._watched == {}
+    finally:
+        await be.shutdown()
+
+
+async def test_process_that_global_services_cannot_join_fails_and_is_killed(
+    backend, dragon, monkeypatch
+):
+    """With a timeout of 0, Global Services reports an unknown process and nothing else about it."""
+    poll = dragon_native.multi_join
+
+    def unknown(puids, timeout=None, join_all=False):
+        exited, status = poll(puids, timeout, join_all)
+        lost = {str(p): [1, "unknown"] for p in puids if dragon.procs[p].target == "/bin/sleep"}
+        return exited, {**status, **lost}
+
+    monkeypatch.setattr(dragon_native, "multi_join", unknown)
+    rec = Recorder(backend)
+    task = exe_task("/bin/sleep", "30")
+    other = exe_task("true")
+    await backend.submit_tasks([task, other])
+    assert await rec.wait(task["uid"]) == ["FAILED"]
+    assert "cannot join" in task["stderr"]
+    assert await rec.wait(other["uid"]) == ["DONE"]
+    proc = next(p for p in dragon.started if p.target == "/bin/sleep")
+    await until(lambda: proc.popen.poll() is not None)
+
+
+async def test_timed_out_process_that_outlives_its_kill_ends_without_an_exit_code(
+    backend, dragon, monkeypatch
+):
+    monkeypatch.setattr(dragon_native, "_KILL_WAIT", 0.3)
+    monkeypatch.setattr(dragon_native, "process_kill", lambda puid, sig=9, hide_stderr=False: None)
+    rec = Recorder(backend)
+    task = exe_task("/bin/sleep", "30", task_backend_specific_kwargs={"timeout": 0.2})
+    t0 = time.monotonic()
+    await backend.submit_tasks([task])
+    try:
+        assert await rec.wait(task["uid"]) == ["FAILED"]
+        assert isinstance(task["exception"], TimeoutError) and task["exit_code"] is None
+        assert time.monotonic() - t0 < 3
+        assert backend._running_ranks == 0 and backend._watched == {}
+    finally:
+        next(p for p in dragon.started if p.target == "/bin/sleep").popen.kill()
 
 
 # ============================================================================
@@ -1751,15 +1830,15 @@ async def test_group_whose_join_fails_has_its_ranks_killed(backend, dragon, monk
     assert token in [line for _, line, _ in dragon.reaped]
 
 
-async def test_process_task_whose_join_fails_has_its_process_killed(backend, dragon, monkeypatch):
-    join = dragon.Process.join
+async def test_process_task_whose_check_fails_has_its_process_killed(backend, dragon, monkeypatch):
+    poll = dragon_native.multi_join
 
-    def failing_join(self, timeout=None):
-        if self.target == "/bin/sleep":
+    def failing(puids, timeout=None, join_all=False):
+        if any(dragon.procs[p].target == "/bin/sleep" for p in puids):
             raise RuntimeError("Global Services went away")
-        return join(self, timeout)
+        return poll(puids, timeout, join_all)
 
-    monkeypatch.setattr(dragon.Process, "join", failing_join)
+    monkeypatch.setattr(dragon_native, "multi_join", failing)
     rec = Recorder(backend)
     task = exe_task("/bin/sleep", "30")
     await backend.submit_tasks([task])
@@ -2393,3 +2472,21 @@ async def test_real_runtime_busy_client_trades_with_the_relay_in_batches(tmp_pat
         await be.shutdown()
         cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
     assert calls["get"] < len(tasks) / 3 and calls["put"] < len(tasks) / 3, (calls, rate)
+
+
+@needs_runtime
+async def test_real_runtime_many_executables_at_once_share_a_few_threads(tmp_path):
+    """A thread per running executable, each in a Global Services request, stalled Dragon at 512."""
+    be = await DragonNativeExecutionBackend(workers_per_node=1, max_process_ranks=512)
+    be._work_dir = str(tmp_path)
+    rec = Recorder(be)
+    tasks = [exe_task("/bin/sleep", "0.5") for _ in range(1024)]
+    peak = threading.active_count()
+    try:
+        await be.submit_tasks(tasks)
+        for task in tasks:
+            assert await rec.wait(task["uid"], 120) == ["DONE"]
+            peak = max(peak, threading.active_count())
+    finally:
+        await be.shutdown()
+    assert peak < 64, peak
