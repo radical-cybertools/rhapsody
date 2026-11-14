@@ -786,7 +786,8 @@ async def test_bad_message_does_not_end_delivery(backend):
 async def test_placed_function_runs_on_a_worker_of_that_host(backend, dragon):
     """A placement, or a policy-only process template, sends a function to that host's pool."""
     rec = Recorder(backend)
-    by_placement = fn_task(blocked, placement={"node": 1, "host": "n1", "gpus": []})
+    placement = {"node_id": "n1", "host": "n1", "cores": 1, "gpu_ids": []}
+    by_placement = fn_task(blocked, placement=placement)
     by_policy = fn_task(blocked, task_backend_specific_kwargs=on("n1"))
     await backend.submit_tasks([by_placement, by_policy])
     hosts = {backend._tasks[t["uid"]].worker.host for t in (by_placement, by_policy)}
@@ -820,14 +821,35 @@ async def test_tasks_wait_for_a_free_worker_of_their_host(backend):
         assert await rec.wait(task["uid"]) == ["DONE"]
 
 
+@pytest.mark.parametrize(
+    "placement, host",
+    [
+        ({"node_id": "n1", "host": "n1", "cores": 1, "gpu_ids": []}, "n1"),
+        ({"node_id": "n1", "host": None, "cores": 1, "gpu_ids": []}, "n1"),
+        ({"node_id": None, "host": None, "cores": 1, "gpu_ids": []}, None),
+    ],
+    ids=["host", "node_id-only", "unnamed-node"],
+)
+async def test_placement_names_its_host_by_host_else_node_id(backend, placement, host):
+    """ResourcePolicy's keys: a node without a name leaves the task unplaced."""
+    rec = Recorder(backend)
+    task = fn_task(square, 3, placement=placement)
+    record = backend.build_task(task)
+    assert record.key == (host, ())
+    await backend.submit_tasks([task])
+    assert await rec.wait(task["uid"]) == ["DONE"]
+    assert task["return_value"] == 9
+
+
 async def test_gpu_task_starts_a_worker_for_its_gpu_set(backend, dragon):
     rec = Recorder(backend)
-    task = fn_task(square, 4, placement={"host": "n0", "gpus": [1]})
+    placement = {"node_id": "n0", "host": "n0", "cores": 1, "gpu_ids": [1]}
+    task = fn_task(square, 4, placement=placement)
     await backend.submit_tasks([task])
     assert await rec.wait(task["uid"]) == ["DONE"]
     gpu_workers = [w for w in dragon.workers() if w.policy.gpu_affinity]
     assert [(w.policy.host_name, w.policy.gpu_affinity) for w in gpu_workers] == [("n0", [1])]
-    again = fn_task(square, 5, placement={"host": "n0", "gpus": [1]})
+    again = fn_task(square, 5, placement=placement)
     await backend.submit_tasks([again])
     assert await rec.wait(again["uid"]) == ["DONE"]
     assert len([w for w in dragon.workers() if w.policy.gpu_affinity]) == 1
@@ -837,7 +859,7 @@ async def test_gpu_task_starts_a_worker_for_its_gpu_set(backend, dragon):
     "extra, match",
     [
         ({"placement": {"host": "no-such-host"}}, "not a Dragon node"),
-        ({"placement": {"host": "n1", "gpus": [0]}}, "GPUs"),
+        ({"placement": {"node_id": "n1", "host": "n1", "cores": 1, "gpu_ids": [0]}}, "GPUs"),
         ({"task_backend_specific_kwargs": on("nowhere")}, "not a Dragon node"),
         (
             {
@@ -1808,7 +1830,7 @@ async def test_worker_not_ready_by_its_deadline_fails_the_tasks_waiting_for_it(
         be._worker_start_timeout = 0.3
         if gpus:
             monkeypatch.setattr(worker_module, "worker_main", never_ready)
-            placement = {"host": "n0", "gpus": [1]}
+            placement = {"node_id": "n0", "host": "n0", "cores": 1, "gpu_ids": [1]}
         else:
             first = fn_task(blocked, placement={"host": "n0"})
             await be.submit_tasks([first])
