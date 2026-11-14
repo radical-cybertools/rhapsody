@@ -103,11 +103,14 @@ def test_exit_code_and_stdio_pass_through(tmp_path):
     assert _record(tmp_path)["exit_code"] == 7
 
 
-def test_death_by_signal_is_reraised(tmp_path):
-    cmd = "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGKILL])
+def test_death_by_signal_is_reraised(tmp_path, sig):
+    """SIGKILL too: its disposition cannot be reset, which used to make the launcher exit 1."""
+    cmd = f"import os; os.kill(os.getpid(), {int(sig)})"
     proc = _launch(tmp_path, sys.executable, "-c", cmd)
-    assert proc.returncode == -signal.SIGTERM
-    assert _record(tmp_path)["exit_code"] == -signal.SIGTERM
+    assert proc.returncode == -sig, proc.stderr
+    assert "Traceback" not in proc.stderr
+    assert _record(tmp_path)["exit_code"] == -sig
 
 
 def test_missing_command_exits_127(tmp_path):

@@ -364,8 +364,9 @@ def exit_like(exit_code: int) -> None:
         resource.setrlimit(resource.RLIMIT_CORE, (0, resource.getrlimit(resource.RLIMIT_CORE)[1]))
     except (ValueError, OSError):
         pass
-    signal.signal(sig, signal.SIG_DFL)
-    signal.pthread_sigmask(signal.SIG_UNBLOCK, [sig])
+    if sig not in (signal.SIGKILL, signal.SIGSTOP):  # these two have no disposition to reset
+        signal.signal(sig, signal.SIG_DFL)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, [sig])
     os.kill(os.getpid(), sig)
     os._exit(128 + sig)  # the signal does not terminate by default (e.g. SIGCHLD)
 
