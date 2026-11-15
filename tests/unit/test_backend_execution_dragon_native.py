@@ -1084,6 +1084,29 @@ async def test_task_fails_once_the_pool_stays_full_for_put_patience(
     assert w.wid in be._workers
 
 
+async def test_a_task_that_waited_out_the_full_pool_is_reported_once_its_worker_is_free(
+    one_worker, pool_full, monkeypatch
+):
+    """The task's FAILED used to go out first, so its callback could find the worker still busy."""
+    be, w = one_worker
+    monkeypatch.setattr(worker_module, "PUT_PATIENCE", 0.2)
+    monkeypatch.setattr(w.inbox, "put", full_until(w.inbox, lambda: True))
+    seen = []
+    emit = be._emit
+
+    def noting(rec, state, fields):
+        if state == "FAILED":
+            seen.append((w.state, w in be._idle[w.key]))
+        emit(rec, state, fields)
+
+    monkeypatch.setattr(be, "_emit", noting)
+    rec = Recorder(be)
+    task = fn_task(square, 2, placement={"host": "n0"})
+    await be.submit_tasks([task])
+    assert await rec.wait(task["uid"]) == ["FAILED"]
+    assert seen == [("idle", True)]
+
+
 async def test_function_with_no_pool_fails_at_once(dragon, tmp_path):
     be = DragonNativeExecutionBackend(workers_per_node=0, inline_stdio=False)
     be._work_dir = str(tmp_path)

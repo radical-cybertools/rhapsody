@@ -324,7 +324,9 @@ def relay_main(control, results, inbound, idle_interval, send_timeout, linger):
 
     thread = threading.Thread(target=run_control_or_exit, name="relay_control", daemon=True)
     thread.start()
-    batch, size, drained_at = [], 0, None
+    batch: list[bytes] = []  # pickled messages, forwarded as they are
+    size = 0
+    drained_at: float | None = None
     while True:
         if not batch:
             mark = time.monotonic()
