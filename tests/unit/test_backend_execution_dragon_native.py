@@ -786,7 +786,8 @@ async def test_bad_message_does_not_end_delivery(backend):
 async def test_placed_function_runs_on_a_worker_of_that_host(backend, dragon):
     """A placement, or a policy-only process template, sends a function to that host's pool."""
     rec = Recorder(backend)
-    by_placement = fn_task(blocked, placement={"node": 1, "host": "n1", "gpus": []})
+    placement = {"node_id": "n1", "host": "n1", "cores": 1, "gpu_ids": []}
+    by_placement = fn_task(blocked, placement=placement)
     by_policy = fn_task(blocked, task_backend_specific_kwargs=on("n1"))
     await backend.submit_tasks([by_placement, by_policy])
     hosts = {backend._tasks[t["uid"]].worker.host for t in (by_placement, by_policy)}
@@ -820,14 +821,35 @@ async def test_tasks_wait_for_a_free_worker_of_their_host(backend):
         assert await rec.wait(task["uid"]) == ["DONE"]
 
 
+@pytest.mark.parametrize(
+    "placement, host",
+    [
+        ({"node_id": "n1", "host": "n1", "cores": 1, "gpu_ids": []}, "n1"),
+        ({"node_id": "n1", "host": None, "cores": 1, "gpu_ids": []}, "n1"),
+        ({"node_id": None, "host": None, "cores": 1, "gpu_ids": []}, None),
+    ],
+    ids=["host", "node_id-only", "unnamed-node"],
+)
+async def test_placement_names_its_host_by_host_else_node_id(backend, placement, host):
+    """ResourcePolicy's keys: a node without a name leaves the task unplaced."""
+    rec = Recorder(backend)
+    task = fn_task(square, 3, placement=placement)
+    record = backend.build_task(task)
+    assert record.key == (host, ())
+    await backend.submit_tasks([task])
+    assert await rec.wait(task["uid"]) == ["DONE"]
+    assert task["return_value"] == 9
+
+
 async def test_gpu_task_starts_a_worker_for_its_gpu_set(backend, dragon):
     rec = Recorder(backend)
-    task = fn_task(square, 4, placement={"host": "n0", "gpus": [1]})
+    placement = {"node_id": "n0", "host": "n0", "cores": 1, "gpu_ids": [1]}
+    task = fn_task(square, 4, placement=placement)
     await backend.submit_tasks([task])
     assert await rec.wait(task["uid"]) == ["DONE"]
     gpu_workers = [w for w in dragon.workers() if w.policy.gpu_affinity]
     assert [(w.policy.host_name, w.policy.gpu_affinity) for w in gpu_workers] == [("n0", [1])]
-    again = fn_task(square, 5, placement={"host": "n0", "gpus": [1]})
+    again = fn_task(square, 5, placement=placement)
     await backend.submit_tasks([again])
     assert await rec.wait(again["uid"]) == ["DONE"]
     assert len([w for w in dragon.workers() if w.policy.gpu_affinity]) == 1
@@ -837,7 +859,7 @@ async def test_gpu_task_starts_a_worker_for_its_gpu_set(backend, dragon):
     "extra, match",
     [
         ({"placement": {"host": "no-such-host"}}, "not a Dragon node"),
-        ({"placement": {"host": "n1", "gpus": [0]}}, "GPUs"),
+        ({"placement": {"node_id": "n1", "host": "n1", "cores": 1, "gpu_ids": [0]}}, "GPUs"),
         ({"task_backend_specific_kwargs": on("nowhere")}, "not a Dragon node"),
         (
             {
@@ -1251,6 +1273,39 @@ async def test_function_process_that_sent_no_result_fails_once_the_queue_is_drai
     assert await rec.wait(task["uid"]) == ["FAILED"]
     assert time.monotonic() - t0 < 5.0
     assert task["exit_code"] == 0 and "without a result" in task["stderr"]
+
+
+@pytest.mark.parametrize("kind", ["function", "executable", "group"])
+async def test_process_task_that_times_out_fails_once_its_process_is_killed(
+    dragon, tmp_path, monkeypatch, kind
+):
+    """A timed-out function process used to wait for the result it would never send.
+
+    The wait ended only when the result thread next found its queue empty, which an idle client does
+    once a relay interval (one second; five here). Executables and groups never waited.
+    """
+    monkeypatch.setattr(dragon_native, "_WATCH_INTERVAL", 5.0)
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, kill_grace=0.5)
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        rec = Recorder(be)
+        if kind == "function":
+            task = fn_task(blocked, task_backend_specific_kwargs={"process_template": {}})
+        elif kind == "executable":
+            task = exe_task("/bin/sleep", "30")
+        else:
+            task = exe_task("/bin/sleep", "30")
+            task["task_backend_specific_kwargs"] = {"process_templates": [(2, {})]}
+        task.setdefault("task_backend_specific_kwargs", {})["timeout"] = 0.3
+        t0 = time.monotonic()
+        await be.submit_tasks([task])
+        assert await rec.wait(task["uid"]) == ["FAILED"]
+        assert isinstance(task["exception"], TimeoutError)
+        assert time.monotonic() - t0 < 3.0
+    finally:
+        GATE.set()
+        await be.shutdown()
 
 
 async def test_function_with_process_template_returns_its_value(backend):
@@ -1775,7 +1830,7 @@ async def test_worker_not_ready_by_its_deadline_fails_the_tasks_waiting_for_it(
         be._worker_start_timeout = 0.3
         if gpus:
             monkeypatch.setattr(worker_module, "worker_main", never_ready)
-            placement = {"host": "n0", "gpus": [1]}
+            placement = {"node_id": "n0", "host": "n0", "cores": 1, "gpu_ids": [1]}
         else:
             first = fn_task(blocked, placement={"host": "n0"})
             await be.submit_tasks([first])
@@ -1987,10 +2042,14 @@ async def test_shutdown_lets_only_a_window_of_processes_out_at_once(dragon, tmp_
         put(None)  # the fake workers' threads
 
 
-async def test_shutdown_kills_a_process_that_ignores_sigterm_after_kill_grace(backend, dragon):
-    task = exe_task("/bin/sh", "-c", "trap '' TERM; exec sleep 30")
+async def test_shutdown_kills_a_process_that_ignores_sigterm_after_kill_grace(
+    backend, dragon, tmp_path
+):
+    # The SIGTERM must come after the trap: a loaded machine can start the shell late.
+    trapped = tmp_path / "trapped"
+    task = exe_task("/bin/sh", "-c", f"trap '' TERM; : >{trapped}; exec sleep 30")
     await backend.submit_tasks([task])
-    await until(lambda: len(backend._watched) == 1)
+    await until(trapped.exists)
     t0 = time.monotonic()
     await backend.shutdown()
     assert 0.5 <= time.monotonic() - t0 < 3.0
@@ -2208,6 +2267,25 @@ async def test_a_relay_that_dies_fails_the_pool_tasks_and_new_ones(backend):
     assert await rec.wait(late["uid"]) == ["FAILED"]
     assert "relay" in late["stderr"]
     assert await rec.wait(executable["uid"]) == ["DONE"]
+
+
+async def test_a_relay_that_dies_while_the_pool_starts_fails_the_start_at_once(
+    dragon, tmp_path, monkeypatch
+):
+    """A relay that dies while the pool starts fails the start once its death is seen.
+
+    The pool's READY messages come through the relay: the start used to wait for them until
+    ``worker_start_timeout``, 300 s by default (20 here).
+    """
+    monkeypatch.setattr(worker_module, "relay_main", lambda *args: None)
+    be = DragonNativeExecutionBackend(
+        workers_per_node=1, inline_stdio=False, worker_start_timeout=20.0
+    )
+    be._work_dir = str(tmp_path)
+    t0 = time.monotonic()
+    with pytest.raises(RuntimeError, match="relay process exited with code 0 before the pool"):
+        await be
+    assert time.monotonic() - t0 < 5.0
 
 
 # ============================================================================
