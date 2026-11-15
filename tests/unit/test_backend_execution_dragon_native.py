@@ -1914,7 +1914,9 @@ async def test_fill_keeps_a_worker_whose_task_failed_to_send(capped, pool_full, 
         capped._pending[record.key].append(record)
         capped._fill("n1")
     assert await rec.wait(task["uid"]) == ["FAILED"]
-    assert w in idle and w.state == "idle"
+    # The result thread frees the worker just after it reports the task, so the callback can come
+    # first: wait for the worker rather than read it at once.
+    await until(lambda: w in idle and w.state == "idle")
 
 
 # ============================================================================
