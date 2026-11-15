@@ -974,8 +974,9 @@ class DragonNativeExecutionBackend(BaseBackend):
             if rec.put_deadline is None:
                 rec.put_deadline = time.monotonic() + _worker.PUT_PATIENCE
             if time.monotonic() >= rec.put_deadline:
-                self._fail_unsent(rec, MemoryError(f"task {uid} could not be sent: {error_text}"))
+                # Free the worker first: the task's callback must find the backend settled.
                 self._feed(w)
+                self._fail_unsent(rec, MemoryError(f"task {uid} could not be sent: {error_text}"))
                 return
             self._pending[rec.key].appendleft(rec)
             w.state = "paused"
