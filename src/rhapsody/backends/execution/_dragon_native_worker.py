@@ -443,7 +443,7 @@ def _record_this_process(peak_dir):
     if not peak_dir:
         return lambda exit_code: None
     started, cpu_start = time.time(), _measure.cpu_now()
-    written = []
+    written: list[int] = []
 
     def write(exit_code):
         if not written:
