@@ -14,7 +14,9 @@
   `process_templates` as one process group, with the PMI chosen by `pmi`. Unlike a
   Batch job, a group has no PMI by default. A relay process on the client's node
   trades tasks and results with the client in batches, so a client process that
-  keeps its GIL busy still starts tasks quickly. See `docs/execution/dragon-native.md`.
+  keeps its GIL busy still starts tasks quickly, and holds each busy worker's next
+  task, which it starts as the worker finishes, without waiting for the client.
+  See `docs/execution/dragon-native.md`.
   `tests/integration/test-hpc/benchmarks/dragon_throughput.py` measures it with
   `--with-rhapsody-dragon-native`, and `--workers_per_node` sets its pool size;
   `tests/performance/dragon_native_busy_client.py` measures it next to a busy thread.

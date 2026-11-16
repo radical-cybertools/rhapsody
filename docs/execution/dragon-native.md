@@ -45,8 +45,9 @@ Install it with the `dragon` extra, and start your script with the Dragon launch
 - **Pinning.** A worker runs only on its share. With the default pool that share is one core, so a
   function that starts its own threads, as NumPy and OpenMP do, gets that core's hardware threads.
   Set a lower `workers_per_node` for such functions, or give them a `process_template` of their own.
-- **Dispatch.** The client sends a task only to an idle worker; a task with no idle worker for its
-  host waits in the backend, first in, first out. Unplaced function tasks fill the client's node
+- **Dispatch.** The client sends a task to an idle worker, and gives each busy worker one more task
+  to hold as its next (see the relay below); a task with neither for its host waits in the backend,
+  first in, first out. Unplaced function tasks fill the client's node
   first, where a round trip is cheapest. Unplaced process tasks get no policy, so Dragon spreads
   them round robin over all nodes; place them to keep them local. A task that asks for GPUs goes to
   a worker started, on demand, with `gpu_affinity` set to exactly those GPUs (`gpu_workers_per_set`
@@ -64,6 +65,15 @@ Install it with the `dragon` extra, and start your script with the Dragon launch
   next to such a thread. In batches, the client makes three such calls per pass, however many
   tasks the pass holds, and the relay's process has its GIL to itself. The busier the client, the
   larger the batches.
+- **Next tasks wait at the relay.** The relay holds each busy worker's next task and puts it on
+  the worker's inbox as the worker's result passes through, so a worker starts its next task
+  without waiting for the client's turn and the control queue. Only one task waits per worker, at
+  the relay rather than in the inbox, because a task in a Dragon queue cannot be taken back. A held
+  task has not started: its `timeout` counts from when the relay starts it, a cancel drops it at
+  the relay, and if its worker dies or is killed first, it goes to another worker. A worker that
+  becomes idle takes back a task another worker holds behind a long one. When the relay started a
+  held task just as its worker died or was killed, the task fails with the worker rather than run
+  twice; a cancel that comes as the relay starts the task kills the worker, as for a running task.
 - **Results.** A worker pickles its message with cloudpickle and puts the bytes on the result
   queue. One client thread takes the relay's batches, applies each under one lock, sends the relay
   the next tasks for the workers that are free, and hands the state changes to the asyncio loop
@@ -257,7 +267,8 @@ MPI, so set `"pmi": "none"` for jobs that don't: it logs neither warning.
   fail, and losing a host's last pool worker is logged as an error.
 - **A dead relay is noticed too.** If the relay process dies, every pool task fails, and so do pool
   tasks submitted after it, and functions with a `process_template`, whose results it carried.
-  Executables and groups still run. The relay is not restarted: shut the backend down and start
+  The error of a task that was waiting in the backend says it had not started, and that of a task
+  the relay held says it had not been reported started. Executables and groups still run. The relay is not restarted: shut the backend down and start
   another.
 - **The garbage collector.** Dragon's `gs_request` turns Python's garbage collector off at the start
   of every Global Services request and back on at the end of any, for the whole process, so a

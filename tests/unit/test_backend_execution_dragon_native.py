@@ -811,11 +811,16 @@ async def test_unplaced_functions_fill_the_clients_node_first(backend):
 
 
 async def test_tasks_wait_for_a_free_worker_of_their_host(backend):
-    """With both n1 workers busy, a third n1 task waits instead of going to n0."""
+    """With both n1 workers busy, a third n1 task waits for one of them instead of going to n0.
+
+    It waits as one n1 worker's next task, and a fifth waits in the queue.
+    """
     rec = Recorder(backend)
-    tasks = [fn_task(blocked, placement={"host": "n1"}) for _ in range(3)]
+    tasks = [fn_task(blocked, placement={"host": "n1"}) for _ in range(5)]
     await backend.submit_tasks(tasks)
-    assert backend._tasks[tasks[2]["uid"]].state == "queued"
+    records = [backend._tasks[t["uid"]] for t in tasks]
+    assert [r.state for r in records] == ["running", "running", "held", "held", "queued"]
+    assert {r.worker.host for r in records[:4]} == {"n1"}
     GATE.set()
     for task in tasks:
         assert await rec.wait(task["uid"]) == ["DONE"]
@@ -1694,7 +1699,7 @@ async def test_timed_out_process_that_outlives_its_kill_ends_without_an_exit_cod
 
 async def test_cancel_queued_pool_task_never_runs(backend):
     rec = Recorder(backend)
-    busy = [fn_task(blocked) for _ in range(4)]
+    busy = [fn_task(blocked) for _ in range(8)]  # 4 running and 4 held
     queued = fn_task(square, 3)
     await backend.submit_tasks(busy + [queued])
     assert backend._tasks[queued["uid"]].state == "queued"
@@ -1809,6 +1814,8 @@ async def test_dead_worker_fails_its_task_and_is_replaced(backend, dragon):
 
 
 async def test_unplaced_tasks_fail_when_no_worker_is_left(dragon, tmp_path, monkeypatch):
+    """The waiting task is held by n0's worker: it is queued again when that worker dies, and fails
+    as the last replacement does, or once it finds none."""
     be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False)
     be._work_dir = str(tmp_path)
     await be
@@ -1816,7 +1823,7 @@ async def test_unplaced_tasks_fail_when_no_worker_is_left(dragon, tmp_path, monk
         rec = Recorder(be)
         a, b, waiting = fn_task(blocked), fn_task(blocked), fn_task(square, 2)
         await be.submit_tasks([a, b, waiting])
-        assert be._tasks[waiting["uid"]].state == "queued"
+        assert be._tasks[waiting["uid"]].state == "held"
 
         def broken_start(self):
             raise RuntimeError("no memory")
@@ -1826,7 +1833,8 @@ async def test_unplaced_tasks_fail_when_no_worker_is_left(dragon, tmp_path, monk
             for task in (a, b):
                 be._tasks[task["uid"]].worker.proc._exit(-11)
             assert await rec.wait(waiting["uid"]) == ["FAILED"]
-        assert "no Dragon worker" in str(waiting["exception"])
+        error = str(waiting["exception"])
+        assert "no Dragon worker" in error or "no pool worker on any node" in error
     finally:
         GATE.set()
         await be.shutdown()
@@ -2312,6 +2320,358 @@ async def test_a_relay_that_dies_while_the_pool_starts_fails_the_start_at_once(
 
 
 # ============================================================================
+# Next tasks held by the relay
+# ============================================================================
+
+
+def relay_thread(dragon):
+    """A relay on fake queues, with a worker's inbox: (results, control, inbound, inbox, thread)."""
+    results, control, inbound = dragon.Queue(4096), dragon.Queue(16), dragon.Queue(1)
+    inbox = dragon.Queue(16)
+    relay = threading.Thread(
+        target=worker_module.relay_main,
+        args=(control, results, inbound, 5.0, 1.0, 0.001),
+        daemon=True,
+    )
+    relay.start()
+    return results, control, inbound, inbox, relay
+
+
+def relay_messages(inbound, control, n):
+    """The next ``n`` messages the relay forwards, acknowledging each batch."""
+    msgs = []
+    while len(msgs) < n:
+        batch, _ = cloudpickle.loads(inbound.get(timeout=5))
+        msgs += [cloudpickle.loads(raw) for raw in batch]
+        control.put(cloudpickle.dumps([("ack",)]))
+    return msgs
+
+
+def stop_relay(results, control, inbound, relay):
+    control.put(None)
+    results.put(None)
+    while inbound.get(timeout=5) is not None:
+        pass
+    relay.join(5)
+    assert not relay.is_alive()
+
+
+def done(wid, uid, value=None):
+    return cloudpickle.dumps((worker_module.DONE, wid, uid, True, value, None, "", ""))
+
+
+def test_relay_starts_a_held_task_as_its_worker_finishes(dragon):
+    """A worker's next task waits at the relay, goes on its inbox as its DONE passes, and STARTED
+    comes right after that DONE, with the time it started by the client's node's clocks."""
+    results, control, inbound, inbox, relay = relay_thread(dragon)
+    ops = [("inbox", 7, inbox), ("send", 7, "a", b"A"), ("next", 7, "b", b"B")]
+    control.put(cloudpickle.dumps(ops))
+    assert inbox.get(timeout=5) == b"A"
+    with pytest.raises(queue.Empty):
+        inbox.get(timeout=0.2)  # b waits for a
+    before = (time.time(), time.monotonic())
+    results.put(done(7, "a"))
+    assert inbox.get(timeout=5) == b"B"
+    after = (time.time(), time.monotonic())
+    msgs = relay_messages(inbound, control, 2)
+    assert [m[:3] for m in msgs] == [
+        (worker_module.DONE, 7, "a"),
+        (worker_module.STARTED, 7, "b"),
+    ]
+    assert before[0] <= msgs[1][3] <= after[0] and before[1] <= msgs[1][4] <= after[1]
+    # A next task for a free worker starts at once.
+    results.put(done(7, "b"))
+    relay_messages(inbound, control, 1)
+    control.put(cloudpickle.dumps([("next", 7, "c", b"C")]))
+    assert inbox.get(timeout=5) == b"C"
+    assert relay_messages(inbound, control, 1)[0][:3] == (worker_module.STARTED, 7, "c")
+    stop_relay(results, control, inbound, relay)
+
+
+def test_relay_drops_a_held_task_on_drop_or_forget_and_reports_it_once(dragon):
+    """Each held task gets one STARTED or one DROPPED: a drop for a task that has started, or
+    was dropped already, says nothing."""
+    results, control, inbound, inbox, relay = relay_thread(dragon)
+    ops = [("inbox", 7, inbox), ("send", 7, "a", b"A"), ("next", 7, "b", b"B"), ("drop", 7, "b")]
+    control.put(cloudpickle.dumps(ops))
+    assert inbox.get(timeout=5) == b"A"
+    assert relay_messages(inbound, control, 1) == [(worker_module.DROPPED, 7, "b")]
+    control.put(cloudpickle.dumps([("next", 7, "c", b"C"), ("forget", 7), ("drop", 7, "c")]))
+    assert relay_messages(inbound, control, 1) == [(worker_module.DROPPED, 7, "c")]
+    results.put(done(7, "a"))  # a forgotten worker's DONE starts nothing
+    assert relay_messages(inbound, control, 1)[0][:3] == (worker_module.DONE, 7, "a")
+    with pytest.raises(queue.Empty):
+        inbox.get(timeout=0.2)
+    stop_relay(results, control, inbound, relay)
+
+
+def test_relay_holds_the_next_task_of_a_worker_whose_put_failed(dragon, pool_full):
+    """The client takes both back, in order: the relay must not start the second on its own."""
+    results, control, inbound, inbox, relay = relay_thread(dragon)
+    full = [True]
+    inbox.put = full_until(inbox, lambda: full[0])
+    ops = [("inbox", 7, inbox), ("send", 7, "a", b"A"), ("next", 7, "b", b"B")]
+    control.put(cloudpickle.dumps(ops))
+    (unsent,) = relay_messages(inbound, control, 1)
+    assert unsent[:4] == (worker_module.UNSENT, 7, "a", "full")
+    full[0] = False
+    with pytest.raises(queue.Empty):
+        inbox.get(timeout=0.2)
+    control.put(cloudpickle.dumps([("drop", 7, "b"), ("send", 7, "a", b"A")]))
+    assert relay_messages(inbound, control, 1) == [(worker_module.DROPPED, 7, "b")]
+    assert inbox.get(timeout=5) == b"A"
+    stop_relay(results, control, inbound, relay)
+
+
+def test_relay_reports_a_next_task_started_before_its_worker_can_finish_it(dragon):
+    """A next task for a worker the relay has found free goes on the inbox at once.
+
+    Its STARTED used to follow the put, so a short task's DONE could come first: the client took
+    that DONE for no task, and then waited for the task for good.
+    """
+    results, control, inbound, inbox, relay = relay_thread(dragon)
+    put = inbox.put
+
+    def finishes_at_once(obj, block=True, timeout=None, flush=False):
+        put(obj, block, timeout)
+        results.put(done(7, obj.decode()))
+
+    inbox.put = finishes_at_once
+    control.put(cloudpickle.dumps([("inbox", 7, inbox), ("next", 7, "b", b"b")]))
+    msgs = relay_messages(inbound, control, 2)
+    assert [m[:3] for m in msgs] == [
+        (worker_module.STARTED, 7, "b"),
+        (worker_module.DONE, 7, "b"),
+    ]
+    stop_relay(results, control, inbound, relay)
+
+
+def test_relay_reports_unsent_after_started_when_a_free_workers_put_fails(dragon, pool_full):
+    results, control, inbound, inbox, relay = relay_thread(dragon)
+    inbox.put = full_until(inbox, lambda: True)
+    control.put(cloudpickle.dumps([("inbox", 7, inbox), ("next", 7, "b", b"B")]))
+    msgs = relay_messages(inbound, control, 2)
+    assert [m[:4] for m in msgs] == [
+        (worker_module.STARTED, 7, "b", msgs[0][3]),
+        (worker_module.UNSENT, 7, "b", "full"),
+    ]
+    stop_relay(results, control, inbound, relay)
+
+
+async def test_a_held_task_reported_started_then_unsent_is_sent_again(one_worker, pool_full):
+    """The relay found the worker free, said STARTED, and the put found the pool full: as for a send
+    that failed, the task waits for room and is sent again."""
+    be, w = one_worker
+    rec = Recorder(be)
+    task = fn_task(square, 5, placement={"host": "n0"})
+    x = be.build_task(task)
+    with be._lock:
+        be._idle[w.key].remove(w)
+        be._tasks[x.uid] = x
+        w.state, w.task, w.held = "busy", None, x  # its last task done, the next held
+        x.worker, x.state = w, "held"
+        be._holding.add(w)
+        payload = x.payload
+        be._apply_message((worker_module.STARTED, w.wid, x.uid, time.time(), time.monotonic()), [])
+        assert (x.state, w.task, w.held) == ("running", x, None)
+        unsent = (worker_module.UNSENT, w.wid, x.uid, "full", "PoolFullError: full", payload)
+        be._apply_message(unsent, [])
+        assert (x.state, w.state, w.task) == ("queued", "paused", None)
+    assert await rec.wait(task["uid"]) == ["DONE"] and task["return_value"] == 25
+
+
+async def test_a_held_task_starts_as_its_worker_finishes(one_worker):
+    be, w = one_worker
+    rec = Recorder(be)
+    first, second = (
+        fn_task(blocked, placement={"host": "n0"}),
+        fn_task(square, 3, placement={"host": "n0"}),
+    )
+    await be.submit_tasks([first, second])
+    assert be._tasks[second["uid"]].state == "held" and w.held is be._tasks[second["uid"]]
+    await until(lambda: w.inbox.q.empty())  # the worker took the first
+    await asyncio.sleep(0.2)
+    assert w.inbox.q.empty()  # the second waits at the relay, not in the inbox
+    GATE.set()
+    assert await rec.wait(second["uid"]) == ["DONE"] and second["return_value"] == 9
+    assert [u for u, s, _ in rec.records if s == "DONE"] == [first["uid"], second["uid"]]
+    await until(lambda: w.state == "idle")
+    assert w.held is None and not be._holding and not be._releasing
+
+
+async def test_a_held_tasks_timeout_runs_from_when_it_starts(one_worker):
+    """It waits for the task before it, and that wait is not its run."""
+    be, _ = one_worker
+    rec = Recorder(be)
+    first = fn_task(time.sleep, 0.5, placement={"host": "n0"})
+    second = fn_task(
+        square, 3, placement={"host": "n0"}, task_backend_specific_kwargs={"timeout": 0.3}
+    )
+    await be.submit_tasks([first, second])
+    assert be._tasks[second["uid"]].state == "held"
+    assert await rec.wait(first["uid"]) == ["DONE"]
+    assert await rec.wait(second["uid"]) == ["DONE"] and second["return_value"] == 9
+
+
+async def test_cancel_of_a_held_task_drops_it_and_keeps_its_worker(one_worker, dragon):
+    be, w = one_worker
+    rec = Recorder(be)
+    first, held = (
+        fn_task(blocked, placement={"host": "n0"}),
+        fn_task(square, 3, placement={"host": "n0"}),
+    )
+    await be.submit_tasks([first, held])
+    proc = w.proc
+    assert await be.cancel_task(held["uid"]) is True
+    assert await rec.wait(held["uid"]) == ["CANCELED"]
+    await until(lambda: w.held is None)
+    GATE.set()
+    assert await rec.wait(first["uid"]) == ["DONE"]
+    after = fn_task(square, 4, placement={"host": "n0"})
+    await be.submit_tasks([after])
+    assert await rec.wait(after["uid"]) == ["DONE"]
+    assert "return_value" not in held
+    assert w.proc is proc and proc.code is None and len(dragon.workers()) == 2
+
+
+def without_ops(monkeypatch, be, kinds):
+    """Keep the control operations of ``kinds`` from the relay, as if they came too late."""
+    put = be._control.put
+
+    def filtered(raw, *args, **kwargs):
+        if raw is not None:  # None stops the relay
+            raw = cloudpickle.dumps([op for op in cloudpickle.loads(raw) if op[0] not in kinds])
+        return put(raw, *args, **kwargs)
+
+    monkeypatch.setattr(be._control, "put", filtered)
+
+
+async def test_a_held_task_cancelled_as_the_relay_starts_it_ends_its_worker(
+    one_worker, dragon, monkeypatch
+):
+    """The relay started it before the drop came: it runs, so its worker is killed, and the task
+    is reported cancelled once."""
+    be, w = one_worker
+    rec = Recorder(be)
+    without_ops(monkeypatch, be, {"drop"})
+    first, held = (
+        fn_task(blocked, placement={"host": "n0"}),
+        fn_task(square, 3, placement={"host": "n0"}),
+    )
+    await be.submit_tasks([first, held])
+    proc = w.proc
+    assert await be.cancel_task(held["uid"]) is True
+    GATE.set()
+    assert await rec.wait(first["uid"]) == ["DONE"]
+    await until(lambda: proc.code == -signal.SIGKILL)
+    await until(lambda: len(dragon.workers()) == 3 and be._live_by_key[w.key] == 1)
+    await asyncio.sleep(0.2)
+    assert [s for u, s, _ in rec.records if u == held["uid"] and s in Recorder.terminal] == [
+        "CANCELED"
+    ]
+    assert "return_value" not in held
+
+
+@pytest.mark.parametrize("end", ["dies", "cancel", "timeout"])
+async def test_a_held_task_runs_on_another_worker_when_its_own_goes(one_worker, dragon, end):
+    be, w = one_worker
+    rec = Recorder(be)
+    kwargs = {"timeout": 0.3} if end == "timeout" else {}
+    first = fn_task(blocked, placement={"host": "n0"}, task_backend_specific_kwargs=kwargs)
+    held = fn_task(square, 4, placement={"host": "n0"})
+    await be.submit_tasks([first, held])
+    assert be._tasks[held["uid"]].state == "held"
+    if end == "dies":
+        w.proc._exit(-11)
+    elif end == "cancel":
+        assert await be.cancel_task(first["uid"]) is True
+    expected = {"dies": "FAILED", "cancel": "CANCELED", "timeout": "FAILED"}[end]
+    assert await rec.wait(first["uid"]) == [expected]
+    assert await rec.wait(held["uid"]) == ["DONE"] and held["return_value"] == 16
+    assert w.wid not in be._workers and not be._releasing
+
+
+async def test_a_held_task_that_started_as_its_worker_was_killed_fails_with_it(
+    one_worker, dragon, monkeypatch
+):
+    """The worker finished its task as it was cancelled, and the relay started the held one on
+    it: that one ran, or began to, so it must not run again elsewhere."""
+    be, w = one_worker
+    rec = Recorder(be)
+    without_ops(monkeypatch, be, {"drop", "forget"})
+    first, held = (
+        fn_task(blocked, placement={"host": "n0"}),
+        fn_task(square, 4, placement={"host": "n0"}),
+    )
+    await be.submit_tasks([first, held])
+    assert await be.cancel_task(first["uid"]) is True
+    GATE.set()  # its DONE reaches the relay, which starts the held task
+    assert await rec.wait(held["uid"]) == ["FAILED"]
+    assert f"started on Dragon worker {w.wid} on n0" in held["stderr"]
+    assert not be._releasing
+    await asyncio.sleep(0.2)
+    assert [s for u, s, _ in rec.records if u == held["uid"] and s in Recorder.terminal] == [
+        "FAILED"
+    ]
+
+
+async def test_a_relay_that_dies_fails_held_and_queued_tasks_as_not_started(one_worker):
+    """Matteo's condition for the relay holding tasks: none is lost without a word."""
+    be, w = one_worker
+    rec = Recorder(be)
+    running, held, queued = (fn_task(blocked, placement={"host": "n0"}),) + tuple(
+        fn_task(square, i, placement={"host": "n0"}) for i in (2, 3)
+    )
+    await be.submit_tasks([running, held, queued])
+    states = [be._tasks[t["uid"]].state for t in (running, held, queued)]
+    assert states == ["running", "held", "queued"]
+    be._relay._exit(-9)
+    for task in (running, held, queued):
+        assert await rec.wait(task["uid"]) == ["FAILED"]
+        assert "relay process exited with code -9" in task["stderr"]
+    assert "started" not in running["stderr"]
+    assert held["stderr"].endswith("the task had not been reported started")
+    assert queued["stderr"].endswith("the task had not started")
+    assert w.held is None and not be._holding and not be._releasing
+
+
+async def test_an_idle_worker_takes_back_a_task_held_behind_a_long_one(one_worker):
+    """An unplaced task held by n0's worker, busy for good, runs on n1's once that one is free."""
+    be, w = one_worker
+    rec = Recorder(be)
+    long = fn_task(blocked, placement={"host": "n0"})
+    short = fn_task(time.sleep, 0.2, placement={"host": "n1"})
+    unplaced = fn_task(square, 5)
+    await be.submit_tasks([long, short, unplaced])
+    assert be._tasks[unplaced["uid"]].state == "held" and w.held.uid == unplaced["uid"]
+    assert await rec.wait(unplaced["uid"]) == ["DONE"] and unplaced["return_value"] == 25
+    assert long["uid"] in be._tasks and w.held is None and not be._holding
+
+
+async def test_a_held_task_the_relay_cannot_start_waits_for_room_in_its_place(
+    one_worker, pool_full, monkeypatch
+):
+    """The pool is full as the relay starts the held task: it is sent again, before the tasks
+    queued behind it."""
+    be, w = one_worker
+    rec = Recorder(be)
+    full = [False]
+    monkeypatch.setattr(w.inbox, "put", full_until(w.inbox, lambda: full[0]))
+    tasks = [fn_task(blocked, placement={"host": "n0"})] + [
+        fn_task(square, i, placement={"host": "n0"}) for i in range(4)
+    ]
+    await be.submit_tasks(tasks)
+    assert be._tasks[tasks[1]["uid"]].state == "held"
+    full[0] = True
+    GATE.set()
+    await until(lambda: w.state == "paused")
+    full[0] = False
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert [u for u, s, _ in rec.records if s == "DONE"] == [t["uid"] for t in tasks]
+
+
+# ============================================================================
 # Task callback contract
 # ============================================================================
 
@@ -2344,6 +2704,20 @@ async def test_a_task_gets_one_terminal_state(backend):
 # ============================================================================
 # Worker-side code
 # ============================================================================
+
+
+def test_worker_code_still_pickles_by_value_once_this_process_has_flushed():
+    """The C library a flush loads must not travel with the worker's code: Dragon pickles a worker's
+    target with cloudpickle, and the backend sends this module by value."""
+    worker_module.flush_all()
+    registered = worker_module.__name__ in cloudpickle.list_registry_pickle_by_value()
+    cloudpickle.register_pickle_by_value(worker_module)
+    try:
+        for fn in (worker_module.worker_main, worker_module.relay_main, worker_module.flush_all):
+            cloudpickle.loads(cloudpickle.dumps(fn))
+    finally:
+        if not registered:
+            cloudpickle.unregister_pickle_by_value(worker_module)
 
 
 def test_worker_call_runs_sync_and_async():
@@ -2699,6 +3073,41 @@ async def test_real_runtime_busy_client_trades_with_the_relay_in_batches(tmp_pat
         await be.shutdown()
         cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
     assert calls["get"] < len(tasks) / 3 and calls["put"] < len(tasks) / 3, (calls, rate)
+
+
+@needs_runtime
+async def test_real_runtime_held_tasks_run_in_order_and_cancel_without_a_kill(tmp_path):
+    """One worker: the task after the running one waits at the relay, its timeout counts from its
+    start, a cancelled one never runs and costs no worker, and many run in order."""
+    cloudpickle.register_pickle_by_value(sys.modules[__name__])
+    be = await DragonNativeExecutionBackend(workers_per_node=1)
+    be._work_dir = str(tmp_path)
+    rec = Recorder(be)
+    try:
+        wids = set(be._workers)
+        assert len(wids) == 1
+        first = fn_task(time.sleep, 2)
+        timed = fn_task(square, 6, task_backend_specific_kwargs={"timeout": 1.5})
+        await be.submit_tasks([first, timed])
+        assert be._tasks[timed["uid"]].state == "held"
+        assert await rec.wait(timed["uid"], 60) == ["DONE"] and timed["return_value"] == 36
+        blocker, dropped = fn_task(time.sleep, 1), fn_task(square, 7)
+        await be.submit_tasks([blocker, dropped])
+        assert be._tasks[dropped["uid"]].state == "held"
+        assert await be.cancel_task(dropped["uid"]) is True
+        assert await rec.wait(blocker["uid"], 60) == ["DONE"]
+        rest = [fn_task(square, i) for i in range(200)]
+        await be.submit_tasks(rest)
+        for task in rest:
+            assert await rec.wait(task["uid"], 120) == ["DONE"]
+        uids = {t["uid"] for t in rest}
+        assert [u for u, s, _ in rec.records if s == "DONE" and u in uids] == [
+            t["uid"] for t in rest
+        ]
+        assert "return_value" not in dropped and set(be._workers) == wids
+    finally:
+        await be.shutdown()
+        cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
 
 
 @needs_runtime

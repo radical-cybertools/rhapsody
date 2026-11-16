@@ -172,6 +172,8 @@ class _Worker:
         "proc",
         "state",
         "task",
+        "held",
+        "listed",
         "initial",
         "retry",
         "backoff",
@@ -186,7 +188,10 @@ class _Worker:
         self.proc: Any = None
         # starting, idle, busy, dead, or paused: waiting to be sent a task after a full memory pool
         self.state = "starting"
+        # The task it runs, and the next one, which the relay holds and starts when it is done.
         self.task: _Task | None = None
+        self.held: _Task | None = None
+        self.listed = False  # in _open, as a busy worker with room for a held task
         self.initial = initial
         # A replacement for a worker that died: if it dies before it is ready, it is not replaced.
         self.retry = retry
@@ -230,6 +235,7 @@ class _Task:
         "repeats",
         "exit_code",
         "exited_at",
+        "taking_back",
     )
 
     def __init__(self, uid: str, desc: dict, kind: str, timeout: float | None, token: str):
@@ -248,7 +254,8 @@ class _Task:
         self.group: Any = None
         self.puids: list = []
         self.ranks = 1
-        self.state = "queued"  # queued, running, done
+        # queued; held: given to a busy worker as its next task, not started; running; done
+        self.state = "queued"
         self.worker: Any = None
         self.cancelled: Any = False  # set from other threads: a type checker must not narrow it
         self.timed_out = False
@@ -263,6 +270,8 @@ class _Task:
         # failed once with another error.
         self.put_deadline: float | None = None
         self.put_failed_on: str | None = None
+        # A held task the client asked the relay back for, for an idle worker.
+        self.taking_back = False
         # A process task's exit code, and when the process watcher found it exited.
         self.exit_code: int | None = None
         self.exited_at: float | None = None
@@ -481,6 +490,13 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._pending: dict[tuple, deque[_Task]] = defaultdict(deque)
         # Sends decided since the relay was last sent a batch.
         self._outgoing: list = []
+        # Busy workers with room for a held task, by key (lazy: checked when taken), and the
+        # workers that hold one.
+        self._open: dict[tuple, deque[_Worker]] = defaultdict(deque)
+        self._holding: set[_Worker] = set()
+        # Held tasks of workers that went away, by uid, until the relay says whether it started
+        # them: DROPPED requeues one, STARTED means it went with its worker.
+        self._releasing: dict[str, _Task] = {}
         self._live_by_key: dict[tuple, int] = defaultdict(int)
         self._proc_queue: deque = deque()
         self._running_ranks = 0
@@ -784,6 +800,10 @@ class DragonNativeExecutionBackend(BaseBackend):
             self._on_done(msg, completions)
         elif kind == _worker.READY:
             self._on_ready(msg)
+        elif kind == _worker.STARTED:
+            self._on_started(msg)
+        elif kind == _worker.DROPPED:
+            self._on_dropped(msg)
         elif kind == _worker.UNSENT:
             self._on_unsent(msg)
         elif kind == _worker.RESULT:
@@ -820,34 +840,129 @@ class DragonNativeExecutionBackend(BaseBackend):
             else:
                 fields = {"exception": value, "stdout": out, "stderr": err or tb or str(value)}
                 completions.append((rec, "FAILED", fields))
-        self._feed(w)
+        if w.held is None:
+            self._feed(w)
+        # Otherwise the relay starts the held task, or has dropped it: STARTED, DROPPED or UNSENT
+        # follows, and says what the worker does next.
+
+    def _on_started(self, msg) -> None:
+        """The relay starts a worker's held task, as the worker finished its last.
+
+        It comes before the task's ``DONE``. When the relay found the worker already free, it may
+        be followed by ``UNSENT``, taken as for a send that failed.
+        """
+        _, wid, uid, _wall, started = msg
+        rec = self._releasing.pop(uid, None)
+        if rec is not None:
+            # Its worker died, or was killed for its last task, as the relay started this one.
+            if not rec.cancelled and self._tasks.get(uid) is rec:
+                gone = rec.worker
+                self._fail_unsent(
+                    rec,
+                    RuntimeError(
+                        f"task {uid} started on Dragon worker {wid} on {gone.host if gone else '?'}"
+                        " as that worker was killed or died"
+                    ),
+                )
+            return
+        w = self._workers.get(wid)
+        if w is None or w.state not in ("busy", "paused") or w.held is None or w.held.uid != uid:
+            return  # its worker died, or the task went elsewhere: handled there
+        rec, w.held = w.held, None
+        self._holding.discard(w)
+        # A paused worker too: the relay starts a held task on a worker whose last send failed.
+        w.state = "busy"
+        if rec.cancelled:  # cancelled as the relay started it: it runs, so kill it
+            w.state = "dead"
+            self._ops.submit(self._retire_worker, w, rec.token)
+            return
+        rec.taking_back = False
+        rec.state = "running"
+        rec.payload = None
+        w.task = rec
+        if rec.timeout is not None:  # from its start: the relay's clock is this node's
+            self._add_timer(rec, max(0.0, rec.timeout - (time.monotonic() - started)))
+        self._fill_held(w)
+
+    def _on_dropped(self, msg) -> None:
+        """The relay discarded a held task, as asked: it was cancelled, or is wanted elsewhere."""
+        _, wid, uid = msg
+        rec = self._releasing.pop(uid, None)
+        if rec is not None:  # its worker went away before the task started: it runs elsewhere
+            if not rec.cancelled and self._tasks.get(uid) is rec:
+                rec.taking_back = False
+                rec.state = "queued"
+                rec.worker = None
+                self._route(rec, first=True)
+            return
+        w = self._workers.get(wid)
+        if w is None or w.held is None or w.held.uid != uid:
+            return  # its worker died: handled there
+        rec, w.held = w.held, None
+        self._holding.discard(w)
+        if not rec.cancelled:
+            rec.taking_back = False
+            rec.state = "queued"
+            rec.worker = None
+            self._route(rec, first=True)
+        if w.state == "busy" and w.task is None:
+            self._feed(w)  # it finished while the relay still held the task
+        elif w.state == "busy":
+            self._fill_held(w)
 
     def _on_unsent(self, msg) -> None:
         """Take back a task the relay could not put on its worker's inbox, and do what ``_send``
-        did with a failed put before the relay: wait for room, or replace the worker."""
+        did with a failed put before the relay: wait for room, or replace the worker.
+
+        The task the worker held next has not started either: the relay keeps a failed worker's.
+        It is taken back too, and queued right behind.
+        """
         _, wid, uid, kind, error_text, payload = msg
         w = self._workers.get(wid)
-        if w is None or w.state != "busy" or w.task is None or w.task.uid != uid:
-            return  # its worker was killed for a cancel or a timeout, or died: handled there
+        if w is None:
+            return  # its worker died: handled there
+        if w.held is not None and w.held.uid == uid and w.task is None:
+            # The relay could not start the task it held: as for a send that failed.
+            w.task, w.held = w.held, None
+            self._holding.discard(w)
+            if w.state == "paused":
+                w.state = "busy"
+        if w.state != "busy" or w.task is None or w.task.uid != uid:
+            return  # its worker was killed for a cancel or a timeout: handled there
+        behind = self._take_held(w)
         rec, w.task = w.task, None
         rec.worker = None
         rec.timer = None  # its timeout started with a send that did not happen
         rec.state = "queued"
         rec.payload = payload
+        if rec.cancelled:  # a held task cancelled as the relay tried to start it
+            if behind is not None:
+                self._route(behind, first=True)
+            self._feed(w)
+            return
         if kind == "full":
             if rec.put_deadline is None:
                 rec.put_deadline = time.monotonic() + _worker.PUT_PATIENCE
             if time.monotonic() >= rec.put_deadline:
                 # Free the worker first: the task's callback must find the backend settled.
+                if behind is not None:
+                    self._route(behind, first=True)
                 self._feed(w)
                 self._fail_unsent(rec, MemoryError(f"task {uid} could not be sent: {error_text}"))
                 return
-            self._pending[rec.key].appendleft(rec)
+            pending = self._pending[rec.key]
+            pending.appendleft(rec)
+            if behind is not None:
+                if behind.key == rec.key:
+                    pending.insert(1, behind)
+                else:
+                    self._pending[behind.key].appendleft(behind)
             w.state = "paused"
             self._add_retry(w)
             return
+        error: Exception
         if kind == "timeout":
-            error: Exception = TimeoutError(
+            error = TimeoutError(
                 f"sending to worker {w.wid} on {w.host} took over {_SEND_TIMEOUT} s"
             )
         else:
@@ -855,11 +970,27 @@ class DragonNativeExecutionBackend(BaseBackend):
         self.logger.warning(f"Worker {w.wid} on {w.host} cannot be sent tasks: {error}")
         w.state = "dead"
         self._ops.submit(self._retire_worker, w, None)
+        if behind is not None:  # first: rec goes to the head, in front of it
+            self._route(behind, first=True)
         if rec.put_failed_on is not None:
             self._fail_unsent(rec, error)
             return
         rec.put_failed_on = w.host
         self._route(rec, first=True)
+
+    def _take_held(self, w: _Worker) -> _Task | None:
+        """Take a worker's held task back from the relay; None if it has none, or was cancelled."""
+        rec, w.held = w.held, None
+        if rec is None:
+            return None
+        self._holding.discard(w)
+        self._outgoing.append(("drop", w.wid, rec.uid))
+        if rec.cancelled:
+            return None
+        rec.taking_back = False
+        rec.state = "queued"
+        rec.worker = None
+        return rec
 
     def _watch_timers(self) -> None:
         """Time out pool tasks at their deadline, and send paused workers their next task.
@@ -953,6 +1084,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                     w = self._workers_by_puid.pop(puid, None)
                 if w is not None and not self._stopping:
                     self._worker_died(w, f"exited with code {code}")
+            self._flush_sends()  # a dead worker's held task, given to another
 
     def _relay_lost(self, why: str) -> None:
         """Fail every pool task: none can be sent, or heard from, without the relay.
@@ -961,6 +1093,12 @@ class DragonNativeExecutionBackend(BaseBackend):
         came through the relay too. Executables and process groups still run.
         """
         error = RuntimeError(f"the Dragon native backend's relay process {why}")
+        # Queued tasks never reached a worker, and held ones had not as far as the client knows:
+        # they say so, and can be submitted again.
+        not_started = {
+            "queued": RuntimeError(f"{error}; the task had not started"),
+            "held": RuntimeError(f"{error}; the task had not been reported started"),
+        }
         with self._lock:
             if self._relay_error is not None:
                 return
@@ -968,39 +1106,61 @@ class DragonNativeExecutionBackend(BaseBackend):
             if not self._ready_event.is_set():  # the pool's READY messages come through it
                 self._start_error = f"its relay process {why} before the pool was ready"
                 self._ready_event.set()
-            lost = [rec for rec in self._tasks.values() if rec.kind == "pool"]
-            for rec in lost:
+            lost = []
+            for rec in [r for r in self._tasks.values() if r.kind == "pool"]:
+                lost.append((rec, not_started.get(rec.state, error)))
                 del self._tasks[rec.uid]
                 rec.state = "done"
                 if rec.worker is not None:
                     rec.worker.task = None
+                    rec.worker.held = None
+            self._holding.clear()
+            self._releasing.clear()
             for pending in self._pending.values():
                 pending.clear()
         self.logger.error(f"{error}: its pool tasks fail, and so will new ones")
         self._emit_all(
-            [(rec, "FAILED", {"exception": error, "stderr": str(error)}) for rec in lost]
+            [(rec, "FAILED", {"exception": exc, "stderr": str(exc)}) for rec, exc in lost]
         )
 
     # ------------------------------------------------------------------
     # Pool scheduling (call with _lock held)
     # ------------------------------------------------------------------
 
+    def _keys_for(self, key: tuple, avoid: str | None = None) -> list:
+        """The worker keys that can run a task of ``key``, best first.
+
+        A placed or GPU task's own; for an unplaced one, every host's CPU workers, the client's
+        host first and ``avoid`` last.
+        """
+        host, gpus = key
+        if gpus or host is not None:
+            return [key]
+        hosts = self._host_order
+        if avoid is not None:
+            hosts = [h for h in hosts if h != avoid] + [avoid]
+        return [(h, ()) for h in hosts]
+
     def _idle_pop(self, key: tuple, avoid: str | None = None) -> _Worker | None:
         """Take an idle worker for ``key``.
 
         For an unplaced task, hosts other than ``avoid`` come first.
         """
-        host, gpus = key
-        if gpus or host is not None:
-            idle = self._idle.get(key)
-            return idle.popleft() if idle else None
-        hosts = self._host_order
-        if avoid is not None:
-            hosts = [h for h in hosts if h != avoid] + [avoid]
-        for h in hosts:
-            idle = self._idle.get((h, ()))
+        for k in self._keys_for(key, avoid):
+            idle = self._idle.get(k)
             if idle:
                 return idle.popleft()
+        return None
+
+    def _open_pop(self, key: tuple, avoid: str | None = None) -> _Worker | None:
+        """Take a busy worker for ``key`` with room for a held task, as ``_idle_pop`` does."""
+        for k in self._keys_for(key, avoid):
+            listed = self._open.get(k)
+            while listed:
+                w = listed.popleft()
+                w.listed = False
+                if w.state == "busy" and w.task is not None and w.held is None:
+                    return w
         return None
 
     def _next_for(self, w: _Worker) -> _Task | None:
@@ -1012,7 +1172,13 @@ class DragonNativeExecutionBackend(BaseBackend):
         return None
 
     def _feed(self, w: _Worker) -> None:
-        """Give ``w`` its next task, or mark it idle."""
+        """Give a free ``w`` a task to run and the next to hold, or make it idle.
+
+        A worker the relay may still start a held task on waits for the relay to say. One that
+        goes idle asks for a task another worker holds, if it can run it (``_take_back``).
+        """
+        if w.held is not None:
+            return
         if self._stopping:
             w.state = "idle"
             return
@@ -1020,8 +1186,63 @@ class DragonNativeExecutionBackend(BaseBackend):
         if rec is None:
             w.state = "idle"
             self._idle[w.key].append(w)
+            self._take_back(w)
             return
         self._send(w, rec)
+        self._fill_held(w)
+
+    def _fill_held(self, w: _Worker) -> None:
+        """Give busy ``w`` the next waiting task to hold, or list it as having room for one."""
+        rec = self._next_for(w)
+        if rec is not None:
+            self._hold(w, rec)
+        elif not w.listed:
+            w.listed = True
+            self._open[w.key].append(w)
+
+    def _hold(self, w: _Worker, rec: _Task) -> None:
+        """Give ``rec`` to busy ``w`` as its next task: the relay holds it until ``w`` is done.
+
+        So ``w`` starts it without waiting for the client. ``rec`` has not started: its timeout
+        starts with the relay's ``STARTED``, a cancel drops it at the relay, and it keeps its
+        payload in case it has to go to another worker.
+        """
+        self._outgoing.append(("next", w.wid, rec.uid, rec.payload))
+        w.held = rec
+        rec.worker = w
+        rec.state = "held"
+        self._holding.add(w)
+
+    def _take_back(self, w: _Worker) -> None:
+        """Ask the relay back for a task another worker holds, if idle ``w`` can run it.
+
+        A held task waits for its worker's current one, which may run long: an idle worker runs it
+        now. If the relay starts it first, it runs where it was.
+        """
+        for holder in self._holding:
+            rec = holder.held
+            if rec is None or rec.cancelled or rec.taking_back:
+                continue
+            if rec.key == w.key or (not w.gpus and rec.key == (None, ())):
+                rec.taking_back = True
+                self._outgoing.append(("drop", holder.wid, rec.uid))
+                return
+
+    def _release_held(self, w: _Worker) -> None:
+        """Ask the relay back for the task a worker that goes away holds.
+
+        The worker may have finished its last task just before, and the relay started the held one
+        on it: the relay alone knows. On ``DROPPED`` the task goes to another worker; on
+        ``STARTED`` it fails with its worker, as a task that started must not run twice. The
+        relay's ``forget`` for the worker drops it too, if this ``drop`` comes later.
+        """
+        rec, w.held = w.held, None
+        if rec is None:
+            return
+        self._holding.discard(w)
+        self._outgoing.append(("drop", w.wid, rec.uid))
+        if not rec.cancelled:
+            self._releasing[rec.uid] = rec
 
     def _send(self, w: _Worker, rec: _Task) -> None:
         """Give ``rec`` to ``w``: the relay puts it on ``w``'s inbox with the next batch.
@@ -1089,11 +1310,12 @@ class DragonNativeExecutionBackend(BaseBackend):
         return any(self._live_by_key[(h, ())] > 0 for h in self._host_order)
 
     def _route(self, rec: _Task, first: bool = False) -> None:
-        """Send ``rec`` to an idle worker that can run it, or queue it, at the head when ``first``.
+        """Send ``rec`` to an idle worker that can run it, or give it to a busy one to hold next, or
+        queue it, at the head when ``first``.
 
-        Idle workers do not look at the queue, so a task waits there only while none of them can
-        take it. A task whose inbox turned out broken comes back here, and goes to another host when
-        it is not placed.
+        Idle workers, and busy ones with room to hold a task, do not look at the queue, so a task
+        waits there only while none of them can take it. A task whose inbox turned out broken comes
+        back here, and goes to another host when it is not placed.
         """
         if self._relay_error is not None:
             self._fail_unsent(rec, RuntimeError(self._relay_error))
@@ -1101,6 +1323,11 @@ class DragonNativeExecutionBackend(BaseBackend):
         w = self._idle_pop(rec.key, rec.put_failed_on)
         if w is not None:
             self._send(w, rec)
+            self._fill_held(w)
+            return
+        w = self._open_pop(rec.key, rec.put_failed_on)
+        if w is not None:
+            self._hold(w, rec)
             return
         host, gpus = rec.key
         if not gpus and not self._can_serve(rec.key):
@@ -1139,6 +1366,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                     f"Dragon worker {w.wid} on {w.host} {why} while running {rec.uid}"
                 )
                 failed.append((rec, error))
+            self._release_held(w)  # unless it had started, it runs on another worker
             if was == "starting":
                 if w.initial and self._initial_left > 0:
                     self._start_error = f"worker {w.wid} on {w.host} {why} before it was ready"
@@ -1215,6 +1443,8 @@ class DragonNativeExecutionBackend(BaseBackend):
             w, rec.worker = rec.worker, None
             w.state = "dead"
             w.task = None
+            self._release_held(w)
+        self._flush_sends()
         error = TimeoutError(
             f"task {rec.uid} exceeded its timeout of {rec.timeout} s; its worker was killed"
         )
@@ -2005,14 +2235,21 @@ class DragonNativeExecutionBackend(BaseBackend):
                 pending = self._pending[rec.key] if rec.kind == "pool" else self._proc_queue
                 with contextlib.suppress(ValueError):
                     pending.remove(rec)
+            elif rec.state == "held":
+                # The relay discards it, or has started it: DROPPED, or STARTED and a kill.
+                self._outgoing.append(("drop", rec.worker.wid, rec.uid))
             elif rec.kind == "pool":
                 worker, rec.worker = rec.worker, None
                 worker.state = "dead"
                 worker.task = None
+                self._release_held(worker)
+            held = rec.state == "held"
             rec.state = "done"
             started = bool(rec.puids)
         for desc in (rec.desc, *rec.repeats):
             self._callback_func(desc, "CANCELED")
+        if held or worker is not None:
+            self._flush_sends()
         if worker is not None:
             self._ops.submit(self._retire_worker, worker, rec.token)
         elif rec.kind != "pool" and started:
@@ -2058,10 +2295,14 @@ class DragonNativeExecutionBackend(BaseBackend):
             busy = []
             for rec in records:
                 rec.cancelled = True
-                if rec.kind == "pool" and rec.worker is not None:
+                if rec.kind == "pool" and rec.worker is not None and rec.state == "running":
                     busy.append(rec.worker)
                     rec.worker.state = "dead"
                     rec.worker.task = None
+            for w in self._holding:
+                w.held = None
+            self._holding.clear()
+            self._releasing.clear()
             workers = list(self._workers.values())
         if self._loop is not None:
             self._emit_all([(rec, "CANCELED", {}) for rec in records])

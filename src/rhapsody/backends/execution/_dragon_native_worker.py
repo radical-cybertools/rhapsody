@@ -38,8 +38,11 @@ TOKEN_ENV = "RHAPSODY_DRAGON_NATIVE_TASK"  # noqa: S105 - a variable name, not a
 READY = "ready"
 DONE = "done"
 RESULT = "result"
-# From the relay: a task it could not put on its worker's inbox.
+# From the relay: a task it could not put on its worker's inbox; a worker's held task it put on
+# the inbox, as the worker finished its last; and one it discarded, as the client asked.
 UNSENT = "unsent"
+STARTED = "started"
+DROPPED = "dropped"
 
 # Seconds a result waits for room in Dragon's memory pool before its task fails.
 PUT_PATIENCE = 60.0
@@ -134,13 +137,35 @@ def _open_append(path):
     return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
 
 
+class _CLibrary:
+    """This process's C library, loaded once: a load costs some 30 us.
+
+    It pickles empty. This module travels by value with every worker and process the backend starts,
+    and a loaded library, which holds pointers, cannot be pickled.
+    """
+
+    def __init__(self):
+        self.lib = None
+
+    def __reduce__(self):
+        return (_CLibrary, ())
+
+    def get(self):
+        if self.lib is None:
+            self.lib = ctypes.CDLL(None)
+        return self.lib
+
+
+_C_LIBRARY = _CLibrary()
+
+
 def flush_all():
     """Flush Python's ``sys.stdout`` and ``sys.stderr``, and every stdio stream of C code."""
     for stream in (sys.stdout, sys.stderr):
         with contextlib.suppress(Exception):
             stream.flush()
     with contextlib.suppress(Exception):
-        ctypes.CDLL(None).fflush(None)
+        _C_LIBRARY.get().fflush(None)
 
 
 @contextlib.contextmanager
@@ -261,59 +286,115 @@ def relay_main(control, results, inbound, idle_interval, send_timeout, linger):
     the calls for each task, and the client sends and takes them in batches:
 
     - ``control`` brings lists of operations: ``("inbox", wid, queue)`` names a worker's inbox,
-      ``("forget", wid)`` drops it, ``("send", wid, uid, payload)`` puts a task on it, and
-      ``("ack",)`` says the client has handled the last batch it took. ``None`` ends this thread.
-      A send that fails comes back as ``(UNSENT, wid, uid, kind, error, payload)`` through
-      ``results``, so the client reads it in order with that worker's messages; ``kind`` is
-      ``"full"`` (Dragon's memory pool), ``"timeout"`` or ``"broken"``.
+      ``("forget", wid)`` drops it with the task held for it, and ``("ack",)`` says the client has
+      handled the last batch it took. ``("send", wid, uid, payload)`` puts a task on a free
+      worker's inbox. ``("next", wid, uid, payload)`` gives a busy worker its next task: the relay
+      holds it, and puts it on the inbox as soon as the worker's ``DONE`` passes through, so
+      between two tasks a worker waits for neither the client nor the control queue.
+      ``("drop", wid, uid)`` discards a held task. ``None`` ends this thread.
+    - What became of a task comes back in order with its worker's messages: ``(STARTED, wid, uid,
+      wall, monotonic)`` when the relay starts a next task, with when, by the clocks of the
+      client's node; ``(DROPPED, wid, uid)`` when it discarded a held one, for a ``drop`` or a
+      ``forget``; and ``(UNSENT, wid, uid, kind, error, payload)`` when a put failed, ``kind``
+      being ``"full"`` (Dragon's memory pool), ``"timeout"`` or ``"broken"``. A next task gets one
+      ``STARTED`` or one ``DROPPED``, and a ``STARTED`` always comes before the task's own
+      ``DONE``: a task held when its worker's ``DONE`` came is reported right after that ``DONE``,
+      in the same batch, and a next task for a worker already free is reported before the relay
+      puts it, so an ``UNSENT`` may follow its ``STARTED``.
     - ``results`` brings what workers and function processes send, and the relay forwards it to
       ``inbound`` as ``(messages, drained_at)``: the messages it had, and the last time it found
       ``results`` empty, or None if it did not. It forwards a batch only once the client has
       acknowledged the last one, so a batch holds everything that came while the client was busy.
       After an acknowledgement that came with tasks to send, it waits a tenth of the time the
       client took over the last batch, at most ``linger`` seconds, so that short tasks come back in
-      the next batch, not in one each: the slower the client, the more each batch is worth. An idle client gets an empty batch every ``idle_interval``
-      seconds, which still moves ``drained_at`` on. A ``None`` on ``results`` is forwarded as
-      ``None`` and ends the relay.
+      the next batch, not in one each: the slower the client, the more each batch is worth. An
+      idle client gets an empty batch every ``idle_interval`` seconds, which still moves
+      ``drained_at`` on. A ``None`` on ``results`` is forwarded as ``None`` and ends the relay.
     """
     ready = threading.Event()  # the client has handled the last batch it took
     ready.set()
     forwarded_at = [0.0]  # when the relay last forwarded a batch
     hold_until = [0.0]  # until when it waits for the tasks the client just sent
+    # Per worker, shared by both threads: its inbox; "free", "running" a task the relay put there,
+    # or "failed" when the last put failed; and the next task the relay holds for it, as (uid,
+    # payload). A failed worker's next task stays held: the client takes it back.
+    lock = threading.Lock()
+    inboxes: dict = {}
+    states: dict = {}
+    held: dict = {}
 
-    def report(wid, uid, kind, error, payload):
-        msg = (UNSENT, wid, uid, kind, f"{type(error).__name__}: {error}", payload)
-        put_waiting(results, cloudpickle.dumps(msg))
+    def put(inbox, wid, uid, payload):
+        """Put a task on its worker's inbox: None, or the pickled UNSENT when the put fails."""
+        try:
+            inbox.put(payload, timeout=send_timeout)
+            return None
+        except PoolFull as exc:
+            kind, error = "full", exc
+        except queue.Full:
+            kind, error = "timeout", TimeoutError(f"the put took over {send_timeout} s")
+        except Exception as exc:  # noqa: BLE001 - the client replaces the worker
+            kind, error = "broken", exc
+        with lock:
+            if wid in states:
+                states[wid] = "failed"
+        return cloudpickle.dumps(
+            (UNSENT, wid, uid, kind, f"{type(error).__name__}: {error}", payload)
+        )
+
+    def started(wid, uid):
+        return cloudpickle.dumps((STARTED, wid, uid, time.time(), time.monotonic()))
 
     def run_control():
-        inboxes = {}
         while True:
             raw = control.get()
             if raw is None:
                 return
             sent = False
             for op in cloudpickle.loads(raw):
-                if op[0] == "ack":
+                kind = op[0]
+                if kind == "ack":
                     if sent:
                         now = time.monotonic()
                         hold_until[0] = now + min(linger, (now - forwarded_at[0]) / 10)
                     ready.set()
-                elif op[0] == "inbox":
-                    inboxes[op[1]] = op[2]
-                elif op[0] == "forget":
-                    inboxes.pop(op[1], None)
-                else:
+                elif kind == "inbox":
+                    with lock:
+                        inboxes[op[1]] = op[2]
+                        states[op[1]] = "free"
+                elif kind == "forget":
+                    with lock:
+                        inboxes.pop(op[1], None)
+                        states.pop(op[1], None)
+                        nxt = held.pop(op[1], None)
+                    if nxt is not None:
+                        put_waiting(results, cloudpickle.dumps((DROPPED, op[1], nxt[0])))
+                elif kind == "drop":
+                    _, wid, uid = op
+                    with lock:
+                        dropped = wid in held and held[wid][0] == uid
+                        if dropped:
+                            del held[wid]
+                    if dropped:  # otherwise it has started, and STARTED says so
+                        put_waiting(results, cloudpickle.dumps((DROPPED, wid, uid)))
+                else:  # "send" or "next"
                     _, wid, uid, payload = op
                     sent = True
-                    try:
-                        inboxes[wid].put(payload, timeout=send_timeout)
-                    except PoolFull as exc:
-                        report(wid, uid, "full", exc, payload)
-                    except queue.Full:
-                        error = TimeoutError(f"the put took over {send_timeout} s")
-                        report(wid, uid, "timeout", error, payload)
-                    except Exception as exc:  # noqa: BLE001 - the client replaces the worker
-                        report(wid, uid, "broken", exc, payload)
+                    with lock:
+                        inbox = inboxes.get(wid)
+                        hold = kind == "next" and states.get(wid) != "free"
+                        if inbox is not None:
+                            if hold:
+                                held[wid] = (uid, payload)
+                            else:
+                                states[wid] = "running"
+                    if inbox is None or hold:
+                        continue  # a forgotten worker's: the client has dealt with it
+                    if kind == "next":  # its worker had finished: it starts now
+                        # Said first: a short task's DONE would otherwise come before it.
+                        put_waiting(results, started(wid, uid))
+                    unsent = put(inbox, wid, uid, payload)
+                    if unsent is not None:
+                        put_waiting(results, unsent)
 
     def run_control_or_exit():
         try:
@@ -321,6 +402,31 @@ def relay_main(control, results, inbound, idle_interval, send_timeout, linger):
         except BaseException:  # noqa: BLE001 - the client sees the relay die, not tasks vanish
             traceback.print_exc()
             os._exit(70)
+
+    def take(item):
+        """The messages to forward for one result: after a worker's DONE, how its held task went.
+
+        The relay must not put on ``results``, which it reads: what it has to say goes in the batch.
+        """
+        try:
+            msg = cloudpickle.loads(item)
+        except Exception:  # noqa: BLE001 - the client reports a message it cannot read
+            return [item]
+        if not isinstance(msg, tuple) or len(msg) < 2 or msg[0] != DONE:
+            return [item]
+        wid = msg[1]
+        with lock:
+            if wid not in states:
+                return [item]  # forgotten
+            states[wid] = "free"
+            nxt = held.pop(wid, None)
+            inbox = inboxes.get(wid)
+            if nxt is None or inbox is None:
+                return [item]
+            states[wid] = "running"
+        uid, payload = nxt
+        unsent = put(inbox, wid, uid, payload)
+        return [item, started(wid, uid) if unsent is None else unsent]
 
     thread = threading.Thread(target=run_control_or_exit, name="relay_control", daemon=True)
     thread.start()
@@ -339,8 +445,9 @@ def relay_main(control, results, inbound, idle_interval, send_timeout, linger):
                 continue
             if item is None:
                 break
-            batch.append(item)
-            size += len(item)
+            for raw in take(item):
+                batch.append(raw)
+                size += len(raw)
         stop = False
         while len(batch) < RELAY_BATCH and size < RELAY_BYTES:
             now = time.monotonic()
@@ -352,8 +459,9 @@ def relay_main(control, results, inbound, idle_interval, send_timeout, linger):
             if item is None:
                 stop = True
                 break
-            batch.append(item)
-            size += len(item)
+            for raw in take(item):
+                batch.append(raw)
+                size += len(raw)
         if stop:
             break
         if len(batch) < RELAY_BATCH and size < RELAY_BYTES:
