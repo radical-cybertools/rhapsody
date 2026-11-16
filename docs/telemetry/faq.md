@@ -122,7 +122,7 @@ Telemetry is designed to be low-overhead:
 
 At default settings (5 s poll, checkpoint on stop), telemetry overhead is negligible. For a 6-hour run with 10 nodes, expect a JSONL file of roughly 10–50 MB depending on task throughput.
 
-The per-event cost of the dispatch path did not change when instrumentations were introduced: in an interleaved A/B run of the benchmark (`tests/performance/session_floor.py`, 100K tasks, 400K events, one machine, medians of 5 runs) the cost was about 24.7 µs per event both before and after, within 1% (run the script to reproduce it on your machine). The inference batch events add one row per request: about 90 bytes in the JSONL file and about 260 bytes in the in-memory event log (measured on 1024-request batches); the per-task attributes add about 150 bytes to each task span line of the JSONL file.
+The per-event cost of the dispatch path did not change when instrumentations were introduced: in an interleaved A/B run of the benchmark (`tests/performance/session_floor.py`, 100K tasks, 400K events, one machine, medians of 5 runs) the cost was about 24.7 µs per event both before and after, within 1% (run the script to reproduce it on your machine). The inference batch events add one row per request: about 130 bytes in the JSONL file for `BatchEnded` plus about 35 bytes for the task ids in `BatchStarted` (a real run, 1004 requests in batches of 32) and about 260 bytes in the in-memory event log (a synthetic test on 1024-request batches); the per-task attributes add about 150 bytes to each task span line of the JSONL file.
 
 ---
 

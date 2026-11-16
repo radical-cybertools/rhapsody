@@ -37,12 +37,27 @@ class FakeQueue:
 
 
 class FakePipeline:
-    """Answers the first ``answer`` prompts of every query, in order, like Inference.query()."""
+    """Answers the first ``answer`` prompts of every query, in order, like Inference.query().
 
-    def __init__(self, answer=None, respond=None, fail=False):
+    ``delay`` (seconds, or a function of the prompt) puts each response on the queue that long
+    after the query, on the running loop, so batches take time and answers can arrive late.
+    """
+
+    def __init__(self, answer=None, respond=None, fail=False, delay=None):
         self.answer = answer  # None = answer everything
         self.respond = respond  # prompt -> response, to shape what Dragon sends back
         self.fail = fail
+        self.delay = delay  # None, a number, or prompt -> seconds
+
+    def _item(self, prompt, count):
+        if self.respond is not None:
+            return self.respond(prompt)
+        return {
+            "assistant": f"re: {prompt}",
+            "model_inference_latency": 0.1,
+            "hostname": "node7",
+            "batch_size": count,
+        }
 
     def query(self, args):
         if self.fail:
@@ -50,17 +65,12 @@ class FakePipeline:
         prompts, response_queue = args
         count = len(prompts) if self.answer is None else min(self.answer, len(prompts))
         for prompt in prompts[:count]:
-            if self.respond is not None:
-                response_queue.put(self.respond(prompt))
+            item = self._item(prompt, len(prompts))
+            wait = self.delay(prompt) if callable(self.delay) else self.delay
+            if wait:
+                asyncio.get_running_loop().call_later(wait, response_queue.put, item)
             else:
-                response_queue.put(
-                    {
-                        "assistant": f"re: {prompt}",
-                        "model_inference_latency": 0.1,
-                        "hostname": "node7",
-                        "batch_size": len(prompts),
-                    }
-                )
+                response_queue.put(item)
 
 
 @contextlib.asynccontextmanager

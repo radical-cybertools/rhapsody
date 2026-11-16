@@ -87,7 +87,7 @@ def _attach(manager, backend, name):
 
 
 async def _drain(manager):
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
 
 
 def _scopes(manager):

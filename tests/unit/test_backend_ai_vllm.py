@@ -319,6 +319,7 @@ async def test_one_pair_of_events_per_batch_whatever_its_size(monkeypatch):
     assert started["batch_trigger"] == ended["batch_trigger"] == "deadline"
     assert started["model"] == ended["model"] == "test-model"
     assert ended["batch_duration_s"] >= 0
+    assert (ended["batch_prompts"], ended["batch_requests"]) == (6, 3)
     assert ended["timed_out_prompts"] == 0
     assert ended["dragon_model_duration_s"] == 0.1
     assert ended["dragon_worker_host"] == "node7"
@@ -541,3 +542,73 @@ async def test_a_failed_batch_leaves_a_span_that_ends_at_stop(monkeypatch, tmp_p
     (batch,) = [s for s in telemetry.read_traces() if s.name == "chat test-model"]
     assert batch.status.status_code.name == "ERROR"
     assert batch.status.description == "batch did not finish"
+
+
+@pytest.mark.asyncio
+async def test_the_batch_duration_is_the_time_the_model_took(monkeypatch):
+    pipeline = _FakePipeline(delay=0.12)  # every answer arrives 120 ms after the query
+    async with _running_backend(monkeypatch, pipeline=pipeline, timeout_s=5) as (backend, _s):
+        log = _record(backend)
+        await backend.submit_tasks([{"uid": "t1", "prompt": "a"}])
+        await _wait_callbacks(log, 1)
+
+    ended = _events(log, ENDED)[0][2]
+    assert 0.12 <= ended["batch_duration_s"] < 1.0  # not 0, not scaled to milliseconds
+
+
+@pytest.mark.asyncio
+async def test_the_trigger_counts_requests_not_prompts(monkeypatch):
+    # One request holding two prompts in a batch limited to two requests: not a full batch.
+    async with _running_backend(monkeypatch, max_batch_size=2) as (backend, _states):
+        log = _record(backend)
+        await backend.submit_tasks([{"uid": "t1", "prompt": ["p1", "p2"]}])
+        await _wait_callbacks(log, 1)
+
+    started = _events(log, STARTED)[0][2]
+    assert (started["batch_requests"], started["batch_prompts"]) == (1, 2)
+    assert started["batch_trigger"] == "deadline"
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_at_the_first_prompt_reports_every_prompt_as_timed_out(monkeypatch):
+    async with _running_backend(monkeypatch, answer=0) as (backend, _states):
+        log = _record(backend)
+        await backend.submit_tasks([{"uid": "t1", "prompt": ["a", "b", "c"]}])
+        await _wait_callbacks(log, 1)
+
+    ended = _events(log, ENDED)[0][2]
+    assert ended["timed_out_prompts"] == 3
+    assert [r["timed_out_prompts"] for r in ended["requests"]] == [3]
+
+
+@pytest.mark.xfail(
+    reason="B2: late responses of a timed-out batch stay in the shared queue and the next batch "
+    "reads them as its own (reported, not fixed). Timing based, so not strict.",
+    strict=False,
+)
+@pytest.mark.asyncio
+async def test_a_late_response_must_not_be_taken_for_the_next_batchs_answer(monkeypatch):
+    delays = {"a": 0.15, "b": 0.08}  # a answers after its batch timed out, b after that
+    pipeline = _FakePipeline(delay=lambda prompt: delays[prompt])
+    async with _running_backend(monkeypatch, pipeline=pipeline, timeout_s=0.1) as (backend, states):
+        first = {"uid": "A", "prompt": "a"}
+        await backend.submit_tasks([first])
+        await _wait_terminal(states, 1)
+        second = {"uid": "B", "prompt": "b"}
+        await backend.submit_tasks([second])
+        await _wait_terminal(states, 2)
+        await asyncio.sleep(0.2)
+    assert second["response"] == ["re: b"]
+
+
+@pytest.mark.xfail(
+    reason="B13: a request without prompts is never answered and its task never finishes "
+    "(reported, not fixed)",
+    strict=False,
+)
+@pytest.mark.asyncio
+async def test_a_task_without_prompts_finishes(monkeypatch):
+    async with _running_backend(monkeypatch) as (backend, states):
+        await backend.submit_tasks([{"uid": "t1", "prompt": []}])
+        await asyncio.sleep(0.15)
+    assert [s for s in states if s[1] in ("DONE", "FAILED")], "the task was never reported"
