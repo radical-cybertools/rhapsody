@@ -13,7 +13,7 @@ All telemetry originates as **frozen Python dataclasses** (`BaseEvent` subclasse
 - **Identified** — every event carries a unique `event_id` (UUID4 hex), a `session_id`, and a `backend` name.
 - **OTel-enriched** in the JSONL file — the serializer adds `trace_id` and `span_id` fields that link the event to the correct OTel span.
 
-Backends can emit events too, through their emitter (see [Backends, emitters and instrumentations](#backends-emitters-and-instrumentations)): their `event_type` is a namespaced name such as `rhapsody.inference.BatchEnded`, not a class name.
+Backends can emit events too, through their emitter (see [Backends, emitters and instrumentations](#backends-emitters-and-instrumentations)): their `event_type` is a namespaced name such as `rhapsody.inference.BatchDone`, not a class name.
 
 ---
 
@@ -22,7 +22,7 @@ Backends can emit events too, through their emitter (see [Backends, emitters and
 | Field | Type | Description |
 |---|---|---|
 | `event_id` | `str` | UUID4 hex, unique per event |
-| `event_type` | `str` | Discriminator string (the class name; for events emitted by a backend, its namespaced name, e.g. `rhapsody.inference.BatchEnded`) |
+| `event_type` | `str` | Discriminator string (the class name; for events emitted by a backend, its namespaced name, e.g. `rhapsody.inference.BatchDone`) |
 | `event_time` | `float` | Wall-clock time the event occurred (`time.time()`) |
 | `emit_time` | `float` | Wall-clock time of queue insertion (`time.time()`) |
 | `session_id` | `str` | Owning session identifier |
@@ -413,7 +413,7 @@ When a `DragonVllmInferenceBackend` is part of a session or workflow engine with
 Nothing needs to be enabled besides telemetry itself (`await session.start_telemetry()` or `await flow.start_telemetry()`) and `pip install 'rhapsody-py[telemetry]'` (`opentelemetry-sdk>=1.30`, the first release with histogram bucket advice).
 
 ```
-DragonVllmInferenceBackend ──emit──▶ rhapsody.inference.BatchStarted / BatchEnded   (plain data)
+DragonVllmInferenceBackend ──emit──▶ rhapsody.inference.BatchStarted / BatchDone / BatchFailed   (plain data)
                                           │ routed by backend name
                                           ▼
                        InferenceInstrumentation (OpenTelemetry API only)
@@ -424,7 +424,7 @@ DragonVllmInferenceBackend ──emit──▶ rhapsody.inference.BatchStarted /
 
 ### Events
 
-The backend reports two events per batch through its emitter. They are ordinary RHAPSODY events: they reach `subscribe()` callbacks and the JSONL file like any other. Their own `task_id` is `None`, so their `trace_id`/`span_id` in the JSONL file resolve to the session span.
+The backend reports a start event and an end event per batch through its emitter. They are ordinary RHAPSODY events: they reach `subscribe()` callbacks and the JSONL file like any other. Their own `task_id` is `None`, so their `trace_id`/`span_id` in the JSONL file resolve to the session span.
 
 `rhapsody.inference.BatchStarted` is emitted right before the batch is sent to Dragon (`event_time` is the dispatch time):
 
@@ -437,18 +437,24 @@ The backend reports two events per batch through its emitter. They are ordinary 
 | `batch_trigger` | `str` | `"size"` when the batch reached `max_batch_size` requests, else `"deadline"` |
 | `task_ids` | `list[str]` | UIDs of the AITasks in the batch |
 
-`rhapsody.inference.BatchEnded` is emitted when the responses are in (`event_time` is the real end), before the tasks are reported DONE or FAILED:
+A batch ends with one of two events, emitted when its responses are in (`event_time` is the real end), before the tasks are reported DONE or FAILED. At most one is emitted per started batch: a batch cancelled while in flight (for example when the backend shuts down) gets neither.
+
+- `rhapsody.inference.BatchDone`: every prompt of the batch was answered.
+- `rhapsody.inference.BatchFailed`: some prompt got no response within the batch deadline, or Dragon answered a prompt with an exception object, or the batch processor itself failed (for example `query()` raised). It carries the same fields as `BatchDone` plus `error_type`.
+
+Both carry:
 
 | Field | Type | Description |
 |---|---|---|
 | `batch_id`, `model`, `batch_trigger`, `batch_prompts`, `batch_requests` | | As above, repeated so the event stands alone |
-| `batch_duration_s` | `float` | Time from sending the batch until its last response |
+| `batch_duration_s` | `float` | Time from sending the batch until its last response (for a batch that failed in the batch processor: until the failure) |
 | `timed_out_prompts` | `int` | Prompts that got no response within the batch deadline |
+| `error_type` | `str` (only on `BatchFailed`) | Class name of the first failure in prompt order, for example `"TimeoutError"` or the class of an exception Dragon answered with; for a failure of the batch processor, the class of that exception. Never the message, which can contain prompt text |
 | `dragon_model_duration_s` | `float` (optional) | Dragon's model inference time of the batch, from the first response (Dragon rounds it to 0.01 s) |
 | `dragon_worker_host` | `str` (optional) | Host name of the Dragon worker, from the first response |
 | `requests` | `list[dict]` | One row per request: `task_id` (`None` for `generate()` and HTTP requests), `prompt_count`, `queue_duration_s`, `timed_out_prompts` |
 
-A request's **source** is derived: `task` when its row has a `task_id`, `api` otherwise. `BatchEnded` carries one row per request, so it is part of the JSONL file and of the in-memory event log. On a real run (1004 requests in batches of 32, task ids like `task.000001`) the JSONL file held about 130 bytes per request for `BatchEnded` and about 35 bytes per request for the task-id list of `BatchStarted`; the in-memory event log held about 260 bytes per request (measured in a synthetic test on 1024-request batches).
+A request's **source** is derived: `task` when its row has a `task_id`, `api` otherwise. `BatchDone` and `BatchFailed` carry one row per request, so they are part of the JSONL file and of the in-memory event log. On a real run (1004 requests in batches of 32, task ids like `task.000001`) the JSONL file held about 130 bytes per request for the end event (measured when it was still one event named `BatchEnded`) and about 35 bytes per request for the task-id list of `BatchStarted`; the in-memory event log held about 260 bytes per request (measured in a synthetic test on 1024-request batches).
 
 ### Metrics
 
@@ -496,7 +502,7 @@ Events, spans and metrics carry numbers, ids, the model name (which can be a fil
 - A live queue depth and running totals between batches (limitation L16): only what the batch events carry is recorded.
 - Token counts: Dragon computes them but does not forward them.
 - Trace context into Dragon and vLLM (limitation L2): vLLM's own spans, if Dragon enables them, are separate traces.
-- Batches still in flight when the session closes: `session.close()` stops telemetry before it shuts the backends down, so such a batch emits no `BatchEnded`, its metrics are lost and its span ends without batch data.
+- Batches still in flight when the session closes: `session.close()` stops telemetry before it shuts the backends down, so such a batch emits no `BatchDone` or `BatchFailed`, its metrics are lost and its span ends without batch data.
 
 ---
 
@@ -552,12 +558,13 @@ chat span   (kind CLIENT)
 │     rhapsody.inference.batch.trigger    "size" | "deadline"
 │     rhapsody.inference.dragon.model.duration   (when Dragon reports it)
 │     rhapsody.inference.dragon.worker.host      (when Dragon reports it)
-│     error.type = "TimeoutError", rhapsody.inference.timed_out_prompts   (when prompts timed out)
-├── status:  ERROR when prompts timed out, or "batch did not finish" when the batch never ended
+│     error.type = the error_type of BatchFailed        (when the batch failed)
+│     rhapsody.inference.timed_out_prompts              (when prompts timed out)
+├── status:  ERROR "N prompts timed out" or "batch failed" for a BatchFailed, or "batch did not finish" when the batch never ended
 └── time:    the real dispatch time → the real time of the last response
 ```
 
-The batch span is not parented to a task, because a batch can serve tasks of several workflows; the span enrichers (such as AsyncFlow's `workflow_id`) are not applied to it. When the batch ends, each AITask span in it gets these attributes: `gen_ai.request.model`, `rhapsody.inference.batch.id`, `rhapsody.inference.prompt_count`, `rhapsody.inference.request.queue.duration` and, if its prompts timed out, `error.type` and `rhapsody.inference.timed_out_prompts`.
+The batch span is not parented to a task, because a batch can serve tasks of several workflows; the span enrichers (such as AsyncFlow's `workflow_id`) are not applied to it. When the batch ends, each AITask span in it gets these attributes: `gen_ai.request.model`, `rhapsody.inference.batch.id`, `rhapsody.inference.prompt_count`, `rhapsody.inference.request.queue.duration` and, if its prompts timed out, `error.type` (`TimeoutError`) and `rhapsody.inference.timed_out_prompts`. A prompt that Dragon answered with an exception object fails its task and the batch (`BatchFailed`), but it is not counted separately in the telemetry: only `error_type` names it.
 
 ### Trace–span correlation in the JSONL file
 
@@ -742,7 +749,7 @@ The file is written line-buffered, so it is readable during a live run.
 
 ## Known limitations
 
-Each limitation has a `TELEMETRY-LIMITATION(<id>)` comment at the place in the code where it applies: in the RHAPSODY source, except L9, which is in the radical.asyncflow source. References such as B2, T3, T9 or A1 are items of the maintainers' issue report for this work, not GitHub issues, and Tier 1, 2 and 3 are the steps of the planned telemetry refactor: Tier 1 injects the OpenTelemetry providers so that RHAPSODY-owned code can use the API directly, Tier 2 moves the resource metrics and the JSONL file onto OpenTelemetry mechanisms, Tier 3 removes the event bus. The numbering has gaps (L1, L6, L10, L11 and L13 are not used): those limitations were dropped or fixed while the work was in progress, and ids are not reused.
+Each limitation has a `TELEMETRY-LIMITATION(<id>)` comment at the place in the code where it applies: in the RHAPSODY source, except L9, which is in the radical.asyncflow source. References such as B2, T3, T9 or A1 are items of the maintainers' issue report for this work, not GitHub issues, and Tier 1, 2 and 3 are the steps of the planned telemetry refactor: Tier 1 injects the OpenTelemetry providers so that RHAPSODY-owned code can use the API directly, Tier 2 moves the resource metrics and the JSONL file onto OpenTelemetry mechanisms, Tier 3 removes the event bus. The numbering has gaps (L1, L6, L10, L11, L12 and L13 are not used): those limitations were dropped or fixed while the work was in progress, and ids are not reused.
 
 | Id | Limitation | Planned |
 |---|---|---|
@@ -753,7 +760,6 @@ Each limitation has a `TELEMETRY-LIMITATION(<id>)` comment at the place in the c
 | L7 | The batch span links to at most 128 of the batch's task spans (the SDK keeps 128 links per span by default, `OTEL_SPAN_LINK_COUNT_LIMIT`); the real request count is on the span as `rhapsody.inference.batch.requests`. | Configuration |
 | L8 | The inference attributes follow the OpenTelemetry GenAI semantic conventions, which are still in development and may change; `gen_ai.provider.name` is not set (vLLM has no registered value). | Follow the conventions when they stabilize |
 | L9 | AsyncFlow always emits `TaskFailed` with `error_type="unknown"`, even when the task carries an exception (issue A1; AsyncFlow-owned). RHAPSODY's `Session` uses the exception's type. An inference timeout is still marked by `error.type` on the task span. | AsyncFlow: use the exception's type |
-| L12 | A batch that fails on the batch processor's exception path emits no `BatchEnded` (issue B11): its batch span ends at the next batch or at the end of the session, and the queue times of its tasks are missing. | B11 fix |
 | L14 | `gen_ai.request.model` is the configured model name and may be a local filesystem path. | Documented only |
 | L15 | Instrumentations are keyed by backend name: two backends of one session with the same name share one slot, and the later one is ignored. `Session` and `WorkflowEngine` key their backends by name, so a same-name backend replaces the earlier one there; instrumentations follow the same rule. | None needed |
 | L16 | Only what the batch events carry is recorded: there is no live queue depth and no cumulative totals between batches (the vLLM batcher is one sequential loop, one batch in flight at a time). | Tier 1 (the emitter handle gains `.meter`) |

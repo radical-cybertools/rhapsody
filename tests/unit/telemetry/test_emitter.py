@@ -90,12 +90,12 @@ async def test_emit_builds_an_event_with_session_backend_and_payload():
     manager.subscribe(received.append)
     attrs = {"batch_id": 3, "requests": [{"n": 1}]}
     BackendEmitter(manager, "vllm").emit(
-        "rhapsody.inference.BatchEnded", attrs, event_time=123.5, task_id="task.1"
+        "rhapsody.inference.BatchDone", attrs, event_time=123.5, task_id="task.1"
     )
     await _drain(manager)
     await manager.stop()
 
-    (event,) = [e for e in received if e.event_type == "rhapsody.inference.BatchEnded"]
+    (event,) = [e for e in received if e.event_type == "rhapsody.inference.BatchDone"]
     assert event.session_id == "sess"
     assert event.backend == "vllm"
     assert event.task_id == "task.1"

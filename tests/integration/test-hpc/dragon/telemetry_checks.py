@@ -29,7 +29,9 @@ from pathlib import Path
 
 PREFIX = "rhapsody.inference."
 STARTED = PREFIX + "BatchStarted"
-ENDED = PREFIX + "BatchEnded"
+DONE = PREFIX + "BatchDone"
+FAILED = PREFIX + "BatchFailed"
+ENDED = (DONE, FAILED)  # a batch ends with one of them
 SCOPE = "rhapsody.instrumentation.inference"
 # Dragon reports latencies rounded to 0.01 s, so the model time can exceed the measured batch
 # time by up to that much.
@@ -157,7 +159,7 @@ def verify(
     spans = list(telemetry.read_traces())
     metrics = _inference_metrics(telemetry)
     starts = [e for e in events if e.event_type == STARTED]
-    ends = [e for e in events if e.event_type == ENDED]
+    ends = [e for e in events if e.event_type in ENDED]
     rows = [
         (e.attributes["batch_id"], row) for e in ends for row in e.attributes.get("requests", [])
     ]
@@ -165,17 +167,18 @@ def verify(
     api_rows = [(b, r) for b, r in rows if not r.get("task_id")]
     timeouts_expected = bool(expected.get("timeouts"))
     total_timed_out = sum(e.attributes.get("timed_out_prompts", 0) for e in ends)
+    n_failed = sum(e.event_type == FAILED for e in ends)
 
     # 1. The events pair up, in memory and in the JSONL file.
     start_ids = sorted(e.attributes["batch_id"] for e in starts)
     end_ids = sorted(e.attributes["batch_id"] for e in ends)
     report.add(
-        "events: BatchStarted and BatchEnded pair up",
+        "events: every BatchStarted has a BatchDone or BatchFailed",
         bool(ends) and start_ids == end_ids,
         f"{len(starts)} started, {len(ends)} ended",
     )
     if jsonl_path:
-        counts = {STARTED: 0, ENDED: 0}
+        counts = {STARTED: 0, DONE: 0, FAILED: 0}
         for line in Path(jsonl_path).read_text().splitlines():
             try:
                 kind = json.loads(line).get("event_type")
@@ -185,8 +188,14 @@ def verify(
                 counts[kind] += 1
         report.add(
             "events: the JSONL file has the same events",
-            counts == {STARTED: len(starts), ENDED: len(ends)},
-            f"file {counts[STARTED]}/{counts[ENDED]}, memory {len(starts)}/{len(ends)}",
+            counts
+            == {
+                STARTED: len(starts),
+                DONE: sum(e.event_type == DONE for e in ends),
+                FAILED: sum(e.event_type == FAILED for e in ends),
+            },
+            f"file {counts[STARTED]}/{counts[DONE]}/{counts[FAILED]} "
+            f"(started/done/failed), memory {len(starts)}/{len(ends) - n_failed}/{n_failed}",
         )
 
     # 2. One batch span per batch, with the right shape.
@@ -228,13 +237,11 @@ def verify(
         "; ".join(bad_shape[:3]) or "ok",
     )
     errored = sorted(b for b, s in batch_spans.items() if s.status.status_code.name == "ERROR")
-    timed_out_batches = sorted(
-        e.attributes["batch_id"] for e in ends if e.attributes.get("timed_out_prompts")
-    )
+    failed_batches = sorted(e.attributes["batch_id"] for e in ends if e.event_type == FAILED)
     report.add(
-        "spans: ERROR exactly for the batches that timed out",
-        errored == timed_out_batches,
-        f"error spans {errored}, timed-out batches {timed_out_batches}",
+        "spans: ERROR exactly for the batches that failed",
+        errored == failed_batches,
+        f"error spans {errored}, failed batches {failed_batches}",
     )
 
     # 3. The per-task attributes.

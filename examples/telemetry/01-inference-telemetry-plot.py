@@ -67,7 +67,8 @@ except ImportError as exc:  # pragma: no cover
     sys.exit(f"matplotlib and numpy are required: {exc}")
 
 PREFIX = "rhapsody.inference."
-STARTED, ENDED = PREFIX + "BatchStarted", PREFIX + "BatchEnded"
+STARTED = PREFIX + "BatchStarted"
+ENDED = (PREFIX + "BatchDone", PREFIX + "BatchFailed")  # a batch ends with one of them
 COLORS = {
     "size": "#2a78c2",
     "deadline": "#e0892b",
@@ -166,7 +167,8 @@ class Run:
         starts = {e["attributes"]["batch_id"]: e for e in ev.get(STARTED, [])}
         self.batches: list[dict] = []
         self.requests: list[dict] = []
-        for e in sorted(ev.get(ENDED, []), key=lambda x: x["attributes"]["batch_id"]):
+        ends = [e for kind in ENDED for e in ev.get(kind, [])]
+        for e in sorted(ends, key=lambda x: x["attributes"]["batch_id"]):
             a = e["attributes"]
             s = starts.get(a["batch_id"])
             if s is None:
@@ -800,7 +802,7 @@ def plot_14_trust(run: Run, out: Path, saved: list) -> None:
         lim = [0, max(max(x), max(y)) * 1.05]
         ax[1].plot(lim, lim, "k--", lw=0.8)
         ax[1].set(
-            title="Batch span duration against BatchEnded duration (on the line = agree)",
+            title="Batch span duration against the end event duration (on the line = agree)",
             xlabel="event batch_duration_s x 1000 (ms)",
             ylabel="span duration (ms)",
         )
@@ -842,13 +844,13 @@ def plot_15_volume(run: Run, out: Path, saved: list) -> None:
     ax[1].set(xscale="log", title="Event counts", xlabel="events")
     n_req = max(len(run.requests), 1)
     inf_bytes = sum(v for k, v in run.bytes_by_type.items() if k.startswith(PREFIX))
-    ended = run.bytes_by_type.get(ENDED, 0)
+    ended = sum(run.bytes_by_type.get(kind, 0) for kind in ENDED)
     started = run.bytes_by_type.get(STARTED, 0)
     lines = [
         f"JSONL total: {run.jsonl_bytes / 1e6:.2f} MB",
         f"OTLP export: {run.otlp_bytes / 1e6:.2f} MB",
         f"{len(run.events)} events, {run.jsonl_bytes / max(len(run.events), 1):.0f} B avg line",
-        f"BatchEnded:   {ended / n_req:.0f} B per request",
+        f"BatchDone/Failed: {ended / n_req:.0f} B per request",
         f"BatchStarted: {started / n_req:.0f} B per request",
         f"inference events: {inf_bytes / 1e3:.1f} kB",
         f"all spans: {run.bytes_by_type.get('span', 0) / 1e3:.1f} kB",

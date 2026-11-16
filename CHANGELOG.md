@@ -38,7 +38,54 @@
   instead of one error per event; and a restarted manager no longer carries running-task and
   node-resource state over from the previous run.
 
+- **BEHAVIOUR CHANGE: `DragonVllmInferenceBackend` keeps the exception object of a failed batch.**
+  When the batch processor fails a batch, `task["exception"]` is now the exception itself (it was
+  its text). Telemetry `error_type` of such a task is the exception class instead of `"str"`,
+  `await task` of such an AITask now raises that exception (before, it returned normally),
+  AsyncFlow reports the original exception class instead of a wrapped `RuntimeError`, and
+  `Session.wait_tasks()` is unchanged.
+
+- **BEHAVIOUR CHANGE: a failing batch no longer fails the requests that wait in the queue.**
+  `DragonVllmInferenceBackend` used to fail the batch it was processing and every pending request,
+  including requests that were never sent. It now fails only the batch it was processing; the
+  pending requests go into the next batch. If the pipeline stays down, each following batch fails
+  in turn (one batch window and one error log each), so the requests still fail, one batch at a
+  time instead of all at once.
+
+- **Telemetry (experimental, BEHAVIOUR CHANGE): the batch end event `rhapsody.inference.BatchEnded`
+  is split into `BatchDone` and `BatchFailed`.** `BatchDone` is emitted when every prompt of the
+  batch was answered. `BatchFailed` carries the same fields plus `error_type` (the exception class
+  name) and is emitted when prompts timed out (before, such a batch ended with `BatchEnded`),
+  when Dragon answered a prompt with an exception, and when the batch processor fails a batch
+  (before, that path emitted no end event at all). Code that subscribes to `BatchEnded` or reads
+  it from the JSONL file must handle both names. The batch span of a failed batch is closed with
+  status ERROR and the `error.type` attribute; the metrics are recorded as for a good batch.
+
 ### Fixed
+
+- **`DragonVllmInferenceBackend`: a `queue.Empty` from `get_nowait()` no longer fails a whole batch** — the
+  response loop called `empty()` and then `get_nowait()`. Dragon documents `empty()` as
+  unreliable, so `get_nowait()` could still raise `queue.Empty`, and the batch processor then
+  failed the batch. The loop now only calls `get_nowait()` and treats `queue.Empty` as "no answer
+  yet".
+
+- **`DragonVllmInferenceBackend`: a prompt that Dragon answers with an exception object fails its
+  task** — a worker that fails a prompt puts the exception object in the response queue
+  (`RuntimeError(...)`), which was returned as the prompt's result and the task was reported DONE.
+  The task is now reported FAILED with `task["exception"]` set to that exception; the prompt's
+  result is `"ERROR: <class>: <message>"`; the batch ends with `BatchFailed`. The string
+  `"LLM inference failed ..."` that Dragon sends for a failed whole batch is not detected (it has
+  no marker): such a task is still reported DONE.
+
+- **`DragonVllmInferenceBackend`: `generate([])` no longer hangs** — a request without prompts was
+  never answered, so the call waited until its timeout. `generate()` now raises `ValueError` for
+  an empty prompt list. An `AITask` cannot have an empty prompt (its constructor refuses it); a
+  plain dict task without prompts is still not validated and is never finished.
+
+- **Telemetry: a batch that fails in the batch processor now ends its batch span** — the batch
+  span stayed open until the next batch or the end of the session, ending with "batch did not
+  finish", and the queue times of its tasks were missing. It now emits `BatchFailed` (see above).
+  A batch cancelled while in flight (for example by a shutdown) still emits no end event.
 
 - **`DragonVllmInferenceBackend`: late responses after a batch timeout no longer leak into the next
   batch** — the answers of a batch that timed out used to stay in the one response queue shared by

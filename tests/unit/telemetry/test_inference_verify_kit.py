@@ -106,10 +106,10 @@ async def test_a_dropped_batch_span_fails(monkeypatch, tmp_path):
 
 async def test_a_missing_end_event_fails(monkeypatch, tmp_path):
     kit, telemetry, events, expected, jsonl, otlp = await _healthy_run(monkeypatch, tmp_path)
-    last_end = max(i for i, e in enumerate(events) if e.event_type == kit.ENDED)
+    last_end = max(i for i, e in enumerate(events) if e.event_type in kit.ENDED)
     broken = events[:last_end] + events[last_end + 1 :]
     report = kit.verify(telemetry, broken, expected, jsonl_path=jsonl, otlp_path=otlp)
-    assert _statuses(report)["events: BatchStarted and BatchEnded pair up"] == "FAIL"
+    assert _statuses(report)["events: every BatchStarted has a BatchDone or BatchFailed"] == "FAIL"
 
 
 async def test_prompt_text_in_the_files_fails(monkeypatch, tmp_path):
@@ -178,7 +178,7 @@ async def test_a_model_time_above_the_batch_time_fails(monkeypatch, tmp_path):
     kit, telemetry, events, expected, jsonl, otlp = await _healthy_run(monkeypatch, tmp_path)
     slow = []
     for event in events:
-        if event.event_type == kit.ENDED:
+        if event.event_type in kit.ENDED:
             attrs = {**event.attributes, "dragon_model_duration_s": 60.0}
             event = type(event)(**{**event.__dict__, "attributes": attrs})
         slow.append(event)
@@ -260,7 +260,7 @@ async def test_the_log_checks_pass_clean_fail_on_a_telemetry_warning_and_warn_on
 
 async def test_string_and_list_prompts_are_both_in_the_workload(monkeypatch, tmp_path):
     kit, telemetry, events, expected, jsonl, otlp = await _healthy_run(monkeypatch, tmp_path)
-    ends = [e for e in events if e.event_type == kit.ENDED]
+    ends = [e for e in events if e.event_type in kit.ENDED]
     counts = [r["prompt_count"] for e in ends for r in e.attributes["requests"] if r.get("task_id")]
     assert 1 in counts and 2 in counts  # task 3 is a plain string; the others hold two prompts
 
