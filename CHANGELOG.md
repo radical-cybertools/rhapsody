@@ -40,6 +40,19 @@
 
 ### Fixed
 
+- **`DragonVllmInferenceBackend`: late responses after a batch timeout no longer leak into the next
+  batch** — the answers of a batch that timed out used to stay in the one response queue shared by
+  all batches, and the next batch read them as its own, so a task could get another task's text and
+  be reported DONE with healthy-looking telemetry (issue B2). A batch that gives up now hands its
+  response queue to a background task that reads and discards the late answers and then closes it;
+  the next batch uses a new queue. Batches that are fully read still share one queue, so nothing is
+  allocated per batch. Shutdown now runs `Inference.destroy()` in a thread with a bounded wait
+  (120 s) while the late answers are discarded. This also removes a shutdown hang: with the old
+  code, one timed-out batch of 224 prompts (more late answers than one 100-slot response queue
+  holds) made `shutdown()` hang, and with this change it returns in a few seconds. Checked with a
+  0.5B model on one node with one GPU (1 hang in 1 run before, no hang in 5 of 5 runs after) and
+  on two nodes with one GPU each (no hang in 5 of 5 runs after; the old code was not run there).
+
 - **BEHAVIOUR CHANGE: `DragonVllmInferenceBackend` reports a timed-out AITask as FAILED, not DONE** —
   when some prompts of a task got no response within the batch deadline (300 s), the task was
   reported DONE with `"ERROR: Timeout ..."` strings as its response. It is now reported FAILED,

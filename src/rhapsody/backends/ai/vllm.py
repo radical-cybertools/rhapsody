@@ -2,9 +2,12 @@
 batches to pipeline for efficiency."""
 
 import asyncio
+import contextlib
 import logging
 import math
+import queue as stdlib_queue
 import socket
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -40,6 +43,14 @@ _QUEUE_REGISTRY = {}
 # Seconds the batch processor waits for the responses of one batch (a module constant so tests
 # can shorten it).
 _BATCH_RESPONSE_TIMEOUT_S = 300
+
+# Late response queues: how often and how much of them is read, and when to warn about many.
+_DRAIN_INTERVAL_S = 0.1
+_DRAIN_MAX_ITEMS_PER_TICK = 50
+_WARN_LATE_QUEUES = 8
+
+# Seconds shutdown() waits for Inference.destroy() before it gives up and goes on.
+_DESTROY_TIMEOUT_S = 120
 
 
 def _unwrap_assistant_response(response: Any) -> Any:
@@ -80,6 +91,133 @@ def _timed_out_in_range(start: int, size: int, first_timeout: Optional[int], tot
         return 0
     end = min(start + size, total)
     return max(0, end - max(start, first_timeout))
+
+
+class ResponseQueues:
+    """The response queues of one backend.
+
+    Dragon answers each prompt into the queue given to ``Inference.query()`` and expects the owner
+    of that queue to read every answer. A batch that gives up at its deadline stops reading while
+    the workers still answer later. Reusing that queue would hand the late answers to the next
+    batch, and its 100 slots can fill up so a worker blocks in ``put()`` for good.
+
+    So: normal batches reuse one *current* queue. A batch that gave up hands its queue back with the
+    number of answers still missing; that queue becomes a *late queue*: it is never given out again,
+    a background task reads and discards its late answers, and it is closed when all arrived. The
+    next batch gets a new current queue.
+
+    Assumes Dragon puts exactly one answer per prompt. A worker that puts fewer leaves its late
+    queue open until ``close()``; extra answers put after the count reached 0 are not read.
+    """
+
+    def __init__(self, queue_factory: Callable[[], Any]):
+        self._queue_factory = queue_factory
+        self._current = None
+        self.late_queues: dict = {}  # queue -> missing_answers
+        self.created_queue_count = 0
+        self._drainer: Optional[asyncio.Task] = None
+        self._unreadable: set = set()  # late queues whose read failed (warned once each)
+
+    @property
+    def late_queue_count(self) -> int:
+        return len(self.late_queues)
+
+    async def queue_for_batch(self):
+        """The queue the next batch reads: the current one, or a new one (made in a thread: a Dragon
+        queue allocates shared memory and calls Dragon services)."""
+        if self._current is None:
+            if len(self.late_queues) >= _WARN_LATE_QUEUES:
+                logger.warning(
+                    f"{len(self.late_queues)} response queues still wait for late answers "
+                    "(workers slow or gone); each holds Dragon shared memory"
+                )
+            loop = asyncio.get_running_loop()
+            self._current = await loop.run_in_executor(None, self._queue_factory)
+            self.created_queue_count += 1
+        return self._current
+
+    def give_up(self, queue, missing: int) -> None:
+        """A batch stopped reading ``queue`` with ``missing`` answers not read yet."""
+        if missing <= 0:
+            return
+        if queue is self._current:
+            self._current = None
+        self.late_queues[queue] = missing
+        if self._drainer is None or self._drainer.done():
+            self._drainer = asyncio.get_running_loop().create_task(self._drain_late_queues())
+
+    async def _drain_late_queues(self):
+        while self.late_queues:
+            budget = _DRAIN_MAX_ITEMS_PER_TICK  # one budget for all queues: the loop is shared
+            for queue, missing in list(self.late_queues.items()):
+                if budget <= 0:
+                    break
+                try:
+                    taken = _discard_answers(queue, min(missing, budget))
+                except Exception:
+                    # Not counted: the queue stays and is tried again, and closed by close().
+                    if queue not in self._unreadable:
+                        self._unreadable.add(queue)
+                        logger.warning("Cannot read a late response queue", exc_info=True)
+                    taken = 0
+                budget -= taken
+                del self.late_queues[queue]  # re-added last: queues take turns when budget is short
+                if missing - taken > 0:
+                    self.late_queues[queue] = missing - taken
+                else:
+                    self._unreadable.discard(queue)
+                    self._close_queue(queue)
+            await asyncio.sleep(_DRAIN_INTERVAL_S)
+
+    async def close(self, workers_gone: bool) -> None:
+        """Stop draining and close the queues.
+
+        ``workers_gone``: ``Inference.destroy()`` ended, so no answer can arrive any more: what is
+        left is discarded and every queue is closed. Otherwise a worker may still use them and they
+        are left open.
+        """
+        drainer, self._drainer = self._drainer, None
+        if drainer is not None:
+            drainer.cancel()
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await drainer  # whatever it died of, the queues below must still be closed
+        if not workers_gone:
+            if self.late_queues:
+                logger.warning(f"Leaving {len(self.late_queues)} late response queues open")
+            return
+        queues = [*self.late_queues, *([self._current] if self._current is not None else [])]
+        self.late_queues.clear()
+        self._unreadable.clear()
+        self._current = None
+        for queue in queues:
+            try:
+                _discard_answers(queue, math.inf)
+            except Exception:
+                logger.warning("Cannot read a response queue before closing it", exc_info=True)
+            self._close_queue(queue)
+
+    @staticmethod
+    def _close_queue(queue) -> None:
+        try:
+            queue.close()
+        except Exception:
+            logger.warning("Cannot close a response queue", exc_info=True)
+
+
+def _discard_answers(queue, limit) -> int:
+    """Read and drop up to ``limit`` answers; returns how many.
+
+    Not ``empty()``: Dragon documents it
+    as unreliable, so it reads until ``queue.Empty``.
+    """
+    taken = 0
+    try:
+        while taken < limit:
+            queue.get_nowait()
+            taken += 1
+    except stdlib_queue.Empty:
+        pass
+    return taken
 
 
 @dataclass
@@ -193,6 +331,9 @@ class DragonVllmInferenceBackend(BaseBackend):
         self._tasks_in_flight = {}  # UID -> AITask
         self._batch_seq = 0  # batch ids for telemetry
 
+        # The queue each batch reads its answers from (made lazily, DragonQueue needs Dragon)
+        self._response_queues = ResponseQueues(DragonQueue)
+
     def __await__(self):
         """Enable `backend = await DragonVllmInferenceBackend(...)`, consistent with the other
         execution backends.
@@ -213,21 +354,17 @@ class DragonVllmInferenceBackend(BaseBackend):
         )
 
     def _get_or_create_queues(self):
-        """Get queues from registry or create new ones."""
+        """Get the input queue from the registry or create it.
+
+        The response queues are not here: ``self._response_queues`` makes one per batch that gave up.
+        """
         if self._instance_id not in _QUEUE_REGISTRY:
-            _QUEUE_REGISTRY[self._instance_id] = {
-                "input": DragonQueue(),
-                "response": DragonQueue(),
-            }
+            _QUEUE_REGISTRY[self._instance_id] = {"input": DragonQueue()}
         return _QUEUE_REGISTRY[self._instance_id]
 
     def _get_input_queue(self):
         """Get input queue (lazy)"""
         return self._get_or_create_queues()["input"]
-
-    def _get_response_queue(self):
-        """Get response queue (lazy)"""
-        return self._get_or_create_queues()["response"]
 
     def register_callback(self, func: Callable[[dict, str], None]) -> None:
         """Register a callback for task state changes."""
@@ -322,8 +459,6 @@ class DragonVllmInferenceBackend(BaseBackend):
         4. Submit combined batch to pipeline
         5. Distribute responses back to individual futures
         """
-        response_queue = self._get_response_queue()
-
         while True:
             try:
                 # Wait for at least one request to arrive
@@ -372,6 +507,11 @@ class DragonVllmInferenceBackend(BaseBackend):
                 # Submit to pipeline
                 logger.debug("Submitting batch to Inference pipeline...")
 
+                # The queue this batch reads: taken after the empty-prompt check above (a batch
+                # without prompts sends nothing) and before BatchStarted (creating a queue can fail).
+                response_queue = await self._response_queues.queue_for_batch()
+                sent = answers_read = 0  # prompts sent to Dragon, answers read from the queue
+
                 self._batch_seq += 1
                 batch_id = self._batch_seq
                 dispatch_mono = time.perf_counter()
@@ -395,72 +535,81 @@ class DragonVllmInferenceBackend(BaseBackend):
                         },
                     )
 
-                # TELEMETRY-LIMITATION(L2): no trace context is passed to Dragon here, so if the
-                # Dragon team enables vLLM's native tracing, its spans form separate traces that
-                # can only be matched to ours by time, model and host.
-                # Why not now: Dragon's query() takes no trace context and RHAPSODY cannot change
-                # Dragon. Planned: Tier 1 of the telemetry refactor plus a Dragon feature request
-                # (accept and forward `traceparent`, enable vLLM tracing).
-                # See docs/telemetry/reference.md#known-limitations.
-                self.inference_pipeline.query((all_prompts, response_queue))
+                try:
+                    # TELEMETRY-LIMITATION(L2): no trace context is passed to Dragon here, so if the
+                    # Dragon team enables vLLM's native tracing, its spans form separate traces that
+                    # can only be matched to ours by time, model and host.
+                    # Why not now: Dragon's query() takes no trace context and RHAPSODY cannot change
+                    # Dragon. Planned: Tier 1 of the telemetry refactor plus a Dragon feature request
+                    # (accept and forward `traceparent`, enable vLLM tracing).
+                    # See docs/telemetry/reference.md#known-limitations.
+                    self.inference_pipeline.query((all_prompts, response_queue))
+                    # No await between query() and here: cancellation cannot fall in between.
+                    sent = len(all_prompts)
 
-                logger.debug("Batch submitted, waiting for responses...")
-                # Collect responses
-                all_results = []
-                first_response: Any = None  # first raw Dragon response: batch-level numbers
-                first_timeout = None  # index of the first prompt that got no response
-                deadline = asyncio.get_event_loop().time() + _BATCH_RESPONSE_TIMEOUT_S
+                    logger.debug("Batch submitted, waiting for responses...")
+                    # Collect responses
+                    all_results = []
+                    first_response: Any = None  # first raw Dragon response: batch-level numbers
+                    first_timeout = None  # index of the first prompt that got no response
+                    deadline = asyncio.get_event_loop().time() + _BATCH_RESPONSE_TIMEOUT_S
 
-                for i in range(len(all_prompts)):
-                    logger.debug(f"Waiting for response {i + 1}/{len(all_prompts)}...")
-                    response_received = False
-                    poll_count = 0
+                    for i in range(len(all_prompts)):
+                        logger.debug(f"Waiting for response {i + 1}/{len(all_prompts)}...")
+                        response_received = False
+                        poll_count = 0
 
-                    while True:
-                        poll_count += 1
-                        if not response_queue.empty():
-                            raw_response = response_queue.get_nowait()
-                            if first_response is None:
-                                first_response = raw_response
-                            response = _unwrap_assistant_response(raw_response)
-                            all_results.append(response)
-                            logger.debug(
-                                f"Received response {i + 1}/{len(all_prompts)} after {poll_count} polls"
+                        while True:
+                            poll_count += 1
+                            if not response_queue.empty():
+                                raw_response = response_queue.get_nowait()
+                                answers_read += 1
+                                if first_response is None:
+                                    first_response = raw_response
+                                response = _unwrap_assistant_response(raw_response)
+                                all_results.append(response)
+                                logger.debug(
+                                    f"Received response {i + 1}/{len(all_prompts)} after {poll_count} polls"
+                                )
+                                response_received = True
+                                break
+
+                            if asyncio.get_event_loop().time() > deadline:
+                                error_msg = (
+                                    f"Timeout waiting for response {i + 1}/{len(all_prompts)} "
+                                    f"after {_BATCH_RESPONSE_TIMEOUT_S}s ({poll_count} polls)"
+                                )
+                                logger.error(error_msg)
+                                all_results.append(f"ERROR: {error_msg}")
+                                first_timeout = i
+                                break
+
+                            # Log every 10 seconds
+                            if poll_count % 10000 == 0:
+                                elapsed = asyncio.get_event_loop().time() - (
+                                    deadline - _BATCH_RESPONSE_TIMEOUT_S
+                                )
+                                logger.debug(
+                                    f"Still waiting for response {i + 1}/{len(all_prompts)} after {elapsed:.1f}s ({poll_count} polls)"
+                                )
+
+                            await asyncio.sleep(0.001)  # Async polling
+
+                        if not response_received and asyncio.get_event_loop().time() > deadline:
+                            logger.error(
+                                f"Batch processing timed out at response {i + 1}/{len(all_prompts)}"
                             )
-                            response_received = True
+                            # Fill remaining responses with errors
+                            for j in range(i + 1, len(all_prompts)):
+                                all_results.append(
+                                    f"ERROR: Batch timeout, response {j + 1} not received"
+                                )
                             break
-
-                        if asyncio.get_event_loop().time() > deadline:
-                            error_msg = (
-                                f"Timeout waiting for response {i + 1}/{len(all_prompts)} "
-                                f"after {_BATCH_RESPONSE_TIMEOUT_S}s ({poll_count} polls)"
-                            )
-                            logger.error(error_msg)
-                            all_results.append(f"ERROR: {error_msg}")
-                            first_timeout = i
-                            break
-
-                        # Log every 10 seconds
-                        if poll_count % 10000 == 0:
-                            elapsed = asyncio.get_event_loop().time() - (
-                                deadline - _BATCH_RESPONSE_TIMEOUT_S
-                            )
-                            logger.debug(
-                                f"Still waiting for response {i + 1}/{len(all_prompts)} after {elapsed:.1f}s ({poll_count} polls)"
-                            )
-
-                        await asyncio.sleep(0.001)  # Async polling
-
-                    if not response_received and asyncio.get_event_loop().time() > deadline:
-                        logger.error(
-                            f"Batch processing timed out at response {i + 1}/{len(all_prompts)}"
-                        )
-                        # Fill remaining responses with errors
-                        for j in range(i + 1, len(all_prompts)):
-                            all_results.append(
-                                f"ERROR: Batch timeout, response {j + 1} not received"
-                            )
-                        break
+                finally:
+                    # Answers still missing (timeout, cancellation, an error while reading) will
+                    # arrive later: the queue goes to the late queues and is drained, so the next
+                    # batch never reads them and no worker blocks on a full queue.
+                    self._response_queues.give_up(response_queue, sent - answers_read)
 
                 batch_duration = time.perf_counter() - dispatch_mono
                 total_prompts = len(all_prompts)
@@ -476,11 +625,6 @@ class DragonVllmInferenceBackend(BaseBackend):
                 # Emitted before the tasks are reported, so their spans are still open when the
                 # instrumentation handles it.
                 if self.telemetry.enabled:
-                    # TELEMETRY-LIMITATION(L11): after a timeout the late responses of this batch
-                    # stay in the shared response queue (existing issue B2), so the next batch
-                    # may read its Dragon fields from the wrong batch.
-                    # Why not now: B2 is an existing bug, reported and not patched.
-                    # Planned: B2 fix. See docs/telemetry/reference.md#known-limitations.
                     payload = {
                         "batch_id": batch_id,
                         "model": self.model_name,
@@ -654,19 +798,58 @@ class DragonVllmInferenceBackend(BaseBackend):
             if self.runner:
                 await self.runner.cleanup()
 
-        # Shutdown pipeline. Inference.destroy() already closes the input queue
-        # internally, so only the response queue needs cleaning up below.
-        if self.inference_pipeline:
-            self.inference_pipeline.destroy()
+        # Shutdown pipeline. Inference.destroy() already closes the input queue internally. It
+        # runs off the event loop so the response queues keep being drained meanwhile (a worker
+        # blocked on a full response queue would never let destroy() return).
+        workers_gone = False
+        try:
+            if self.inference_pipeline:
+                try:
+                    workers_gone = await self._destroy_pipeline_off_loop()
+                except Exception:
+                    workers_gone = True  # destroy() ended, with an error: it waits for nobody
+                    raise
+            else:
+                workers_gone = True
+        finally:
+            await self._response_queues.close(workers_gone)
+            _QUEUE_REGISTRY.pop(self._instance_id, None)
+            self.is_initialized = False
 
-        # Clean up queues from registry
-        if self._instance_id in _QUEUE_REGISTRY:
-            queues = _QUEUE_REGISTRY[self._instance_id]
-            queues["response"].close()
-            del _QUEUE_REGISTRY[self._instance_id]
-
-        self.is_initialized = False
         logger.info(f"{mode.capitalize()} shutdown complete")
+
+    async def _destroy_pipeline_off_loop(self) -> bool:
+        """Run ``Inference.destroy()`` in a daemon thread and wait at most ``_DESTROY_TIMEOUT_S``.
+
+        Returns True when destroy() ended (an exception from it is raised here) and False when the
+        wait ran out and the thread is left running. A daemon thread, not the default executor, so a
+        stuck destroy() cannot keep the interpreter from exiting.
+        """
+        loop = asyncio.get_running_loop()
+        ended = loop.create_future()
+
+        def finish(error):
+            if not ended.done():  # cancelled by a timeout or a cancelled shutdown()
+                ended.set_result(error)
+
+        def run():
+            error = None
+            try:
+                self.inference_pipeline.destroy()
+            except BaseException as exc:
+                error = exc
+            with contextlib.suppress(RuntimeError):  # the loop is already closed
+                loop.call_soon_threadsafe(finish, error)
+
+        threading.Thread(target=run, name="rhapsody-destroy", daemon=True).start()
+        try:
+            error = await asyncio.wait_for(ended, _DESTROY_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.error(f"Inference.destroy() did not return within {_DESTROY_TIMEOUT_S}s")
+            return False
+        if error is not None:
+            raise error
+        return True
 
     async def _handle_chat_completions(self, request):
         """OpenAI-compatible chat completions endpoint.
@@ -860,6 +1043,7 @@ class DragonVllmInferenceBackend(BaseBackend):
         state["_pending_requests"] = []
         state["_batch_lock"] = None
         state["_new_request_event"] = None
+        state["_response_queues"] = None  # holds an asyncio task and Dragon queues
         return state
 
     def __setstate__(self, state):
@@ -868,6 +1052,7 @@ class DragonVllmInferenceBackend(BaseBackend):
         # These will be lazily re-initialized if needed
         self._batch_lock = asyncio.Lock()
         self._new_request_event = asyncio.Event()
+        self._response_queues = ResponseQueues(DragonQueue)
 
     # BaseBackend abstract methods
     def state(self) -> str:
