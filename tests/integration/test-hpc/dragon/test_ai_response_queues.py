@@ -133,7 +133,9 @@ async def test_normal_batches_use_one_queue(inference_backend):
     assert len(answers) == requests * 4
     assert not errors, f"{len(errors)} of {len(answers)} answers are errors, e.g. {errors[0]!r}"
     queues = _queues(backend)
-    assert queues.created_queue_count == 1, f"{queues.created_queue_count} response queues for ordinary batches"
+    assert queues.created_queue_count == 1, (
+        f"{queues.created_queue_count} response queues for ordinary batches"
+    )
     assert queues.late_queue_count == 0
     REPORT["throughput"] = {
         "prompts": len(answers),
@@ -172,7 +174,8 @@ async def test_late_answers_do_not_reach_the_next_batch(inference_backend):
 
 async def test_timeouts_at_scale_leave_no_late_queue_open(inference_backend):
     """ROUNDS rounds of BURST_BATCHES timed-out batches (each round holds more late answers than a
-    100-slot Dragon queue); every round drains, the next batch is still right, all late queues are closed."""
+    100-slot Dragon queue); every round drains, the next batch is still right, all late queues are
+    closed."""
     backend = inference_backend
     queues = _queues(backend)
     rss_start = _rss_mb()
@@ -230,7 +233,9 @@ async def test_shutdown_after_timeouts_returns(inference_backend, artifact_dir, 
     await backend.shutdown()
     elapsed = time.perf_counter() - began
 
-    stuck = [r.getMessage() for r in log_capture.records if "did not return within" in r.getMessage()]
+    stuck = [
+        r.getMessage() for r in log_capture.records if "did not return within" in r.getMessage()
+    ]
     REPORT["shutdown"] = {"seconds": round(elapsed, 1), "destroy_timed_out": bool(stuck)}
     (artifact_dir / "response_queues_report.json").write_text(json.dumps(REPORT, indent=2))
     print(f"\nreport: {json.dumps(REPORT, indent=2)}")

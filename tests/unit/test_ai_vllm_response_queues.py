@@ -1,6 +1,6 @@
 """Unit tests for ``ResponseQueues``: the queue each batch reads and the late queues that wait for
-the answers of batches that gave up. Uses the fake queue of ``fake_dragon``; the real Dragon queue is
-checked by ``tests/integration/test-hpc/dragon/test_ai_response_queues.py``.
+the answers of batches that gave up. Uses the fake queue of ``fake_dragon``; the real Dragon queue
+is checked by ``tests/integration/test-hpc/dragon/test_ai_response_queues.py``.
 
 Not covered offline: Dragon's own behaviour on ``close()`` and on a ``put()`` after the owner closed
 the queue (the fake queue cannot model it): that is a cluster check.
