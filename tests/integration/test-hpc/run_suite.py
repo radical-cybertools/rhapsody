@@ -61,6 +61,15 @@ GROUPS = {
             optional=True,
             require=("gpu", "model"),
         ),
+        # The response queues of the vLLM backend: a throughput run, timed-out batches at scale and
+        # a shutdown after timeouts. Starts its own vLLM backend.
+        Group(
+            "ai-response-queues",
+            "dragon/test_ai_response_queues.py",
+            600,
+            optional=True,
+            require=("gpu", "model"),
+        ),
     ],
 }
 

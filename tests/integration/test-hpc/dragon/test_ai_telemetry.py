@@ -5,10 +5,8 @@ string prompts, plus direct `generate()` calls. Telemetry is stopped once and ch
 (`telemetry_checks.verify`); the first three tests report the outcome by topic.
 
 The last test sets the batch deadline far below what the model needs, so prompts time out, and
-checks that FAILED tasks, ERROR batch spans, the timed-out counter and the batch events agree. It
-runs last on purpose: late responses after a timeout stay in the backend's shared response queue
-(issue B2) and can contaminate later batches, so nothing may run after it on this backend. If it
-hangs, the group's budget ends the run and the results of the whole file are lost: run it alone
+checks that FAILED tasks, ERROR batch spans, the timed-out counter and the batch events agree. If
+it hangs, the group's budget ends the run and the results of the whole file are lost: run it alone
 with `-k timeouts` when investigating.
 
 Needs GPUs and a model.

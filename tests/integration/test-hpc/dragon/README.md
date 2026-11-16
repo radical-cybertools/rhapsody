@@ -89,6 +89,7 @@ hangs, the later groups still run.
 | `mpi` | `test_mpi.py` | 6 | 4 min | gather, allreduce, broadcast, concurrent jobs; stops at the first failure |
 | `telemetry` | `test_telemetry.py` | 4 | 3 min | Task events, spans and counters, per-node resource updates, JSONL file. **Optional** |
 | `ai-telemetry` | `test_ai_telemetry.py` | 4 | 10 min | Inference telemetry of the vLLM backend, including a timed-out batch. **Optional**, needs a GPU and a model |
+| `ai-response-queues` | `test_ai_response_queues.py` | 4 | 10 min | Response queues of the vLLM backend: throughput, answers after a timed-out batch, timeouts at scale, shutdown after timeouts. **Optional**, needs a GPU and a model |
 
 Optional groups run only when named with `--groups` (see [Telemetry tests](#telemetry-tests)), so the default run still fits a 15-minute job.
 
@@ -124,7 +125,8 @@ test-hpc/
     ├── test_scale.py
     ├── test_mpi.py
     ├── test_telemetry.py
-    └── test_ai_telemetry.py
+    ├── test_ai_telemetry.py
+    └── test_ai_response_queues.py
 ```
 
 ---
@@ -162,6 +164,8 @@ The `scale` mark only selects tests: scale tests are excluded by default, and `-
 | `RHAPSODY_HPC_ARTIFACTS` | `<junit dir>/artifacts` (`./hpc-artifacts` outside `run_suite.py`) | Where the telemetry tests save their files and report |
 | `RHAPSODY_HPC_AI_TASKS` | `256` | AITasks in the `ai-telemetry` workload |
 | `RHAPSODY_HPC_AI_TIMEOUT_S` | `0.05` | Batch deadline of the last `ai-telemetry` test (the timeout test), in seconds |
+| `RHAPSODY_HPC_AI_SCALE_PROMPTS` | `4096` | Prompts of the throughput test of `ai-response-queues` |
+| `RHAPSODY_HPC_AI_ROUNDS` | `5` | Rounds (6 timed-out batches each) of the timeout scale test of `ai-response-queues` |
 | `RHAPSODY_SCALE_FUNC_COUNT` | `10000` | Function task count for scale tests |
 | `RHAPSODY_SCALE_EXEC_COUNT` | `1000` | Executable task count for scale tests |
 | `RHAPSODY_DDICT_MEM_GB` | `2` (standard) / `4` (scale) | GiB per node for Dragon's results DDict |
@@ -204,7 +208,8 @@ The telemetry groups run RHAPSODY's telemetry on a real allocation and check tha
 
 - **`telemetry`** (no model): function tasks, an executable pinned to each node and one failing executable run on the Dragon execution backend. The tests check the task events and spans, the task counters, that a resource update arrived from every node, and that the JSONL file matches the in-memory events.
 - **`ai-telemetry`** (GPU and model): AITasks with list and plain-string prompts plus direct `generate()` calls run on `DragonVllmInferenceBackend`. One run is checked once by `telemetry_checks.verify()`; the tests report it by topic: that events, batch spans, per-task attributes and metrics agree and Dragon's fields are plausible, that no prompt or response text reached the telemetry files, and that every request was seen. A failure lists each failing check with its detail.
-  The fourth test, `test_timeouts_are_reported_consistently`, runs last: it sets the batch deadline to `RHAPSODY_HPC_AI_TIMEOUT_S`, far below what the model needs, so prompts time out, and checks that FAILED tasks, ERROR batch spans, the timed-out counter and the batch events agree. It fails if nothing timed out (lower the value). It is last because late responses after a timeout can contaminate the next batches on the same backend. If it hangs, the group's budget ends the run and the results of all four tests are lost; investigate with `-k timeouts` on its own.
+  The fourth test, `test_timeouts_are_reported_consistently`, sets the batch deadline to `RHAPSODY_HPC_AI_TIMEOUT_S`, far below what the model needs, so prompts time out, and checks that FAILED tasks, ERROR batch spans, the timed-out counter and the batch events agree. It fails if nothing timed out (lower the value). If it hangs, the group's budget ends the run and the results of all four tests are lost; investigate with `-k timeouts` on its own.
+- **`ai-response-queues`** (GPU and model): a batch that timed out gets a new Dragon response queue for the next batch, and the old one is drained and closed in the background. The four tests share one backend and run in order: (1) a throughput run of ordinary batches, which must use one response queue; (2) a batch times out (`RHAPSODY_HPC_AI_TIMEOUT_S`) and the next batch must get only its own answers (every prompt asks for one marker word, so a foreign answer is recognised); (3) `RHAPSODY_HPC_AI_ROUNDS` rounds of 6 timed-out batches of 56 prompts each, more late answers than one 100-slot Dragon queue holds, each round drained and followed by a correctness check, with no late queue left open at the end; (4) four timed-out batches and then `shutdown()`, which must return in under 90 s without the backend's `destroy()` time limit being hit. The run saves `response_queues_report.json` in `out/artifacts/test_ai_response_queues/`. If the last test hangs, the group's budget ends the run and the results of all four tests are lost; investigate with `-k shutdown` on its own.
 
 The `verify()` checks are exercised offline against a fake Dragon pipeline, on healthy and on deliberately broken data (`tests/unit/telemetry/test_inference_verify_kit.py`), so most mistakes in them show up before they meet a GPU. The fixtures that start the real backend can only be tested on a cluster.
 
@@ -217,6 +222,9 @@ export RHAPSODY_HPC_MODEL=/path/to/Qwen2.5-0.5B-Instruct
 
 python3 tests/integration/test-hpc/run_suite.py --backend dragon --junit out/junit.xml \
     --groups telemetry,ai-telemetry -- <dragon launcher options for your machine>
+
+python3 tests/integration/test-hpc/run_suite.py --backend dragon --junit out/junit.xml \
+    --groups ai-response-queues -- <dragon launcher options for your machine>
 ```
 
 Start with `--groups ai-telemetry` to check the setup (budget 10 minutes; a model load, warm-up, the workload and the checks usually take a few). The `ai-telemetry` group starts the vLLM backend itself (about 40 s) and makes `gpu` and `model` required: a missing GPU or model fails it instead of skipping. The telemetry tests check every node of the allocation, so they also work on one node.

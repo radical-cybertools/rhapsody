@@ -12,6 +12,7 @@ Run with:
 
 import asyncio
 import contextlib
+import threading
 from unittest.mock import AsyncMock
 from unittest.mock import MagicMock
 
@@ -30,11 +31,13 @@ from fake_dragon import FakePipeline as _FakePipeline
 from fake_dragon import model_config as _model_config
 from fake_dragon import running_backend as _running_backend
 
+from rhapsody.backends.ai import vllm as vllm_mod
 from rhapsody.backends.ai.config import BatchingConfig
 from rhapsody.backends.ai.config import DynamicWorkerConfig
 from rhapsody.backends.ai.config import GuardrailsConfig
 from rhapsody.backends.ai.config import HardwareConfig
 from rhapsody.backends.ai.vllm import DragonVllmInferenceBackend
+from rhapsody.backends.ai.vllm import ResponseQueues
 from rhapsody.backends.ai.vllm import _unwrap_assistant_response
 
 # ============================================================================
@@ -581,24 +584,256 @@ async def test_a_timeout_at_the_first_prompt_reports_every_prompt_as_timed_out(m
     assert [r["timed_out_prompts"] for r in ended["requests"]] == [3]
 
 
-@pytest.mark.xfail(
-    reason="B2: late responses of a timed-out batch stay in the shared queue and the next batch "
-    "reads them as its own (reported, not fixed). Timing based, so not strict.",
-    strict=False,
-)
 @pytest.mark.asyncio
-async def test_a_late_response_must_not_be_taken_for_the_next_batchs_answer(monkeypatch):
-    delays = {"a": 0.15, "b": 0.08}  # a answers after its batch timed out, b after that
-    pipeline = _FakePipeline(delay=lambda prompt: delays[prompt])
-    async with _running_backend(monkeypatch, pipeline=pipeline, timeout_s=0.1) as (backend, states):
+async def test_a_late_response_is_not_taken_for_the_next_batchs_answer(monkeypatch):
+    """B2: after a timeout the late answer must not reach the next batch.
+
+    Fails with a single shared response queue (B would get A's answer). Passes because the
+    timed-out batch's queue is a late queue the next batch never reads.
+    """
+    late = threading.Event()
+    pipeline = _FakePipeline(hold={"a": late})  # a's answer is held back until released by hand
+    async with _running_backend(monkeypatch, pipeline=pipeline, timeout_s=0.3) as (backend, states):
         first = {"uid": "A", "prompt": "a"}
         await backend.submit_tasks([first])
-        await _wait_terminal(states, 1)
+        await _wait_terminal(states, 1)  # A timed out: FAILED
+
         second = {"uid": "B", "prompt": "b"}
         await backend.submit_tasks([second])
         await _wait_terminal(states, 2)
-        await asyncio.sleep(0.2)
-    assert second["response"] == ["re: b"]
+        assert backend._response_queues.late_queue_count == 1
+        late.set()  # now A's answer arrives, after B was answered
+        async with asyncio.timeout(3):
+            while backend._response_queues.late_queue_count:
+                await asyncio.sleep(0.01)
+
+    assert ("A", "FAILED") in states
+    assert second["response"] == ["re: b"]  # B got its own answer, not A's
+    assert len(backend.fake_queues) == 2
+    assert backend.fake_queues[0].closed  # all answers of the late queue arrived: it is closed
+
+
+@pytest.mark.asyncio
+async def test_late_answers_beyond_the_queue_capacity_do_not_hang_the_shutdown(monkeypatch):
+    """The cluster hang: unread late answers filled the 100-slot queue, a worker blocked in put(),
+    and destroy() waited for it. Here a queue holds 5 and 8 late answers arrive.
+
+    Fails (``hung``) with the old single queue that nobody reads after the timeout.
+    """
+    late = threading.Event()
+    pipeline = _FakePipeline(hold=late)
+    async with _running_backend(
+        monkeypatch, pipeline=pipeline, timeout_s=0.1, queue_capacity=5
+    ) as (backend, states):
+        task = {"uid": "t1", "prompt": [f"p{i}" for i in range(8)]}
+        await backend.submit_tasks([task])
+        await _wait_terminal(states, 1)  # timed out with nothing read: 8 answers are missing
+        late.set()
+        await asyncio.wait_for(backend.shutdown(), timeout=10)
+
+    assert pipeline.hung is False  # destroy() returned: no worker stayed blocked
+    assert backend.fake_queues[0].max_backlog <= 5
+
+
+@pytest.mark.asyncio
+async def test_without_draining_the_same_shutdown_hangs(monkeypatch):
+    """Proof that the test above reproduces the hang: take away the draining and it hangs."""
+    monkeypatch.setattr(ResponseQueues, "give_up", lambda self, queue, missing: None)
+    late = threading.Event()
+    pipeline = _FakePipeline(hold=late)
+    async with _running_backend(
+        monkeypatch, pipeline=pipeline, timeout_s=0.1, queue_capacity=5
+    ) as (backend, states):
+        await backend.submit_tasks([{"uid": "t1", "prompt": [f"p{i}" for i in range(8)]}])
+        await _wait_terminal(states, 1)
+        late.set()
+        with pytest.raises(RuntimeError, match="destroy"):
+            await asyncio.wait_for(backend.shutdown(), timeout=10)
+    assert pipeline.hung is True
+
+
+@pytest.mark.asyncio
+async def test_many_answered_batches_use_a_single_response_queue(monkeypatch):
+    """Normal operation allocates nothing per batch.
+
+    (Does not catch the shared-queue mutation: the B2 test does.)
+    """
+    async with _running_backend(monkeypatch, max_batch_size=2) as (backend, states):
+        await backend.submit_tasks([{"uid": f"t{i}", "prompt": "p"} for i in range(9)])
+        await _wait_terminal(states, 9)
+    assert len(backend.fake_queues) == 1
+    assert backend._response_queues.late_queue_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_failing_query_keeps_the_queue_current(monkeypatch):
+    async with _running_backend(monkeypatch, pipeline=_FakePipeline(fail=True)) as (backend, _s):
+        with pytest.raises(Exception):
+            await backend.generate(["a"], timeout=2)
+        assert backend._response_queues.late_queue_count == 0  # nothing was sent: none missing
+        assert len(backend.fake_queues) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_partly_answered_batch_leaves_exactly_the_missing_answers(monkeypatch):
+    async with _running_backend(monkeypatch, pipeline=_FakePipeline(answer=1), timeout_s=0.1) as (
+        backend,
+        states,
+    ):
+        await backend.submit_tasks([{"uid": "t1", "prompt": ["a", "b", "c"]}])
+        await _wait_terminal(states, 1)  # 1 of 3 answered, then the deadline
+        assert list(backend._response_queues.late_queues.values()) == [2]
+
+
+@pytest.mark.asyncio
+async def test_a_batch_without_prompts_takes_no_response_queue(monkeypatch):
+    async with _running_backend(monkeypatch) as (backend, _states):
+        await backend.submit_tasks([{"uid": "t1", "prompt": []}])
+        await asyncio.sleep(0.15)
+    assert backend.fake_queues == []  # nothing was sent, so no queue was made (B13 is separate)
+
+
+def test_a_destroy_that_ends_after_the_loop_closed_does_not_fail(monkeypatch):
+    release = threading.Event()
+    errors = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: errors.append(args))
+    monkeypatch.setattr(vllm_mod, "_DESTROY_TIMEOUT_S", 0.05)
+
+    class Pipeline(_FakePipeline):
+        def destroy(self):
+            release.wait(10)
+
+    async def scenario():
+        async with _running_backend(monkeypatch, pipeline=Pipeline()) as (backend, _states):
+            await backend.shutdown()  # gives up after 0.05 s, the thread keeps running
+            return backend
+
+    backend = asyncio.run(scenario())  # the loop is closed when this returns
+    release.set()
+    for thread in threading.enumerate():
+        if thread.name == "rhapsody-destroy":
+            thread.join(5)
+    assert errors == []
+    assert not backend.is_initialized
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_processor_mid_batch_keeps_the_unread_answers_missing(monkeypatch):
+    held = threading.Event()
+    async with _running_backend(monkeypatch, pipeline=_FakePipeline(hold=held), timeout_s=30) as (
+        backend,
+        _states,
+    ):
+        await backend.submit_tasks([{"uid": "t1", "prompt": ["a", "b"]}])
+        async with asyncio.timeout(3):
+            while not backend.inference_pipeline.threads:  # the batch was sent
+                await asyncio.sleep(0.005)
+        backend.processor.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await backend.processor
+        assert backend._response_queues.late_queues == {backend.fake_queues[0]: 2}
+        held.set()
+        async with asyncio.timeout(3):
+            while backend._response_queues.late_queue_count:
+                await asyncio.sleep(0.01)
+        assert backend.fake_queues[0].closed
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_a_queue_that_never_got_its_answers(monkeypatch):
+    async with _running_backend(monkeypatch, pipeline=_FakePipeline(answer=0), timeout_s=0.05) as (
+        backend,
+        states,
+    ):
+        await backend.submit_tasks([{"uid": "t1", "prompt": ["a", "b"]}])
+        await _wait_terminal(states, 1)
+        assert backend._response_queues.late_queue_count == 1  # 2 answers that never come
+        await backend.shutdown()
+    assert all(queue.closed for queue in backend.fake_queues)
+    assert backend._response_queues.late_queue_count == 0
+    assert backend._instance_id not in vllm_mod._QUEUE_REGISTRY
+    assert not backend.is_initialized
+
+
+@pytest.mark.asyncio
+async def test_shutdown_runs_destroy_off_the_event_loop(monkeypatch):
+    seen = {}
+
+    class Pipeline(_FakePipeline):
+        def destroy(self):
+            seen["thread"] = threading.current_thread()
+
+    async with _running_backend(monkeypatch, pipeline=Pipeline()) as (backend, _states):
+        await backend.shutdown()
+    assert seen["thread"] is not threading.main_thread()
+    assert seen["thread"].daemon
+
+
+@pytest.mark.asyncio
+async def test_shutdown_raises_what_destroy_raised_and_still_closes_the_queues(monkeypatch):
+    class Pipeline(_FakePipeline):
+        def destroy(self):
+            raise ValueError("destroy failed")
+
+    async with _running_backend(monkeypatch, pipeline=Pipeline(answer=0), timeout_s=0.05) as (
+        backend,
+        states,
+    ):
+        await backend.submit_tasks([{"uid": "t1", "prompt": "a"}])
+        await _wait_terminal(states, 1)
+        with pytest.raises(ValueError, match="destroy failed"):
+            await backend.shutdown()
+    assert all(queue.closed for queue in backend.fake_queues)
+    assert backend._instance_id not in vllm_mod._QUEUE_REGISTRY
+
+
+@pytest.mark.asyncio
+async def test_shutdown_goes_on_when_destroy_does_not_return_and_leaves_queues_open(monkeypatch):
+    monkeypatch.setattr(vllm_mod, "_DESTROY_TIMEOUT_S", 0.1)
+    release = threading.Event()
+
+    class Pipeline(_FakePipeline):
+        def destroy(self):
+            release.wait(10)  # a worker that never ends
+
+    async with _running_backend(monkeypatch, pipeline=Pipeline(answer=0), timeout_s=0.05) as (
+        backend,
+        states,
+    ):
+        await backend.submit_tasks([{"uid": "t1", "prompt": "a"}])
+        await _wait_terminal(states, 1)
+        await asyncio.wait_for(backend.shutdown(), timeout=5)  # returned although destroy() did not
+        assert not any(queue.closed for queue in backend.fake_queues)  # a worker may still use them
+        assert not backend.is_initialized
+    release.set()  # the daemon thread finishes later and must not fail the process
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_shutdown_still_clears_the_state(monkeypatch):
+    release = threading.Event()
+
+    class Pipeline(_FakePipeline):
+        def destroy(self):
+            release.wait(10)
+
+    async with _running_backend(monkeypatch, pipeline=Pipeline()) as (backend, _states):
+        shutdown = asyncio.create_task(backend.shutdown())
+        await asyncio.sleep(0.05)
+        shutdown.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await shutdown
+        assert not backend.is_initialized
+        assert backend._instance_id not in vllm_mod._QUEUE_REGISTRY
+    release.set()
+
+
+def test_a_pickled_backend_gets_fresh_response_queues():
+    import pickle
+
+    backend = DragonVllmInferenceBackend(model=_model_config(), use_service=False)
+    restored = pickle.loads(pickle.dumps(backend))
+    assert restored._response_queues is not backend._response_queues
+    assert restored._response_queues.created_queue_count == 0
 
 
 @pytest.mark.xfail(
