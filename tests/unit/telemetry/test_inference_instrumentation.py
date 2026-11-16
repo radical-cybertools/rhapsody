@@ -18,7 +18,8 @@ from rhapsody.telemetry.manager import TelemetryManager
 
 SCOPE = "rhapsody.instrumentation.inference"
 STARTED = "rhapsody.inference.BatchStarted"
-ENDED = "rhapsody.inference.BatchEnded"
+DONE = "rhapsody.inference.BatchDone"
+FAILED = "rhapsody.inference.BatchFailed"
 # Advisory bucket bounds of the duration histograms: 10 ms doubling up to 327.68 s.
 BUCKETS = [0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28]
 BUCKETS += [2.56, 5.12, 10.24, 20.48, 40.96, 81.92, 163.84, 327.68]
@@ -60,6 +61,7 @@ def _started(backend, batch_id=1, task_ids=(), t=100.0, **kw):
 
 
 def _ended(backend, batch_id=1, rows=(), t=102.5, **kw):
+    """BatchDone, or BatchFailed when ``error_type`` is given (as the backend does)."""
     attrs = {
         "batch_id": batch_id,
         "model": "m",
@@ -71,7 +73,7 @@ def _ended(backend, batch_id=1, rows=(), t=102.5, **kw):
         "requests": list(rows),
         **kw,
     }
-    backend.telemetry.emit(ENDED, attrs, event_time=t)
+    backend.telemetry.emit(FAILED if "error_type" in kw else DONE, attrs, event_time=t)
 
 
 def _row(task_id, prompts=1, queue=0.5, timed_out=0):
@@ -171,7 +173,7 @@ def test_the_link_cap_matches_the_sdk_default():
 async def test_timed_out_prompts_make_the_span_an_error():
     manager, backend = await _manager()
     _started(backend)
-    _ended(backend, timed_out_prompts=2)
+    _ended(backend, timed_out_prompts=2, error_type="TimeoutError")
     await asyncio.wait_for(manager._queue.join(), 10)
     await manager.stop()
 
@@ -180,6 +182,51 @@ async def test_timed_out_prompts_make_the_span_an_error():
     assert span.status.status_code == StatusCode.ERROR
     assert attrs["error.type"] == "TimeoutError"
     assert attrs["rhapsody.inference.timed_out_prompts"] == 2
+
+
+async def test_a_failed_batch_makes_the_span_an_error_with_the_class_of_the_failure():
+    manager, backend = await _manager()
+    _started(backend)
+    _ended(backend, error_type="RuntimeError")
+    await asyncio.wait_for(manager._queue.join(), 10)
+    await manager.stop()
+
+    (span,) = _batch_spans(manager)
+    attrs = dict(span.attributes)
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.status.description == "batch failed"
+    assert attrs["error.type"] == "RuntimeError"
+    assert "rhapsody.inference.timed_out_prompts" not in attrs
+
+
+async def test_a_failed_batch_with_timeouts_keeps_the_timeouts_and_the_first_failure():
+    manager, backend = await _manager()
+    _started(backend)
+    _ended(backend, timed_out_prompts=2, error_type="ValueError")  # an exception answer came first
+    await asyncio.wait_for(manager._queue.join(), 10)
+    await manager.stop()
+
+    (span,) = _batch_spans(manager)
+    attrs = dict(span.attributes)
+    assert span.status.description == "2 prompts timed out"
+    assert attrs["error.type"] == "ValueError"
+    assert attrs["rhapsody.inference.timed_out_prompts"] == 2
+
+
+async def test_a_failed_batch_is_recorded_like_a_good_one():
+    manager, backend = await _manager()
+    _started(backend)
+    _ended(backend, error_type="RuntimeError", rows=[_row("t1", prompts=2, queue=0.5)])
+    await asyncio.wait_for(manager._queue.join(), 10)
+    await manager.stop()
+
+    metrics = _metrics(manager)
+    assert (
+        sum(dp.sum for dp in metrics["rhapsody.inference.batch.duration"].data.data_points) == 2.5
+    )
+    assert sum(dp.value for dp in metrics["rhapsody.inference.batches"].data.data_points) == 1
+    assert sum(dp.value for dp in metrics["rhapsody.inference.prompts"].data.data_points) == 2
+    assert "rhapsody.inference.timed_out.prompts" not in metrics  # nothing timed out
 
 
 async def test_a_batch_that_never_ends_is_closed_by_the_next_batch_and_by_stop():
@@ -221,6 +268,7 @@ async def test_per_task_facts_land_on_the_open_task_span():
         backend,
         rows=[_row("t1", prompts=2, queue=0.25), _row("t2", prompts=1, queue=0.5, timed_out=1)],
         timed_out_prompts=1,
+        error_type="TimeoutError",
     )
     await asyncio.wait_for(manager._queue.join(), 10)
     for task_id in ("t1", "t2"):
@@ -328,6 +376,7 @@ async def test_every_instrument_has_its_documented_attributes_and_values():
         backend,
         batch_duration_s=2.5,
         timed_out_prompts=1,
+        error_type="TimeoutError",
         rows=[_row("t1", prompts=3, queue=0.5, timed_out=1)],
         dragon_model_duration_s=2.0,
     )

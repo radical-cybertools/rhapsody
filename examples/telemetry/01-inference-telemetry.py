@@ -93,8 +93,9 @@ def summarize(telemetry, events):
 
     # 4. The same facts as events (what subscribe() delivers and the JSONL file holds).
     started = sum(e.event_type == PREFIX + "BatchStarted" for e in events)
-    ended = sum(e.event_type == PREFIX + "BatchEnded" for e in events)
-    lines.append(f"events seen: {started} BatchStarted, {ended} BatchEnded")
+    done = sum(e.event_type == PREFIX + "BatchDone" for e in events)
+    failed = sum(e.event_type == PREFIX + "BatchFailed" for e in events)
+    lines.append(f"events seen: {started} BatchStarted, {done} BatchDone, {failed} BatchFailed")
     return lines
 
 

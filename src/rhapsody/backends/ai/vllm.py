@@ -251,8 +251,11 @@ class DragonVllmInferenceBackend(BaseBackend):
 
     Telemetry: the backend reports plain data (numbers and strings, never prompt or response text)
     through ``self.telemetry``, the emitter it is handed when it is attached to a session: one
-    ``rhapsody.inference.BatchStarted`` when a batch is sent and one ``BatchEnded`` when its
-    responses are in. It never imports OpenTelemetry: RHAPSODY does not own the execution events
+    ``rhapsody.inference.BatchStarted`` when a batch is sent and, when its responses are in, one
+    ``BatchDone`` (every prompt was answered) or ``BatchFailed`` (a prompt got no answer or an
+    exception as its answer, or the batch processor failed; ``error_type`` names the exception
+    class). A batch cancelled while in flight gets neither. It never imports OpenTelemetry:
+    RHAPSODY does not own the execution events
     here (the model runs inside Dragon's pipeline), so the backend translates what Dragon reports
     into plain data and the inference instrumentation
     (``rhapsody.telemetry.instrumentation.inference``) turns it into spans and metrics.
@@ -373,7 +376,8 @@ class DragonVllmInferenceBackend(BaseBackend):
     async def submit_tasks(self, tasks: list[dict]) -> None:
         """Submit AITask objects for inference.
 
-        Each task is decomposed into prompts and added to the batching queue.
+        Each task is decomposed into prompts and added to the batching queue. An ``AITask`` always
+        has a prompt (its constructor refuses an empty one); a plain dict task is not validated.
         """
         if not self.is_initialized:
             await self.initialize()
@@ -460,6 +464,10 @@ class DragonVllmInferenceBackend(BaseBackend):
         5. Distribute responses back to individual futures
         """
         while True:
+            # Where this batch got to: BatchStarted emitted (telemetry was on and the emit was
+            # attempted) and its end event (BatchDone or BatchFailed) emitted. Only a batch that
+            # started gets an end event, and only one, also on the failure path.
+            batch_started = batch_result_sent = False
             try:
                 # Wait for at least one request to arrive
                 await self._new_request_event.wait()
@@ -511,6 +519,7 @@ class DragonVllmInferenceBackend(BaseBackend):
                 # without prompts sends nothing) and before BatchStarted (creating a queue can fail).
                 response_queue = await self._response_queues.queue_for_batch()
                 sent = answers_read = 0  # prompts sent to Dragon, answers read from the queue
+                first_response: Any = None  # first raw Dragon response: batch-level numbers
 
                 self._batch_seq += 1
                 batch_id = self._batch_seq
@@ -534,6 +543,7 @@ class DragonVllmInferenceBackend(BaseBackend):
                             "task_ids": [req.task_uid for req in batch if req.task_uid],
                         },
                     )
+                    batch_started = True
 
                 try:
                     # TELEMETRY-LIMITATION(L2): no trace context is passed to Dragon here, so if the
@@ -550,7 +560,7 @@ class DragonVllmInferenceBackend(BaseBackend):
                     logger.debug("Batch submitted, waiting for responses...")
                     # Collect responses
                     all_results = []
-                    first_response: Any = None  # first raw Dragon response: batch-level numbers
+                    prompt_errors: dict[int, BaseException] = {}  # prompt index -> its exception
                     first_timeout = None  # index of the first prompt that got no response
                     deadline = asyncio.get_event_loop().time() + _BATCH_RESPONSE_TIMEOUT_S
 
@@ -561,12 +571,26 @@ class DragonVllmInferenceBackend(BaseBackend):
 
                         while True:
                             poll_count += 1
-                            if not response_queue.empty():
+                            try:
                                 raw_response = response_queue.get_nowait()
+                            except stdlib_queue.Empty:
+                                # No answer yet. Not asked with empty(): Dragon documents it as
+                                # unreliable, so get_nowait() can raise Empty right after it.
+                                pass
+                            else:
+                                # Count it now, before anything that could raise or await.
                                 answers_read += 1
-                                if first_response is None:
-                                    first_response = raw_response
-                                response = _unwrap_assistant_response(raw_response)
+                                if isinstance(raw_response, BaseException):
+                                    # Dragon's worker failed this prompt and answered with the
+                                    # exception itself.
+                                    prompt_errors[i] = raw_response
+                                    response = (
+                                        f"ERROR: {type(raw_response).__name__}: {raw_response}"
+                                    )
+                                else:
+                                    if first_response is None:
+                                        first_response = raw_response
+                                    response = _unwrap_assistant_response(raw_response)
                                 all_results.append(response)
                                 logger.debug(
                                     f"Received response {i + 1}/{len(all_prompts)} after {poll_count} polls"
@@ -611,7 +635,6 @@ class DragonVllmInferenceBackend(BaseBackend):
                     # batch never reads them and no worker blocks on a full queue.
                     self._response_queues.give_up(response_queue, sent - answers_read)
 
-                batch_duration = time.perf_counter() - dispatch_mono
                 total_prompts = len(all_prompts)
                 # Unanswered prompts of each request (see B1 below), computed once.
                 timed_outs = []
@@ -622,29 +645,29 @@ class DragonVllmInferenceBackend(BaseBackend):
                     )
                     offset += size
 
+                # The first failure in prompt order names the batch's failure. An exception
+                # answer always comes before the timeouts, which are the tail of the batch.
+                if prompt_errors:
+                    batch_error_type = type(prompt_errors[min(prompt_errors)]).__name__
+                elif first_timeout is not None:
+                    batch_error_type = "TimeoutError"
+                else:
+                    batch_error_type = None
+
                 # Emitted before the tasks are reported, so their spans are still open when the
                 # instrumentation handles it.
-                if self.telemetry.enabled:
-                    payload = {
-                        "batch_id": batch_id,
-                        "model": self.model_name,
-                        "batch_trigger": batch_trigger,
-                        "batch_prompts": total_prompts,
-                        "batch_requests": len(batch),
-                        "batch_duration_s": batch_duration,
-                        "timed_out_prompts": sum(timed_outs),
-                        "requests": [
-                            {
-                                "task_id": req.task_uid,
-                                "prompt_count": size,
-                                "queue_duration_s": max(dispatch_mono - req.enqueued_at, 0.0),
-                                "timed_out_prompts": timed_out,
-                            }
-                            for req, size, timed_out in zip(batch, request_sizes, timed_outs)
-                        ],
-                    }
-                    payload.update(_dragon_fields(first_response))
-                    self._emit_telemetry("rhapsody.inference.BatchEnded", payload)
+                if batch_started:
+                    batch_result_sent = True
+                    self._emit_batch_result(
+                        batch_id=batch_id,
+                        batch_trigger=batch_trigger,
+                        batch=batch,
+                        request_sizes=request_sizes,
+                        timed_outs=timed_outs,
+                        dispatch_mono=dispatch_mono,
+                        first_response=first_response,
+                        error_type=batch_error_type,
+                    )
 
                 # Distribute results back to individual requests
                 offset = 0
@@ -660,11 +683,27 @@ class DragonVllmInferenceBackend(BaseBackend):
                         task = self._tasks_in_flight.pop(req.task_uid)
                         task["response"] = req_results  # AITask uses .response for model output
 
-                        # A task with unanswered prompts failed. It keeps its partial response
-                        # (answered prompts plus "ERROR: ..." strings). generate() and HTTP
-                        # callers still get the strings in their result.
+                        # A task with a prompt that Dragon answered with an exception, or that got
+                        # no answer, failed. It keeps its partial response (the answers, plus
+                        # "ERROR: ..." strings). generate() and HTTP callers still get the
+                        # strings in their result.
                         state = "DONE"
-                        if timed_out:
+                        request_error = (
+                            next(
+                                (
+                                    prompt_errors[j]
+                                    for j in range(offset, offset + size)
+                                    if j in prompt_errors
+                                ),
+                                None,
+                            )
+                            if prompt_errors
+                            else None
+                        )
+                        if request_error is not None:
+                            task["exception"] = request_error
+                            state = "FAILED"
+                        elif timed_out:
                             task["exception"] = TimeoutError(
                                 f"{timed_out} of {size} prompts got no response within "
                                 f"{_BATCH_RESPONSE_TIMEOUT_S}s"
@@ -680,14 +719,23 @@ class DragonVllmInferenceBackend(BaseBackend):
             except Exception as e:
                 logger.error(f"Batch processor error: {e}", exc_info=True)
 
-                # TELEMETRY-LIMITATION(L12): a batch that fails on this path emits no BatchEnded
-                # (existing issue B11), so its batch span stays open until the next batch or the
-                # end of the session and the queue times of its tasks are missing; the tasks still
-                # produce their own failure events.
-                # Why not now: this exception path is existing behaviour, reported and not
-                # changed here. Planned: B11 fix. See docs/telemetry/reference.md#known-limitations.
+                # A batch that started and has no end event yet ends here, once. The tasks are
+                # reported FAILED below, after this, so their spans are still open.
+                if batch_started and not batch_result_sent:
+                    batch_result_sent = True
+                    self._emit_batch_result(
+                        batch_id=batch_id,
+                        batch_trigger=batch_trigger,
+                        batch=batch,
+                        request_sizes=request_sizes,
+                        timed_outs=[0] * len(batch),
+                        dispatch_mono=dispatch_mono,
+                        first_response=first_response,
+                        error_type=type(e).__name__,
+                    )
 
-                # Fail requests in the current batch being processed
+                # Fail the requests of the batch being processed. The requests still waiting in
+                # the queue are not touched: they go into the next batch.
                 if "batch" in locals():
                     for req in batch:
                         if not req.future.done():
@@ -695,23 +743,57 @@ class DragonVllmInferenceBackend(BaseBackend):
 
                         if req.task_uid and req.task_uid in self._tasks_in_flight:
                             task = self._tasks_in_flight.pop(req.task_uid)
-                            task["exception"] = str(e)
+                            task["exception"] = e
                             if self._callback_func:
                                 self._callback_func(task, "FAILED")
 
-                # Fail pending requests still in queue
-                async with self._batch_lock:
-                    for req in self._pending_requests:
-                        if not req.future.done():
-                            req.future.set_exception(e)
+    def _emit_batch_result(
+        self,
+        *,
+        batch_id: int,
+        batch_trigger: str,
+        batch: list,
+        request_sizes: list,
+        timed_outs: list,
+        dispatch_mono: float,
+        first_response: Any,
+        error_type: Optional[str],
+    ) -> None:
+        """Emit how a batch ended: ``BatchDone``, or ``BatchFailed`` when ``error_type`` is given.
 
-                        if req.task_uid and req.task_uid in self._tasks_in_flight:
-                            task = self._tasks_in_flight.pop(req.task_uid)
-                            task["exception"] = str(e)
-                            if self._callback_func:
-                                self._callback_func(task, "FAILED")
-
-                    self._pending_requests.clear()
+        ``error_type`` is the class name of the exception, never its message (a message can hold
+        prompt text). Telemetry must never break inference: building the payload is guarded like
+        the emit itself.
+        """
+        if not self.telemetry.enabled:
+            return
+        name = "BatchDone" if error_type is None else "BatchFailed"
+        try:
+            payload = {
+                "batch_id": batch_id,
+                "model": self.model_name,
+                "batch_trigger": batch_trigger,
+                "batch_prompts": sum(request_sizes),
+                "batch_requests": len(batch),
+                "batch_duration_s": time.perf_counter() - dispatch_mono,
+                "timed_out_prompts": sum(timed_outs),
+                "requests": [
+                    {
+                        "task_id": req.task_uid,
+                        "prompt_count": size,
+                        "queue_duration_s": max(dispatch_mono - req.enqueued_at, 0.0),
+                        "timed_out_prompts": timed_out,
+                    }
+                    for req, size, timed_out in zip(batch, request_sizes, timed_outs)
+                ],
+            }
+            if error_type is not None:
+                payload["error_type"] = error_type
+            payload.update(_dragon_fields(first_response))
+        except Exception:
+            logger.debug("Could not build %s", name, exc_info=True)
+            return
+        self._emit_telemetry(f"rhapsody.inference.{name}", payload)
 
     def _emit_telemetry(self, name: str, attributes: dict) -> None:
         """Emit one inference event; telemetry must never break inference."""
@@ -749,8 +831,13 @@ class DragonVllmInferenceBackend(BaseBackend):
     async def generate(self, prompts: list[str], timeout: int = 300) -> list[str]:
         """Generate responses for given prompts.
 
-        Queues request for batching instead of immediate submission.
+        Queues request for batching instead of immediate submission. ``prompts`` must hold at least
+        one prompt (``ValueError`` otherwise): a request without prompts is never sent, so nothing
+        would ever answer it.
         """
+        if not prompts:
+            raise ValueError("generate() needs at least one prompt")
+
         if not self.is_initialized:
             raise RuntimeError("Not initialized. Call await initialize() first.")
 

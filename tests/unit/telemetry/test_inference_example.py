@@ -73,7 +73,7 @@ async def _run(monkeypatch, tmp_path, n_tasks=9):
 async def test_summarize_describes_every_batch_task_and_metric(monkeypatch, tmp_path):
     example = _load(EXAMPLE, "inference_example")
     telemetry, events, _ = await _run(monkeypatch, tmp_path)
-    ended = [e for e in events if e.event_type == example.PREFIX + "BatchEnded"]
+    ended = [e for e in events if e.event_type == example.PREFIX + "BatchDone"]
 
     lines = example.summarize(telemetry, events)
     text = "\n".join(lines)
@@ -94,7 +94,7 @@ async def test_summarize_describes_every_batch_task_and_metric(monkeypatch, tmp_
     assert all(task_line.fullmatch(ln) for ln in lines if ln.startswith("  task."))
     assert f"rhapsody.inference.batches: {len(ended)}" in text
     assert "rhapsody.inference.request.queue.duration: 9 samples" in text
-    assert f"events seen: {len(ended)} BatchStarted, {len(ended)} BatchEnded" in text
+    assert f"events seen: {len(ended)} BatchStarted, {len(ended)} BatchDone, 0 BatchFailed" in text
 
 
 async def test_summarize_never_prints_prompt_text(monkeypatch, tmp_path):

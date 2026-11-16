@@ -143,12 +143,18 @@ class FakePipeline:
 
 @contextlib.asynccontextmanager
 async def running_backend(
-    monkeypatch, answer=None, timeout_s=0.05, pipeline=None, queue_capacity=None, **backend_kwargs
+    monkeypatch,
+    answer=None,
+    timeout_s=0.05,
+    pipeline=None,
+    queue_capacity=None,
+    queue_class=None,
+    **backend_kwargs,
 ):
     """A backend with its batch processor running; the processor is stopped on exit.
 
-    The backend's response queues make ``FakeQueue(queue_capacity)``; the queues it made are in
-    ``backend.fake_queues``.
+    The backend's response queues make ``FakeQueue(queue_capacity)`` (or ``queue_class(capacity)``
+    to misbehave on purpose); the queues it made are in ``backend.fake_queues``.
     """
     from rhapsody.backends.ai import vllm as vllm_mod
     from rhapsody.backends.ai.vllm import DragonVllmInferenceBackend
@@ -160,7 +166,7 @@ async def running_backend(
     backend.fake_queues = []
 
     def make_queue():
-        queue = FakeQueue(queue_capacity)
+        queue = (queue_class or FakeQueue)(queue_capacity)
         backend.fake_queues.append(queue)
         return queue
 

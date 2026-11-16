@@ -47,7 +47,7 @@ class Emitter(Protocol):
         """Report one event.
 
         Args:
-            name: Namespaced event name (contains a ``.``), e.g. ``rhapsody.inference.BatchEnded``.
+            name: Namespaced event name (contains a ``.``), e.g. ``rhapsody.inference.BatchDone``.
             attributes: Plain numbers, strings and lists/dicts of them. Never prompt or response
                 text. The caller hands the dict over and must not mutate it afterwards.
             event_time: When the event really happened (``time.time()``); defaults to now.
