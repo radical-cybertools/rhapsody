@@ -422,6 +422,12 @@ class DragonNativeExecutionBackend(BaseBackend):
         pmi: The PMI of every ``process_templates`` group whose task sets none: ``"pmix"``,
             ``"cray"``, ``"none"`` or a Dragon ``PMIBackend``. An unknown name raises
             ``ValueError`` before anything starts.
+        hosts: The Dragon nodes this backend uses, by hostname. Defaults to all of the runtime's
+            nodes. With a list, the backend acts as if the runtime had only those nodes: its pool,
+            its unplaced tasks, its process slots and the placements it accepts. Several clients
+            of one multi-node runtime, one per node, can each pass their own node, so that each
+            pool stays on its client's node instead of every client starting workers everywhere.
+            A host that is not a Dragon node raises ``ValueError`` when the backend starts.
         name: Backend name.
     """
 
@@ -440,11 +446,14 @@ class DragonNativeExecutionBackend(BaseBackend):
         worker_start_timeout: float = 300.0,
         pmi: str | PMIBackend | None = None,
         name: str | None = "dragon_native",
+        hosts: list[str] | None = None,
     ):
         if Process is None:
             raise RuntimeError(DRAGON_NATIVE_INIT_ERROR)
         if workers_per_node is not None and workers_per_node < 0:
             raise ValueError("workers_per_node must be >= 0")
+        if hosts is not None and (isinstance(hosts, str) or not hosts):
+            raise ValueError("hosts must be a non-empty list of hostnames, or None for all nodes")
         if gpu_workers_per_set < 1:
             raise ValueError("gpu_workers_per_set must be >= 1")
         _group_pmi(pmi)
@@ -455,6 +464,7 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._workers_per_node = workers_per_node
         self._gpu_workers_per_set = gpu_workers_per_set
         self._max_process_ranks_arg = max_process_ranks
+        self._hosts = list(dict.fromkeys(hosts)) if hosts is not None else None
         self._inline_stdio = inline_stdio
         self._kill_grace = kill_grace
         self._worker_start_timeout = worker_start_timeout
@@ -601,7 +611,16 @@ class DragonNativeExecutionBackend(BaseBackend):
                 "h_uid": node.h_uid,
             }
             self._hosts_by_huid[node.h_uid] = node.hostname
-        self._host_order = [self._client_host] + [h for h in self._nodes if h != self._client_host]
+        if self._hosts is not None:
+            unknown = [h for h in self._hosts if h not in self._nodes]
+            if unknown:
+                raise ValueError(
+                    f"hosts {unknown} are not Dragon nodes; nodes: {sorted(self._nodes)}"
+                )
+            self._nodes = {h: self._nodes[h] for h in self._hosts}
+            self._hosts_by_huid = {info["h_uid"]: h for h, info in self._nodes.items()}
+        first = [self._client_host] if self._client_host in self._nodes else []
+        self._host_order = first + [h for h in self._nodes if h != self._client_host]
         total_cpus = sum(len(n["cpus"]) or n["num_cpus"] for n in self._nodes.values())
         self._max_process_ranks = self._max_process_ranks_arg or max(1, total_cpus)
 
