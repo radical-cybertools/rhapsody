@@ -583,6 +583,67 @@ async def test_default_pool_on_a_node_with_no_cpu_list(dragon, monkeypatch):
         await be.shutdown()
 
 
+async def test_hosts_keep_the_pool_and_unplaced_tasks_on_those_nodes(dragon, tmp_path):
+    """A client on n0 that passes hosts=["n1"] starts workers on n1 only, and runs there."""
+    be = DragonNativeExecutionBackend(workers_per_node=2, inline_stdio=False, hosts=["n1"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        assert {w.policy.host_name for w in dragon.workers()} == {"n1"}
+        assert be.num_workers == 2
+        assert [t["id"] for t in be.topology()] == ["n1"]
+        assert be._results.policy.host_name == "n0"  # results still come back to the client
+        rec = Recorder(be)
+        tasks = [fn_task(square, i) for i in range(3)]
+        await be.submit_tasks(tasks)
+        for task in tasks:
+            assert await rec.wait(task["uid"]) == ["DONE"]
+        assert {be._tasks[t["uid"]].worker.host for t in tasks if t["uid"] in be._tasks} <= {"n1"}
+        assert [t["return_value"] for t in tasks] == [0, 1, 4]
+    finally:
+        await be.shutdown()
+
+
+async def test_hosts_with_the_clients_node_put_it_first(dragon, tmp_path):
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n1", "n0"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        assert be._host_order == ["n0", "n1"]
+    finally:
+        await be.shutdown()
+
+
+async def test_a_placement_outside_hosts_fails_only_its_task(dragon, tmp_path):
+    """With hosts=["n0"], n1 is not one of the backend's nodes: a task placed there fails."""
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n0"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        rec = Recorder(be)
+        bad = fn_task(square, 3, task_backend_specific_kwargs=on("n1"))
+        good = fn_task(square, 2)
+        await be.submit_tasks([bad, good])
+        assert [s for u, s, _ in rec.records if u == bad["uid"]] == ["FAILED"]
+        assert "not a Dragon node" in str(bad["exception"])
+        assert await rec.wait(good["uid"]) == ["DONE"]
+    finally:
+        await be.shutdown()
+
+
+async def test_an_unknown_host_fails_the_start(dragon):
+    be = DragonNativeExecutionBackend(inline_stdio=False, hosts=["n0", "nowhere"])
+    with pytest.raises(ValueError, match="nowhere"):
+        await be
+    assert not dragon.workers()
+
+
+@pytest.mark.parametrize("hosts", ["n0", []])
+def test_hosts_must_be_a_non_empty_list(dragon, hosts):
+    with pytest.raises(ValueError, match="hosts"):
+        DragonNativeExecutionBackend(hosts=hosts)
+
+
 async def test_each_inbox_is_on_its_workers_node_and_results_on_the_clients(backend):
     """Inbox queues sit on their worker's node; the result queue sits on the client's node."""
     for w in backend._workers.values():
