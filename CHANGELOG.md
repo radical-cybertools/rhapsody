@@ -15,6 +15,15 @@
 
 ### Fixed
 
+- **`import rhapsody` broke Dragon's `multiprocessing` bridge** (#159) — `rhapsody.backends`
+  imported `DragonVllmInferenceBackend` with the package, and with it `dragon.ai.inference`,
+  whose `llm_engine.py` sets `DRAGON_PATCH_MP` to `""` at import. Processes a program then
+  started through Dragon's `multiprocessing` bridge lacked Dragon's start method and failed with
+  `ValueError: cannot find context for 'dragon'`. The vLLM backend now loads on first use (a
+  module `__getattr__`): `from rhapsody.backends import DragonVllmInferenceBackend` still works,
+  but the name is no longer in `rhapsody.backends.__all__`. Using the vLLM backend still clears
+  the variable, which is Dragon's to change; a program that also starts processes through the
+  bridge can set `DRAGON_PATCH_MP=True` again after importing it.
 - **BEHAVIOUR CHANGE: `DragonVllmInferenceBackend` reports a timed-out AITask as FAILED, not DONE** —
   when some prompts of a task got no response within the batch deadline (300 s), the task was
   reported DONE with `"ERROR: Timeout ..."` strings as its response. It is now reported FAILED,

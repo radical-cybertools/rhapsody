@@ -6,6 +6,9 @@ infrastructures.
 
 from __future__ import annotations
 
+import importlib
+from typing import Any
+
 from rhapsody.api import Session
 
 from .base import BaseBackend
@@ -58,10 +61,18 @@ try:
 except ImportError:
     pass
 
-# Try to import optional AI (inference) backends
-try:
-    from .ai.vllm import DragonVllmInferenceBackend  # noqa: F401
+# Optional AI (inference) backends load on first use, not with this package. Importing one
+# imports dragon.ai.inference, whose llm_engine sets DRAGON_PATCH_MP to "" at import; the
+# processes a program starts afterwards through Dragon's multiprocessing bridge then lack
+# Dragon's start method. A plain `import rhapsody` must not do that.
+_LAZY_BACKENDS = {"DragonVllmInferenceBackend": ".ai.vllm"}
 
-    __all__.append("DragonVllmInferenceBackend")
-except ImportError:
-    pass
+
+def __getattr__(name: str) -> Any:
+    """Import an optional AI backend the first time it is asked for."""
+    if name in _LAZY_BACKENDS:
+        module = importlib.import_module(_LAZY_BACKENDS[name], __name__)
+        value = getattr(module, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
