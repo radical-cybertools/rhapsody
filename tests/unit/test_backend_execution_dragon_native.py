@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import ctypes
 import enum
+import gc
 import itertools
 import os
 import queue
@@ -22,6 +23,7 @@ import sys
 import threading
 import time
 import types
+import weakref
 from dataclasses import dataclass
 from dataclasses import field
 
@@ -1189,6 +1191,37 @@ async def test_a_task_too_large_for_its_inbox_fails_at_once_and_keeps_its_worker
     assert await rec.wait(after["uid"]) == ["DONE"] and after["return_value"] == 25
     assert be._workers.get(w.wid) is w and w.proc is proc and proc.code is None
     assert len(dragon.workers()) == workers
+
+
+class Blob:
+    """A value a test can hold a weak reference to."""
+
+
+HELD = []
+
+
+def keeps_track(blob):
+    """Note weak references to this task's argument and result, as its worker holds them."""
+    out = Blob()
+    HELD[:] = [weakref.ref(blob), weakref.ref(out)]
+    return out
+
+
+async def test_an_idle_worker_keeps_nothing_of_its_last_task(one_worker):
+    """It held the last task's function, arguments and result until the next task came: a large
+    result stayed on its node, in no task's measurement."""
+    be, _ = one_worker
+    rec = Recorder(be)
+    task = fn_task(keeps_track, Blob(), placement={"host": "n0"})
+    await be.submit_tasks([task])
+    assert await rec.wait(task["uid"]) == ["DONE"]
+    assert len(HELD) == 2
+
+    def released():
+        gc.collect()
+        return all(ref() is None for ref in HELD)
+
+    await until(released)
 
 
 async def test_function_with_no_pool_fails_at_once(dragon, tmp_path):

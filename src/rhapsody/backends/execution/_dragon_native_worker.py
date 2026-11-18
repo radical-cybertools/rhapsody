@@ -257,14 +257,19 @@ def worker_main(wid, inbox, results):
         if raw is None:
             return
         uid, body = cloudpickle.loads(raw)
+        del raw
         try:
             token, fn, args, kwargs, out_path, err_path, inline = cloudpickle.loads(body)
         except BaseException as exc:  # noqa: BLE001 - the error goes back to the client
+            del body
             send(results, (DONE, wid, uid, False, exc, traceback.format_exc(), "", ""), 4)
             continue
         del body
         ok, value, tb, out, err = run_task(token, fn, args, kwargs, out_path, err_path, inline)
         send(results, (DONE, wid, uid, ok, value, tb, out, err), 4)
+        # Waiting for the next task, the worker keeps nothing of this one: a large result would
+        # stay on the node, in no task's measurement.
+        del fn, args, kwargs, value, tb, out, err
 
 
 def relay_main(control, results, inbound, idle_interval, send_timeout, linger):
