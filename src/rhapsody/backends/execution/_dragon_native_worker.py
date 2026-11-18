@@ -116,6 +116,22 @@ def put_waiting(results, raw, flush=False):
             delay = min(delay * 2, 1.0)
 
 
+def too_large(exc) -> bool:
+    """Whether Dragon refused a message larger than its memory pool can ever hold
+    (``DRAGON_DYNHEAP_REQUESTED_SIZE_TOO_LARGE``), as against a pool that is full for now.
+
+    Dragon raises a ``DragonPoolError`` or a ``DragonFLIError`` for it, not the pool-full error:
+    only its return code tells it apart.
+    """
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if "REQUESTED_SIZE_TOO_LARGE" in f"{getattr(exc, '_lib_err_str', '')} {exc.args!r}":
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
 def send(results, msg, value_index, flush=False):
     """Send a result message; one that Dragon cannot take fails its task, not the worker."""
     raw = pack(msg, value_index)
@@ -265,7 +281,9 @@ def relay_main(control, results, inbound, idle_interval, send_timeout, linger):
       ``("ack",)`` says the client has handled the last batch it took. ``None`` ends this thread.
       A send that fails comes back as ``(UNSENT, wid, uid, kind, error, payload)`` through
       ``results``, so the client reads it in order with that worker's messages; ``kind`` is
-      ``"full"`` (Dragon's memory pool), ``"timeout"`` or ``"broken"``.
+      ``"full"`` (Dragon's memory pool, for now), ``"too_large"`` (larger than the pool can ever
+      hold: the payload, which would not fit on ``results`` either, comes back as its size in
+      bytes), ``"timeout"`` or ``"broken"``.
     - ``results`` brings what workers and function processes send, and the relay forwards it to
       ``inbound`` as ``(messages, drained_at)``: the messages it had, and the last time it found
       ``results`` empty, or None if it did not. It forwards a batch only once the client has
@@ -307,13 +325,16 @@ def relay_main(control, results, inbound, idle_interval, send_timeout, linger):
                     sent = True
                     try:
                         inboxes[wid].put(payload, timeout=send_timeout)
-                    except PoolFull as exc:
-                        report(wid, uid, "full", exc, payload)
-                    except queue.Full:
-                        error = TimeoutError(f"the put took over {send_timeout} s")
-                        report(wid, uid, "timeout", error, payload)
-                    except Exception as exc:  # noqa: BLE001 - the client replaces the worker
-                        report(wid, uid, "broken", exc, payload)
+                    except Exception as exc:  # noqa: BLE001 - the client decides what follows
+                        if too_large(exc):
+                            report(wid, uid, "too_large", exc, len(payload))
+                        elif isinstance(exc, PoolFull):
+                            report(wid, uid, "full", exc, payload)
+                        elif isinstance(exc, queue.Full):
+                            error = TimeoutError(f"the put took over {send_timeout} s")
+                            report(wid, uid, "timeout", error, payload)
+                        else:  # the client replaces the worker
+                            report(wid, uid, "broken", exc, payload)
 
     def run_control_or_exit():
         try:
