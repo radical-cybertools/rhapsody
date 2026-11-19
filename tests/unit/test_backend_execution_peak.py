@@ -9,6 +9,7 @@ NVML for the GPU sampler.
 # FakeNvml mirrors pynvml's camelCase function names.
 # ruff: noqa: N802
 
+import gc
 import json
 import os
 import pickle
@@ -330,6 +331,10 @@ def _hold(mib):
 
 
 def test_measured_call_returns_the_peak_and_the_growth():
+    # Garbage that earlier tests left in reference cycles (a cancelled command's output can hold
+    # hundreds of MiB) would otherwise be freed by a collection during the call, and the RSS it
+    # gives back would hide the growth
+    gc.collect()
     before = time.time()
     result = _peak.measured_call(_hold, (256,), {})
     assert isinstance(result, _peak.MeasuredResult)
