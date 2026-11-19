@@ -376,7 +376,7 @@ Checkpoint = define_event(
 
 ## OTel metrics instruments
 
-The `TelemetryManager` registers the following instruments on a `rhapsody` meter:
+The task instrumentation (`rhapsody.telemetry.instrumentation.task`) records the following instruments on the `rhapsody` meter scope, from the task and resource events of every backend:
 
 | Instrument name | Type | Unit | Description |
 |---|---|---|---|
@@ -526,3 +526,23 @@ Each line in the `.telemetry.jsonl` file is a JSON object with a `"section"` dis
 ```
 
 The file is written line-buffered, so it is readable during a live run.
+
+## Known limitations
+
+Each limitation has a `TELEMETRY-LIMITATION(<id>)` comment at the place in the code where it applies.
+
+| Id | Limitation | Planned |
+|---|---|---|
+| L2 | No trace context is passed to Dragon or vLLM. If Dragon enables vLLM's native tracing, its spans form separate traces that can only be matched to the batch span by time, model and host. | Tier 1 + a Dragon feature request (accept and forward `traceparent`, enable vLLM tracing) |
+| L3 | The JSONL metric snapshot sums data points across all attributes (T9), so series split by attribute are added together in the file. `read_metrics()` keeps the dimensions. | Tier 2 |
+| L4 | Task spans start and end at the time the dispatch loop processes the event, not at the event's own time (T3), so they can be offset from spans an instrumentation records with real times. | Tier 3 (Tier 2 partially) |
+| L5 | `subscribe()` callbacks receive events only. OTel metrics recorded by an instrumentation are available through `read_metrics()` or a metric reader, not as events. | Tier 3 |
+| L7 | The batch span links to at most 128 of the batch's task spans (the SDK keeps 128 links per span by default, `OTEL_SPAN_LINK_COUNT_LIMIT`); the real request count is on the span as `rhapsody.inference.batch.requests`. | Configuration |
+| L8 | The inference attributes follow the OpenTelemetry GenAI semantic conventions, which are still in development and may change; `gen_ai.provider.name` is not set (vLLM has no registered value). | Follow the conventions when they stabilize |
+| L11 | After a timeout, the late responses of that batch stay in the shared response queue (issue B2), so the next batch may take its Dragon fields (model time, worker host) from the wrong batch. | B2 fix |
+| L12 | A batch that fails on the batch processor's exception path emits no `BatchEnded` (issue B11): its batch span ends at the next batch or at the end of the session, and the queue times of its tasks are missing. | B11 fix |
+| L14 | `gen_ai.request.model` is the configured model name and may be a local filesystem path. | Documented only |
+| L15 | Instrumentations are keyed by backend name: two backends of one session with the same name share one slot, and the later one is ignored. `Session` and `WorkflowEngine` key their backends by name, so a same-name backend replaces the earlier one there; instrumentations follow the same rule. | None needed |
+| L16 | Only what the batch events carry is recorded: there is no live queue depth and no cumulative totals between batches (the vLLM batcher is one sequential loop, one batch in flight at a time). | Tier 1 (the emitter handle gains `.meter`) |
+| L17 | `Emitter.emit()` (the handle every backend gets as `backend.telemetry`) must be called on the event-loop thread, because the event queue is not thread-safe. A backend whose callbacks run in worker threads would have to hop onto the loop first. The vLLM batcher runs on the loop. | Tier 1 of the telemetry refactor, or a `call_soon_threadsafe` hop in the emitter |
+| L18 | The OTLP export (`export_as_otlp`) writes OTel `SpanKind` values that are off by one from OTLP (CLIENT is 2 in OTel, 3 in OTLP), hardcodes the scope `rhapsody` and drops span links, so exported inference batch spans are mislabeled and lose their links (issue T19). | Tier 2 |

@@ -1,4 +1,4 @@
-.PHONY: help install lint format test test-all test-unit test-unit-no-dragon test-unit-dragon test-integration test-quick test-regular test-dragon-only test-ci check setup-pre-commit
+.PHONY: help install lint format test test-all test-unit test-unit-no-dragon test-unit-dragon test-integration test-quick test-regular test-dragon-only test-ci test-allocation-shapes check setup-pre-commit
 .DEFAULT_GOAL := help
 
 # Python executable - override with PYTHON variable if needed
@@ -98,6 +98,9 @@ test-ci:  ## CI test - regular tests + Dragon tests when the dragon launcher is 
 	else \
 		echo "Dragon launcher not available on this Python version, skipping Dragon tests."; \
 	fi
+
+test-allocation-shapes:  ## Dragon tests on all, half and one of the CPUs this process may use
+	@PYTHON=$(PYTHON) bash tests/integration/run_allocation_shapes.sh
 
 test-dask:  ## Run Dask backend tests only
 	@echo "Running Dask tests..."
