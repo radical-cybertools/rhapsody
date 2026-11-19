@@ -351,6 +351,15 @@ def _group_pmi(pmi) -> PMIBackend | None:
     return _pmi_options(pmi).get("pmi")
 
 
+def _too_large(uid: str, nbytes: int | None, detail: str) -> RuntimeError:
+    """The error of a pool task whose function and arguments Dragon's memory pool cannot hold."""
+    size = f", {nbytes} bytes pickled," if nbytes is not None else ""
+    return RuntimeError(
+        f"task {uid} cannot be sent: its function and arguments{size} are larger than Dragon's "
+        f"memory pool can hold; pass large data in files instead ({detail})"
+    )
+
+
 def _load_value(msg: tuple) -> tuple:
     """Unpickle the value in a result message; one that cannot be loaded here fails its task."""
     index = _VALUE_INDEX.get(msg[0])
@@ -969,6 +978,10 @@ class DragonNativeExecutionBackend(BaseBackend):
         rec.worker = None
         rec.timer = None  # its timeout started with a send that did not happen
         rec.state = "queued"
+        if kind == "too_large":  # it can never fit: the worker is fine, as for a result too large
+            self._feed(w)
+            self._fail_unsent(rec, _too_large(uid, payload, error_text))
+            return
         rec.payload = payload
         if kind == "full":
             if rec.put_deadline is None:
@@ -1185,35 +1198,79 @@ class DragonNativeExecutionBackend(BaseBackend):
         results it took last, so it may send the next. Call without _lock held.
         """
         with self._control_lock:
-            with self._lock:
-                ops, self._outgoing = self._outgoing, []
-            if ack:
-                ops.append(("ack",))
-            if ops:
+            while True:  # again if a task that cannot be sent let its worker take another
+                with self._lock:
+                    ops, self._outgoing = self._outgoing, []
+                if ack:
+                    ops.append(("ack",))
+                    ack = False
+                if not ops:
+                    return
                 self._send_control(ops, locked=True)
 
     def _send_control(self, ops: list, locked: bool = False) -> None:
         """Put one batch of operations on the relay's queue; a relay that cannot take it is lost.
 
-        A full memory pool is waited out, as workers wait for room for their results.
+        A full memory pool is waited out, as workers wait for room for their results. A batch larger
+        than the pool can ever hold goes one operation at a time, and a task too large on its own
+        fails, not the relay.
         """
         if self._relay_error is not None:
             return
-        raw = cloudpickle.dumps(ops)
         with contextlib.nullcontext() if locked else self._control_lock:
             try:
-                deadline = time.monotonic() + _worker.PUT_PATIENCE
-                while True:
-                    try:
-                        self._control.put(raw, timeout=_SEND_TIMEOUT)
-                        return
-                    except _worker.PoolFull:
-                        if time.monotonic() >= deadline:
-                            raise
-                        time.sleep(_RETRY_FIRST)
+                self._put_control(ops)
             except Exception as exc:
+                if self._stopping:
+                    return
+                if len(ops) > 1 and _worker.too_large(exc):
+                    self._send_one_by_one(ops)
+                elif len(ops) == 1 and ops[0][0] == "send" and _worker.too_large(exc):
+                    self._fail_too_large(ops[0], exc)
+                else:
+                    self._relay_lost(f"cannot be sent tasks: {exc!r}")
+
+    def _put_control(self, ops: list) -> None:
+        raw = cloudpickle.dumps(ops)
+        deadline = time.monotonic() + _worker.PUT_PATIENCE
+        while True:
+            try:
+                self._control.put(raw, timeout=_SEND_TIMEOUT)
+                return
+            except _worker.PoolFull:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(_RETRY_FIRST)
+
+    def _send_one_by_one(self, ops: list) -> None:
+        """Send a batch too large for the pool one operation at a time, in its order."""
+        for op in ops:
+            try:
+                self._put_control([op])
+            except Exception as exc:
+                if op[0] == "send" and _worker.too_large(exc):
+                    self._fail_too_large(op, exc)
+                    continue
                 if not self._stopping:
                     self._relay_lost(f"cannot be sent tasks: {exc!r}")
+                return
+
+    def _fail_too_large(self, op: tuple, exc: BaseException) -> None:
+        """Fail a task larger than Dragon's memory pool can hold, and give its worker another.
+
+        Its worker never got it, so the worker is fine, as for a result too large.
+        """
+        _, wid, uid, payload = op
+        with self._lock:
+            w = self._workers.get(wid)
+            rec = self._tasks.get(uid)
+            if w is None or rec is None or w.task is not rec:
+                return  # cancelled, or its worker died: handled there
+            w.task = None
+            rec.worker = None
+            rec.timer = None
+            self._feed(w)
+            self._fail_unsent(rec, _too_large(uid, len(payload), repr(exc)))
 
     def _fail_unsent(self, rec: _Task, error: BaseException) -> None:
         """Fail a pool task that no worker has."""

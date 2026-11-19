@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import ctypes
 import enum
+import gc
 import itertools
 import os
 import queue
@@ -22,6 +23,7 @@ import sys
 import threading
 import time
 import types
+import weakref
 from dataclasses import dataclass
 from dataclasses import field
 
@@ -1105,6 +1107,121 @@ async def test_a_task_that_waited_out_the_full_pool_is_reported_once_its_worker_
     await be.submit_tasks([task])
     assert await rec.wait(task["uid"]) == ["FAILED"]
     assert seen == [("idle", True)]
+
+
+class TooLargeError(Exception):
+    """As Dragon raises for a message larger than its memory pool can ever hold."""
+
+    def __init__(self):
+        code = "DRAGON_DYNHEAP_REQUESTED_SIZE_TOO_LARGE"
+        super().__init__("Could not perform allocation", 63, "", code)
+        self._lib_err_str = code
+
+
+def pool_of(q, limit):
+    """A put on ``q`` as if its memory pool could never hold more than ``limit`` bytes."""
+    put = q.put
+
+    def small_pool_put(obj, block=True, timeout=None, flush=False):
+        if isinstance(obj, (bytes, bytearray)) and len(obj) > limit:
+            raise TooLargeError()
+        put(obj, block, timeout)
+
+    return small_pool_put
+
+
+def test_too_large_tells_a_message_the_pool_can_never_hold_from_a_full_pool():
+    assert worker_module.too_large(TooLargeError())
+    try:
+        try:
+            raise TooLargeError()
+        except TooLargeError as exc:
+            raise RuntimeError("could not send") from exc
+    except RuntimeError as exc:
+        assert worker_module.too_large(exc)
+    assert not worker_module.too_large(PoolFullError("pool is full"))
+    assert not worker_module.too_large(RuntimeError("broken inbox"))
+
+
+async def test_a_task_too_large_for_the_pool_fails_alone_and_keeps_the_relay(backend, dragon):
+    """Its batch to the relay was too large for the pool: the client took the relay for lost, and
+    every pool task failed, then and after."""
+    rec = Recorder(backend)
+    workers = len(dragon.workers())
+    backend._control.put = pool_of(backend._control, 1 << 20)
+    before = [fn_task(square, i) for i in range(3)]
+    big = fn_task(len, b"x" * (2 << 20))
+    after = [fn_task(square, i) for i in range(6)]
+    await backend.submit_tasks(before + [big] + after)
+    assert await rec.wait(big["uid"]) == ["FAILED"]
+    assert "larger than Dragon's memory pool can hold" in str(big["exception"])
+    for task in before + after:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert [t["return_value"] for t in after] == [i * i for i in range(6)]
+    assert backend._relay_error is None and len(dragon.workers()) == workers
+
+
+async def test_a_batch_too_large_for_the_pool_goes_one_task_at_a_time(backend, dragon):
+    rec = Recorder(backend)
+    workers = len(dragon.workers())
+    backend._control.put = pool_of(backend._control, 1 << 20)
+    tasks = [fn_task(len, b"x" * (400 << 10)) for _ in range(4)]  # 1.6 MiB in one batch
+    await backend.submit_tasks(tasks)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert backend._relay_error is None and len(dragon.workers()) == workers
+
+
+async def test_a_task_too_large_for_its_inbox_fails_at_once_and_keeps_its_worker(
+    one_worker, dragon
+):
+    """The relay took it for a broken inbox: two healthy workers were replaced before it failed."""
+    be, w = one_worker
+    rec = Recorder(be)
+    proc, workers = w.proc, len(dragon.workers())
+    w.inbox.put = pool_of(w.inbox, 1 << 20)
+    big = fn_task(len, b"x" * (2 << 20), placement={"host": "n0"})
+    after = fn_task(square, 5, placement={"host": "n0"})
+    t0 = time.monotonic()
+    await be.submit_tasks([big, after])
+    assert await rec.wait(big["uid"]) == ["FAILED"]
+    assert time.monotonic() - t0 < 2.0  # no wait for room that will never come
+    assert "larger than Dragon's memory pool can hold" in str(big["exception"])
+    assert "bytes pickled" in str(big["exception"])  # how large it was
+    assert await rec.wait(after["uid"]) == ["DONE"] and after["return_value"] == 25
+    assert be._workers.get(w.wid) is w and w.proc is proc and proc.code is None
+    assert len(dragon.workers()) == workers
+
+
+class Blob:
+    """A value a test can hold a weak reference to."""
+
+
+HELD = []
+
+
+def keeps_track(blob):
+    """Note weak references to this task's argument and result, as its worker holds them."""
+    out = Blob()
+    HELD[:] = [weakref.ref(blob), weakref.ref(out)]
+    return out
+
+
+async def test_an_idle_worker_keeps_nothing_of_its_last_task(one_worker):
+    """It held the last task's function, arguments and result until the next task came: a large
+    result stayed on its node, in no task's measurement."""
+    be, _ = one_worker
+    rec = Recorder(be)
+    task = fn_task(keeps_track, Blob(), placement={"host": "n0"})
+    await be.submit_tasks([task])
+    assert await rec.wait(task["uid"]) == ["DONE"]
+    assert len(HELD) == 2
+
+    def released():
+        gc.collect()
+        return all(ref() is None for ref in HELD)
+
+    await until(released)
 
 
 async def test_function_with_no_pool_fails_at_once(dragon, tmp_path):
@@ -2699,6 +2816,38 @@ async def test_real_runtime_busy_client_trades_with_the_relay_in_batches(tmp_pat
         await be.shutdown()
         cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
     assert calls["get"] < len(tasks) / 3 and calls["put"] < len(tasks) / 3, (calls, rate)
+
+
+def _small_pool():
+    size = os.environ.get("DRAGON_DEFAULT_SEG_SZ")
+    return size is not None and int(size) <= 1 << 30
+
+
+@needs_runtime
+@pytest.mark.skipif(
+    not _small_pool(),
+    reason="needs a small memory pool: DRAGON_DEFAULT_SEG_SZ=268435456 dragon python -m pytest",
+)
+async def test_real_runtime_an_argument_too_large_for_the_pool_fails_alone(tmp_path):
+    """It used to take the relay for lost: every pool task failed, then and after."""
+    cloudpickle.register_pickle_by_value(sys.modules[__name__])
+    be = await DragonNativeExecutionBackend(workers_per_node=4)
+    be._work_dir = str(tmp_path)
+    rec = Recorder(be)
+    try:
+        wids = set(be._workers)
+        before = [fn_task(square, i) for i in range(4)]
+        big = fn_task(len, b"x" * (int(os.environ["DRAGON_DEFAULT_SEG_SZ"]) + (64 << 20)))
+        after = [fn_task(square, i) for i in range(8)]
+        await be.submit_tasks(before + [big] + after)
+        assert await rec.wait(big["uid"], 120) == ["FAILED"]
+        assert "larger than Dragon's memory pool can hold" in str(big["exception"])
+        for task in before + after:
+            assert await rec.wait(task["uid"], 120) == ["DONE"]
+        assert set(be._workers) == wids and be._relay_error is None
+    finally:
+        await be.shutdown()
+        cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
 
 
 @needs_runtime

@@ -72,8 +72,10 @@ Install it with the `dragon` extra, and start your script with the Dragon launch
   full pool a worker waits up to 60 s for room, and a result that does not fit then, or could never
   fit, fails its task with Dragon's error. Sending a task waits the same way: on a full pool the
   client holds the task and its worker, tries again with a backoff, and fails the task only after
-  60 s. A send that fails for any other reason, or takes more than 10 s, replaces the worker, and
-  the task goes to the next idle worker, or waits for one; it fails only if that send fails too. A
+  60 s. A task too large for the pool ever to hold fails at once, with Dragon's error, and its
+  worker carries on, as for a result too large. A send that fails for any other reason, or takes
+  more than 10 s, replaces the worker, and the task goes to the next idle worker, or waits for
+  one; it fails only if that send fails too. A
   function with a `process_template` flushes its result onto the queue before it exits, so the
   client knows when one is missing. The pool is 4 GiB per node by default
   (`DRAGON_DEFAULT_SEG_SZ`), so workers that finish together should return much less than that
