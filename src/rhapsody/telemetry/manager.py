@@ -1536,9 +1536,10 @@ class TelemetryManager:
 
 def _task_executable(task: dict) -> str:
     """Extract the executable/function identifier from a task dict."""
-    # ComputeTask stores executable directly
-    if "executable" in task:
-        return str(task["executable"])
+    # ComputeTask stores both executable and function, one of them None: skip a None executable.
+    executable = task.get("executable")
+    if executable is not None:
+        return str(executable)
     # FunctionTask stores func reference. The label must not vary per task (it is a
     # metric attribute): unwrap partials, and never use str(func), which embeds an address.
     func = task.get("func") or task.get("function")
