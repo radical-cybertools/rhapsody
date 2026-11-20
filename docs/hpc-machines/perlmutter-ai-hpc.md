@@ -85,6 +85,10 @@ Once the allocation is granted, launch with the `dragon` command:
 dragon <script.py>
 ```
 
+### 7. Check the inference telemetry (optional)
+
+To see the telemetry of a real inference run (batch spans, queue waits, batch and model durations), run the example `examples/telemetry/01-inference-telemetry.py` with the same `dragon` command. It runs a set of prompts through the vLLM backend with telemetry enabled and prints the batches, the per-task attributes and the inference metrics; the launch command and a plot script for the saved data are in `examples/telemetry/README.md` ("Inference telemetry (AI)"). See also the [telemetry reference](../telemetry/reference.md#inference-telemetry-experimental).
+
 ---
 
 ## Example

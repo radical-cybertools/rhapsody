@@ -4,7 +4,7 @@
 Each group gets its own launcher and time budget, so a crash or hang costs that group and
 not the whole run:
 
-    python3 run_suite.py --backend dragon --junit junit.xml -- -w slurm -t tcp
+    python3 run_suite.py --backend dragon --junit junit.xml -- <dragon launcher options>
 
 Everything after "--" goes to the launcher. The exit code is 0 once the JUnit file is
 written, because failures are reported in that file. A launcher that crashes or runs over
@@ -36,10 +36,13 @@ class Group:
     test_file: str
     budget: int  # seconds
     pytest_args: tuple = ()
+    optional: bool = False  # runs only when named in --groups (needs a model, or is long)
+    require: tuple = ()  # capabilities added to RHAPSODY_HPC_REQUIRE: a missing one fails the group
 
 
-# Cheapest first, so the riskiest groups can't stop the others from running. Budgets total
-# 14 minutes to fit a 15-minute job.
+# Cheapest first, so the riskiest groups can't stop the others from running. The default
+# groups' budgets total 14 minutes to fit a 15-minute job; the optional groups run only when
+# named with --groups.
 GROUPS = {
     "dragon": [
         Group("tasks", "dragon/test_tasks.py", 180),
@@ -48,6 +51,25 @@ GROUPS = {
         # Stop at the first failure: a hung MPI test would otherwise use the whole budget,
         # and pytest writes its results only when it finishes.
         Group("mpi", "dragon/test_mpi.py", 240, ("--maxfail=1",)),
+        # Telemetry on a real allocation. The ai-telemetry group also needs RHAPSODY_HPC_MODEL and a
+        # GPU, and starts its own vLLM backend.
+        Group("telemetry", "dragon/test_telemetry.py", 180, optional=True),
+        Group(
+            "ai-telemetry",
+            "dragon/test_ai_telemetry.py",
+            600,
+            optional=True,
+            require=("gpu", "model"),
+        ),
+        # The response queues of the vLLM backend: a throughput run, timed-out batches at scale and
+        # a shutdown after timeouts. Starts its own vLLM backend.
+        Group(
+            "ai-response-queues",
+            "dragon/test_ai_response_queues.py",
+            600,
+            optional=True,
+            require=("gpu", "model"),
+        ),
     ],
 }
 
@@ -162,6 +184,10 @@ def run_group(group, launcher_args, budget, work_dir, env):
         *group.pytest_args,
         f"--junitxml={junit}",
     ]
+    if group.require:
+        # A group the user named must not pass by skipping: what it needs becomes mandatory.
+        have = {c.strip() for c in env.get("RHAPSODY_HPC_REQUIRE", "").split(",")} - {""}
+        env = env | {"RHAPSODY_HPC_REQUIRE": ",".join(sorted(have | set(group.require)))}
     print(f"=== group {group.name}: budget {budget} s", flush=True)
     start = time.monotonic()
     finished = run_limited(command, budget, log, work_dir, env)
@@ -214,7 +240,9 @@ def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--backend", required=True, choices=sorted(GROUPS))
     parser.add_argument("--junit", required=True, type=pathlib.Path)
-    parser.add_argument("--groups", help="comma-separated groups to run; default all")
+    parser.add_argument(
+        "--groups", help="comma-separated groups to run; default all but the optional ones"
+    )
     parser.add_argument(
         "--budget",
         action="append",
@@ -231,13 +259,19 @@ def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     groups = GROUPS[args.backend]
     known = {g.name for g in groups}
-    wanted = args.groups.split(",") if args.groups else [g.name for g in groups]
+    wanted = (
+        [name.strip() for name in args.groups.split(",") if name.strip()]
+        if args.groups
+        else [g.name for g in groups if not g.optional]
+    )
     budgets = {g.name: g.budget for g in groups}
     for item in args.budget:
         name, _, seconds = item.partition("=")
         if name not in known or not seconds.isdigit():
             raise SystemExit(f"invalid --budget {item!r}")
         budgets[name] = int(seconds)
+    if not wanted:
+        raise SystemExit("no groups selected")
     unknown = set(wanted) - known
     if unknown:
         raise SystemExit(f"unknown groups: {sorted(unknown)}; known: {sorted(known)}")
@@ -248,6 +282,11 @@ def main(argv=None):
 
     suite_dir = HERE / args.backend
     env = os.environ | {"RHAPSODY_HPC": "1"}
+    # Where the telemetry tests save their files (a test can be run by hand with its own folder).
+    # Resolved here: pytest runs in <junit dir>/groups, so a relative path would land there.
+    env["RHAPSODY_HPC_ARTIFACTS"] = str(
+        pathlib.Path(env.get("RHAPSODY_HPC_ARTIFACTS", junit.parent / "artifacts")).resolve()
+    )
     # Workers import hpc_workers by name, so the suite directory must be on the path.
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = f"{suite_dir}{os.pathsep}{existing}" if existing else str(suite_dir)
