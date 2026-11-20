@@ -326,7 +326,7 @@ def relay_main(
     forwarded_at = [0.0]  # when the relay last forwarded a batch
     hold_until = [0.0]  # until when it waits for the tasks the client just sent
     stale_after = 10 * idle_interval
-    notes = queue.SimpleQueue()  # reports that found no room on ``results``, for the next batch
+    notes: queue.SimpleQueue[bytes] = queue.SimpleQueue()  # reports with no room on ``results``
 
     def report(wid, uid, kind, error, payload):
         msg = (UNSENT, wid, uid, kind, f"{type(error).__name__}: {error}", payload)
@@ -384,7 +384,7 @@ def relay_main(
         def __init__(self):
             self.cv = threading.Condition()
             self.ops = {}  # wid -> its operations not yet made
-            self.waiting = deque()  # wids with operations, served by no thread
+            self.waiting: deque[int] = deque()  # wids with operations, served by no thread
             self.later = []  # heap of (when, seq, wid): workers whose next put waits for room
             self.seq = itertools.count()
             self.served = set()  # wids a thread is serving
@@ -477,7 +477,7 @@ def relay_main(
                 if raw is None:
                     return
                 sent = False
-                by_node = {}  # this batch's operations for each node, in order
+                by_node: dict[str | None, list[tuple]] = {}  # this batch's operations, by node
                 handed = set()  # wids whose operations in this batch go to their node's threads
                 for op in cloudpickle.loads(raw):
                     if op[0] == "ack":

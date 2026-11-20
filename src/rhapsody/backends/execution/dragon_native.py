@@ -881,7 +881,8 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._route(rec, first=True)
 
     def _watch_timers(self) -> None:
-        """Time out pool tasks at their deadline, and send paused workers their next task.
+        """Time out pool tasks at their deadline, try again to send the relay a batch its queue had
+        no room for, and count as dead the workers not ready by their start deadline.
 
         Process tasks time out in their own thread.
         """
