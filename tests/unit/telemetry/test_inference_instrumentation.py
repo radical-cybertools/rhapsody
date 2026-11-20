@@ -1,5 +1,6 @@
 """The inference instrumentation: batch events in, spans and metrics out. No Dragon needed."""
 
+import asyncio
 import logging
 
 import pytest
@@ -17,7 +18,8 @@ from rhapsody.telemetry.manager import TelemetryManager
 
 SCOPE = "rhapsody.instrumentation.inference"
 STARTED = "rhapsody.inference.BatchStarted"
-ENDED = "rhapsody.inference.BatchEnded"
+DONE = "rhapsody.inference.BatchDone"
+FAILED = "rhapsody.inference.BatchFailed"
 # Advisory bucket bounds of the duration histograms: 10 ms doubling up to 327.68 s.
 BUCKETS = [0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28]
 BUCKETS += [2.56, 5.12, 10.24, 20.48, 40.96, 81.92, 163.84, 327.68]
@@ -42,7 +44,7 @@ async def _manager(**kwargs):
 
 async def _create_task(manager, task_id):
     manager.emit(make_event(TaskCreated, session_id="s", backend="vllm", task_id=task_id))
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
 
 
 def _started(backend, batch_id=1, task_ids=(), t=100.0, **kw):
@@ -59,6 +61,7 @@ def _started(backend, batch_id=1, task_ids=(), t=100.0, **kw):
 
 
 def _ended(backend, batch_id=1, rows=(), t=102.5, **kw):
+    """BatchDone, or BatchFailed when ``error_type`` is given (as the backend does)."""
     attrs = {
         "batch_id": batch_id,
         "model": "m",
@@ -70,7 +73,7 @@ def _ended(backend, batch_id=1, rows=(), t=102.5, **kw):
         "requests": list(rows),
         **kw,
     }
-    backend.telemetry.emit(ENDED, attrs, event_time=t)
+    backend.telemetry.emit(FAILED if "error_type" in kw else DONE, attrs, event_time=t)
 
 
 def _row(task_id, prompts=1, queue=0.5, timed_out=0):
@@ -110,7 +113,7 @@ async def test_the_batch_span_has_real_times_parent_kind_links_and_attributes():
     await _create_task(manager, "t2")
     _started(backend, task_ids=["t1", "t2", "no-such-task"])
     _ended(backend, dragon_model_duration_s=2.0, dragon_worker_host="node7")
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
     for task_id in ("t1", "t2"):  # finished spans only appear once their task ended
         manager.emit(make_event(TaskCompleted, session_id="s", backend="vllm", task_id=task_id))
     await manager.stop()
@@ -150,10 +153,10 @@ async def test_the_number_of_links_is_capped(monkeypatch):
     ids = [f"t{i}" for i in range(5)]
     for task_id in ids:
         manager.emit(make_event(TaskCreated, session_id="s", backend="vllm", task_id=task_id))
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
     _started(backend, task_ids=ids, batch_requests=5)
     _ended(backend, batch_requests=5)
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
     await manager.stop()
 
     (span,) = _batch_spans(manager)
@@ -162,14 +165,16 @@ async def test_the_number_of_links_is_capped(monkeypatch):
 
 
 def test_the_link_cap_matches_the_sdk_default():
-    assert inference._MAX_LINKS == 128
+    from opentelemetry.sdk.trace import SpanLimits
+
+    assert inference._MAX_LINKS == SpanLimits().max_links
 
 
 async def test_timed_out_prompts_make_the_span_an_error():
     manager, backend = await _manager()
     _started(backend)
-    _ended(backend, timed_out_prompts=2)
-    await manager._queue.join()
+    _ended(backend, timed_out_prompts=2, error_type="TimeoutError")
+    await asyncio.wait_for(manager._queue.join(), 10)
     await manager.stop()
 
     (span,) = _batch_spans(manager)
@@ -179,13 +184,58 @@ async def test_timed_out_prompts_make_the_span_an_error():
     assert attrs["rhapsody.inference.timed_out_prompts"] == 2
 
 
+async def test_a_failed_batch_makes_the_span_an_error_with_the_class_of_the_failure():
+    manager, backend = await _manager()
+    _started(backend)
+    _ended(backend, error_type="RuntimeError")
+    await asyncio.wait_for(manager._queue.join(), 10)
+    await manager.stop()
+
+    (span,) = _batch_spans(manager)
+    attrs = dict(span.attributes)
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.status.description == "batch failed"
+    assert attrs["error.type"] == "RuntimeError"
+    assert "rhapsody.inference.timed_out_prompts" not in attrs
+
+
+async def test_a_failed_batch_with_timeouts_keeps_the_timeouts_and_the_first_failure():
+    manager, backend = await _manager()
+    _started(backend)
+    _ended(backend, timed_out_prompts=2, error_type="ValueError")  # an exception answer came first
+    await asyncio.wait_for(manager._queue.join(), 10)
+    await manager.stop()
+
+    (span,) = _batch_spans(manager)
+    attrs = dict(span.attributes)
+    assert span.status.description == "2 prompts timed out"
+    assert attrs["error.type"] == "ValueError"
+    assert attrs["rhapsody.inference.timed_out_prompts"] == 2
+
+
+async def test_a_failed_batch_is_recorded_like_a_good_one():
+    manager, backend = await _manager()
+    _started(backend)
+    _ended(backend, error_type="RuntimeError", rows=[_row("t1", prompts=2, queue=0.5)])
+    await asyncio.wait_for(manager._queue.join(), 10)
+    await manager.stop()
+
+    metrics = _metrics(manager)
+    assert (
+        sum(dp.sum for dp in metrics["rhapsody.inference.batch.duration"].data.data_points) == 2.5
+    )
+    assert sum(dp.value for dp in metrics["rhapsody.inference.batches"].data.data_points) == 1
+    assert sum(dp.value for dp in metrics["rhapsody.inference.prompts"].data.data_points) == 2
+    assert "rhapsody.inference.timed_out.prompts" not in metrics  # nothing timed out
+
+
 async def test_a_batch_that_never_ends_is_closed_by_the_next_batch_and_by_stop():
     manager, backend = await _manager()
     _started(backend, batch_id=1, t=10.0)
     _started(backend, batch_id=2, t=20.0)  # batch 1 never ended
     _ended(backend, batch_id=2, t=21.0)
     _started(backend, batch_id=3, t=30.0)  # batch 3 never ends either
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
     await manager.stop()
 
     by_id = {dict(s.attributes)["rhapsody.inference.batch.id"]: s for s in _batch_spans(manager)}
@@ -200,7 +250,7 @@ async def test_an_end_before_the_start_never_gives_a_negative_span():
     manager, backend = await _manager()
     _started(backend, t=100.0)
     _ended(backend, t=99.0)  # clock step backwards
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
     await manager.stop()
     (span,) = _batch_spans(manager)
     assert span.end_time >= span.start_time
@@ -218,8 +268,9 @@ async def test_per_task_facts_land_on_the_open_task_span():
         backend,
         rows=[_row("t1", prompts=2, queue=0.25), _row("t2", prompts=1, queue=0.5, timed_out=1)],
         timed_out_prompts=1,
+        error_type="TimeoutError",
     )
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
     for task_id in ("t1", "t2"):
         manager.emit(make_event(TaskCompleted, session_id="s", backend="vllm", task_id=task_id))
     await manager.stop()
@@ -243,7 +294,7 @@ async def test_missing_values_are_skipped_not_set_to_none():
     await _create_task(manager, "t1")
     _started(backend, task_ids=["t1"], model=None)
     _ended(backend, model=None, rows=[_row("t1")])
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
     manager.emit(make_event(TaskCompleted, session_id="s", backend="vllm", task_id="t1"))
     await manager.stop()
     task = next(dict(s.attributes) for s in _spans(manager) if s.name == "task")
@@ -264,7 +315,7 @@ async def test_metric_names_units_buckets_and_attributes():
         rows=[_row("t1", prompts=2, queue=0.5), _row(None, prompts=1, queue=1.5)],
         dragon_model_duration_s=2.0,
     )
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
     await manager.stop()
 
     metrics = _metrics(manager)
@@ -307,7 +358,7 @@ async def test_timed_out_prompts_are_counted_per_source():
     manager, backend = await _manager()
     _started(backend)
     _ended(backend, rows=[_row("t1", timed_out=1), _row(None, prompts=2, timed_out=2)])
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
     await manager.stop()
     points = _metrics(manager)["rhapsody.inference.timed_out.prompts"].data.data_points
     assert {dp.attributes["rhapsody.inference.request.source"]: dp.value for dp in points} == {
@@ -316,13 +367,89 @@ async def test_timed_out_prompts_are_counted_per_source():
     }
 
 
+async def test_every_instrument_has_its_documented_attributes_and_values():
+    manager, backend = await _manager()
+    _started(backend)
+    # prompts (3) differ from timed-out prompts (1) and from the request count (1): a counter that
+    # adds the wrong quantity cannot pass.
+    _ended(
+        backend,
+        batch_duration_s=2.5,
+        timed_out_prompts=1,
+        error_type="TimeoutError",
+        rows=[_row("t1", prompts=3, queue=0.5, timed_out=1)],
+        dragon_model_duration_s=2.0,
+    )
+    await asyncio.wait_for(manager._queue.join(), 10)
+    await manager.stop()
+
+    metrics = _metrics(manager)
+    base = {"session_id", "backend", "gen_ai.request.model"}
+    with_source = base | {"rhapsody.inference.request.source"}
+    expected = {
+        "rhapsody.inference.request.queue.duration": with_source,
+        "rhapsody.inference.requests": with_source,
+        "rhapsody.inference.prompts": with_source,
+        "rhapsody.inference.timed_out.prompts": with_source,
+        "rhapsody.inference.batch.duration": base,
+        "rhapsody.inference.model.duration": base,
+        "rhapsody.inference.batches": base | {"rhapsody.inference.batch.trigger"},
+    }
+    assert set(metrics) == set(expected)
+    for name, attributes in expected.items():
+        points = metrics[name].data.data_points
+        assert [set(dp.attributes) for dp in points] == [attributes], name
+    for name in (
+        "rhapsody.inference.request.queue.duration",
+        "rhapsody.inference.batch.duration",
+        "rhapsody.inference.model.duration",
+    ):
+        (point,) = metrics[name].data.data_points
+        assert list(point.explicit_bounds) == pytest.approx(BUCKETS), name
+
+    def only(name):
+        (point,) = metrics[name].data.data_points
+        return getattr(point, "value", None) if hasattr(point, "value") else point.sum
+
+    assert only("rhapsody.inference.requests") == 1
+    assert only("rhapsody.inference.prompts") == 3
+    assert only("rhapsody.inference.timed_out.prompts") == 1
+    assert only("rhapsody.inference.batch.duration") == 2.5
+    assert only("rhapsody.inference.model.duration") == 2.0
+    assert only("rhapsody.inference.request.queue.duration") == 0.5
+
+
+async def test_unusual_batches_are_recorded_without_errors():
+    """A row without timed_out_prompts, an API-only batch and an empty row list are all valid."""
+    manager, backend = await _manager()
+    _started(backend, batch_id=1)
+    row = _row("t1")
+    del row["timed_out_prompts"]
+    _ended(backend, batch_id=1, rows=[row])
+    _started(backend, batch_id=2)
+    _ended(backend, batch_id=2, rows=[_row(None, prompts=2)])  # only a generate() call
+    _started(backend, batch_id=3)
+    _ended(backend, batch_id=3, rows=[])
+    await asyncio.wait_for(manager._queue.join(), 10)
+    await manager.stop()
+
+    assert len(_batch_spans(manager)) == 3
+    batches = _metrics(manager)["rhapsody.inference.batches"].data.data_points
+    assert sum(dp.value for dp in batches) == 3
+    sources = {
+        dp.attributes["rhapsody.inference.request.source"]
+        for dp in _metrics(manager)["rhapsody.inference.requests"].data.data_points
+    }
+    assert sources == {"task", "api"}
+
+
 @pytest.mark.parametrize("model_time", [0, 0.0, None])
 async def test_the_model_duration_is_not_recorded_when_it_is_zero_or_absent(model_time):
     manager, backend = await _manager()
     _started(backend)
     extra = {} if model_time is None else {"dragon_model_duration_s": model_time}
     _ended(backend, rows=[_row("t1")], **extra)
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
     await manager.stop()
     assert "rhapsody.inference.model.duration" not in _metrics(manager)
 
@@ -330,7 +457,7 @@ async def test_the_model_duration_is_not_recorded_when_it_is_zero_or_absent(mode
 async def test_an_end_without_a_start_records_metrics_but_no_span():
     manager, backend = await _manager()
     _ended(backend, rows=[_row("t1")])
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
     await manager.stop()
     assert _batch_spans(manager) == []
     assert "rhapsody.inference.batches" in _metrics(manager)
@@ -351,7 +478,7 @@ async def test_a_malformed_row_is_skipped_as_a_whole(bad):
     manager, backend = await _manager()
     _started(backend)
     _ended(backend, rows=[bad, _row("t2", prompts=3, queue=0.5)])
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
     await manager.stop()
 
     metrics = _metrics(manager)
@@ -376,7 +503,7 @@ async def test_other_events_of_the_backend_are_ignored(caplog):
         await _create_task(manager, "t1")
         backend.telemetry.emit("rhapsody.other.Thing", {"x": 1})
         backend.telemetry.emit("rhapsody.inference.Unknown", {"x": 1})
-        await manager._queue.join()
+        await asyncio.wait_for(manager._queue.join(), 10)
     await manager.stop()
     assert "failed on" not in caplog.text
     assert _batch_spans(manager) == []
@@ -385,13 +512,13 @@ async def test_other_events_of_the_backend_are_ignored(caplog):
 async def test_a_restart_creates_fresh_instruments_and_state():
     manager, backend = await _manager()
     _started(backend, batch_id=1)
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
     await manager.stop()  # the open span is ended here
 
     await manager.start()
     _started(backend, batch_id=1, t=200.0)
     _ended(backend, batch_id=1, t=201.0, rows=[_row("t1")])
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
     assert "rhapsody.inference.batches" in _metrics(manager)  # the new meter records
     await manager.stop()
     ended = [s for s in _batch_spans(manager) if s.end_time >= 201_000_000_000]

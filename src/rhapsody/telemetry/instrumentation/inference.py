@@ -1,8 +1,8 @@
 """Inference telemetry: batch spans, per-request queue waits and batch metrics.
 
 The only place that knows the inference telemetry. The vLLM backend reports plain data through its
-emitter (two events per batch, ``rhapsody.inference.BatchStarted`` and ``BatchEnded``); this
-instrumentation turns it into OpenTelemetry using the API only. It records:
+emitter (``rhapsody.inference.BatchStarted`` when a batch is sent, then ``BatchDone`` or
+``BatchFailed`` when its responses are in); this instrumentation turns it into OpenTelemetry using the API only. It records:
 
 - one ``chat {model}`` span per batch (``SpanKind.CLIENT``) with the batch's real start and end
   times, parented to the session span and linked to the task spans of the batch;
@@ -65,7 +65,8 @@ class InferenceInstrumentation(Instrumentation):
     def __init__(self) -> None:
         self._handlers = {
             _PREFIX + "BatchStarted": self._on_batch_started,
-            _PREFIX + "BatchEnded": self._on_batch_ended,
+            _PREFIX + "BatchDone": self._on_batch_ended,
+            _PREFIX + "BatchFailed": self._on_batch_ended,
         }
 
     def instrument(self, ctx: InstrumentationContext) -> None:
@@ -114,8 +115,8 @@ class InferenceInstrumentation(Instrumentation):
         self._open: dict[Any, Any] = {}
 
     def uninstrument(self) -> None:
-        # A batch that never ended (the backend's failure path emits no BatchEnded) still has its
-        # span open: end it before the providers shut down.
+        # A batch that never ended (it was cancelled in flight) still has its span open: end it
+        # before the providers shut down.
         for batch_id in list(self._open):
             self._end_unfinished(self._open.pop(batch_id))
 
@@ -238,11 +239,19 @@ class InferenceInstrumentation(Instrumentation):
             host = attrs.get("dragon_worker_host")
             if host:
                 span.set_attribute("rhapsody.inference.dragon.worker.host", host)
+            failed = event.event_type == _PREFIX + "BatchFailed"
             timed_out = attrs.get("timed_out_prompts") or 0
+            # The class of the first failure; a batch with timeouts and no class is a timeout.
+            error_type = attrs.get("error_type") or ("TimeoutError" if timed_out else None)
             if timed_out:
-                span.set_attribute(_ERROR_TYPE, "TimeoutError")
                 span.set_attribute("rhapsody.inference.timed_out_prompts", timed_out)
-                span.set_status(trace.StatusCode.ERROR, f"{timed_out} prompts timed out")
+            if error_type:
+                span.set_attribute(_ERROR_TYPE, error_type)
+            if failed or timed_out:
+                span.set_status(
+                    trace.StatusCode.ERROR,
+                    f"{timed_out} prompts timed out" if timed_out else "batch failed",
+                )
         finally:
             end = _ns(event.event_time)
             start = getattr(span, "start_time", None)

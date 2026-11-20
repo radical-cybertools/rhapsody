@@ -1,8 +1,9 @@
 """The telemetry handle a backend uses to report plain data.
 
-Every backend (execution, AI, data) gets an :class:`Emitter` as ``backend.telemetry``. The session
-or workflow engine hands a :class:`BackendEmitter` over when it attaches the backend to a
-:class:`~rhapsody.telemetry.manager.TelemetryManager`. Until then, and whenever telemetry is off,
+Every backend (execution, AI, data) gets an :class:`Emitter` as ``backend.telemetry``. When the
+backend is attached to a session or workflow engine with telemetry, the
+:class:`~rhapsody.telemetry.manager.TelemetryManager` hands it a :class:`BackendEmitter` through
+the backend's ``register_emitter`` hook. Until then, and whenever telemetry is off,
 ``backend.telemetry`` is a :class:`NoopEmitter`, so a backend never checks for ``None``::
 
     if self.telemetry.enabled:
@@ -46,7 +47,7 @@ class Emitter(Protocol):
         """Report one event.
 
         Args:
-            name: Namespaced event name (contains a ``.``), e.g. ``rhapsody.inference.BatchEnded``.
+            name: Namespaced event name (contains a ``.``), e.g. ``rhapsody.inference.BatchDone``.
             attributes: Plain numbers, strings and lists/dicts of them. Never prompt or response
                 text. The caller hands the dict over and must not mutate it afterwards.
             event_time: When the event really happened (``time.time()``); defaults to now.
