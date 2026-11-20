@@ -149,7 +149,7 @@ class TestTaskFailedDetails:
 
     async def test_string_exception(self):
         """Some backends store the exception as a plain string."""
-        task = {"uid": "t-str", "backend": "vllm", "exception": "connection reset by peer"}
+        task = {"uid": "t-str", "backend": "radical_pilot", "exception": "connection reset by peer"}
         event, span, _ = await _fail(task)
 
         attrs = event["attributes"]
