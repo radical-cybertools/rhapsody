@@ -9,7 +9,6 @@ NVML for the GPU sampler.
 # FakeNvml mirrors pynvml's camelCase function names.
 # ruff: noqa: N802
 
-import gc
 import json
 import os
 import pickle
@@ -330,27 +329,45 @@ def _hold(mib):
     return len(buf)
 
 
+MEASURED_HOLD = """
+import json, sys
+from rhapsody.backends.execution import _peak
+
+def hold(mib):
+    buf = b"x" * (mib << 20)
+    return len(buf)
+
+result = _peak.measured_call(hold, (256,), {})
+json.dump({"measured": isinstance(result, _peak.MeasuredResult), "value": result.value,
+           "observed": result.observed}, sys.stdout)
+"""
+
+
 def test_measured_call_returns_the_peak_and_the_growth():
-    # Garbage that earlier tests left in reference cycles (a cancelled command's output can hold
-    # hundreds of MiB) would otherwise be freed by a collection during the call, and the RSS it
-    # gives back would hide the growth
-    gc.collect()
+    # In a fresh interpreter, as in a new pool worker. In this one, memory that earlier tests
+    # freed stays resident, or is freed during the call, and either hides the growth: a call
+    # reuses what the allocator kept without growing (see _measure.measure)
     before = time.time()
-    result = _peak.measured_call(_hold, (256,), {})
-    assert isinstance(result, _peak.MeasuredResult)
-    assert result.value == 256 * MIB
-    assert before <= result.observed["started"] <= result.observed["ended"] <= time.time()
-    assert result.observed["host"] == socket.gethostname()
+    proc = subprocess.run(
+        [sys.executable, "-c", MEASURED_HOLD], capture_output=True, text=True, timeout=60
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    observed = result["observed"]
+    assert result["measured"]
+    assert result["value"] == 256 * MIB
+    assert before <= observed["started"] <= observed["ended"] <= time.time()
+    assert observed["host"] == socket.gethostname()
     if not LINUX:
-        assert result.observed["host_mem"] is None
-        assert "approximate" not in result.observed
+        assert observed["host_mem"] is None
+        assert "approximate" not in observed
         return
-    assert result.observed["approximate"] is True
-    assert result.observed["gpu_mem"] is None
-    growth = result.observed["host_mem_growth"] * (1 << 30)
+    assert observed["approximate"] is True
+    assert observed["gpu_mem"] is None
+    growth = observed["host_mem_growth"] * (1 << 30)
     assert 256 * MIB - SLACK <= growth <= 300 * MIB
-    # host_mem is the whole peak during the call: this process's own size included
-    assert result.observed["host_mem"] * (1 << 30) >= growth + 8 * MIB
+    # host_mem is the whole peak during the call: the process's own size included
+    assert observed["host_mem"] * (1 << 30) >= growth + 8 * MIB
 
 
 def test_measured_call_without_memory_reports_only_times():
