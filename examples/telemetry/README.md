@@ -20,6 +20,35 @@ nvcc gpu-cuda-stress.cu -o gpu-cuda-stress
 ```
 ---
 
+### `01-inference-telemetry.py` — Inference telemetry (AI)
+
+Runs a set of scientific prompts as `AITask`s on the vLLM backend (`DragonVllmInferenceBackend`) with telemetry enabled, then prints what telemetry recorded about the inference backend: the batches it sent to the model (one `chat` span each: requests, prompts, trigger, duration, Dragon model time, worker host), the per-task attributes (batch id, prompt count, queue wait) and the inference metrics. The telemetry is also saved as JSONL in `--out`.
+**Use it to:** see inference telemetry on a real GPU allocation. The fields are described in the [telemetry reference](../../docs/telemetry/reference.md) ("Inference telemetry"). The feature is experimental.
+
+It needs a GPU allocation and the Dragon launcher. Get the allocation and choose the launcher options (workload manager, network transport) the way your machine requires; the launch below is the same for any machine apart from those options (see [AI inference on Perlmutter](../../docs/hpc-machines/perlmutter-ai-hpc.md) for one machine's environment). For 2 nodes with one GPU each, inside the allocation:
+
+```
+dragon <launcher options for your machine> examples/telemetry/01-inference-telemetry.py \
+    --model /path/to/Qwen2.5-0.5B-Instruct \
+    --nodes 2 --gpus-per-node 1 \
+    --tasks 64 --out ./inference-telemetry
+```
+
+`--model` can also come from the `MODEL_PATH` environment variable; `HF_TOKEN` is read from the environment if the model must be downloaded. The backend here sends batches of at most 16 requests, so `--tasks 64` gives about four batches plus a last partial one (more `--tasks`, more batches).
+
+### `01-inference-telemetry-plot.py` — Inference telemetry plots
+
+Draws the saved JSONL of an inference run, from simple to sophisticated: batch size and trigger, queue wait, batch and model time, a timeline with the reconstructed queue depth, throughput and idle gaps, the latency of each task split into queue wait and batch time, worker hosts, CPU/memory/GPU against batch activity, and the data volume of the telemetry files. Needs only `matplotlib` and `numpy`.
+
+```
+python examples/telemetry/01-inference-telemetry-plot.py ./inference-telemetry            # plots go to ./inference-telemetry/plots
+python examples/telemetry/01-inference-telemetry-plot.py ./inference-telemetry --out ./plots
+```
+
+Plots whose data is missing are skipped with a note (for example the timeouts plot when nothing timed out).
+
+---
+
 ### `plot_dashboard.py` — Telemetry Dashboard
 
 A polished, presentation-ready overview of a completed run.
