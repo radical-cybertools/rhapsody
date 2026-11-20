@@ -278,15 +278,15 @@ class ConcurrentExecutionBackend(BaseBackend):
             # processes it starts
             if peak_dir is not None:
                 # The launcher runs the command (or the shell) and records its peaks. The
-                # command gets a process group of its own, to which the launcher forwards
-                # _stop_process's SIGTERM
+                # command stays in the launcher's group, which _stop_process signals as a whole:
+                # the launcher outlives the SIGTERM, and SIGKILL ends them all
                 command = (
                     ["/bin/sh", "-c", " ".join([executable] + arguments)]
                     if execute_in_shell
                     else [executable, *arguments]
                 )
                 start = asyncio.create_subprocess_exec(
-                    *_peak.launcher_argv(peak_dir),
+                    *_peak.launcher_argv(peak_dir, shared_group=True),
                     *command,
                     stdout=stdout_arg,
                     stderr=stderr_arg,
@@ -405,6 +405,13 @@ class ConcurrentExecutionBackend(BaseBackend):
                 f"Process {process.pid} was killed but did not finish: it is stuck, or a "
                 "process that left its group holds its output"
             )
+            return
+
+        # The processes it started are not ours to reap (under the peak launcher, the command
+        # itself): CANCELED waits until they are gone, for at most kill_wait
+        deadline = loop.time() + self.kill_wait
+        while self._signal_group(process.pid, 0) and loop.time() < deadline:
+            await asyncio.sleep(0.01)
 
     async def _handle_task(self, task: dict) -> None:
         """Handle task execution with callback."""

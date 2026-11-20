@@ -472,15 +472,19 @@ deadline = time.time() + 1.0
 while time.time() < deadline:
     time.sleep(0.01)
 with open(sys.argv[2], "w") as f:
-    f.write(str(len(hits)))
+    f.write(f"{len(hits)} {os.getpgrp()}")
 """
 
 
-def test_a_signal_to_the_launchers_group_reaches_the_command_once(tmp_path):
+@pytest.mark.parametrize("shared_group", [False, True], ids=["own_group", "shared_group"])
+def test_a_signal_to_the_launchers_group_reaches_the_command_once(tmp_path, shared_group):
     ready, count, out = tmp_path / "ready", tmp_path / "count", tmp_path / "rec"
     out.mkdir()
     launcher = subprocess.Popen(
-        [*_peak.launcher_argv(str(out)), sys.executable, "-c", COUNT_USR1, ready, count],
+        [
+            *_peak.launcher_argv(str(out), shared_group),
+            *(sys.executable, "-c", COUNT_USR1, ready, count),
+        ],
         stdin=subprocess.DEVNULL,
         start_new_session=True,  # its own group, as Ctrl-C or Slurm would signal
     )
@@ -489,7 +493,12 @@ def test_a_signal_to_the_launchers_group_reaches_the_command_once(tmp_path):
         time.sleep(0.01)
     os.killpg(launcher.pid, signal.SIGUSR1)
     assert launcher.wait(timeout=10) == 0
-    assert count.read_text() == "1"
+    hits, group = count.read_text().split()
+    assert hits == "1"
+    # Shared, the command is in the launcher's group, and the launcher, which forwarded nothing,
+    # outlived the signal to write its record
+    assert (int(group) == launcher.pid) == shared_group
+    assert len(_peak.read_records(str(out))) == 1
 
 
 def test_peak_dirs_are_fresh_absolute_and_inside_their_root(tmp_path, monkeypatch):
