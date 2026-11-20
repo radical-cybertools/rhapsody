@@ -112,6 +112,11 @@ _SEND_TIMEOUT = 10.0
 # each failure up to the maximum.
 _RETRY_FIRST = 0.01
 _RETRY_MAX = 1.0
+# Seconds a put on the relay's queue may wait for a free slot, on the asyncio loop at worst. A full
+# queue or memory pool does not wait longer: the batch is retried from the timer thread.
+_CONTROL_PUT_WAIT = 0.01
+# Seconds the relay waits out a full memory pool for one task; None is _worker.PUT_PATIENCE.
+_RELAY_PATIENCE: float | None = None
 # Seconds between the process watcher's checks for process tasks that exited: the first after an
 # exit, doubled while nothing exits, up to the last.
 _JOIN_FIRST = 0.01
@@ -181,7 +186,6 @@ class _Worker:
         "task",
         "initial",
         "retry",
-        "backoff",
     )
 
     def __init__(self, wid: int, host: str, cpus: tuple, gpus: tuple, initial: bool, retry: bool):
@@ -191,13 +195,12 @@ class _Worker:
         self.gpus = gpus
         self.inbox: Any = None
         self.proc: Any = None
-        # starting, idle, busy, dead, or paused: waiting to be sent a task after a full memory pool
+        # starting, idle, busy or dead
         self.state = "starting"
         self.task: _Task | None = None
         self.initial = initial
         # A replacement for a worker that died: if it dies before it is ready, it is not replaced.
         self.retry = retry
-        self.backoff = _RETRY_FIRST
 
     @property
     def key(self) -> tuple:
@@ -494,6 +497,11 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._control_lock = threading.Lock()
         # Set when the relay has died: no pool task can be sent or heard from again.
         self._relay_error: str | None = None
+        # While the relay's queue has no room: when to try again, and the wait after that.
+        self._control_retry_at: float | None = None
+        self._control_backoff = _RETRY_FIRST
+        # The relay waits for an acknowledgement that could not be sent yet.
+        self._ack_owed = False
 
         # Everything below is guarded by _lock.
         self._lock = threading.RLock()
@@ -630,6 +638,8 @@ class DragonNativeExecutionBackend(BaseBackend):
                     _WATCH_INTERVAL,
                     _SEND_TIMEOUT,
                     _RELAY_LINGER,
+                    _RELAY_PATIENCE,
+                    self._client_host,
                 ),
                 policy=here,
             )
@@ -726,7 +736,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                 maxsize=_INBOX_SIZE, block_size=_BLOCK_SIZE, policy=self._host_policy(w.host)
             )
             # Before the worker can report ready: the relay must know its inbox by then.
-            self._send_control([("inbox", w.wid, w.inbox)])
+            self._queue_control(("inbox", w.wid, w.inbox, w.host))
             proc = Process(
                 _worker.worker_main,
                 args=(w.wid, w.inbox, self._results),
@@ -842,7 +852,6 @@ class DragonNativeExecutionBackend(BaseBackend):
         if not w.gpus:
             self._record(w.host, seconds)
         rec, w.task = w.task, None
-        w.backoff = _RETRY_FIRST
         if rec is not None and rec.uid == uid and self._tasks.get(uid) is rec:
             del self._tasks[uid]
             rec.state = "done"
@@ -857,8 +866,12 @@ class DragonNativeExecutionBackend(BaseBackend):
             self._fill(w.host)  # the host's tasks may have turned long
 
     def _on_unsent(self, msg) -> None:
-        """Take back a task the relay could not put on its worker's inbox, and do what ``_send``
-        did with a failed put before the relay: wait for room, or replace the worker."""
+        """Take back a task the relay could not put on its worker's inbox.
+
+        A pool that stayed full, or a task too large for it, fails the task and keeps the worker:
+        the relay already waited for room. An inbox that took nothing for ``_SEND_TIMEOUT``, or
+        failed, retires the worker and sends the task elsewhere, once.
+        """
         _, wid, uid, kind, error_text, payload = msg
         w = self._workers.get(wid)
         if w is None or w.state != "busy" or w.task is None or w.task.uid != uid:
@@ -871,19 +884,12 @@ class DragonNativeExecutionBackend(BaseBackend):
             self._feed(w)
             self._fail_unsent(rec, _too_large(uid, payload, error_text))
             return
-        rec.payload = payload
         if kind == "full":
-            if rec.put_deadline is None:
-                rec.put_deadline = time.monotonic() + _worker.PUT_PATIENCE
-            if time.monotonic() >= rec.put_deadline:
-                # Free the worker first: the task's callback must find the backend settled.
-                self._feed(w)
-                self._fail_unsent(rec, MemoryError(f"task {uid} could not be sent: {error_text}"))
-                return
-            self._pending[rec.key].appendleft(rec)
-            self._set_state(w, "paused")
-            self._add_retry(w)
+            # Free the worker first: the task's callback must find the backend settled.
+            self._feed(w)
+            self._fail_unsent(rec, MemoryError(f"task {uid} could not be sent: {error_text}"))
             return
+        rec.payload = payload
         if kind == "timeout":
             error: Exception = TimeoutError(
                 f"sending to worker {w.wid} on {w.host} took over {_SEND_TIMEOUT} s"
@@ -934,18 +940,6 @@ class DragonNativeExecutionBackend(BaseBackend):
         """Arm a timeout by uid, so the heap does not keep a finished task's result alive."""
         rec.timer = next(self._timer_seq)
         self._push_timer(timeout, rec.timer, self._timeout_pool_task, rec.uid)
-
-    def _add_retry(self, w: _Worker) -> None:
-        """Feed a paused worker again after its backoff, and double the backoff."""
-        delay, w.backoff = w.backoff, min(2 * w.backoff, _RETRY_MAX)
-        self._push_timer(delay, next(self._timer_seq), self._retry_send, w.wid)
-
-    def _retry_send(self, wid: int, _timer: int) -> None:
-        with self._lock:
-            w = self._workers.get(wid)
-            if w is not None and w.state == "paused":
-                self._feed(w)
-        self._flush_sends()
 
     def _start_expired(self, wid: int, _timer: int) -> None:
         """Count a worker that is still starting at its deadline as dead, and kill it.
@@ -1019,8 +1013,10 @@ class DragonNativeExecutionBackend(BaseBackend):
     def _relay_lost(self, why: str) -> None:
         """Fail every pool task: none can be sent, or heard from, without the relay.
 
-        Pool tasks submitted from now on fail at once, and so do function processes, whose results
-        came through the relay too. Executables and process groups still run.
+        Only the relay's exit means it is lost: a queue or memory pool with no room for now is
+        waited out (``_send_control``). Pool tasks and function processes submitted from now on
+        fail at once, since their results came through the relay too; running function processes
+        end with no result. Executables and process groups still run.
         """
         error = RuntimeError(f"the Dragon native backend's relay process {why}")
         with self._lock:
@@ -1133,65 +1129,134 @@ class DragonNativeExecutionBackend(BaseBackend):
         """Send the relay, in one batch, the tasks given to workers since the last batch.
 
         With ``ack``, the batch also tells the relay that the client has handled the batch of
-        results it took last, so it may send the next. Call without _lock held.
+        results it took last, so it may send the next. While the relay's queue has no room, the
+        batch waits for the timer thread's next try. Call without _lock held.
         """
         with self._control_lock:
             while True:  # again if a task that cannot be sent let its worker take another
                 with self._lock:
+                    if ack:
+                        self._ack_owed = True
+                        ack = False
+                    if self._control_retry_at is not None:
+                        return  # the relay's queue is full: _retry_control sends it
                     ops, self._outgoing = self._outgoing, []
-                if ack:
-                    ops.append(("ack",))
-                    ack = False
-                if not ops:
+                    if self._ack_owed:  # owed again if this batch does not go
+                        ops.append(("ack",))
+                        self._ack_owed = False
+                if not ops or not self._send_control(ops):
                     return
-                self._send_control(ops, locked=True)
 
-    def _send_control(self, ops: list, locked: bool = False) -> None:
-        """Put one batch of operations on the relay's queue; a relay that cannot take it is lost.
+    def _queue_control(self, op: tuple) -> None:
+        """Send the relay ``op`` after the operations already waiting."""
+        with self._lock:
+            self._outgoing.append(op)
+        self._flush_sends()
 
-        A full memory pool is waited out, as workers wait for room for their results. A batch larger
-        than the pool can ever hold goes one operation at a time, and a task too large on its own
-        fails, not the relay.
+    def _send_control(self, ops: list) -> bool:
+        """Put one batch of operations on the relay's queue; return whether it went.
+
+        This never waits for long, since it runs on the asyncio loop too. A queue or memory pool
+        with no room for now puts the batch back first in line, and the timer thread tries again
+        with a growing wait (``_control_stalled``); a task whose send waits out ``PUT_PATIENCE``
+        fails, and its worker takes the next. A batch larger than the pool can ever hold goes one
+        operation at a time, and a task too large on its own fails. No failure here means the
+        relay is lost: only its exit does. Call with _control_lock held.
         """
         if self._relay_error is not None:
-            return
-        with contextlib.nullcontext() if locked else self._control_lock:
+            return True
+        try:
+            self._control.put(cloudpickle.dumps(ops), timeout=_CONTROL_PUT_WAIT)
+        except Exception as exc:
+            if self._stopping:
+                return True
+            if _worker.too_large(exc):
+                if len(ops) > 1:
+                    return self._send_one_by_one(ops)
+                if ops[0][0] == "send":
+                    self._fail_too_large(ops[0], exc)
+                    return True
+            self._control_stalled(ops, exc)
+            return False
+        self._control_went(ops)
+        return True
+
+    def _send_one_by_one(self, ops: list) -> bool:
+        """Send a batch too large for the pool one operation at a time, in its order."""
+        for i, op in enumerate(ops):
             try:
-                self._put_control(ops)
+                self._control.put(cloudpickle.dumps([op]), timeout=_CONTROL_PUT_WAIT)
             except Exception as exc:
                 if self._stopping:
-                    return
-                if len(ops) > 1 and _worker.too_large(exc):
-                    self._send_one_by_one(ops)
-                elif len(ops) == 1 and ops[0][0] == "send" and _worker.too_large(exc):
-                    self._fail_too_large(ops[0], exc)
-                else:
-                    self._relay_lost(f"cannot be sent tasks: {exc!r}")
-
-    def _put_control(self, ops: list) -> None:
-        raw = cloudpickle.dumps(ops)
-        deadline = time.monotonic() + _worker.PUT_PATIENCE
-        while True:
-            try:
-                self._control.put(raw, timeout=_SEND_TIMEOUT)
-                return
-            except _worker.PoolFull:
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(_RETRY_FIRST)
-
-    def _send_one_by_one(self, ops: list) -> None:
-        """Send a batch too large for the pool one operation at a time, in its order."""
-        for op in ops:
-            try:
-                self._put_control([op])
-            except Exception as exc:
+                    return True
                 if op[0] == "send" and _worker.too_large(exc):
                     self._fail_too_large(op, exc)
                     continue
-                if not self._stopping:
-                    self._relay_lost(f"cannot be sent tasks: {exc!r}")
+                self._control_stalled(ops[i:], exc)
+                return False
+            self._control_went([op])
+        return True
+
+    def _control_went(self, ops: list) -> None:
+        """Note that the relay has ``ops``, and that its queue takes batches again."""
+        with self._lock:
+            if self._control_backoff == _RETRY_FIRST:
                 return
+            self._control_backoff = _RETRY_FIRST
+            for op in ops:
+                rec = self._tasks.get(op[2]) if op[0] == "send" else None
+                if rec is not None:
+                    rec.put_deadline = None
+        self.logger.info("The relay's queue takes tasks again")
+
+    def _control_stalled(self, ops: list, exc: BaseException) -> None:
+        """Put ``ops`` back first in line, and try again from the timer thread after a wait."""
+        now = time.monotonic()
+        with self._lock:
+            self._outgoing[:0] = [op for op in ops if op[0] != "ack"]
+            if any(op[0] == "ack" for op in ops):
+                self._ack_owed = True
+            for op in ops:
+                rec = self._tasks.get(op[2]) if op[0] == "send" else None
+                if rec is not None and rec.put_deadline is None:
+                    rec.put_deadline = now + _worker.PUT_PATIENCE
+            first = self._control_backoff == _RETRY_FIRST
+            delay = self._control_backoff
+            self._control_backoff = min(2 * delay, _RETRY_MAX)
+            self._control_retry_at = now + delay
+        if first:
+            self.logger.warning(f"The relay's queue has no room for tasks ({exc!r}): they wait")
+        self._push_timer(delay, next(self._timer_seq), self._retry_control, None)
+
+    def _retry_control(self, _arg, _timer: int) -> None:
+        """Fail the tasks whose send waited out ``PUT_PATIENCE``, then try the batch again."""
+        with self._lock:
+            self._control_retry_at = None
+            now = time.monotonic()
+            expired = []
+            keep = []
+            for op in self._outgoing:
+                rec = self._tasks.get(op[2]) if op[0] == "send" else None
+                if rec is not None and rec.put_deadline is not None and rec.put_deadline <= now:
+                    expired.append(op)
+                else:
+                    keep.append(op)
+            self._outgoing = keep
+            for _, wid, uid, _payload in expired:
+                w = self._workers.get(wid)
+                rec = self._tasks.get(uid)
+                if w is None or rec is None or w.task is not rec:
+                    continue  # cancelled, timed out, or its worker died: handled there
+                w.task = None
+                rec.worker = None
+                rec.timer = None
+                self._feed(w)
+                error = MemoryError(
+                    f"task {uid} could not be sent: the relay's queue had no room for "
+                    f"{_worker.PUT_PATIENCE} s"
+                )
+                self._fail_unsent(rec, error)
+        self._flush_sends()
 
     def _fail_too_large(self, op: tuple, exc: BaseException) -> None:
         """Fail a task larger than Dragon's memory pool can hold, and give its worker another.
@@ -1312,7 +1377,7 @@ class DragonNativeExecutionBackend(BaseBackend):
     def _discard_worker_queue(self, w: _Worker) -> None:
         if w.inbox is not None:
             if not self._stopping:
-                self._send_control([("forget", w.wid)])
+                self._queue_control(("forget", w.wid))
             with contextlib.suppress(Exception):
                 w.inbox.destroy()
 
@@ -1372,6 +1437,9 @@ class DragonNativeExecutionBackend(BaseBackend):
 
     def _admit_process(self, rec: _Task) -> None:
         """Start a process or group task now, or queue it, first in, first out."""
+        if rec.kind == "process" and rec.is_function and self._relay_error is not None:
+            self._fail_unsent(rec, RuntimeError(self._relay_error))  # its result could not come
+            return
         if self._proc_queue or not self._fits(rec):
             self._proc_queue.append(rec)
         else:
@@ -1681,10 +1749,12 @@ class DragonNativeExecutionBackend(BaseBackend):
                 cancelled = rec.cancelled
             if cancelled:
                 self._kill_process_task(rec)
+            joined_at = time.monotonic()
             try:
                 group.join(timeout=rec.timeout)
             except Exception:  # a timeout, as TimeoutError or as a manager error
-                if rec.timeout is None:
+                # Dragon raises either for a timeout: only the clock tells one from another error.
+                if rec.timeout is None or time.monotonic() - joined_at < 0.9 * rec.timeout:
                     # The task fails with the error. close() stops the group without a SIGKILL,
                     # and does not reach the ranks' children: kill and reap them first.
                     self._kill_process_task(rec)
@@ -2084,7 +2154,8 @@ class DragonNativeExecutionBackend(BaseBackend):
         Pool tasks are sent to a free worker or queued for one. A task whose uid belongs to a task
         still in the backend joins that task: it does not run, and it gets that task's states,
         RUNNING now and the final state with its result when the task ends. A ``Session`` keeps one
-        future per uid, so failing the repeat would fail the first task's future. Once the task has
+        future per uid, so failing the repeat would fail the first task's future. The uid decides:
+        a repeat with another function or executable joins too, with a warning. Once the task has
         ended, its uid runs again.
         """
         if self._backend_state == BackendMainStates.SHUTDOWN:
@@ -2106,7 +2177,18 @@ class DragonNativeExecutionBackend(BaseBackend):
             if running is not None:
                 # Its final state goes through the loop, after this RUNNING.
                 if joins:
-                    self.logger.debug(f"Task {task['uid']} joins the unfinished task of its uid")
+                    first = running.desc
+                    if task.get("function") is not first.get("function") or task.get(
+                        "executable"
+                    ) != first.get("executable"):
+                        self.logger.warning(
+                            f"Task {task['uid']} repeats the uid of an unfinished task with "
+                            "another function or executable. It joins that task and does not run."
+                        )
+                    else:
+                        self.logger.debug(
+                            f"Task {task['uid']} joins the unfinished task of its uid"
+                        )
                     self._callback_func(task, "RUNNING")
                 continue
             try:
