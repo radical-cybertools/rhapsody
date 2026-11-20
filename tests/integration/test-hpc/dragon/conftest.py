@@ -9,6 +9,7 @@ resources are not present in the current allocation.
 """
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -135,3 +136,88 @@ async def rhapsody_session(dragon_backend):
     session = Session(backends=[dragon_backend])
     yield session
     # Session is closed by the backend shutdown in dragon_backend fixture
+
+
+# ---------------------------------------------------------------------------
+# AI telemetry fixtures (the vLLM backend needs a GPU and a model)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def ai_model():
+    """Model name or local snapshot path from RHAPSODY_HPC_MODEL; skips (or fails if required)."""
+    model = os.environ.get("RHAPSODY_HPC_MODEL")
+    if not model:
+        _unavailable("model", "set RHAPSODY_HPC_MODEL to a model name or a local snapshot path")
+    return model
+
+
+@pytest.fixture(scope="module")
+def artifact_dir(request):
+    """Folder for this module's telemetry files and report (RHAPSODY_HPC_ARTIFACTS, default ./hpc-
+    artifacts)."""
+    base = Path(os.environ.get("RHAPSODY_HPC_ARTIFACTS", "hpc-artifacts")).resolve()
+    out = base / request.module.__name__
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+@pytest.fixture(scope="module")
+def log_capture():
+    """Collect the WARNING and ERROR records of the run, so a failing hook or instrumentation shows.
+
+    Attached to the "rhapsody" logger before the backend is created, because Dragon may reset the
+    root handlers.
+    """
+    import logging
+
+    from telemetry_checks import LogCapture
+
+    handler = LogCapture()
+    logging.getLogger("rhapsody").addHandler(handler)
+    yield handler
+    logging.getLogger("rhapsody").removeHandler(handler)
+
+
+@pytest.fixture(scope="module")
+async def inference_backend(ai_model, topology, gpu_nodes, log_capture):
+    """A warm DragonVllmInferenceBackend (engine mode, no HTTP server) on all GPU nodes."""
+    import multiprocessing as mp
+
+    from telemetry_checks import AI_BATCH_SIZE
+    from telemetry_checks import AI_WARMUP_REQUESTS
+    from telemetry_checks import warm_up
+
+    if not gpu_nodes:
+        _unavailable("gpu", "the inference backend needs at least one GPU-equipped node")
+
+    from rhapsody.backends import DragonVllmInferenceBackend
+    from rhapsody.backends.ai.config import HardwareConfig
+    from rhapsody.backends.ai.config import ModelConfig
+
+    if mp.get_start_method(allow_none=True) != "dragon":
+        mp.set_start_method("dragon", force=True)
+
+    backend = await DragonVllmInferenceBackend(
+        model=ModelConfig(
+            model_name=ai_model,
+            tp_size=1,
+            gpu_memory_utilization=0.85,
+            hf_token=os.environ.get("HF_TOKEN", ""),
+        ),
+        hardware=HardwareConfig(
+            num_nodes=len(gpu_nodes),
+            num_gpus=min(n["num_gpus"] for n in gpu_nodes),  # per node
+            node_offset=0,
+        ),
+        max_batch_size=AI_BATCH_SIZE,
+        max_batch_wait_ms=500,
+        use_service=False,  # no HTTP server, so the request counts stay exact
+    )
+    try:
+        # Before telemetry: the backend drops events until a manager is attached, and the first
+        # call to each worker is slow.
+        await warm_up(backend, AI_WARMUP_REQUESTS)
+        yield backend
+    finally:
+        await backend.shutdown()
