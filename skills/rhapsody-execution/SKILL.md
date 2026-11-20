@@ -169,7 +169,7 @@ Rules for retries:
 - **One attempt per object:** a task object represents one execution, so every retry is a new task object.
 - **Cap the attempts:** for example, at most N retries.
 - **Persistent failures:** report them with uid, `exit_code` and `stderr`, or with the exception.
-- **Cancellation:** `await backend.cancel_task(task.uid)` returns `True` when the backend cancelled the task.
+- **Cancellation:** `await backend.cancel_task(task.uid)` returns `True` when the backend cancelled the task, and `False` for a uid it does not know. Only a cancel you request ends `CANCELED`; a Dragon task that runs past its `timeout` ends `FAILED` with a `TimeoutError`.
 
 ### 8. Read results
 
