@@ -2,7 +2,8 @@
 
 Usage::
 
-    python -I -m rhapsody.backends.execution._peak --out-dir DIR [--interval S] -- CMD [ARG ...]
+    python -I -m rhapsody.backends.execution._peak --out-dir DIR [--interval S] [--shared-group] \\
+        -- CMD [ARG ...]
 
 The command runs as a child of this process, which reaps it with ``os.wait4`` to read its peak
 resident set size (``ru_maxrss``: the largest single process of the command's tree, not a sum).
@@ -26,6 +27,10 @@ It then exits the way the command did: the same exit code, or the same signal.
   ``SIGPIPE`` and ``SIGXFSZ``) and, unless this process runs in a terminal's foreground, in a
   process group of its own. Signals sent to this process, or to its group, reach the command's
   group once, forwarded. On Linux the command is also killed if this process dies.
+  With ``--shared-group``, for a caller that started this process in a group of its own and
+  stops the command by signalling that group, the command stays in this process's group, and
+  this process forwards nothing and outlives the forwarded signals: each signal reaches the
+  command once, from the caller, and a SIGKILL reaches every process the command started.
 - **Isolation.** Backends run it with ``python -I``, so the task's ``PYTHONHOME``,
   ``PYTHONPATH`` or ``PYTHONWARNINGS`` cannot break it; the command still gets the task's
   environment unchanged.
@@ -81,9 +86,15 @@ GPU_STOP_TIMEOUT = 5.0
 FLOOR_SLACK = 1.0 / 1024
 
 
-def launcher_argv(out_dir: str) -> list[str]:
-    """The command that runs a task's command under this launcher: append the command to it."""
-    return [sys.executable, "-I", os.path.abspath(__file__), "--out-dir", out_dir, "--"]
+def launcher_argv(out_dir: str, shared_group: bool = False) -> list[str]:
+    """The command that runs a task's command under this launcher: append the command to it.
+
+    ``shared_group`` keeps the command in the launcher's group (see the module's Signals).
+    """
+    argv = [sys.executable, "-I", os.path.abspath(__file__), "--out-dir", out_dir]
+    if shared_group:
+        argv.append("--shared-group")
+    return [*argv, "--"]
 
 
 def make_peak_dir(root: str, uid: str) -> str:
@@ -388,13 +399,16 @@ def _wait_exited(pid: int) -> bool:
     return True
 
 
-def run(cmd: list[str], out_dir: str, interval: float = 0.2) -> int:
-    """Run ``cmd``, write its peaks to ``out_dir``, and return its exit code (negative: signal)."""
+def run(cmd: list[str], out_dir: str, interval: float = 0.2, shared_group: bool = False) -> int:
+    """Run ``cmd``, write its peaks to ``out_dir``, and return its exit code (negative: signal).
+
+    ``shared_group`` keeps the command in this process's group, and forwards no signal.
+    """
     child: dict = {"pid": None, "group": False}
 
     def forward(sig, _frame):
         pid = child["pid"]
-        if pid is None:  # exited: forward nothing more
+        if pid is None or shared_group:  # exited, or the signal reached the command already
             return
         try:
             if child["group"]:
@@ -408,7 +422,7 @@ def run(cmd: list[str], out_dir: str, interval: float = 0.2) -> int:
     mask = signal.pthread_sigmask(signal.SIG_BLOCK, FORWARDED_SIGNALS)
     for sig in FORWARDED_SIGNALS:
         signal.signal(sig, forward)
-    own_group = not _in_terminal_foreground()
+    own_group = not shared_group and not _in_terminal_foreground()
     floor = rss_now()
     started = time.time()
     try:
@@ -540,17 +554,22 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(
         prog="python -I -m rhapsody.backends.execution._peak",
         description="Run CMD and write its peak host and GPU memory to OUT_DIR.",
-        usage="%(prog)s --out-dir OUT_DIR [--interval S] -- CMD [ARG ...]",
+        usage="%(prog)s --out-dir OUT_DIR [--interval S] [--shared-group] -- CMD [ARG ...]",
     )
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--interval", type=float, default=0.2, help="GPU sampling period")
+    parser.add_argument(
+        "--shared-group",
+        action="store_true",
+        help="keep CMD in this process's group and forward no signal",
+    )
     if "--" not in argv:
         parser.error("missing '--' before the command")
     split = argv.index("--")
     opts, cmd = parser.parse_args(argv[:split]), argv[split + 1 :]
     if not cmd:
         parser.error("no command after '--'")
-    exit_like(run(cmd, opts.out_dir, opts.interval))
+    exit_like(run(cmd, opts.out_dir, opts.interval, opts.shared_group))
 
 
 if __name__ == "__main__":

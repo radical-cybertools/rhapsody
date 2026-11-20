@@ -432,7 +432,9 @@ Limits:
   record written after the backend read the directory is dropped.
 - The launcher runs the command with every signal at its default disposition and, outside a
   terminal's foreground, in a process group of its own. A signal to the launcher, or to its
-  group, reaches the command's group once.
+  group, reaches the command's group once. `ConcurrentExecutionBackend` keeps the command in
+  the launcher's group instead, so that a cancel stops it as it stops a command run without
+  the launcher: SIGTERM to the whole group, then SIGKILL after `term_grace`.
 - NVML is set up in the launcher's sampler thread: a slow or broken NVML (or `pynvml`) neither
   delays the command nor fails the task; GPU memory NVML cannot tell (MIG) is unknown, not zero.
 - A native function's `host_mem` is what its node held for it: the worker's own size (60 to
