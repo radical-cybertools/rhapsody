@@ -1,7 +1,8 @@
 """A cancelled command on ConcurrentExecutionBackend must not leave its process running.
 
 These tests run real commands. A command stopped by mistake only fails its test, but one left
-running outlives it, so each sleeps for a short, bounded time.
+running outlives it, so each sleeps for a short, bounded time. Each runs with and without
+``observe_peaks``, which starts commands under the peak launcher.
 """
 
 import asyncio
@@ -54,9 +55,14 @@ async def _submit_exec(backend, *command):
     return task
 
 
+@pytest.fixture(params=[False, True], ids=["plain", "observe_peaks"])
+def observe_peaks(request):
+    return request.param
+
+
 @pytest.fixture
-async def backend():
-    backend = await ConcurrentExecutionBackend()
+async def backend(observe_peaks):
+    backend = await ConcurrentExecutionBackend(observe_peaks=observe_peaks)
     yield backend
     await backend.shutdown()
 
@@ -138,8 +144,9 @@ async def test_canceled_is_reported_once_the_process_has_stopped(backend, tmp_pa
 async def test_a_process_that_ignores_sigterm_is_killed(backend, tmp_path):
     backend.term_grace = 0.3
     pids = tmp_path / "pids"
-    task = await _submit_shell(backend, f"trap '' TERM ; echo $$ > {pids} ; sleep 20 ; true")
-    shell = (await _pids(pids))[0]
+    # The shell's child ignores SIGTERM too: only SIGKILL to the whole group ends it
+    task = await _submit_shell(backend, f"trap '' TERM ; sleep 20 & echo $$ $! > {pids} ; wait")
+    shell, child = await _pids(pids)
 
     ticks = 0
 
@@ -155,7 +162,9 @@ async def test_a_process_that_ignores_sigterm_is_killed(backend, tmp_path):
     elapsed = time.monotonic() - started
     beating.cancel()
 
+    # CANCELED waits until they are gone, the child too, which is not the backend's to reap
     assert not _running(shell)
+    assert not _running(child)
     assert elapsed >= 0.3
     # The loop kept running during the grace period
     assert ticks >= 10
@@ -240,10 +249,12 @@ async def test_cancel_ends_when_a_process_left_the_group(backend, tmp_path, capl
     await _wait_for(lambda: not _running(escaped))
 
 
-async def test_cancel_during_the_start_stops_the_command(backend, tmp_path):
+async def test_cancel_during_the_start_stops_the_command(backend, tmp_path, observe_peaks):
     """Asyncio answers a cancel here by killing the shell, not its children."""
     pids = tmp_path / "pids"
-    start = asyncio.create_subprocess_shell
+    # The peak launcher runs the shell, and is started as an exec command
+    name = "asyncio.create_subprocess_" + ("exec" if observe_peaks else "shell")
+    start = asyncio.create_subprocess_exec if observe_peaks else asyncio.create_subprocess_shell
     started = asyncio.Event()
 
     async def slow_start(*args, **kwargs):
@@ -253,7 +264,7 @@ async def test_cancel_during_the_start_stops_the_command(backend, tmp_path):
         await asyncio.sleep(0.1)
         return process
 
-    with patch("asyncio.create_subprocess_shell", slow_start):
+    with patch(name, slow_start):
         task = await _submit_shell(backend, f"sleep 20 & echo $$ $! > {pids} ; wait")
         await started.wait()
         assert await backend.cancel_task(task.uid)
@@ -313,8 +324,8 @@ async def test_cancelling_all_tasks_cuts_a_grace_period_short(backend, tmp_path)
     assert await cancel
 
 
-async def test_shutdown_stops_running_commands(tmp_path):
-    backend = await ConcurrentExecutionBackend()
+async def test_shutdown_stops_running_commands(tmp_path, observe_peaks):
+    backend = await ConcurrentExecutionBackend(observe_peaks=observe_peaks)
     pids = tmp_path / "pids"
     await _submit_shell(backend, f"sleep 20 & echo $$ $! > {pids} ; wait")
     started = await _pids(pids)
