@@ -56,12 +56,12 @@ dragon-config add --ofi-runtime-lib=/opt/cray/libfabric/<version>/lib64
 ```bash
 # Download to node-local /tmp on the login node (flock works there)
 export HF_HOME=/tmp/${USER}_hf_dl
-huggingface-cli download Qwen/Qwen2.5-0.5B-Instruct \
-    --local-dir /tmp/${USER}_hf_dl/Qwen2.5-0.5B-Instruct
+hf download HuggingFaceTB/SmolLM2-1.7B-Instruct \
+    --local-dir /tmp/${USER}_hf_dl/SmolLM2-1.7B-Instruct
 
 # Move it to scratch — a plain file copy, no flock involved
 mkdir -p $SCRATCH/models
-rsync -av /tmp/${USER}_hf_dl/Qwen2.5-0.5B-Instruct/ $SCRATCH/models/Qwen2.5-0.5B-Instruct/
+rsync -av /tmp/${USER}_hf_dl/SmolLM2-1.7B-Instruct/ $SCRATCH/models/SmolLM2-1.7B-Instruct/
 ```
 
 Then set, before launching your job, so the model loads from the local snapshot with no further Hub/lock calls:
@@ -135,7 +135,7 @@ def fine_tune(simulation_outputs: list):
         TrainingArguments,
     )
 
-    model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+    model_name = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
     print(f"Loading tokenizer and model: {model_name}", flush=True)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -181,7 +181,7 @@ async def main():
 
     inference_backend = await DragonVllmInferenceBackend(
         model=ModelConfig(
-            model_name=f"{os.environ['SCRATCH']}/models/Qwen2.5-0.5B-Instruct",
+            model_name=f"{os.environ['SCRATCH']}/models/SmolLM2-1.7B-Instruct",
             hf_token="",
             tp_size=1,
         ),
@@ -247,7 +247,7 @@ dragon ai-hpc.py
       Sim 6: Stress concentrations appear at the fixed end with a maximum von Mises stress of 320...
       Sim 7: The drag coefficient Cd ≈ 1.38, consistent with experimental values at Re=100. Karman...
     --- Phase 2: Fine-tuning model on simulation outputs ---
-    Loading tokenizer and model: Qwen/Qwen2.5-0.5B-Instruct
+    Loading tokenizer and model: HuggingFaceTB/SmolLM2-1.7B-Instruct
     {'loss': 2.4231, 'epoch': 1.0}
     {'loss': 1.8902, 'epoch': 2.0}
     {'loss': 1.5214, 'epoch': 3.0}
@@ -261,7 +261,7 @@ dragon ai-hpc.py
 !!! tip "Scaling up"
     - Increase `SIMULATION_PROMPTS` to hundreds or thousands of scenarios to generate a larger training corpus
     - Use `HardwareConfig(num_gpus=4)` and `ModelConfig(tp_size=4)` on Perlmutter's A100 nodes for larger inference models
-    - Replace `Qwen/Qwen2.5-0.5B-Instruct` in `fine_tune()` with any HuggingFace model that fits in GPU memory
+    - Replace `HuggingFaceTB/SmolLM2-1.7B-Instruct` in `fine_tune()` with any HuggingFace model that fits in GPU memory
 
 ---
 

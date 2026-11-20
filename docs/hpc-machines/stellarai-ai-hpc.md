@@ -60,7 +60,7 @@ module load cudatoolkit/13.1
 `DragonVllmInferenceBackend` takes model settings as a `ModelConfig` object (see the [AI guide](../ai/index.md#dragon-vllm-inference-backend)). Download the model on the login node and pass the local snapshot path as `ModelConfig(model_name=...)`:
 
 ```bash
-hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir ~/models/Qwen2.5-0.5B-Instruct
+hf download HuggingFaceTB/SmolLM2-1.7B-Instruct --local-dir ~/models/SmolLM2-1.7B-Instruct
 ```
 
 Then set, before launching your job, so the model loads from the local snapshot with no Hub calls:
@@ -79,7 +79,7 @@ salloc -N 2 -p gpu --qos=gpu-short --gres=gpu:1 --ntasks-per-node=1 -t 1:00:00 -
 Once the allocation is granted, launch with the `dragon` command, the TCP transport and a network prefix that matches StellarAI's interfaces:
 
 ```bash
-dragon -t tcp --network-prefix '^(eno|bond)\w*$' <script.py>
+dragon -t tcp --network-prefix '^(hsn|ipogif|ib|eth|en|nic|bond|lo|vmbr)\w*$' <script.py>
 ```
 
 !!! warning "`-t tcp` is required"
@@ -127,7 +127,7 @@ async def main():
 
     inference_backend = await DragonVllmInferenceBackend(
         model=ModelConfig(
-            model_name=os.path.expanduser("~/models/Qwen2.5-0.5B-Instruct"),
+            model_name=os.path.expanduser("~/models/SmolLM2-1.7B-Instruct"),
             hf_token="",
             tp_size=1,
         ),
@@ -171,7 +171,7 @@ export CPATH=$HOME/stellarai-include:$HOME/stellarai-include/python3.12
 export C_INCLUDE_PATH=$CPATH
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 
-dragon -t tcp --network-prefix '^(eno|bond)\w*$' ai-inference.py
+dragon -t tcp --network-prefix '^(hsn|ipogif|ib|eth|en|nic|bond|lo|vmbr)\w*$' ai-inference.py
 ```
 
 !!! success "Expected Output"
@@ -214,7 +214,7 @@ export CPATH=$HOME/stellarai-include:$HOME/stellarai-include/python3.12
 export C_INCLUDE_PATH=$CPATH
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 
-dragon -t tcp --network-prefix '^(eno|bond)\w*$' ai-inference.py
+dragon -t tcp --network-prefix '^(hsn|ipogif|ib|eth|en|nic|bond|lo|vmbr)\w*$' ai-inference.py
 ```
 
 Submit with `sbatch ai-inference.sbatch`.

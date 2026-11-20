@@ -40,14 +40,14 @@ pip install "rhapsody-py[dragon]"
 Inside the allocation, launch with the TCP transport and a network prefix that matches StellarAI's interfaces:
 
 ```bash
-dragon -t tcp --network-prefix '^(eno|bond)\w*$' <script.py>
+dragon -t tcp --network-prefix '^(hsn|ipogif|ib|eth|en|nic|bond|lo|vmbr)\w*$' <script.py>
 ```
 
 !!! warning "`-t tcp` is required"
     Without `-t tcp`, a multi-node launch fails within seconds with `RuntimeError: Abnormal exit detected` from `dragon-backend`, before any of your code runs. Single-node runs work without it.
 
 !!! note
-    Dragon starts its backends through Slurm, so no `dragon-network-config` file or `-w ssh` launcher is needed. Dragon always skips the loopback interface, so `--network-prefix` only has to match `eno8303` and `bond0`.
+    Dragon starts its backends through Slurm, so no `dragon-network-config` file or `-w ssh` launcher is needed. On StellarAI this `--network-prefix` matches `eno8303` and `bond0`; Dragon always skips the loopback interface, even though the pattern includes `lo`.
 
 ---
 
@@ -104,7 +104,7 @@ if __name__ == "__main__":
 Run with:
 
 ```bash
-dragon -t tcp --network-prefix '^(eno|bond)\w*$' rhapsody-scalable.py
+dragon -t tcp --network-prefix '^(hsn|ipogif|ib|eth|en|nic|bond|lo|vmbr)\w*$' rhapsody-scalable.py
 ```
 
 !!! success "Expected Output"
