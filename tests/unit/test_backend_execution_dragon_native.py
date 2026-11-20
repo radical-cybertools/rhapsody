@@ -15,6 +15,7 @@ import ctypes
 import enum
 import gc
 import itertools
+import logging
 import os
 import queue
 import signal
@@ -963,7 +964,7 @@ async def test_a_stalled_send_times_out_and_the_task_runs_elsewhere(dragon, tmp_
         await backend.submit_tasks([task])
         assert time.monotonic() - t0 < 2.0
         assert await rec.wait(task["uid"]) == ["DONE"]
-        assert timeouts == [0.2]
+        assert timeouts == [worker_module.RELAY_FAST_PUT, 0.2]  # its node is the relay's
         assert (stalled.state, healthy.state) == ("dead", "idle")
     finally:
         await backend.shutdown()
@@ -1063,7 +1064,7 @@ async def test_full_pool_holds_tasks_and_sends_them_in_order(one_worker, pool_fu
     for task in tasks:
         assert await rec.wait(task["uid"]) == ["DONE"]
     assert [u for u, s, _ in rec.records if s == "DONE"] == [t["uid"] for t in tasks]
-    assert (w.state, w.backoff) == ("idle", dragon_native._RETRY_FIRST)
+    assert w.state == "idle"
 
 
 async def test_task_fails_once_the_pool_stays_full_for_put_patience(
@@ -2393,6 +2394,245 @@ def test_relay_forwards_the_next_batch_once_the_client_has_handled_the_last(drag
     relay.join(5)
 
 
+def no_room_on(be, room):
+    """Make a put on the relay's queue raise the full-pool error until ``room()``, as on a client
+    node whose memory pool is full."""
+    put = be._control.put
+
+    def full_put(obj, block=True, timeout=None, flush=False):
+        if not room():
+            raise PoolFullError("pool is full")
+        put(obj, block, timeout)
+
+    be._control.put = full_put
+
+
+async def test_a_relay_queue_with_no_room_holds_tasks_without_blocking_the_loop(backend):
+    """The client used to wait for room on the asyncio loop, for up to PUT_PATIENCE, and then took
+    the relay, which was fine, for lost: every pool task failed from then on, even once the pool had
+    room again."""
+    rec = Recorder(backend)
+    room = threading.Event()
+    no_room_on(backend, room.is_set)
+    tasks = [fn_task(square, i) for i in range(8)]
+    t0 = time.monotonic()
+    await backend.submit_tasks(tasks)
+    assert time.monotonic() - t0 < 0.5
+    await asyncio.sleep(0.3)
+    assert not [s for _, s, _ in rec.records if s in rec.terminal]
+    room.set()
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert [t["return_value"] for t in tasks] == [i * i for i in range(8)]
+    assert backend._relay_error is None
+
+
+async def test_tasks_that_wait_out_a_full_relay_queue_fail_and_later_ones_run(backend, monkeypatch):
+    """Only the tasks that waited out PUT_PATIENCE fail; their workers take the next."""
+    monkeypatch.setattr(worker_module, "PUT_PATIENCE", 0.3)
+    rec = Recorder(backend)
+    room = threading.Event()
+    no_room_on(backend, room.is_set)
+    early = [fn_task(square, i) for i in range(3)]
+    await backend.submit_tasks(early)
+    for task in early:
+        assert await rec.wait(task["uid"]) == ["FAILED"]
+        assert "had no room" in task["stderr"]
+    room.set()
+    late = [fn_task(square, i) for i in range(6)]
+    await backend.submit_tasks(late)
+    for task in late:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert backend._relay_error is None
+    assert sorted(w.state for w in backend._workers.values()) == ["idle"] * 4
+
+
+async def test_a_stalled_node_holds_up_neither_other_nodes_nor_results(
+    dragon, tmp_path, monkeypatch
+):
+    """One relay thread made every put in turn and handled the client's acknowledgements: an inbox
+    that took nothing held every other worker's tasks, and every result, for _SEND_TIMEOUT."""
+    monkeypatch.setattr(dragon_native, "_SEND_TIMEOUT", 3.0)  # before the relay starts with it
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, kill_grace=0.5)
+    be._work_dir = str(tmp_path)
+    await be
+    rec = Recorder(be)
+    stalled = next(w for w in be._workers.values() if w.host == "n0")
+    release = threading.Event()
+
+    def stalled_put(obj, block=True, timeout=None, flush=False):
+        if obj is not None:  # not the fake kill's stop message
+            release.wait(timeout)
+        raise queue.Full
+
+    monkeypatch.setattr(stalled.inbox, "put", stalled_put)
+    try:
+        await be.submit_tasks([fn_task(square, 1, placement={"host": "n0"})])
+        fast = [fn_task(square, i, placement={"host": "n1"}) for i in range(5)]
+        t0 = time.monotonic()
+        await be.submit_tasks(fast)
+        for task in fast:
+            assert await rec.wait(task["uid"]) == ["DONE"]
+        assert time.monotonic() - t0 < 1.5
+    finally:
+        release.set()
+        await be.shutdown()
+
+
+async def test_a_stalled_inbox_holds_up_no_other_worker_on_its_node(dragon, tmp_path, monkeypatch):
+    """As one relay thread used to do for every node, and then one per node did for its own."""
+    monkeypatch.setattr(dragon_native, "_SEND_TIMEOUT", 3.0)  # before the relay starts with it
+    be = DragonNativeExecutionBackend(workers_per_node=2, inline_stdio=False, kill_grace=0.5)
+    be._work_dir = str(tmp_path)
+    await be
+    rec = Recorder(be)
+    stalled, healthy = be._idle[("n0", ())]
+    release = threading.Event()
+
+    def stalled_put(obj, block=True, timeout=None, flush=False):
+        if obj is not None:  # not the fake kill's stop message
+            release.wait(timeout)
+        raise queue.Full
+
+    monkeypatch.setattr(stalled.inbox, "put", stalled_put)
+    try:
+        held = fn_task(square, 1, placement={"host": "n0"})
+        await be.submit_tasks([held])
+        assert be._tasks[held["uid"]].worker is stalled
+        others = [fn_task(square, i, placement={"host": "n0"}) for i in range(4)]
+        t0 = time.monotonic()
+        await be.submit_tasks(others)
+        for task in others:
+            assert await rec.wait(task["uid"]) == ["DONE"]
+        assert time.monotonic() - t0 < 1.5
+        assert {be._tasks.get(t["uid"]) for t in others} == {None}
+    finally:
+        release.set()
+        await be.shutdown()
+
+
+async def test_tasks_waiting_for_room_hold_no_relay_thread(
+    dragon, tmp_path, monkeypatch, pool_full
+):
+    """A task that found the pool full held one of the node's few sender threads while it waited:
+
+    with more workers than threads, the last tasks failed only after several PUT_PATIENCEs.
+    """
+    be = DragonNativeExecutionBackend(workers_per_node=8, inline_stdio=False)
+    be._work_dir = str(tmp_path)
+    await be
+    monkeypatch.setattr(worker_module, "PUT_PATIENCE", 0.5)
+    rec = Recorder(be)
+    for w in be._workers.values():
+        if w.host == "n0":
+            monkeypatch.setattr(w.inbox, "put", full_until(w.inbox, lambda: True))
+    try:
+        tasks = [fn_task(square, i, placement={"host": "n0"}) for i in range(8)]
+        t0 = time.monotonic()
+        await be.submit_tasks(tasks)
+        for task in tasks:
+            assert await rec.wait(task["uid"]) == ["FAILED"]
+        assert 0.5 <= time.monotonic() - t0 < 0.9
+        assert worker_module.RELAY_SENDERS < len(tasks)
+    finally:
+        await be.shutdown()
+
+
+def test_relay_forwards_without_an_acknowledgement_after_ten_idle_intervals(dragon):
+    """A lost or late acknowledgement held every result for good."""
+    results, control, inbound = dragon.Queue(4096), dragon.Queue(16), dragon.Queue(1)
+    relay = threading.Thread(
+        target=worker_module.relay_main,
+        args=(control, results, inbound, 0.05, 1.0, 0.001),
+        daemon=True,
+    )
+    relay.start()
+    results.put(cloudpickle.dumps(("message", 0)))
+    assert len(cloudpickle.loads(inbound.get(timeout=5))[0]) == 1
+    t0 = time.monotonic()
+    results.put(cloudpickle.dumps(("message", 1)))
+    batch, _ = cloudpickle.loads(inbound.get(timeout=5))  # no acknowledgement was sent
+    assert [cloudpickle.loads(raw)[1] for raw in batch] == [1]
+    assert time.monotonic() - t0 >= 0.3
+    control.put(None)
+    results.put(None)
+    while inbound.get(timeout=5) is not None:
+        pass
+    relay.join(5)
+    assert not relay.is_alive()
+
+
+def test_relay_waits_out_a_full_pool_for_its_results_and_stays_up(dragon, pool_full):
+    """A full pool used to end the relay after PUT_PATIENCE, and with it every pool task."""
+    results, control, inbound = dragon.Queue(4096), dragon.Queue(16), dragon.Queue(1)
+    room = threading.Event()
+    put = inbound.put
+
+    def full_put(obj, block=True, timeout=None, flush=False):
+        if not room.is_set():
+            raise PoolFullError("pool is full")
+        put(obj, block, timeout)
+
+    inbound.put = full_put
+    relay = threading.Thread(
+        target=worker_module.relay_main,
+        args=(control, results, inbound, 0.05, 1.0, 0.001, 0.1),
+        daemon=True,
+    )
+    relay.start()
+    results.put(cloudpickle.dumps(("message", 0)))
+    time.sleep(0.5)  # five times its patience
+    assert relay.is_alive()
+    room.set()
+    batch, _ = cloudpickle.loads(inbound.get(timeout=5))
+    assert [cloudpickle.loads(raw)[1] for raw in batch] == [0]
+    control.put(None)
+    results.put(None)
+    while inbound.get(timeout=5) is not None:
+        control.put(cloudpickle.dumps([("ack",)]))
+    relay.join(5)
+
+
+async def test_a_repeat_with_other_work_joins_with_a_warning(backend, caplog):
+    """The uid decides, as in a Session; a repeat that would run something else is not silent."""
+    seen = record_states(backend)
+    first = fn_task(blocked)
+    same = dict(fn_task(blocked), uid=first["uid"])
+    other = dict(fn_task(square, 3), uid=first["uid"])
+    with caplog.at_level(logging.WARNING):
+        await backend.submit_tasks([first, same])
+        assert "another function or executable" not in caplog.text
+        await backend.submit_tasks([other])
+    assert "another function or executable" in caplog.text
+    GATE.set()
+    await until(lambda: len(seen) == 6)
+    assert other["return_value"] == "released"
+
+
+async def test_group_whose_join_fails_before_its_timeout_is_not_reported_as_timed_out(
+    backend, dragon, monkeypatch
+):
+    """Any join error counted as a timeout when the task had one: the kill and second join that
+    followed then succeeded, and the task failed with a TimeoutError."""
+    join = dragon.ProcessGroup.join
+    calls = []
+
+    def fails_once(self, timeout=None):
+        calls.append(timeout)
+        if len(calls) == 1:
+            raise FakeProcessGroupError("manager died")
+        return join(self, timeout)
+
+    monkeypatch.setattr(dragon.ProcessGroup, "join", fails_once)
+    rec = Recorder(backend)
+    task = exe_task(
+        "true", task_backend_specific_kwargs={"process_templates": [(2, {})], "timeout": 30}
+    )
+    await backend.submit_tasks([task])
+    assert await rec.wait(task["uid"]) == ["FAILED"]
+    assert isinstance(task["exception"], FakeProcessGroupError)
+
+
 async def test_a_relay_that_dies_fails_the_pool_tasks_and_new_ones(backend):
     """Processes do not need the relay, and still run."""
     rec = Recorder(backend)
@@ -2403,9 +2643,12 @@ async def test_a_relay_that_dies_fails_the_pool_tasks_and_new_ones(backend):
     assert await rec.wait(running["uid"]) == ["FAILED"]
     assert "relay process exited with code -9" in running["stderr"]
     late, executable = fn_task(square, 2), exe_task("true")
-    await backend.submit_tasks([late, executable])
+    function_process = fn_task(square, 2, task_backend_specific_kwargs={"process_template": {}})
+    await backend.submit_tasks([late, executable, function_process])
     assert await rec.wait(late["uid"]) == ["FAILED"]
     assert "relay" in late["stderr"]
+    assert await rec.wait(function_process["uid"]) == ["FAILED"]  # at once: its result needs it
+    assert "relay" in function_process["stderr"]
     assert await rec.wait(executable["uid"]) == ["DONE"]
 
 
@@ -2846,6 +3089,75 @@ async def test_real_runtime_an_argument_too_large_for_the_pool_fails_alone(tmp_p
             assert await rec.wait(task["uid"], 120) == ["DONE"]
         assert set(be._workers) == wids and be._relay_error is None
     finally:
+        await be.shutdown()
+        cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
+
+
+def fill_the_pool(q, error):
+    """Put blobs on ``q`` until the pool has no room even for a small one; return how many."""
+    held = 0
+    for size in (16 << 20, 1 << 20, 64 << 10, 4 << 10, 512):
+        blob = b"x" * size
+        while True:
+            try:
+                q.put(blob, timeout=1)
+            except error:
+                break
+            held += 1
+    return held
+
+
+@needs_runtime
+@pytest.mark.skipif(
+    not _small_pool(),
+    reason="needs a small memory pool: DRAGON_DEFAULT_SEG_SZ=268435456 dragon python -m pytest",
+)
+async def test_real_runtime_a_full_pool_on_the_clients_node_is_waited_out(tmp_path, monkeypatch):
+    """It used to block the asyncio loop for PUT_PATIENCE and then take the relay for lost: pool
+    tasks failed for the rest of the session, even once the pool had room again."""
+    from dragon.managed_memory import DragonPoolAllocationNotAvailable
+    from dragon.native.queue import Queue
+
+    cloudpickle.register_pickle_by_value(sys.modules[__name__])
+    monkeypatch.setattr(worker_module, "PUT_PATIENCE", 4.0)
+    monkeypatch.setattr(dragon_native, "_RELAY_PATIENCE", 4.0)  # the relay's, from its start
+    be = await DragonNativeExecutionBackend(workers_per_node=4)
+    be._work_dir = str(tmp_path)
+    rec = Recorder(be)
+    filler = Queue(maxsize=8192, block_size=256)  # small blocks: every blob takes pool memory
+    held = 0
+    try:
+        warm = [fn_task(square, i) for i in range(4)]
+        await be.submit_tasks(warm)
+        for task in warm:
+            assert await rec.wait(task["uid"], 60) == ["DONE"], task.get("stderr")
+        held = fill_the_pool(filler, DragonPoolAllocationNotAvailable)
+        t0 = time.monotonic()
+        during = [fn_task(square, i) for i in range(4)]
+        await be.submit_tasks(during)
+        waited = time.monotonic() - t0
+        for task in during:
+            states = await rec.wait(task["uid"], 60)
+            print("RESULT during", task["uid"], states, task.get("stderr", "")[:160])
+            assert states in (["FAILED"], ["DONE"])
+            assert "relay process" not in (task.get("stderr") or "")
+        await asyncio.sleep(2.0)
+        for _ in range(held):
+            filler.get(timeout=10)
+        held = 0
+        after = [fn_task(square, i) for i in range(8)]
+        await be.submit_tasks(after)
+        for task in after:
+            assert await rec.wait(task["uid"], 60) == ["DONE"], task.get("stderr")
+        print(f"RESULT submit during the full pool returned after {waited:.2f} s")
+        assert waited < 1.0
+        assert be._relay_error is None
+    finally:
+        for _ in range(held):
+            with contextlib.suppress(Exception):
+                filler.get(timeout=1)
+        with contextlib.suppress(Exception):
+            filler.destroy()
         await be.shutdown()
         cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
 

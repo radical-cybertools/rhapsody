@@ -29,7 +29,9 @@ from test_backend_execution_dragon_native import exe_task  # noqa: E402
 from test_backend_execution_dragon_native import fn_task  # noqa: E402
 from test_backend_execution_dragon_native import full_until  # noqa: E402
 from test_backend_execution_dragon_native import needs_runtime  # noqa: E402
+from test_backend_execution_dragon_native import no_room_on  # noqa: E402
 from test_backend_execution_dragon_native import pool_full  # noqa: E402, F401 - fixture
+from test_backend_execution_dragon_native import pool_of  # noqa: E402
 from test_backend_execution_dragon_native import square  # noqa: E402
 from test_backend_execution_dragon_native import until  # noqa: E402
 
@@ -693,6 +695,48 @@ async def test_the_relay_keeps_what_workers_say_and_an_unsent_task_gives_its_num
             assert all(task["observed"].get(k) is not None for k in WINDOW)
             if LINUX:
                 assert task["observed"]["approximate"] is True
+    finally:
+        await be.shutdown()
+
+
+@pytest.mark.parametrize("why", ["too_large", "no_room"])
+async def test_a_task_failed_before_the_relay_took_it_gives_its_number_back(
+    dragon,  # noqa: F811
+    tmp_path,
+    monkeypatch,
+    why,
+):
+    """The client fails a task too large for its pool, or one that waited out a relay queue with no
+    room, before the relay sees it: the worker never numbers it, so the client must not either."""
+    monkeypatch.setattr(worker_module, "PUT_PATIENCE", 0.3)
+    be = await make(tmp_path)
+    try:
+        (w,) = [w for w in be._workers.values() if w.host == "n0"]
+        rec = Recorder(be)
+        room = threading.Event()
+        if why == "too_large":
+            be._control.put = pool_of(be._control, 1 << 20)
+            lost = fn_task(len, b"x" * (2 << 20), placement={"host": "n0"})
+        else:
+            no_room_on(be, room.is_set)
+            lost = fn_task(square, 7, placement={"host": "n0"})
+        await be.submit_tasks([lost])
+        assert await rec.wait(lost["uid"]) == ["FAILED"]
+        assert w.sent == 0
+        room.set()
+        numbers = []
+        on_done = be._on_done
+
+        def record(msg, completions):
+            task = be._workers[msg[1]].task
+            numbers.append((msg[2], msg[-1], task.seq if task is not None else None))
+            on_done(msg, completions)
+
+        monkeypatch.setattr(be, "_on_done", record)
+        tasks = [fn_task(square, i, placement={"host": "n0"}) for i in range(2)]
+        assert await run(be, tasks) == ["DONE"] * 2
+        assert numbers == [(t["uid"], i, i) for i, t in enumerate(tasks, 1)]
+        assert w.sent == 2
     finally:
         await be.shutdown()
 
