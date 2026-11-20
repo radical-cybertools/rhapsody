@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
+
+if os.environ.get("RHAPSODY_REQUIRE_TELEMETRY") == "1":
+    # CI sets this: every telemetry test file skips itself when opentelemetry-sdk is missing, so
+    # without this check a CI install that lacks the SDK would report them all as skipped.
+    import opentelemetry.sdk.trace  # noqa: F401
 
 from rhapsody.telemetry.events import ResourceUpdate
 
