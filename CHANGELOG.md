@@ -63,6 +63,16 @@
 
 ### Fixed
 
+- **`import rhapsody` broke Dragon's `multiprocessing` bridge** (#159) — `rhapsody.backends`
+  imported `DragonVllmInferenceBackend` with the package, and with it `dragon.ai.inference`,
+  whose `llm_engine.py` sets `DRAGON_PATCH_MP` to `""` at import. Processes a program then
+  started through Dragon's `multiprocessing` bridge lacked Dragon's start method and failed with
+  `ValueError: cannot find context for 'dragon'`. The vLLM backend now loads on first use (a
+  module `__getattr__`): `from rhapsody.backends import DragonVllmInferenceBackend` still works,
+  but the name is no longer in `rhapsody.backends.__all__`. Using the vLLM backend still clears
+  the variable, which is Dragon's to change; a program that also starts processes through the
+  bridge can set `DRAGON_PATCH_MP=True` again after importing it.
+
 - **`DragonVllmInferenceBackend`: a `queue.Empty` from `get_nowait()` no longer fails a whole batch** — the
   response loop called `empty()` and then `get_nowait()`. Dragon documents `empty()` as
   unreliable, so `get_nowait()` could still raise `queue.Empty`, and the batch processor then
