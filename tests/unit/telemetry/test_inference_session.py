@@ -1,7 +1,7 @@
 """Inference telemetry through a real Session, without Dragon.
 
 A stand-in backend does what the vLLM batcher does around a batch: it emits ``BatchStarted`` and
-``BatchEnded`` through its emitter, then reports its tasks DONE. This pins the ordering the
+``BatchDone`` through its emitter, then reports its tasks DONE. This pins the ordering the
 instrumentation relies on: the end event is processed before the task's terminal event, so the task
 span is still open when its per-task attributes are set.
 """
@@ -51,7 +51,7 @@ class FakeInference(NoopExecutionBackend):
         )
         await asyncio.sleep(0.02)
         self.telemetry.emit(
-            PREFIX + "BatchEnded",
+            PREFIX + "BatchDone",
             {
                 "batch_id": 1,
                 "model": "m",
@@ -96,7 +96,7 @@ async def test_the_end_event_is_processed_before_the_tasks_end(tmp_path, attach_
 
     # Event order: the batch events come before the tasks' terminal events.
     types = [e.event_type for e in telemetry._event_log]
-    end_at = types.index(PREFIX + "BatchEnded")
+    end_at = types.index(PREFIX + "BatchDone")
     completed_at = [i for i, t in enumerate(types) if t == "TaskCompleted"]
     assert len(completed_at) == 2
     assert types.index(PREFIX + "BatchStarted") < end_at < min(completed_at)

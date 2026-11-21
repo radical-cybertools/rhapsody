@@ -16,6 +16,8 @@ import os, pathlib, sys, time
 args = sys.argv[1:]
 with open(os.environ["FAKE_CALLS"], "a") as calls:
     calls.write(" ".join(args) + "\\n")
+with open(os.environ["FAKE_CALLS"] + ".artifacts", "a") as artifacts:
+    artifacts.write(os.environ.get("RHAPSODY_HPC_ARTIFACTS", "") + "\\n")
 target = next(a for a in args if a.endswith(".py") or "test_" in a)
 group = pathlib.Path(target).stem.replace("test_", "")
 junit = next(a.split("=", 1)[1] for a in args if a.startswith("--junitxml="))
@@ -200,3 +202,66 @@ def test_slurm_steps_are_cancelled_and_cleanup_uses_srun(runner, fake_bin, tmp_p
     assert lines.index("scancel 77.5") < lines.index(
         "srun --overlap -N2 --ntasks-per-node=1 dragon-cleanup -s"
     )
+
+
+def test_optional_groups_run_only_when_named(runner, fake_bin, tmp_path):
+    results, _ = run(runner, tmp_path, "--groups", "telemetry,ai-telemetry")
+    assert results == {
+        "test_telemetry.test_a": "passed",
+        "test_ai_telemetry.test_a": "passed",
+    }
+    assert [line for line in calls(tmp_path) if "test_tasks.py" in line] == []
+
+
+def test_the_default_run_has_no_optional_group(runner, fake_bin, tmp_path):
+    run(runner, tmp_path)
+    assert not [line for line in calls(tmp_path) if "telemetry" in line]
+
+
+def test_unknown_group_lists_the_optional_ones_too(runner, fake_bin, tmp_path):
+    with pytest.raises(SystemExit) as error:
+        runner.main(["--backend", "dragon", "--junit", str(tmp_path / "j.xml"), "--groups", "nope"])
+    assert "ai-telemetry" in str(error.value)
+
+
+def test_artifacts_go_next_to_the_junit_file_unless_set(runner, fake_bin, tmp_path, monkeypatch):
+    monkeypatch.delenv("RHAPSODY_HPC_ARTIFACTS", raising=False)
+    run(runner, tmp_path, "--groups", "tasks")
+    assert (tmp_path / "calls.artifacts").read_text().strip() == str(tmp_path / "artifacts")
+
+    monkeypatch.setenv("RHAPSODY_HPC_ARTIFACTS", "/elsewhere")
+    (tmp_path / "calls.artifacts").unlink()
+    run(runner, tmp_path, "--groups", "tasks")
+    assert (tmp_path / "calls.artifacts").read_text().strip() == "/elsewhere"
+
+
+def test_group_names_may_have_spaces_after_the_commas(runner, fake_bin, tmp_path):
+    results, _ = run(runner, tmp_path, "--groups", "tasks, telemetry")
+    assert set(results) == {"test_tasks.test_a", "test_telemetry.test_a"}
+
+
+def test_a_relative_artifacts_path_is_resolved_before_pytest_changes_directory(
+    runner, fake_bin, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RHAPSODY_HPC_ARTIFACTS", "arts")
+    run(runner, tmp_path, "--groups", "tasks")
+    assert (tmp_path / "calls.artifacts").read_text().strip() == str(tmp_path / "arts")
+
+
+def test_a_group_that_needs_a_capability_makes_it_required(runner, fake_bin, tmp_path, monkeypatch):
+    (tmp_path / "bin" / "dragon").write_text(
+        (tmp_path / "bin" / "dragon").read_text()
+        + 'with open(os.environ["FAKE_CALLS"] + ".require", "a") as f:\n'
+        + '    f.write(os.environ.get("RHAPSODY_HPC_REQUIRE", "") + "\\n")\n'
+    )
+    monkeypatch.setenv("RHAPSODY_HPC_REQUIRE", "mpi")
+    run(runner, tmp_path, "--groups", "tasks,ai-telemetry")
+    tasks_required, ai_required = (tmp_path / "calls.require").read_text().splitlines()
+    assert tasks_required == "mpi"  # a group without needs is untouched
+    assert ai_required == "gpu,model,mpi"
+
+
+def test_an_empty_group_selection_is_an_error(runner, fake_bin, tmp_path):
+    with pytest.raises(SystemExit):
+        runner.main(["--backend", "dragon", "--junit", str(tmp_path / "j.xml"), "--groups", ","])
