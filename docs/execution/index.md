@@ -167,6 +167,19 @@ Each backend declares whether it moves data between tasks through two independen
     - Use Dask backend for distributed cluster computing
     - Use Concurrent backend for local development and testing
 
+!!! note "Many short async function tasks on the Concurrent backend"
+    On a thread pool, `ConcurrentExecutionBackend` runs every `async def` function task with
+    `asyncio.run`, whose clean-up walks every asyncio task of the process to find the ones the
+    function left running. A task then costs more the more asyncio tasks are alive: about 0.1 ms
+    with none, about 1 ms with 10,000, about 8 ms with 100,000 (Python 3.12), as with an AsyncFlow
+    engine holding thousands of tasks in flight. `ConcurrentExecutionBackend(reuse_event_loop=True)`
+    keeps one event loop per worker thread instead. After each task the backend still cancels the
+    tasks the function left running and reports their errors, without the walk. Async generators
+    a task leaves open are closed later, when garbage-collected; the loop's default executor
+    (`asyncio.to_thread`) lives until the backend shuts down; and an object bound to a loop that a
+    task keeps beyond its end stays usable on the same thread only. Sync functions never get a
+    loop, and a process pool ignores the option.
+
 !!! note "Task Granularity"
     - AsyncFlow excels at dynamic, fine-grained task graphs
     - For coarse-grained tasks, consider using RHAPSODY's Session API directly

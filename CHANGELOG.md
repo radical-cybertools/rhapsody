@@ -4,6 +4,16 @@
 
 ### Added
 
+- **`ConcurrentExecutionBackend(reuse_event_loop=True)`: one event loop per worker thread.** On
+  a thread pool every `async def` function task ran with `asyncio.run`, whose clean-up walks
+  every asyncio task of the process (`asyncio.all_tasks()` in Python 3.12), so a task cost more
+  the more tasks were alive in the process: about 1 ms with 10,000, 8 ms with 100,000. With the
+  option each worker thread keeps one loop; after each task the backend cancels the tasks the
+  function left running and reports their errors, as `asyncio.run` does, without the walk, and
+  `shutdown()` closes the loops. Off by default; sync functions never get a loop, and a process
+  pool ignores it. Async generators a task leaves open, the loop's default executor and
+  loop-bound objects a task keeps now outlive the task (see "Execution", "Performance
+  Considerations").
 - **Telemetry (experimental): every backend has an emitter.** `backend.telemetry` is a no-op
   emitter (`enabled` is `False`) until the telemetry manager attaches the backend and hands it a
   real one through the new `BaseBackend.register_emitter` / `DataBackend.register_emitter` hook
