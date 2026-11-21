@@ -1,5 +1,6 @@
 """TaskInstrumentation on its own, and as the manager's default instrumentation."""
 
+import asyncio
 import logging
 
 import pytest
@@ -194,7 +195,7 @@ def _registry():
 async def _run(manager, *events):
     for event in events:
         manager.emit(event)
-    await manager._queue.join()
+    await asyncio.wait_for(manager._queue.join(), 10)
 
 
 async def test_every_backend_is_counted_without_a_domain():
