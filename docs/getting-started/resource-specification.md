@@ -370,8 +370,8 @@ tasks are launched with the MPI launcher set by the backend's `mpi_flavour`.
 | `ranks` | `int` | `1` | Total number of MPI ranks; divided by `nnodes` to get the processes per node |
 | `gpus_per_rank` | `int` | `0` | GPUs allocated to each rank |
 | `env` | `dict` | `{}` | Extra environment variables for the task |
-| `cpu_affinity` | `str` | `None` | Comma-separated CPU IDs to pin the task to (e.g. `"0,1,2,3"`) |
-| `gpu_affinity` | `str` | `None` | Comma-separated GPU IDs to pin the task to (e.g. `"0,1"`) |
+| `cpu_affinity` | `str`, `list[int]` or `int` | `None` | CPU IDs to pin the task to (e.g. `"0,1,2,3"`, `[0, 1, 2, 3]` or `0`) |
+| `gpu_affinity` | `str`, `list[int]` or `int` | `None` | GPU IDs to pin the task to (e.g. `"0,1"`, `[0, 1]` or `0`) |
 
 ```python
 from rhapsody.api import ComputeTask

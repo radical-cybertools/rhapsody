@@ -388,6 +388,44 @@ def test_el_build_task_default_resources(mock_nodes):
     assert el_task.ngpus_per_process == 0
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0,1, 2", [0, 1, 2]),
+        ([0, 1], [0, 1]),
+        ((2, 3), [2, 3]),
+        (1, [1]),
+        ("", []),
+        (None, []),
+    ],
+)
+@patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
+def test_el_build_task_affinity(mock_nodes, value, expected):
+    backend = EnsembleExecutionBackend()
+
+    task = ComputeTask(
+        function=lambda: 1,
+        task_backend_specific_kwargs={"cpu_affinity": value, "gpu_affinity": value},
+    )
+
+    el_task = backend.build_task(task)
+    assert el_task.cpu_affinity == expected
+    assert el_task.gpu_affinity == expected
+
+
+@patch("rhapsody.backends.execution.el.get_nodes", return_value=["node0"])
+def test_el_build_task_affinity_invalid_type(mock_nodes):
+    backend = EnsembleExecutionBackend()
+
+    task = ComputeTask(
+        function=lambda: 1,
+        task_backend_specific_kwargs={"cpu_affinity": 1.5},
+    )
+
+    with pytest.raises(TypeError):
+        backend.build_task(task)
+
+
 # ---------------------------------------------------------------------------
 # cancel_task
 # ---------------------------------------------------------------------------

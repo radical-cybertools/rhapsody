@@ -29,6 +29,29 @@ from ..constants import BackendMainStates
 from ..constants import StateMapper
 
 
+def _parse_affinity(val: Any) -> list[int]:
+    """Parse a CPU or GPU affinity into a list of device IDs.
+
+    Args:
+        val: A comma-separated string (``"0,1"``), a list or tuple of IDs, a single ID, or None.
+
+    Returns:
+        The list of device IDs; empty if ``val`` is None or empty.
+
+    Raises:
+        TypeError: If ``val`` is of an unsupported type.
+    """
+    if val is None:
+        return []
+    if isinstance(val, str):
+        return [int(x.strip()) for x in val.split(",") if x.strip()]
+    if isinstance(val, (list, tuple)):
+        return [int(x) for x in val]
+    if isinstance(val, int):
+        return [val]
+    raise TypeError(f"Affinity must be a str, list[int] or int, got {type(val).__name__}")
+
+
 class EnsembleExecutionBackend(BaseBackend):
     def __init__(
         self,
@@ -319,9 +342,11 @@ class EnsembleExecutionBackend(BaseBackend):
                 - **gpus_per_rank** (int): GPUs allocated per MPI rank.
                   Defaults to 0.
                 - **env** (dict): Extra environment variables passed to the task.
-                - **cpu_affinity** (str): Comma-separated CPU IDs for pinning
+                - **cpu_affinity** (str | list[int] | int): CPU IDs for pinning, as a
+                  comma-separated string, a list or a single ID
                   (e.g., ``"0,1,2,3"``).
-                - **gpu_affinity** (str): Comma-separated GPU IDs for pinning
+                - **gpu_affinity** (str | list[int] | int): GPU IDs for pinning, as a
+                  comma-separated string, a list or a single ID
                   (e.g., ``"0,1"``).
 
         Returns:
@@ -332,16 +357,8 @@ class EnsembleExecutionBackend(BaseBackend):
         ppn = backend_kwargs.get("ranks", 1) // nnodes
         ngpus_per_process = backend_kwargs.get("gpus_per_rank", 0)
         env = backend_kwargs.get("env", {})
-        cpu_affinity = (
-            list(map(int, backend_kwargs.get("cpu_affinity").split(",")))
-            if "cpu_affinity" in backend_kwargs
-            else []
-        )
-        gpu_affinity = (
-            list(map(int, backend_kwargs.get("gpu_affinity").split(",")))
-            if "gpu_affinity" in backend_kwargs
-            else []
-        )
+        cpu_affinity = _parse_affinity(backend_kwargs.get("cpu_affinity"))
+        gpu_affinity = _parse_affinity(backend_kwargs.get("gpu_affinity"))
 
         func = task.get("function")
         if func is not None and inspect.iscoroutinefunction(func):
