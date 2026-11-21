@@ -34,18 +34,41 @@ def _backend(**kwargs):
     return ConcurrentExecutionBackend(executor=ThreadPoolExecutor(max_workers=1), **kwargs)
 
 
+def _loop_recorder():
+    """A task that records its running loop, and the list it records into.
+
+    The list keeps every loop alive, so loops compare by identity: comparing their ``id()`` would
+    not do, as CPython gives a freed loop's id to the next object.
+    """
+    seen = []
+
+    async def record_loop():
+        seen.append(asyncio.get_running_loop())
+        return len(seen)
+
+    return seen, record_loop
+
+
 async def test_default_runs_each_task_on_a_new_loop():
+    seen, record_loop = _loop_recorder()
     backend = _backend()
     try:
-        assert await _run(backend, _loop_id) != await _run(backend, _loop_id)
+        await _run(backend, record_loop)
+        await _run(backend, record_loop)
+        assert len(seen) == 2
+        assert seen[0] is not seen[1]  # asyncio.run: a loop per task
     finally:
         await backend.shutdown()
 
 
 async def test_reuse_runs_a_thread_s_tasks_on_one_loop():
+    seen, record_loop = _loop_recorder()
     backend = _backend(reuse_event_loop=True)
     try:
-        assert await _run(backend, _loop_id) == await _run(backend, _loop_id)
+        await _run(backend, record_loop)
+        await _run(backend, record_loop)
+        assert len(seen) == 2
+        assert seen[0] is seen[1]  # one worker thread, one loop
     finally:
         await backend.shutdown()
 
