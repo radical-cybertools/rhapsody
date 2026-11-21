@@ -120,3 +120,72 @@ class TestConcurrentTelemetryAdapter:
             await asyncio.sleep(0.15)
             adapter.stop()
         # No exception raised — adapter is a silent no-op
+
+    async def test_adapters_share_one_thread(self, manager):
+        """Adapters at the same interval share one collection thread; each gets its own events."""
+        received = []
+        manager.subscribe(lambda e: received.append(e) if isinstance(e, ResourceUpdate) else None)
+
+        adapters = [
+            ConcurrentTelemetryAdapter(session_id=f"s{i}", backend_name="concurrent", interval=0.05)
+            for i in range(8)
+        ]
+        with (
+            patch("psutil.cpu_percent", return_value=1.0),
+            patch("psutil.virtual_memory", return_value=MagicMock(percent=2.0)),
+        ):
+            for adapter in adapters:
+                manager.register_adapter(adapter)
+                adapter.start()
+            for _ in range(100):
+                await asyncio.sleep(0.05)
+                if {e.session_id for e in received} == {f"s{i}" for i in range(8)}:
+                    break
+            threads = {adapter._thread for adapter in adapters}
+            for adapter in adapters:
+                adapter.stop()
+
+        assert len(threads) == 1
+        assert {e.session_id for e in received} == {f"s{i}" for i in range(8)}
+
+    async def test_thread_ends_with_last_adapter(self, manager):
+        """The collection thread runs while one adapter is subscribed and ends after the last."""
+        a = ConcurrentTelemetryAdapter(session_id="a", backend_name="concurrent", interval=0.05)
+        b = ConcurrentTelemetryAdapter(session_id="b", backend_name="concurrent", interval=0.05)
+        with (
+            patch("psutil.cpu_percent", return_value=0.0),
+            patch("psutil.virtual_memory", return_value=MagicMock(percent=0.0)),
+        ):
+            for adapter in (a, b):
+                manager.register_adapter(adapter)
+                adapter.start()
+            thread = a._thread
+            a.stop()
+            await asyncio.sleep(0.2)
+            assert thread.is_alive()
+            b.stop()
+            thread.join(timeout=2)
+        assert not thread.is_alive()
+
+    async def test_stopped_adapter_emits_nothing(self, manager):
+        """An adapter stops receiving samples once stopped, while others keep theirs."""
+        received = []
+        manager.subscribe(lambda e: received.append(e) if isinstance(e, ResourceUpdate) else None)
+        a = ConcurrentTelemetryAdapter(session_id="a", backend_name="concurrent", interval=0.05)
+        b = ConcurrentTelemetryAdapter(session_id="b", backend_name="concurrent", interval=0.05)
+        with (
+            patch("psutil.cpu_percent", return_value=0.0),
+            patch("psutil.virtual_memory", return_value=MagicMock(percent=0.0)),
+        ):
+            for adapter in (a, b):
+                manager.register_adapter(adapter)
+                adapter.start()
+            await asyncio.sleep(0.2)
+            a.stop()
+            await asyncio.sleep(0.05)  # let posted events drain
+            received.clear()
+            await asyncio.sleep(0.3)
+            b.stop()
+
+        assert received
+        assert {e.session_id for e in received} == {"b"}
