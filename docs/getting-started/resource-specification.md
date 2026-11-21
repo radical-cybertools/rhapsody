@@ -14,6 +14,7 @@ This design keeps the task API thin and makes resource semantics explicit per ba
 | `ConcurrentExecutionBackend` | not supported | `task_backend_specific_kwargs={"cwd": "..."}` | `task_backend_specific_kwargs={"env": {...}}` | `task_backend_specific_kwargs={"shell": True}` |
 | `DaskExecutionBackend` | `task_backend_specific_kwargs={"resources": {"GPU": 1}}` | `task_backend_specific_kwargs={"cwd": "..."}` | `task_backend_specific_kwargs={"env": {...}}` | `task_backend_specific_kwargs={"shell": True}` |
 | `DragonExecutionBackend` | `task_backend_specific_kwargs={"process_template": {"policy": ...}}` | `task_backend_specific_kwargs={"process_template": {"cwd": "..."}}` | `task_backend_specific_kwargs={"process_template": {"env": {...}}}` | not applicable |
+| `EnsembleExecutionBackend` | `task_backend_specific_kwargs={"nnodes": 1, "ranks": 4, "gpus_per_rank": 1}` | not supported | `task_backend_specific_kwargs={"env": {...}}` | not applicable |
 
 ---
 
@@ -351,3 +352,59 @@ task = ComputeTask(
     },
 )
 ```
+
+---
+
+## Ensemble Launcher Backend
+
+`EnsembleExecutionBackend` submits tasks to an [Ensemble Launcher](https://github.com/argonne-lcf/ensemble_launcher)
+cluster. EL schedules each task onto the nodes, CPUs and GPUs of its workers and
+pins it to them; function tasks run in a process pool on the worker, executable
+tasks are launched with the MPI launcher set by the backend's `mpi_flavour`.
+
+**Supported `task_backend_specific_kwargs`:**
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `nnodes` | `int` | `1` | Number of nodes the task runs on |
+| `ranks` | `int` | `1` | Total number of MPI ranks; divided by `nnodes` to get the processes per node |
+| `gpus_per_rank` | `int` | `0` | GPUs allocated to each rank |
+| `env` | `dict` | `{}` | Extra environment variables for the task |
+| `cpu_affinity` | `str` | `None` | Comma-separated CPU IDs to pin the task to (e.g. `"0,1,2,3"`) |
+| `gpu_affinity` | `str` | `None` | Comma-separated GPU IDs to pin the task to (e.g. `"0,1"`) |
+
+```python
+from rhapsody.api import ComputeTask
+
+# MPI executable: 2 nodes x 4 ranks per node
+task = ComputeTask(
+    executable="./my_mpi_app",
+    arguments=["--steps", "100"],
+    task_backend_specific_kwargs={"nnodes": 2, "ranks": 8},
+)
+
+# Single rank with one GPU and a custom environment
+task = ComputeTask(
+    executable="python",
+    arguments=["train.py"],
+    task_backend_specific_kwargs={
+        "gpus_per_rank": 1,
+        "env": {"OMP_NUM_THREADS": "4"},
+    },
+)
+
+# Function task pinned to specific CPUs and GPUs
+task = ComputeTask(
+    function=gpu_work,
+    task_backend_specific_kwargs={
+        "cpu_affinity": "0,1",
+        "gpu_affinity": "0",
+    },
+)
+```
+
+!!! note "CPU / GPU pinning"
+    GPUs are selected by setting the backend's `gpu_selector` environment variable
+    (`ZE_AFFINITY_MASK` by default, `CUDA_VISIBLE_DEVICES` on NVIDIA systems) for
+    each task. `cpu_affinity` is applied only where Python's `os` module supports it,
+    so it has no effect on platforms such as macOS.
