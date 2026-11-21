@@ -52,6 +52,13 @@ except ImportError:
     pass
 
 try:
+    from .execution import EnsembleExecutionBackend  # noqa: F401
+
+    __all__.append("EnsembleExecutionBackend")
+except ImportError:
+    pass
+
+try:
     from .execution import OrbitExecutionBackend  # noqa: F401
 
     __all__.append("OrbitExecutionBackend")

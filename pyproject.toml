@@ -47,6 +47,7 @@ dask = ["dask[distributed]>=2023.0.0"]
 radical_pilot = ["radical.pilot>=1.30.0"]
 dragon = ["dragonhpc[requests]==0.15.0", "flask", "gunicorn"]  # Requires Python >= 3.11, supports up to 3.13
 orbit = ["radical.orbit"]  # Requires Python >= 3.10
+el = ["ensemble-launcher[hpc]"]  # Requires Python >= 3.10
 
 ai = [
     "aiohttp>=3.8.0",
@@ -90,7 +91,7 @@ examples = [
 
 # Complete installation with all backends
 backends = [
-    "rhapsody-py[dask,radical_pilot,dragon,ai,orbit]"
+    "rhapsody-py[dask,radical_pilot,dragon,ai,orbit,el]"
 ]
 
 all = [

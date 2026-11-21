@@ -160,6 +160,82 @@ The broker bearer token is resolved the same way as the URL, from
     fast on a mismatch). Executable and import-path tasks are unaffected.
     The `orbit` extra itself requires Python >= 3.10.
 
+### Ensemble Launcher Backend
+Hierarchical task execution on HPC systems using [Ensemble Launcher](https://github.com/argonne-lcf/ensemble_launcher) (EL).
+
+EL starts a tree of orchestrator processes across the allocation: a global
+**master** at the root, optional intermediate masters, and **workers** at the
+leaves that execute tasks. The `EnsembleExecutionBackend` starts this tree,
+connects to its root with a `ClusterClient`, and from then on behaves like any
+other Rhapsody backend: tasks are buffered on the client, routed down the tree,
+executed by the workers, and their results buffered and sent back. Function
+tasks run in a process pool on the workers; executable tasks are launched with
+the configured MPI launcher.
+
+```mermaid
+flowchart LR
+    subgraph Client["Your script"]
+        APP["Rhapsody Session +<br/>EnsembleExecutionBackend"]
+    end
+    subgraph HPC["Allocation"]
+        M["Global master"]
+        W0["Worker"]
+        W1["Worker"]
+        M --> W0
+        M --> W1
+    end
+    APP -- "tasks (buffered)" --> M
+    M -. "results (buffered)" .-> APP
+```
+
+```python
+from rhapsody.backends import EnsembleExecutionBackend
+
+backend = await EnsembleExecutionBackend(
+    mpi_flavour="mpich",   # MPI launcher used for executable tasks
+    nlevels=1,             # one level of workers below the global master
+    nleafs=4,              # number of worker processes
+    buffer_size=1000,      # task and result buffer size
+    flush_interval=0.001,  # task and result flush interval in seconds
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | `str` | `None` | Backend identifier used for task routing |
+| `mpi_flavour` | `str` | `"mpich"` | MPI launcher for executable tasks: `"mpich"`, `"intel"`, `"openmpi"`, `"cray-pals"`, `"srun"`, `"aprun"`, `"jsrun"` or `"test"` (plain `mpirun -np`, no host or binding flags) |
+| `mpi_config` | `MPIConfig` | `None` | Full EL `MPIConfig`; overrides `mpi_flavour` |
+| `nlevels` | `int` | `0` | Number of levels in the orchestrator tree below the global master |
+| `nleafs` | `int` | `None` | Number of workers at the leaves; defaults to the number of nodes. Must be a multiple of the number of nodes when larger |
+| `buffer_size` | `int` | `100000` | Tasks (client side) and results (worker side) buffered before an early flush; `0` sends every task and result on its own |
+| `flush_interval` | `float` | `0.05` | Seconds between task and result buffer flushes; bounds the per-task latency |
+| `req_res` | `bool` | `True` | ACK-based guaranteed delivery of tasks and results |
+| `hosts` | `list[str]` | `None` | Hosts to launch on; defaults to `$PBS_NODEFILE`, or the local host |
+| `cpus` | `list[int]` | `None` | CPU IDs available to tasks on each node; defaults to all CPUs |
+| `gpus` | `list[int]` | `None` | GPU IDs available to tasks on each node |
+| `gpu_selector` | `str` | `"ZE_AFFINITY_MASK"` | Environment variable set to select a task's GPUs (e.g. `"CUDA_VISIBLE_DEVICES"`) |
+| `children_scheduler_policy` | `str` | `"fixed_leafs_children_policy"` | EL policy that splits nodes between children |
+| `task_scheduler_policy` | `str` | `"large_resource_policy"` | EL policy that places tasks on resources |
+| `enable_workstealing` | `bool` | `False` | Let idle workers steal tasks from busy ones |
+| `return_stdout` | `bool` | `True` | Capture and return the stdout of executable tasks |
+| `master_logs` / `worker_logs` | `bool` | `True` | Write EL master and worker logs |
+| `checkpoint_dir` | `str` | `None` | Directory for EL checkpoints and logs; defaults to `./ckpt_<uuid>` |
+| `client_only` | `bool` | `False` | Connect to an EL cluster that is already running instead of starting one |
+| `node_id` | `str` | `"global"` | Orchestrator node the client connects to |
+
+!!! tip "Tuning throughput"
+    Every task waits up to `flush_interval` in the client buffer and its result up
+    to `flush_interval` in the worker buffer, so lower it for latency-sensitive
+    workloads. `buffer_size=0` disables buffering and lowers throughput
+    considerably; any buffer of a few hundred tasks is enough for high throughput.
+    Adding workers with `nleafs` raises the throughput of a single node.
+
+!!! note "Connecting to a running cluster"
+    With `client_only=True` the backend does not start EL; it connects to the
+    cluster whose checkpoints are in `checkpoint_dir`. Use `node_id` to submit to a
+    specific orchestrator node (`"main"`, `"main.w0"`, ...) instead of the global
+    master.
+
 ### RADICAL-Pilot Backend
 Large-scale HPC execution using RADICAL-Pilot.
 
