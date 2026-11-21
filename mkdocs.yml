@@ -135,6 +135,10 @@ nav:
           - hpc-machines/perlmutter-index.md
           - Scalable Execution: hpc-machines/perlmutter-scalable.md
           - AI-HPC: hpc-machines/perlmutter-ai-hpc.md
+      - Princeton StellarAI:
+          - hpc-machines/stellarai-index.md
+          - Scalable Execution: hpc-machines/stellarai-scalable.md
+          - AI-HPC: hpc-machines/stellarai-ai-hpc.md
       - PSC Bridges-2: hpc-machines/bridges2.md
       - Purdue Anvil: hpc-machines/anvil.md
   - Project:

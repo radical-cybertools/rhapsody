@@ -27,7 +27,7 @@ async def main():
             tp_size=1,
             vllm_log_level="debug",
             gpu_memory_utilization=0.85,
-            model_name="Qwen/Qwen2.5-0.5B-Instruct",
+            model_name="HuggingFaceTB/SmolLM2-1.7B-Instruct",
             hf_token=os.environ.get("HF_TOKEN", ""),
         ),
         hardware=HardwareConfig(
