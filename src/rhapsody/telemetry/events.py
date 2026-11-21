@@ -13,14 +13,19 @@ TaskQueued is optional. TaskStarted is the authoritative "execution began" event
 from __future__ import annotations
 
 import dataclasses
+import os
 import time
-import uuid
 from dataclasses import dataclass
 from dataclasses import field
 
 
 def _new_event_id() -> str:
-    return uuid.uuid4().hex
+    # uuid4().hex without building a UUID object: random bytes with the version-4 and
+    # RFC 4122 variant bits set, so the id still parses as a UUID4.
+    b = bytearray(os.urandom(16))
+    b[6] = (b[6] & 0x0F) | 0x40
+    b[8] = (b[8] & 0x3F) | 0x80
+    return b.hex()
 
 
 def _now_wall() -> float:
@@ -162,6 +167,21 @@ class TaskCanceled(BaseEvent):
 
     duration_seconds: float = 0.0
     event_type: str = field(default="TaskCanceled", init=False)
+
+
+@dataclass(frozen=True)
+class ResourceLayout(BaseEvent):
+    """Emitted once per execution backend, describing its resource topology.
+
+    Consumed by external viewers to size their node-grid to the actual cluster
+    shape. Carries a ``nodes`` list of ``{id, cores, gpus}`` dicts. The list
+    may be empty when the backend cannot report a topology — viewers should
+    fall back to a sensible default in that case.
+
+    attributes keys: nodes (list[dict])
+    """
+
+    event_type: str = field(default="ResourceLayout", init=False)
 
 
 @dataclass(frozen=True)

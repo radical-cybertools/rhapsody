@@ -62,6 +62,8 @@ class ConcurrentTelemetryAdapter(TelemetryAdapter):
         self._node_id = socket.gethostname()
 
     def start(self) -> None:
+        if self._running:
+            return  # already polling: a second start must not add a second worker
         try:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:

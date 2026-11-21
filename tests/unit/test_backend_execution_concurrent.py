@@ -1,5 +1,6 @@
 """Unit tests for ConcurrentExecutionBackend."""
 
+import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import AsyncMock
@@ -10,6 +11,22 @@ import pytest
 
 from rhapsody import ComputeTask
 from rhapsody.backends.execution.concurrent import ConcurrentExecutionBackend
+
+
+@pytest.fixture(autouse=True)
+def no_leftover_worker_processes():
+    """Fail any test in this module that leaves worker processes running.
+
+    When the interpreter exits, concurrent.futures waits for the workers of every process pool that
+    was not shut down. If one of those workers is stuck, pytest prints its summary and then never
+    exits.
+    """
+    before = set(multiprocessing.active_children())
+    yield
+    leftover = [p for p in multiprocessing.active_children() if p not in before]
+    if leftover:
+        pytest.fail(f"test left worker processes running: {leftover}")
+
 
 # ---------------------------------------------------------------------------
 # cwd tests
@@ -204,35 +221,44 @@ async def test_execute_function_async_function_in_thread():
     assert result_task["return_value"] == 12
 
 
-@pytest.mark.asyncio
-async def test_execute_function_regular_sync_function_in_process():
-    """_execute_function runs a regular (non-async) function in a ProcessPoolExecutor."""
-    cloudpickle = pytest.importorskip("cloudpickle", reason="cloudpickle not installed")
+@pytest.fixture
+async def process_backend():
+    """A ConcurrentExecutionBackend on a one-worker process pool, shut down after the test.
 
-    backend = ConcurrentExecutionBackend(executor=ProcessPoolExecutor())
+    The worker is started with "spawn". On Linux before Python 3.14 the default is "fork", and
+    forking the multi-threaded pytest process can leave the child deadlocked.
+    """
+    pytest.importorskip("cloudpickle", reason="cloudpickle not installed")
+
+    executor = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"))
+    backend = ConcurrentExecutionBackend(executor=executor)
+    yield backend
+    await backend.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_execute_function_regular_sync_function_in_process(process_backend):
+    """_execute_function runs a regular (non-async) function in a ProcessPoolExecutor."""
 
     def multiply(a, b):
         return a * b
 
     task = ComputeTask(function=multiply, args=[5, 6])
-    result_task, state = await backend._execute_function(task)
+    result_task, state = await process_backend._execute_function(task)
 
     assert state == "DONE"
     assert result_task["return_value"] == 30
 
 
 @pytest.mark.asyncio
-async def test_execute_function_async_function_in_process():
+async def test_execute_function_async_function_in_process(process_backend):
     """_execute_function still works for async functions in a ProcessPoolExecutor (regression)."""
-    cloudpickle = pytest.importorskip("cloudpickle", reason="cloudpickle not installed")
-
-    backend = ConcurrentExecutionBackend(executor=ProcessPoolExecutor())
 
     async def async_add(a, b):
         return a + b
 
     task = ComputeTask(function=async_add, args=[10, 20])
-    result_task, state = await backend._execute_function(task)
+    result_task, state = await process_backend._execute_function(task)
 
     assert state == "DONE"
     assert result_task["return_value"] == 30

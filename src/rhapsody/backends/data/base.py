@@ -5,6 +5,12 @@ from __future__ import annotations
 import abc
 import asyncio
 import enum
+from typing import TYPE_CHECKING
+
+from rhapsody.telemetry.emitter import NoopEmitter
+
+if TYPE_CHECKING:
+    from rhapsody.telemetry.emitter import Emitter
 
 
 class DataBackendState(enum.Enum):
@@ -69,11 +75,28 @@ class DataBackend(abc.ABC):
     terminal-state guard correct without any state duplicated in subclasses.
     """
 
+    # Telemetry handle: a no-op emitter until the TelemetryManager hands the backend a real one
+    # through ``register_emitter`` (see BaseBackend.telemetry and rhapsody.telemetry.emitter).
+    telemetry: Emitter = NoopEmitter()
+
+    # Name of the telemetry domain whose instrumentation the manager hosts for this backend
+    # (a plain string, looked up in rhapsody.telemetry.instrumentation.registry), or None.
+    telemetry_domain: str | None = None
+
     def __init__(self, *, name: str | None = None) -> None:
         self._name = name
         self._state: DataBackendState = DataBackendState.CREATED
         self._endpoints: list[Endpoint] = []
         self._lock = asyncio.Lock()
+
+    def register_emitter(self, emitter: Emitter) -> None:
+        """Receive the telemetry emitter (same contract as ``BaseBackend.register_emitter``).
+
+        The :class:`~rhapsody.telemetry.manager.TelemetryManager` calls this when the backend is
+        attached to a session with telemetry. The default stores the emitter in ``self.telemetry``;
+        override it to react and call ``super().register_emitter(emitter)``.
+        """
+        self.telemetry = emitter
 
     @property
     def name(self) -> str:

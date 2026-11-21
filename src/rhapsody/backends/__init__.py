@@ -52,14 +52,19 @@ except ImportError:
     pass
 
 try:
-    from .execution import EnsembleExecutionBackend
+    from .execution import EnsembleExecutionBackend  # noqa: F401
 
-    __all__.append(EnsembleExecutionBackend)
-
+    __all__.append("EnsembleExecutionBackend")
 except ImportError:
     pass
 
-# Try to import optional inference backends
+try:
+    from .execution import OrbitExecutionBackend  # noqa: F401
+
+    __all__.append("OrbitExecutionBackend")
+except ImportError:
+    pass
+
 # Try to import optional AI (inference) backends
 try:
     from .ai.vllm import DragonVllmInferenceBackend  # noqa: F401

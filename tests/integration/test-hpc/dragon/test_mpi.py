@@ -23,7 +23,7 @@ Expected outcomes:
     - No deadlocks or rank mismatches within the timeout.
 
 Run:
-    dragon python3 -m pytest test-hpc/test_mpi.py -v
+    dragon python3 -m pytest dragon/test_mpi.py -v
 """
 
 import pytest

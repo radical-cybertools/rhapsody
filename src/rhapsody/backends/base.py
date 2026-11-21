@@ -6,6 +6,7 @@ implement.
 
 from __future__ import annotations
 
+import logging
 import os
 from abc import ABC
 from abc import abstractmethod
@@ -13,8 +14,12 @@ from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
 
+from rhapsody.telemetry.emitter import NoopEmitter
+
 if TYPE_CHECKING:
-    pass
+    from rhapsody.telemetry.emitter import Emitter
+
+logger = logging.getLogger(__name__)
 
 
 class BaseBackend(ABC):
@@ -45,6 +50,17 @@ class BaseBackend(ABC):
     # of linking without the other.
     supports_implicit_data_linking: bool = False
     supports_explicit_data_linking: bool = False
+
+    # Telemetry handle. The TelemetryManager hands the backend a real emitter through
+    # ``register_emitter`` when it attaches the backend; until then (and whenever telemetry is
+    # off) it is a no-op emitter, so backends never check for None. A backend only calls
+    # ``self.telemetry.emit(...)``: it never sees the manager and never imports OpenTelemetry.
+    # See rhapsody.telemetry.emitter.
+    telemetry: Emitter = NoopEmitter()
+
+    # Name of the telemetry domain whose instrumentation the manager hosts for this backend
+    # (a plain string, looked up in rhapsody.telemetry.instrumentation.registry), or None.
+    telemetry_domain: str | None = None
 
     def __init__(self, name: str | None = None):
         """Initialize the backend."""
@@ -114,6 +130,20 @@ class BaseBackend(ABC):
                 The function should accept task and state parameters.
         """
         self._callback_func = func
+
+    def register_emitter(self, emitter: Emitter) -> None:
+        """Receive the telemetry emitter, like :meth:`register_callback` receives the callback.
+
+        The :class:`~rhapsody.telemetry.manager.TelemetryManager` calls this when the backend is
+        attached to a session or workflow engine that has telemetry (it is called again, with a
+        new emitter, if the backend is attached to another manager). The default stores the
+        emitter in ``self.telemetry``, which the backend then uses to report plain data. Override
+        it to react to the handoff and call ``super().register_emitter(emitter)``.
+
+        Args:
+            emitter: The handle with ``enabled`` and ``emit(...)``.
+        """
+        self.telemetry = emitter
 
     @abstractmethod
     def get_task_states_map(self) -> Any:
@@ -189,3 +219,56 @@ class BaseBackend(ABC):
             NotImplementedError: If the backend doesn't support cancellation
         """
         raise NotImplementedError("Not implemented in the base backend")
+
+    @classmethod
+    def is_available(cls) -> bool:
+        """Return True if this backend's runtime dependencies are importable.
+
+        Used by :func:`rhapsody.backends.discover_backends`. A backend module imports even when
+        its optional runtime (Dragon, Dask, RADICAL-Pilot, ...) is missing, so backends with
+        optional dependencies override this to report whether they can actually be created.
+        """
+        return True
+
+    def topology(self) -> list[dict[str, Any]]:
+        """Best-effort description of the resources this backend has access to.
+
+        Consumed by the telemetry layer to emit a one-shot ResourceLayout event
+        at session start, so external viewers can size their node-grid to the
+        actual cluster shape instead of hardcoding it.
+
+        Returns:
+            A list of node descriptors, each a dict with ``id`` (str, node identifier),
+            ``cores`` (int, CPU cores on the node) and ``gpus`` (int, GPUs on the node).
+
+        Default implementation returns an empty list. Backends that know their
+        layout should override; the telemetry layer treats ``[]`` as "topology
+        unknown" and the viewer falls back to a generic default.
+        """
+        return []
+
+    def _probe_local_resources(self) -> tuple[int, int]:
+        """Return ``(cores, gpus)`` of the local node.
+
+        No pynvml, or no NVIDIA library or driver, means no NVIDIA GPUs: ``gpus`` is 0. Any other
+        NVML failure is logged and raised, so a detection failure is not reported as "no GPUs".
+        """
+        cores = os.cpu_count() or 0
+        try:
+            import pynvml  # type: ignore[import-not-found]
+        except ImportError:
+            return cores, 0
+        try:
+            pynvml.nvmlInit()
+        except (pynvml.NVMLError_LibraryNotFound, pynvml.NVMLError_DriverNotLoaded):
+            return cores, 0
+        except pynvml.NVMLError:
+            logger.exception("NVML initialization failed; GPU count unknown")
+            raise
+        try:
+            return cores, int(pynvml.nvmlDeviceGetCount())
+        except pynvml.NVMLError:
+            logger.exception("NVML device count failed; GPU count unknown")
+            raise
+        finally:
+            pynvml.nvmlShutdown()

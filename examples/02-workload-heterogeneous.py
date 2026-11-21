@@ -40,21 +40,21 @@ async def main():
             arguments=["-c", "echo $HOSTNAME"],
             task_backend_specific_kwargs={"process_template": {}},
         ),
-        # Parallel Job executable (2+2 processes)
+        # Parallel Job executable (2+2 processes); not MPI, so no PMI
         ComputeTask(
             executable="/bin/bash",
             arguments=["-c", "echo $HOSTNAME"],
-            task_backend_specific_kwargs={"process_templates": [(2, {}), (2, {})]},
+            task_backend_specific_kwargs={"process_templates": [(2, {}), (2, {})], "pmi": "none"},
         ),
         # Single-process function
         ComputeTask(
             function=single_function,
             task_backend_specific_kwargs={"process_template": {}},
         ),
-        # Parallel Job function (2+2 processes)
+        # Parallel Job function (2+2 processes); not MPI, so no PMI
         ComputeTask(
             function=parallel_function,
-            task_backend_specific_kwargs={"process_templates": [(2, {}), (2, {})]},
+            task_backend_specific_kwargs={"process_templates": [(2, {}), (2, {})], "pmi": "none"},
         ),
     ]
 

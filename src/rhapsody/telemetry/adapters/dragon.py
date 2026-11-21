@@ -275,6 +275,8 @@ class DragonTelemetryAdapter(TelemetryAdapter):
         self._group = None  # Dragon ProcessGroup — set in _collect_loop, used in stop()
 
     def start(self) -> None:
+        if self._running:
+            return  # already polling: a second start must not add a second worker
         # Guard: Dragon must be importable.
         try:
             import dragon.telemetry  # noqa: F401, PLC0415

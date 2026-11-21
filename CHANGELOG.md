@@ -2,6 +2,265 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Telemetry (experimental): every backend has an emitter.** `backend.telemetry` is a no-op
+  emitter (`enabled` is `False`) until the telemetry manager attaches the backend and hands it a
+  real one through the new `BaseBackend.register_emitter` / `DataBackend.register_emitter` hook
+  (the counterpart of `register_callback`; override it to react). A backend reports plain data
+  with `self.telemetry.emit(name, attributes)` and never imports OpenTelemetry. `Session` now
+  also attaches data backends to telemetry (emitter only: no resource adapter). A failing
+  emitter handoff is now logged as a warning with its traceback instead of at debug level.
+- **Telemetry (experimental): instrumentations.** A backend names its domain with the class
+  attribute `telemetry_domain` (on `BaseBackend` and `DataBackend`); the manager hosts the
+  instrumentation registered for it (`rhapsody.telemetry.instrumentation`:
+  `Instrumentation`, `register_instrumentation`) and routes the backend's events to it. See
+  "Backends, emitters and instrumentations" in the telemetry reference.
+- **Telemetry (experimental): inference telemetry for `DragonVllmInferenceBackend`.** Per batch:
+  one `chat {model}` span (real start and end, linked to the task spans of the batch),
+  per-task attributes (batch id, prompt count, queue wait, timeouts), histograms of the request
+  queue wait, batch duration and Dragon's model time, and counters of requests, prompts,
+  timed-out prompts and batches. Prompt and response text is never carried. Names follow the
+  OpenTelemetry GenAI conventions, which are still in development. See "Inference telemetry" in
+  the telemetry reference.
+
+### Changed
+
+- **The `telemetry` extra needs `opentelemetry-sdk>=1.30.0`** (was 1.20), only for the histogram
+  bucket advice of the inference durations.
+
+- **Telemetry (experimental): task and resource metrics are recorded by a task instrumentation**
+  instead of the `TelemetryManager`. Instrument names, descriptions, attributes, values, the
+  `rhapsody` meter scope and `task_count()` / `summary()` are unchanged (a golden test pins them).
+  The manager now hosts instrumentations and routes events to them. Three small differences: a
+  failing metric update no longer skips that event's task span update, and the reverse; a failing
+  metric update is logged as a warning once per backend and instrumentation, then at debug level,
+  instead of one error per event; and a restarted manager no longer carries running-task and
+  node-resource state over from the previous run.
+
+- **BEHAVIOUR CHANGE: `DragonVllmInferenceBackend` keeps the exception object of a failed batch.**
+  When the batch processor fails a batch, `task["exception"]` is now the exception itself (it was
+  its text). Telemetry `error_type` of such a task is the exception class instead of `"str"`,
+  `await task` of such an AITask now raises that exception (before, it returned normally),
+  AsyncFlow reports the original exception class instead of a wrapped `RuntimeError`, and
+  `Session.wait_tasks()` is unchanged.
+
+- **BEHAVIOUR CHANGE: a failing batch no longer fails the requests that wait in the queue.**
+  `DragonVllmInferenceBackend` used to fail the batch it was processing and every pending request,
+  including requests that were never sent. It now fails only the batch it was processing; the
+  pending requests go into the next batch. If the pipeline stays down, each following batch fails
+  in turn (one batch window and one error log each), so the requests still fail, one batch at a
+  time instead of all at once.
+
+- **Telemetry (experimental, BEHAVIOUR CHANGE): the batch end event `rhapsody.inference.BatchEnded`
+  is split into `BatchDone` and `BatchFailed`.** `BatchDone` is emitted when every prompt of the
+  batch was answered. `BatchFailed` carries the same fields plus `error_type` (the exception class
+  name) and is emitted when prompts timed out (before, such a batch ended with `BatchEnded`),
+  when Dragon answered a prompt with an exception, and when the batch processor fails a batch
+  (before, that path emitted no end event at all). Code that subscribes to `BatchEnded` or reads
+  it from the JSONL file must handle both names. The batch span of a failed batch is closed with
+  status ERROR and the `error.type` attribute; the metrics are recorded as for a good batch.
+
+### Fixed
+
+- **`DragonVllmInferenceBackend`: a `queue.Empty` from `get_nowait()` no longer fails a whole batch** — the
+  response loop called `empty()` and then `get_nowait()`. Dragon documents `empty()` as
+  unreliable, so `get_nowait()` could still raise `queue.Empty`, and the batch processor then
+  failed the batch. The loop now only calls `get_nowait()` and treats `queue.Empty` as "no answer
+  yet".
+
+- **`DragonVllmInferenceBackend`: a prompt that Dragon answers with an exception object fails its
+  task** — a worker that fails a prompt puts the exception object in the response queue
+  (`RuntimeError(...)`), which was returned as the prompt's result and the task was reported DONE.
+  The task is now reported FAILED with `task["exception"]` set to that exception; the prompt's
+  result is `"ERROR: <class>: <message>"`; the batch ends with `BatchFailed`. The string
+  `"LLM inference failed ..."` that Dragon sends for a failed whole batch is not detected (it has
+  no marker): such a task is still reported DONE.
+
+- **`DragonVllmInferenceBackend`: `generate([])` no longer hangs** — a request without prompts was
+  never answered, so the call waited until its timeout. `generate()` now raises `ValueError` for
+  an empty prompt list. An `AITask` cannot have an empty prompt (its constructor refuses it); a
+  plain dict task without prompts is still not validated and is never finished.
+
+- **Telemetry: a batch that fails in the batch processor now ends its batch span** — the batch
+  span stayed open until the next batch or the end of the session, ending with "batch did not
+  finish", and the queue times of its tasks were missing. It now emits `BatchFailed` (see above).
+  A batch cancelled while in flight (for example by a shutdown) still emits no end event.
+
+- **`DragonVllmInferenceBackend`: late responses after a batch timeout no longer leak into the next
+  batch** — the answers of a batch that timed out used to stay in the one response queue shared by
+  all batches, and the next batch read them as its own, so a task could get another task's text and
+  be reported DONE with healthy-looking telemetry (issue B2). A batch that gives up now hands its
+  response queue to a background task that reads and discards the late answers and then closes it;
+  the next batch uses a new queue. Batches that are fully read still share one queue, so nothing is
+  allocated per batch. Shutdown now runs `Inference.destroy()` in a thread with a bounded wait
+  (120 s) while the late answers are discarded. This also removes a shutdown hang: with the old
+  code, one timed-out batch of 224 prompts (more late answers than one 100-slot response queue
+  holds) made `shutdown()` hang, and with this change it returns in a few seconds. Checked with a
+  0.5B model on one node with one GPU (1 hang in 1 run before, no hang in 5 of 5 runs after) and
+  on two nodes with one GPU each (no hang in 5 of 5 runs after; the old code was not run there).
+
+- **BEHAVIOUR CHANGE: `DragonVllmInferenceBackend` reports a timed-out AITask as FAILED, not DONE** —
+  when some prompts of a task got no response within the batch deadline (300 s), the task was
+  reported DONE with `"ERROR: Timeout ..."` strings as its response. It is now reported FAILED,
+  with `task["exception"]` set to a `TimeoutError` and the partial response kept (answered prompts
+  plus the `ERROR:` strings). `Session.wait_tasks()` now sees the failure, and in AsyncFlow the
+  dependents of such a task no longer run. `generate()` and the HTTP endpoints are unchanged.
+  The deadline covers the whole batch, not each task: if a batch takes longer than 300 s, every
+  task with a prompt still unanswered at that point is FAILED, including tasks whose prompts
+  were last in the batch. The deadline is the module constant `_BATCH_RESPONSE_TIMEOUT_S`.
+
+- **Executable tasks submitted through `OrbitExecutionBackend` never completed** — the
+  radical.orbit rhapsody plugin sends DONE notifications without `stdout`, and an executable's
+  result is its stdout, so the consumer's callback failed (`KeyError: 'stdout'`) and the task's
+  future never resolved. For a DONE executable without `stdout`, the backend now fetches the task
+  (`get_task`) and fires DONE with its output. If the fetch fails, or the fetched task carries no
+  `stdout` (as a pool dispatcher's task record does), the task is reported FAILED with the
+  reason. A cancel while the fetch runs is a no-op, since the task has already finished, and
+  `shutdown()` waits for fetches in flight.
+- **Telemetry: `Failed to detach context` error at shutdown, and task spans without a parent** —
+  `TelemetryManager.start()` attached the session span as the ambient OTel context of the
+  asyncio task that called it. When `stop()` ran in another task, OTel logged
+  `ERROR Failed to detach context` (`ValueError: ... was created in a different Context`). Task
+  events emitted from a context the session never touched, e.g. ORBIT callbacks, gave task spans
+  without a parent. The ambient session span also leaked into the caller's OTel context. The
+  session span is now never attached: it is the explicit parent of task and scope spans that
+  have no caller span.
+
+## [0.7.0] 2026-11-09
+
+### Changed
+
+- **HPC test suite restructured into groups** — `tests/integration/test-hpc/run_suite.py`
+  runs `tasks`, `placement`, `scale`, and `mpi` as separate `dragon` launches in one
+  allocation, each with a time budget, and merges the results into one JUnit file. A crash
+  or hang costs that group, not the whole run, and appears as a failed `<group>.launcher`
+  test. Duplicate tests were merged, leaving 19 tests instead of 24, and GPU tests now check
+  the exact GPU assigned. `RHAPSODY_RUN_SCALE` is removed: use `-m scale`. The new
+  `RHAPSODY_HPC_REQUIRE` turns a missing capability into a failure instead of a skip. The
+  throughput benchmark moved to `tests/integration/test-hpc/benchmarks/dragon_throughput.py`.
+
+- **Task metrics no longer carry `task_id`** — `tasks_*` and
+  `task_duration_seconds` aggregate per (session, backend, executable,
+  task_type). The `task_id` attribute opened a new metric series for every task:
+  memory grew with the task count, and it was the most expensive part of
+  per-event processing. Per-task identity stays on the task spans; dashboards
+  that grouped these metrics by `task_id` need to use the spans. Event ids are
+  built without a `UUID` object (still UUID4 hex).
+  Together about 30% less telemetry cost per task and per dependent step.
+- **Dragon pin raised to `dragonhpc==0.15.0`** in the `dragon` extra (was
+  `==0.14.1`). radex needs `DDict.wait_for_keys()` (first in 0.14.2), and 0.15.0
+  supports co-located attach to a running Dragon runtime, which 0.14.1 lacks.
+  Dragon start-up and teardown are noticeably slower on 0.15.0 (35-60% longer
+  Dragon test suites on Perlmutter). Because the `backends`/`all` extras also
+  include `dragon`, they now resolve `dragonhpc[ai]` at 0.15.0 (vLLM
+  `>=0.11,<0.20`); the `ai` extra on its own stays unpinned.
+
+### Fixed
+
+- **A cancelled command stops its process** — `cancel_task()` on
+  `ConcurrentExecutionBackend` reported `CANCELED` while the task's command ran on to
+  the end, with whatever it was using. The backend now sends SIGTERM to the command and
+  the processes it started, and SIGKILL to what is left after `term_grace` seconds (5
+  by default), and reports `CANCELED` once they have stopped, so `cancel_task()` can
+  take up to that long to return. Each command runs in its own session, because killing
+  a shell alone leaves its children running: a signal sent to the process group of the
+  caller, such as Ctrl-C in a terminal, no longer reaches commands directly.
+  `shutdown()` and `asyncio.run()` stop them instead. `shutdown()` now waits for the
+  commands, and a repeated `cancel_task()` no longer reports the task twice.
+- **Telemetry dropped events on `stop()`** — `stop()` gave the event backlog a
+  fixed 5 s to drain and then dropped the rest, logging only that the drain had
+  not finished: a 100k-task session lost 59% of its task events. It now queues
+  the stop sentinel behind the backlog and waits for the dispatch loop to reach
+  it, as long as the backlog shrinks (logging progress). A crashed dispatch loop
+  is reported at once, a stalled one is cancelled after one stall window, and
+  both warnings give the number of events not processed.
+  `start_telemetry(drain_on_stop=False)` skips the backlog instead (discarded
+  with a warning) for a fast shutdown, e.g. close to a job walltime.
+- **`tasks_running` counted tasks that never ran** — a task that ended before
+  RUNNING decremented the gauge without a matching increment, and its -1 could
+  land on a different label set than its +1. Each task now counts once, and its
+  -1 uses the labels of its +1.
+- **`DragonExecutionBackend` oversubscribed partial-node Slurm allocations** (#95) —
+  Dragon's `Batch` starts `os.cpu_count() // 2` workers per node, even when the job may use
+  only part of the node: a 4-CPU job on a 512-CPU node got 256 workers on those 4 CPUs, and
+  every task took minutes. When the job may use fewer physical cores than that on the nodes
+  Batch uses, the backend now passes `workers_per_node` (one per allowed core on the smallest
+  node) and logs a warning. Batch's placement capacity for process and MPI jobs is unchanged,
+  so those jobs still place ranks as if the job had whole nodes. A `workers_per_node` in
+  `batch_kwargs` takes precedence; `size_pool_to_affinity=False` keeps Batch's sizing and only
+  warns. Whole-node allocations are unchanged. Supersedes the `Node.num_cpus` patch first
+  proposed in #106, which also shrank the placement capacity and hung process jobs with more
+  ranks than `allowed // 2`.
+
+- **Dragon process/job exit codes reported like the other backends** — a
+  non-zero exit code from a `process()`/`job()` task (executables, and functions
+  run via `process_template`/`process_templates`) no longer becomes a
+  `SystemExit` in `task["exception"]`, which exited the caller when the task was
+  awaited. `task["exit_code"]` is now set (`0` on success; for a job, a non-zero
+  code from Dragon's per-rank list, whose order is not guaranteed — all codes
+  stay in `task["return_value"]`), and awaiting a failed task raises
+  `TaskExecutionError(uid, stderr, exit_code)` with the task's stderr (for
+  templated functions, the rank's traceback), as documented and as the
+  concurrent and dask backends do.
+  `task["exception"]` stays `None` for these failures.
+- **Dragon-side cancellations reported off the event loop** — when Dragon
+  cancelled a task itself (a timeout or an upstream cancel, surfacing as
+  `TaskCancelledError` from `get()`), `DragonExecutionBackend` called the
+  registered callback with `CANCELED` directly on its `dragon_monitor_loop`
+  thread, while `DONE`/`FAILED` were handed to the event loop with
+  `call_soon_threadsafe`. Consumers that touch asyncio from the callback had
+  those calls rejected (and the error swallowed by the monitor loop), so
+  dependents waited on their own periodic scans. Cancellations now take the
+  same `call_soon_threadsafe` path; a task already reported by `cancel_task()`
+  is still reported only once.
+- **Dragon MPI jobs launched with Cray's PMI everywhere** — `DragonExecutionBackend`
+  passed no PMI to `Batch.options()`, so every `process_templates` job got Batch's
+  default, `PMIBackend.CRAY`. That is right for Cray MPICH, but with Open MPI each
+  rank ran as a one-rank job with no error (Open MPI 5), or every rank exited 1
+  (Open MPI 4.1). A new `pmi` argument (`"pmix"`, `"cray"`, `"none"` or a
+  `PMIBackend`) sets the PMI for every job, and `"pmi"` in a task's
+  `task_backend_specific_kwargs` overrides it; only job submissions get it, and an
+  unknown name fails any task. With neither, Batch's default is kept, and a warning
+  is logged once for each kind of job it can break: an executable with several ranks,
+  and a Python function with one rank or with several. Under Cray MPICH
+  (`CRAY_MPICH_DIR` or `CRAY_MPICH_VERSION` set), where that default is right, a debug
+  line takes its place. The first multi-rank job without a `timeout`, or with `None`,
+  which now means the default, logs a warning too: when a rank dies, Dragon does not
+  end the job, and the other ranks wait until the timeout (`1e9` s by default).
+  `"pmi": "none"` declares a job's processes non-MPI: they run without a PMI, and
+  neither warning is logged. No job is refused.
+- **Example 02's and the tutorials' parallel function jobs crashed on a non-Cray
+  node** — with Batch's default PMI, every rank of a 2+2 Python function job aborted
+  with "double free or corruption" (exit code -6) under Dragon 0.14.1 and 0.15.0.
+  Their parallel jobs now set `"pmi": "none"`.
+
+- **`pip install rhapsody-py[dragon]` could not import Dragon's `Batch`** —
+  dragonhpc 0.15.0 imports `requests` in `dragon.workflows.batch`, but lists it
+  only under its own extras, so a plain install failed with
+  `ModuleNotFoundError: No module named 'requests'`. The `dragon` extra now
+  requires `dragonhpc[requests]==0.15.0`.
+
+- **`discover_backends()` reports real availability** — a backend is available only when its
+  runtime dependencies are importable (new `BaseBackend.is_available()`); Dragon,
+  RADICAL-Pilot and Orbit were reported available without them.
+- **`OrbitExecutionBackend` is exported from `rhapsody.backends`**, like the other backends.
+- **Docs**: real `DragonExecutionBackend` constructor, no `Session.get_statistics()`, correct
+  default session uid, removed never-implemented `RHAPSODY_LOG_LEVEL` / `RHAPSODY_WORK_DIR`.
+
+### Removed
+
+- **Python 3.9 and 3.10 support** — RHAPSODY now requires Python 3.11 or
+  newer (`requires-python = ">=3.11"`). Python 3.9 reached end of life in
+  October 2025 and 3.10 in October 2026, and CI no longer tests them. The 3.8,
+  3.9 and 3.10 classifiers are gone, and the install, contributing and AI
+  backend docs say 3.11.
+
+### Added
+
+- **Agent Skills** — `skills/rhapsody-execution/` teaches AI coding agents to run RHAPSODY
+  workloads (backends, tasks, resources, CPU/GPU affinity, failures, multi-node Dragon).
+
 ## [0.6.0] 2026-10-19
 
 ### Fixed

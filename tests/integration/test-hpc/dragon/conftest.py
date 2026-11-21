@@ -1,7 +1,7 @@
 """Shared fixtures and markers for the RHAPSODY + Dragon HPC test suite.
 
 Run with:
-    dragon python3 -m pytest test-hpc/ -v
+    python3 ../run_suite.py --backend dragon --junit junit.xml
 
 All topology detection happens here.  Tests never hardcode node counts,
 GPU counts, or hostnames — they skip automatically when the required
@@ -9,24 +9,19 @@ resources are not present in the current allocation.
 """
 
 import os
+from pathlib import Path
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Custom marks — registered so pytest does not warn about unknown marks
-# ---------------------------------------------------------------------------
-# Usage in test files:
-#   @pytest.mark.multi_node   – skipped when allocation has < 2 nodes
-#   @pytest.mark.gpu          – skipped when no GPUs are detected
-#   @pytest.mark.mpi          – skipped when mpi4py is not importable
-#   @pytest.mark.scale        – long-running scale/stress tests
+# Capabilities this machine must have, e.g. RHAPSODY_HPC_REQUIRE=gpu,multi_node,mpi.
+# A missing capability listed here fails its tests; any other missing capability skips them.
+REQUIRED = {name.strip() for name in os.environ.get("RHAPSODY_HPC_REQUIRE", "").split(",")} - {""}
 
 
-def pytest_configure(config):
-    config.addinivalue_line("markers", "multi_node: require >= 2 nodes in the Dragon allocation")
-    config.addinivalue_line("markers", "gpu: require >= 1 GPU per node")
-    config.addinivalue_line("markers", "mpi: require mpi4py")
-    config.addinivalue_line("markers", "scale: long-running scale and stress tests")
+def _unavailable(capability, message):
+    if capability in REQUIRED:
+        pytest.fail(f"required by RHAPSODY_HPC_REQUIRE: {message}", pytrace=False)
+    pytest.skip(message)
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +44,7 @@ def topology():
     nodes = []
     for huid in System().nodes:
         node = Node(huid)
-        gpu_ids = list(node.gpus)
+        gpu_ids = list(node.gpus or [])  # None on nodes without GPUs
         nodes.append(
             {
                 "huid": huid,
@@ -84,19 +79,19 @@ def total_gpus(gpu_nodes):
 
 
 @pytest.fixture(autouse=True)
-def _apply_topology_skips(request, topology, gpu_nodes):
-    """Skip tests whose resource marks cannot be satisfied by the allocation."""
+def _check_capabilities(request, topology, gpu_nodes):
+    """Skip or fail tests whose resource marks the allocation cannot satisfy."""
     if request.node.get_closest_marker("multi_node") and len(topology) < 2:
-        pytest.skip(f"multi_node test requires >= 2 nodes; allocation has {len(topology)}")
+        _unavailable("multi_node", f"test needs >= 2 nodes; allocation has {len(topology)}")
 
     if request.node.get_closest_marker("gpu") and not gpu_nodes:
-        pytest.skip("gpu test requires at least one GPU-equipped node; none detected")
+        _unavailable("gpu", "test needs at least one GPU-equipped node; none detected")
 
     if request.node.get_closest_marker("mpi"):
         try:
             import mpi4py  # noqa: F401
         except ImportError:
-            pytest.skip("mpi test requires mpi4py; package not available")
+            _unavailable("mpi", "test needs mpi4py; package not available")
 
 
 # ---------------------------------------------------------------------------
@@ -104,22 +99,31 @@ def _apply_topology_skips(request, topology, gpu_nodes):
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-async def dragon_backend(request):
-    """Initialise a DragonExecutionBackend for the test module.
+@pytest.fixture(scope="session")
+def start_backend():
+    """Return a coroutine function that starts a DragonExecutionBackend.
 
-    Scale tests can override batch_kwargs via indirect parametrisation or by setting the
-    RHAPSODY_DDICT_MEM_GB env var (default: 2 GiB/node).
+    RHAPSODY_DDICT_MEM_GB overrides the per-node results DDict size for every test file.
     """
-    from dragon.native.machine import System
 
-    from rhapsody.backends import DragonExecutionBackend
+    async def start(ddict_gb=2, **batch_kwargs):
+        from dragon.native.machine import System
 
-    num_nodes = len(list(System().nodes))
-    ddict_mem_gb = int(os.environ.get("RHAPSODY_DDICT_MEM_GB", 2))
-    ddict_mem = ddict_mem_gb * num_nodes * (1024**3)
+        from rhapsody.backends import DragonExecutionBackend
 
-    backend = await DragonExecutionBackend(batch_kwargs={"results_ddict_mem": ddict_mem})
+        ddict_gb = int(os.environ.get("RHAPSODY_DDICT_MEM_GB", ddict_gb))
+        ddict_mem = ddict_gb * len(list(System().nodes)) * (1024**3)
+        return await DragonExecutionBackend(
+            batch_kwargs={"results_ddict_mem": ddict_mem, **batch_kwargs}
+        )
+
+    return start
+
+
+@pytest.fixture(scope="module")
+async def dragon_backend(start_backend):
+    """DragonExecutionBackend shared by the tests of one module."""
+    backend = await start_backend()
     yield backend
     await backend.shutdown()
 
@@ -132,3 +136,88 @@ async def rhapsody_session(dragon_backend):
     session = Session(backends=[dragon_backend])
     yield session
     # Session is closed by the backend shutdown in dragon_backend fixture
+
+
+# ---------------------------------------------------------------------------
+# AI telemetry fixtures (the vLLM backend needs a GPU and a model)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def ai_model():
+    """Model name or local snapshot path from RHAPSODY_HPC_MODEL; skips (or fails if required)."""
+    model = os.environ.get("RHAPSODY_HPC_MODEL")
+    if not model:
+        _unavailable("model", "set RHAPSODY_HPC_MODEL to a model name or a local snapshot path")
+    return model
+
+
+@pytest.fixture(scope="module")
+def artifact_dir(request):
+    """Folder for this module's telemetry files and report (RHAPSODY_HPC_ARTIFACTS, default ./hpc-
+    artifacts)."""
+    base = Path(os.environ.get("RHAPSODY_HPC_ARTIFACTS", "hpc-artifacts")).resolve()
+    out = base / request.module.__name__
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+@pytest.fixture(scope="module")
+def log_capture():
+    """Collect the WARNING and ERROR records of the run, so a failing hook or instrumentation shows.
+
+    Attached to the "rhapsody" logger before the backend is created, because Dragon may reset the
+    root handlers.
+    """
+    import logging
+
+    from telemetry_checks import LogCapture
+
+    handler = LogCapture()
+    logging.getLogger("rhapsody").addHandler(handler)
+    yield handler
+    logging.getLogger("rhapsody").removeHandler(handler)
+
+
+@pytest.fixture(scope="module")
+async def inference_backend(ai_model, topology, gpu_nodes, log_capture):
+    """A warm DragonVllmInferenceBackend (engine mode, no HTTP server) on all GPU nodes."""
+    import multiprocessing as mp
+
+    from telemetry_checks import AI_BATCH_SIZE
+    from telemetry_checks import AI_WARMUP_REQUESTS
+    from telemetry_checks import warm_up
+
+    if not gpu_nodes:
+        _unavailable("gpu", "the inference backend needs at least one GPU-equipped node")
+
+    from rhapsody.backends import DragonVllmInferenceBackend
+    from rhapsody.backends.ai.config import HardwareConfig
+    from rhapsody.backends.ai.config import ModelConfig
+
+    if mp.get_start_method(allow_none=True) != "dragon":
+        mp.set_start_method("dragon", force=True)
+
+    backend = await DragonVllmInferenceBackend(
+        model=ModelConfig(
+            model_name=ai_model,
+            tp_size=1,
+            gpu_memory_utilization=0.85,
+            hf_token=os.environ.get("HF_TOKEN", ""),
+        ),
+        hardware=HardwareConfig(
+            num_nodes=len(gpu_nodes),
+            num_gpus=min(n["num_gpus"] for n in gpu_nodes),  # per node
+            node_offset=0,
+        ),
+        max_batch_size=AI_BATCH_SIZE,
+        max_batch_wait_ms=500,
+        use_service=False,  # no HTTP server, so the request counts stay exact
+    )
+    try:
+        # Before telemetry: the backend drops events until a manager is attached, and the first
+        # call to each worker is slow.
+        await warm_up(backend, AI_WARMUP_REQUESTS)
+        yield backend
+    finally:
+        await backend.shutdown()

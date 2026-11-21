@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>rhapsody live viz</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #050518;
+    color: #e0e6f0;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 13px;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+  }
+  #stage {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  #cv {
+    display: block;
+    border-radius: 6px;
+    background: #080818;
+  }
+  #controls {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 16px;
+    background: #0e1626;
+    border: 1px solid #283040;
+    border-radius: 6px;
+    box-sizing: border-box;
+    width: 1280px;
+  }
+  .btn {
+    background: #182030;
+    color: #e0e6f0;
+    border: 1px solid #283040;
+    border-radius: 4px;
+    padding: 6px 14px;
+    font-family: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    letter-spacing: 0.04em;
+  }
+  .btn:hover { background: #202840; }
+  .btn.active {
+    background: #1a2a40;
+    border-color: #40c8e8;
+    color: #40c8e8;
+  }
+  #play { min-width: 96px; text-align: center; }
+  .spacer { flex: 1; }
+  #speed { width: 140px; vertical-align: middle; accent-color: #40c8e8; }
+  .ctl-label {
+    color: #90a0c0;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-size: 11px;
+  }
+  #speedval, #status {
+    font-variant-numeric: tabular-nums;
+    color: #e0e6f0;
+    min-width: 44px;
+    display: inline-block;
+    text-align: right;
+  }
+  #status { color: #7080a0; min-width: 200px; text-align: left; }
+  input[type="file"] {
+    color: #90a0c0;
+    font-family: inherit;
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="cv" width="1280" height="720"></canvas>
+  <div id="controls">
+    <!-- Status on the left in every mode.  Right-hand cluster (file
+         picker, speed slider, pause) is shown only in replay mode —
+         setMode() in viz.js toggles their visibility. -->
+    <span id="status">idle</span>
+    <span class="spacer"></span>
+    <input type="file" id="file" accept=".jsonl,.json,application/json,text/plain">
+    <span id="speedctl">
+      <span class="ctl-label">speed</span>
+      <input type="range" id="speed" min="0.25" max="16" step="0.05" value="1">
+      <span id="speedval">1.00&times;</span>
+    </span>
+    <button class="btn" id="play">&#10074;&#10074; pause</button>
+  </div>
+</div>
+<script src="viz.js"></script>
+</body>
+</html>

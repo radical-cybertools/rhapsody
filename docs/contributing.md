@@ -24,7 +24,7 @@ This project adheres to the [Contributor Covenant Code of Conduct](https://www.c
 
 ### Prerequisites
 
-- Python 3.9 or higher
+- Python 3.11 or higher
 - Git
 - A GitHub account
 

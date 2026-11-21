@@ -214,6 +214,7 @@ This produces a multi-panel PNG (shown in [Integrations — Real Run Visualizati
 | `span_processors` | `list \| None` | `None` | OTel `SpanProcessor` instances (e.g. `BatchSpanProcessor(OTLPSpanExporter())`) added alongside RHAPSODY's internal `SpanBuffer`. Callers own exporter construction. |
 | `metric_readers` | `list \| None` | `None` | OTel `MetricReader` instances (e.g. `PeriodicExportingMetricReader(OTLPMetricExporter())`) added alongside RHAPSODY's internal `InMemoryMetricReader`. |
 | `resource` | `Resource \| None` | `None` | OTel `Resource` override. `None` = `Resource.create()` reads `OTEL_SERVICE_NAME` / `OTEL_RESOURCE_ATTRIBUTES` from the environment automatically. |
+| `drain_on_stop` | `bool` | `True` | `True` = `session.close()` processes every queued telemetry event before shutting down, however long that takes. `False` = events still queued at close are discarded with a warning, for a fast shutdown (e.g. close to a job walltime). |
 
 To access the manager after the initial call use `session.get_telemetry()`.
 
