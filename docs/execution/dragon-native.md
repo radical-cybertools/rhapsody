@@ -83,8 +83,13 @@ Install it with the `dragon` extra, and start your script with the Dragon launch
   Dragon's error, and its worker carries on, as for a result too large. A send that fails for any other reason, or takes
   more than 10 s, replaces the worker, and the task goes to the next idle worker, or waits for
   one; it fails only if that send fails too. A
-  function with a `process_template` flushes its result onto the queue before it exits, so the
-  client knows when one is missing. The pool is 4 GiB per node by default
+  function with a `process_template` flushes its output and its result before it exits, so the
+  client knows when one is missing. Its task is reported when the result comes, without waiting
+  for the exit: a process can hang at interpreter exit, as one did in a Dragon queue's `__del__`.
+  The process then has `kill_grace` seconds to exit, or it is killed, with a warning, and its ranks
+  stay taken until it exits or is killed. An exit code other than 0 after the result is logged
+  and leaves the task as its result reported it; a process that exits before its result comes
+  fails on a non-zero exit code, as before. The pool is 4 GiB per node by default
   (`DRAGON_DEFAULT_SEG_SZ`), so workers that finish together should return much less than that
   between them; write larger results to files.
 - **Process tasks.** A few threads start process tasks, and one thread finds those that exited,

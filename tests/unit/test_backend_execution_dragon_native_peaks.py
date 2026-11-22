@@ -28,10 +28,12 @@ from test_backend_execution_dragon_native import dragon  # noqa: E402, F401 - fi
 from test_backend_execution_dragon_native import exe_task  # noqa: E402
 from test_backend_execution_dragon_native import fn_task  # noqa: E402
 from test_backend_execution_dragon_native import full_until  # noqa: E402
+from test_backend_execution_dragon_native import lingering  # noqa: E402
 from test_backend_execution_dragon_native import needs_runtime  # noqa: E402
 from test_backend_execution_dragon_native import no_room_on  # noqa: E402
 from test_backend_execution_dragon_native import pool_full  # noqa: E402, F401 - fixture
 from test_backend_execution_dragon_native import pool_of  # noqa: E402
+from test_backend_execution_dragon_native import process_of  # noqa: E402
 from test_backend_execution_dragon_native import square  # noqa: E402
 from test_backend_execution_dragon_native import until  # noqa: E402
 
@@ -627,6 +629,35 @@ async def test_a_process_task_killed_before_its_record_reports_what_is_known(dra
     finally:
         await be.shutdown()
     assert_killed(task["observed"], before, "SIGTERM", -signal.SIGTERM, timed_out=True)
+
+
+async def test_a_function_process_that_outlives_its_result_reports_its_record(
+    dragon,  # noqa: F811
+    tmp_path,
+    monkeypatch,
+):
+    """A function process is reported on its result, while it still runs: the record it wrote before
+    sending the result is read then, and its kill after ``kill_grace`` changes nothing."""
+    import signal
+
+    gate, _ = lingering(monkeypatch)
+    be = await make(tmp_path)
+    try:
+        before = time.time()
+        task = fn_task(square, 7, task_backend_specific_kwargs={"process_template": {}})
+        assert await run(be, [task], timeout=10) == ["DONE"]
+        proc = process_of(dragon, task["uid"])
+        assert not proc.done.is_set()  # reported before its process exited
+        observed = dict(task["observed"])
+        assert all(observed.get(k) is not None for k in WINDOW)
+        assert before <= observed["started"] <= observed["ended"] <= time.time()
+        assert "killed" not in observed and "exit_code" not in observed
+        await until(proc.done.is_set)
+        assert proc.code in (-signal.SIGTERM, -signal.SIGKILL)
+        assert task["observed"] == observed
+    finally:
+        gate.set()
+        await be.shutdown()
 
 
 async def test_without_observe_peaks_a_dead_workers_task_reports_nothing(dragon, tmp_path):  # noqa: F811

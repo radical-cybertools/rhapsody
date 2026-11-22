@@ -380,7 +380,7 @@ def relay_main(
     forwarded_at = [0.0]  # when the relay last forwarded a batch
     hold_until = [0.0]  # until when it waits for the tasks the client just sent
     stale_after = 10 * idle_interval
-    notes = queue.SimpleQueue()  # reports that found no room on ``results``, for the next batch
+    notes: queue.SimpleQueue[bytes] = queue.SimpleQueue()  # reports with no room on ``results``
 
     def report(wid, uid, kind, error, payload):
         msg = (UNSENT, wid, uid, kind, f"{type(error).__name__}: {error}", payload)
@@ -438,7 +438,7 @@ def relay_main(
         def __init__(self):
             self.cv = threading.Condition()
             self.ops = {}  # wid -> its operations not yet made
-            self.waiting = deque()  # wids with operations, served by no thread
+            self.waiting: deque[int] = deque()  # wids with operations, served by no thread
             self.later = []  # heap of (when, seq, wid): workers whose next put waits for room
             self.seq = itertools.count()
             self.served = set()  # wids a thread is serving
@@ -531,7 +531,7 @@ def relay_main(
                 if raw is None:
                     return
                 sent = False
-                by_node = {}  # this batch's operations for each node, in order
+                by_node: dict[str | None, list[tuple]] = {}  # this batch's operations, by node
                 handed = set()  # wids whose operations in this batch go to their node's threads
                 for op in cloudpickle.loads(raw):
                     if op[0] == "ack":
@@ -703,16 +703,19 @@ def _record_this_process(peak_dir):
 def run_function_process(results, uid, fn, args, kwargs, out_path, err_path, peak_dir=None):
     """Run a function task in its own Dragon process and send its return value to ``results``.
 
-    Output is appended to ``out_path``/``err_path`` when they are set. A raised exception is sent,
-    then re-raised, so Dragon prints its traceback to stderr and the process exits with 1. The
-    result is flushed, so it is on the queue before the process exits. With ``peak_dir``, the
-    process's record (``_measure.process_record``) is written there before the result is sent.
+    Output is appended to ``out_path``/``err_path`` when they are set, and flushed before the result
+    goes: the client reports the task when the result comes, and may read the output then. A raised
+    exception is sent, then re-raised, so Dragon prints its traceback to stderr and the process
+    exits with 1. The result is flushed, so it is on the queue before the process exits. With
+    ``peak_dir``, the process's record (``_measure.process_record``) is written there before the
+    result is sent.
     """
     if out_path:
         _redirect_for_good(out_path, err_path)
     write_record = _record_this_process(peak_dir)
     ok, value, tb = outcome(fn, args, kwargs)
     write_record(0 if ok else 1)
+    flush_all()
     send(results, (RESULT, uid, ok, value, tb), 3, flush=True)
     if not ok:
         raise value
