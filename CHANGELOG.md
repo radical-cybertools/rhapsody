@@ -63,6 +63,17 @@
 
 ### Fixed
 
+- **BEHAVIOUR CHANGE: `ConcurrentExecutionBackend` lets go of a task once it has reported the
+  task's final state.** It kept every task it ran in `tasks`, and each task's handler (an asyncio
+  task) in the task's `"future"`, so an engine on it kept every task, and in Python 3.12 each
+  `async def` function task cost more than the one before (`asyncio.run` walks every live asyncio
+  task). Now `tasks` holds only the tasks that have not ended, and a task that ended has no
+  `"future"`; its results stay in the task. `cancel_all_tasks()` returns the number of tasks that
+  were still running, not of every task the backend ran. A task cancelled before it started, a
+  later task with the same uid, and a handler that an eager task factory ran to its end inside
+  `submit_tasks` are handled too. The noop backend no longer keeps a finished asyncio task per
+  task under an eager task factory.
+
 - **`DragonVllmInferenceBackend`: a `queue.Empty` from `get_nowait()` no longer fails a whole batch** — the
   response loop called `empty()` and then `get_nowait()`. Dragon documents `empty()` as
   unreliable, so `get_nowait()` could still raise `queue.Empty`, and the batch processor then
