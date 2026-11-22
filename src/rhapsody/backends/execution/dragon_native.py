@@ -1616,6 +1616,9 @@ class DragonNativeExecutionBackend(BaseBackend):
                 return
             if not any(puid in self._watched for puid in rec.puids):
                 return  # it exited
+        if self._all_exited(rec.puids):
+            return  # it exited, and the watcher has yet to see it: signalling it is what to avoid
+        with self._lock:
             rec.reported = "killed"
         self.logger.warning(
             f"The process of task {rec.uid} did not exit {self._kill_grace} s after its result: "
@@ -1623,6 +1626,44 @@ class DragonNativeExecutionBackend(BaseBackend):
         )
         self._ops.submit(self._kill_process_task, rec)
         self._push_timer(self._kill_grace + _KILL_WAIT, timer, self._abandon_after_result, rec)
+
+    def _all_exited(self, puids: list) -> bool:
+        """Whether every process of ``puids`` has exited, as far as Global Services can tell now."""
+        try:
+            exited, _ = multi_join(puids, timeout=0, join_all=True)
+        except Exception:
+            return False
+        return bool(exited) and len(exited) == len(puids)
+
+    def _let_exit(self, recs: list[_Task]) -> list[_Task]:
+        """Give the processes of tasks reported on their result ``kill_grace`` seconds to exit on
+        their own at shutdown, and return the tasks whose processes did not.
+
+        Such a process may still be tearing down, waiting on processes of its own. Killed then, it
+        leaves joins in Global Services that it can no longer receive: when those processes exit,
+        Dragon 0.15.0 fails to answer them and ends the runtime.
+        """
+        left = {puid: rec for rec in recs for puid in rec.puids}
+        deadline = time.monotonic() + self._kill_grace
+        delay = 0.01
+        while left:
+            gone = self._exited_of(list(left))
+            if gone is None:
+                break
+            for puid in gone:
+                left.pop(puid, None)
+            now = time.monotonic()
+            if not left or now >= deadline:
+                break
+            time.sleep(min(delay, deadline - now))
+            delay = min(2 * delay, 0.25)
+        stuck = list({id(rec): rec for rec in left.values()}.values())
+        if stuck:
+            self.logger.warning(
+                f"{len(stuck)} process(es) of tasks reported on their result did not exit "
+                f"{self._kill_grace} s into shutdown: killing them"
+            )
+        return stuck
 
     def _abandon_after_result(self, rec: _Task, timer: int) -> None:
         """Free the ranks of a process that was killed after its result and is still not gone."""
@@ -2279,6 +2320,9 @@ class DragonNativeExecutionBackend(BaseBackend):
         # Queued starts would start processes now; a start under way kills its own process.
         self._proc_ops.shutdown(wait=False, cancel_futures=True)
         lap("cancel")
+        if lingering:
+            lingering = self._let_exit(lingering)
+            lap("exits")
 
         tasks = [rec for rec in records if rec.kind != "pool" and rec.puids] + lingering
         # Not a with-block: leaving one waits for every thread, deadline or not.
