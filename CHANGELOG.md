@@ -32,6 +32,20 @@
   positional calls keep their meaning. The launcher runs with `python -I`, gives the command
   default signal dispositions and a process group of its own, and sets NVML up off the
   command's path; records go to a fresh directory per run.
+- **`DragonNativeExecutionBackend`** (backend name `dragon_native`) — a second
+  Dragon backend beside `DragonExecutionBackend`, on Dragon's `Process`,
+  `ProcessGroup`, `Policy` and `Queue`, without `dragon.workflows.batch`. It takes
+  the same task descriptions. Functions run in a persistent pool of workers, by
+  default one per physical core, pinned to their hosts and CPUs (placed functions
+  on a worker of that host, GPU tasks on a worker started for that GPU set),
+  executables as one native process each, and
+  `process_templates` as one process group, with the PMI chosen by `pmi`. Unlike a
+  Batch job, a group has no PMI by default. A relay process on the client's node
+  trades tasks and results with the client in batches, so a client process that
+  keeps its GIL busy still starts tasks quickly. See `docs/execution/dragon-native.md`.
+  `tests/integration/test-hpc/benchmarks/dragon_throughput.py` measures it with
+  `--with-rhapsody-dragon-native`, and `--workers_per_node` sets its pool size;
+  `tests/performance/dragon_native_busy_client.py` measures it next to a busy thread.
 - **Telemetry: `TaskCompleted` and `TaskFailed` carry what the task used** — with
   `observe_peaks`, `task["observed"]` is flattened into the event's attributes and onto the task
   span, memory in bytes (`memory_peak_bytes`, `cpu_seconds`, `exec_start`, `exec_end`,
@@ -94,6 +108,17 @@
   status ERROR and the `error.type` attribute; the metrics are recorded as for a good batch.
 
 ### Fixed
+
+- **BEHAVIOUR CHANGE: `ConcurrentExecutionBackend` lets go of a task once it has reported the
+  task's final state.** It kept every task it ran in `tasks`, and each task's handler (an asyncio
+  task) in the task's `"future"`, so an engine on it kept every task, and in Python 3.12 each
+  `async def` function task cost more than the one before (`asyncio.run` walks every live asyncio
+  task). Now `tasks` holds only the tasks that have not ended, and a task that ended has no
+  `"future"`; its results stay in the task. `cancel_all_tasks()` returns the number of tasks that
+  were still running, not of every task the backend ran. A task cancelled before it started, a
+  later task with the same uid, and a handler that an eager task factory ran to its end inside
+  `submit_tasks` are handled too. The noop backend no longer keeps a finished asyncio task per
+  task under an eager task factory.
 
 - **`DragonVllmInferenceBackend`: a `queue.Empty` from `get_nowait()` no longer fails a whole batch** — the
   response loop called `empty()` and then `get_nowait()`. Dragon documents `empty()` as
