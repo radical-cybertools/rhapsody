@@ -622,13 +622,15 @@ def _redirect_for_good(out_path, err_path):
 def run_function_process(results, uid, fn, args, kwargs, out_path, err_path):
     """Run a function task in its own Dragon process and send its return value to ``results``.
 
-    Output is appended to ``out_path``/``err_path`` when they are set. A raised exception is sent,
-    then re-raised, so Dragon prints its traceback to stderr and the process exits with 1. The
-    result is flushed, so it is on the queue before the process exits.
+    Output is appended to ``out_path``/``err_path`` when they are set, and flushed before the result
+    goes: the client reports the task when the result comes, and may read the output then. A raised
+    exception is sent, then re-raised, so Dragon prints its traceback to stderr and the process
+    exits with 1. The result is flushed, so it is on the queue before the process exits.
     """
     if out_path:
         _redirect_for_good(out_path, err_path)
     ok, value, tb = outcome(fn, args, kwargs)
+    flush_all()
     send(results, (RESULT, uid, ok, value, tb), 3, flush=True)
     if not ok:
         raise value

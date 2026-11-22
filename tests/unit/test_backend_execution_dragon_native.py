@@ -1364,7 +1364,11 @@ async def test_executable_capture_stdio_returns_paths(backend, tmp_path):
 
 
 async def test_function_process_that_exits_non_zero_after_its_result_fails(backend):
-    """A Session would raise on the exit code, so DONE would be DONE and failed at once."""
+    """A Session would raise on the exit code, so DONE would be DONE and failed at once.
+
+    This is a process that exited before its result came; one whose result came first is reported on
+    it, and its exit code is only logged.
+    """
     rec = backend.build_task(
         fn_task(square, 2, task_backend_specific_kwargs={"process_template": {}})
     )
@@ -1374,6 +1378,137 @@ async def test_function_process_that_exits_non_zero_after_its_result_fails(backe
     state, fields = backend._process_outcome(rec)
     assert (state, fields["return_value"], fields["exit_code"]) == ("FAILED", 4, 139)
     assert fields["exception"].exit_code == 139
+
+
+def lingering(monkeypatch, uids=None):
+    """Make function processes send their result and then not exit, as one stuck at interpreter exit
+    in a Dragon queue's ``__del__``; return the event that lets them go, and their start times.
+
+    With ``uids``, only those tasks' processes linger.
+    """
+    original = worker_module.run_function_process
+    gate = threading.Event()
+    started = {}
+
+    def send_then_linger(results, uid, *args):
+        started[uid] = time.monotonic()
+        original(results, uid, *args)
+        if uids is None or uid in uids:
+            gate.wait(30)
+
+    monkeypatch.setattr(worker_module, "run_function_process", send_then_linger)
+    return gate, started
+
+
+def process_of(dragon, uid):
+    return next(p for p in dragon.started if callable(p.target) and uid in p.args)
+
+
+async def test_a_function_process_that_outlives_its_result_is_reported_then_killed(
+    backend, dragon, monkeypatch, caplog
+):
+    """The task completed only once its process exited: a process stuck at exit held the task, and
+    its caller's await, for good. Now the result reports it, and the process gets ``kill_grace`` to
+    exit before it is killed. Its ranks stay taken until then."""
+    gate, _ = lingering(monkeypatch)
+    rec = Recorder(backend)
+    task = fn_task(square, 7, task_backend_specific_kwargs={"process_template": {}})
+    try:
+        with caplog.at_level(logging.WARNING):
+            t0 = time.monotonic()
+            await backend.submit_tasks([task])
+            assert await rec.wait(task["uid"]) == ["DONE"]
+            assert time.monotonic() - t0 < backend._kill_grace
+            assert task["return_value"] == 49 and task.get("exception") is None
+            proc = process_of(dragon, task["uid"])
+            assert not proc.done.is_set() and backend._running_ranks == 1
+            await until(proc.done.is_set)
+            assert proc.code in (-signal.SIGTERM, -signal.SIGKILL)
+            await until(lambda: backend._running_ranks == 0)
+        assert "did not exit" in caplog.text and task["uid"] in caplog.text
+    finally:
+        gate.set()
+
+
+async def test_the_next_process_task_waits_for_the_ranks_of_one_still_running(
+    dragon, tmp_path, monkeypatch
+):
+    """Reported on its result, a process still holds its ranks: the next task does not share
+    them."""
+    be = DragonNativeExecutionBackend(
+        workers_per_node=1, inline_stdio=False, kill_grace=0.5, max_process_ranks=1
+    )
+    be._work_dir = str(tmp_path)
+    await be
+    first = fn_task(square, 2, task_backend_specific_kwargs={"process_template": {}})
+    second = fn_task(square, 3, task_backend_specific_kwargs={"process_template": {}})
+    gate, started = lingering(monkeypatch, uids={first["uid"]})
+    rec = Recorder(be)
+    try:
+        await be.submit_tasks([first, second])
+        assert await rec.wait(first["uid"]) == ["DONE"]
+        assert await rec.wait(second["uid"]) == ["DONE"]
+        assert started[second["uid"]] >= process_of(dragon, first["uid"]).exited_at
+    finally:
+        gate.set()
+        await be.shutdown()
+
+
+async def test_a_function_process_that_exits_on_its_own_after_its_result_is_not_killed(
+    backend, dragon, monkeypatch, caplog
+):
+    gate, _ = lingering(monkeypatch)
+    rec = Recorder(backend)
+    task = fn_task(square, 5, task_backend_specific_kwargs={"process_template": {}})
+    with caplog.at_level(logging.WARNING):
+        await backend.submit_tasks([task])
+        assert await rec.wait(task["uid"]) == ["DONE"]
+        gate.set()  # it exits within its grace
+        proc = process_of(dragon, task["uid"])
+        await until(proc.done.is_set)
+        await until(lambda: backend._running_ranks == 0)
+        await asyncio.sleep(backend._kill_grace + 0.2)
+    assert proc.code == 0 and "did not exit" not in caplog.text
+
+
+async def test_a_function_process_that_fails_after_its_result_stays_done_with_a_warning(
+    backend, dragon, monkeypatch, caplog
+):
+    """Once reported on its result, a later exit code does not change the task: it is logged."""
+    original = worker_module.run_function_process
+
+    def crash_at_exit(*args):
+        original(*args)
+        time.sleep(0.2)  # after the result has been reported
+        raise SystemExit(3)
+
+    monkeypatch.setattr(worker_module, "run_function_process", crash_at_exit)
+    rec = Recorder(backend)
+    task = fn_task(square, 4, task_backend_specific_kwargs={"process_template": {}})
+    with caplog.at_level(logging.WARNING):
+        await backend.submit_tasks([task])
+        assert await rec.wait(task["uid"]) == ["DONE"]
+        assert task["return_value"] == 16
+        await until(lambda: backend._running_ranks == 0)
+    assert "exited with code 1 after its result" in caplog.text
+
+
+async def test_shutdown_stops_a_process_that_outlived_its_result(dragon, tmp_path, monkeypatch):
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, kill_grace=30.0)
+    be._work_dir = str(tmp_path)
+    await be
+    gate, _ = lingering(monkeypatch)
+    rec = Recorder(be)
+    task = fn_task(square, 2, task_backend_specific_kwargs={"process_template": {}})
+    try:
+        await be.submit_tasks([task])
+        assert await rec.wait(task["uid"]) == ["DONE"]
+        proc = process_of(dragon, task["uid"])
+        assert not proc.done.is_set()
+        await be.shutdown()
+        assert proc.done.is_set()
+    finally:
+        gate.set()
 
 
 @pytest.mark.parametrize("fn, args, state", [(square, (6,), "DONE"), (boom, (), "FAILED")])
@@ -3158,6 +3293,46 @@ async def test_real_runtime_a_full_pool_on_the_clients_node_is_waited_out(tmp_pa
                 filler.get(timeout=1)
         with contextlib.suppress(Exception):
             filler.destroy()
+        await be.shutdown()
+        cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
+
+
+def returns_then_blocks_at_exit(x):
+    """Return ``x * x``, then block the interpreter's exit for a minute."""
+    import atexit  # noqa: PLC0415 - it runs in the task's own process
+    import time as _time  # noqa: PLC0415
+
+    atexit.register(_time.sleep, 60)
+    return x * x
+
+
+@needs_runtime
+async def test_real_runtime_a_function_process_that_blocks_at_exit_is_reported_and_killed(
+    tmp_path,
+):
+    """Its task waited for its exit, so a process stuck at exit held the caller's await for good."""
+    cloudpickle.register_pickle_by_value(sys.modules[__name__])
+    be = await DragonNativeExecutionBackend(workers_per_node=1, kill_grace=2.0)
+    be._work_dir = str(tmp_path)
+    rec = Recorder(be)
+    try:
+        task = fn_task(
+            returns_then_blocks_at_exit, 6, task_backend_specific_kwargs={"process_template": {}}
+        )
+        t0 = time.monotonic()
+        await be.submit_tasks([task])
+        assert await rec.wait(task["uid"], 60) == ["DONE"], task.get("stderr")
+        reported = time.monotonic() - t0
+        assert task["return_value"] == 36
+        t1 = time.monotonic()
+        await until(lambda: be._running_ranks == 0, 60)
+        freed = time.monotonic() - t1
+        print(f"RESULT reported after {reported:.2f} s, ranks freed {freed:.2f} s later")
+        assert freed >= 1.0  # not before its kill_grace of 2 s after the result
+        after = fn_task(square, 3, task_backend_specific_kwargs={"process_template": {}})
+        await be.submit_tasks([after])
+        assert await rec.wait(after["uid"], 60) == ["DONE"]
+    finally:
         await be.shutdown()
         cloudpickle.unregister_pickle_by_value(sys.modules[__name__])
 

@@ -233,6 +233,7 @@ class _Task:
         "repeats",
         "exit_code",
         "exited_at",
+        "reported",
     )
 
     def __init__(self, uid: str, desc: dict, kind: str, timeout: float | None, token: str):
@@ -269,6 +270,9 @@ class _Task:
         # A process task's exit code, and when the process watcher found it exited.
         self.exit_code: int | None = None
         self.exited_at: float | None = None
+        # A function process task reported on its result while its process still ran: "result",
+        # then "killed" once the process outlived its grace and was killed.
+        self.reported: str | None = None
 
 
 def _read_siblings(cpu: int) -> str:
@@ -811,6 +815,9 @@ class DragonNativeExecutionBackend(BaseBackend):
             if rec is not None:
                 rec.result = (ok, value, tb)
                 rec.result_event.set()
+                if rec.exited_at is None and not (rec.timed_out or rec.cancelled or rec.reported):
+                    rec.reported = "result"  # one that exited first is reported by the watcher
+                    self._submit_proc(self._report_on_result, rec)
 
     def _on_ready(self, msg) -> None:
         _, wid, _hostname, _pid = msg
@@ -1501,6 +1508,13 @@ class DragonNativeExecutionBackend(BaseBackend):
                     rec.exit_code, rec.exited_at = code, now
                     if error is None:
                         self._release(rec)
+                        if rec.reported:  # reported on its result already: its exit frees ranks
+                            if rec.reported == "result" and code not in (0, None):
+                                self.logger.warning(
+                                    f"The process of task {rec.uid} exited with code {code} after "
+                                    "its result, which reported the task"
+                                )
+                            continue
                         if rec.is_function and not self._result_known(rec):
                             self._awaiting.add(rec)
                             continue
@@ -1567,6 +1581,58 @@ class DragonNativeExecutionBackend(BaseBackend):
             self.logger.debug(f"Task {rec.uid} failed in the backend", exc_info=True)
             state, fields = "FAILED", {"exception": exc, "stderr": str(exc)}
         self._report_process_task(rec, state, fields)
+
+    def _report_on_result(self, rec: _Task) -> None:
+        """Report a function process task on its result, whether or not its process has exited.
+
+        A process can hang at interpreter exit, as in Dragon 0.15.0 a queue's ``__del__`` can in a
+        request to Global Services, and its task would wait for good. The process gets
+        ``kill_grace`` seconds to exit after the result, then is killed (``_after_result``). Its
+        ranks stay taken until it exits or is killed. Runs on a process thread.
+        """
+        try:
+            state, fields = self._result_outcome(rec)
+        except Exception as exc:
+            self.logger.debug(f"Task {rec.uid} failed in the backend", exc_info=True)
+            state, fields = "FAILED", {"exception": exc, "stderr": str(exc)}
+        self._report_process_task(rec, state, fields)
+        self._push_timer(self._kill_grace, next(self._timer_seq), self._after_result, rec)
+
+    def _result_outcome(self, rec: _Task) -> tuple[str, dict]:
+        """The final state and fields of a function process task, from its result alone."""
+        stdout, stderr = self._stdio_of(rec)
+        ok, value, tb = rec.result  # type: ignore[misc]
+        if ok:
+            return "DONE", {"stdout": stdout, "stderr": stderr, "return_value": value}
+        return "FAILED", {"stdout": stdout, "stderr": stderr or tb, "exception": value}
+
+    def _after_result(self, rec: _Task, timer: int) -> None:
+        """Kill the process of a task reported on its result, if it has not exited by now."""
+        with self._lock:
+            if self._stopping:
+                return
+            if not rec.puids:  # its result came before its start was recorded: wait again
+                self._push_timer(self._kill_grace, timer, self._after_result, rec)
+                return
+            if not any(puid in self._watched for puid in rec.puids):
+                return  # it exited
+            rec.reported = "killed"
+        self.logger.warning(
+            f"The process of task {rec.uid} did not exit {self._kill_grace} s after its result: "
+            "killing it"
+        )
+        self._ops.submit(self._kill_process_task, rec)
+        self._push_timer(self._kill_grace + _KILL_WAIT, timer, self._abandon_after_result, rec)
+
+    def _abandon_after_result(self, rec: _Task, timer: int) -> None:
+        """Free the ranks of a process that was killed after its result and is still not gone."""
+        with self._lock:
+            gone = [puid for puid in rec.puids if self._watched.pop(puid, None) is not None]
+            if not gone:
+                return
+            rec.exit_code, rec.exited_at = None, time.monotonic()
+            self._release(rec)
+        self.logger.warning(f"The process of task {rec.uid} did not exit after its kill")
 
     def _timeout_process(self, uid: str, timer: int) -> None:
         """Kill a process task at its deadline: it fails when its process exits.
@@ -2192,6 +2258,10 @@ class DragonNativeExecutionBackend(BaseBackend):
         with self._lock:
             self._stopping = True
             records = list(self._tasks.values())
+            # Processes still running after their task was reported on its result.
+            lingering = list(
+                {id(rec): rec for rec in self._watched.values() if rec.reported}.values()
+            )
             self._tasks.clear()
             self._pending.clear()
             self._proc_queue.clear()
@@ -2210,7 +2280,7 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._proc_ops.shutdown(wait=False, cancel_futures=True)
         lap("cancel")
 
-        tasks = [rec for rec in records if rec.kind != "pool" and rec.puids]
+        tasks = [rec for rec in records if rec.kind != "pool" and rec.puids] + lingering
         # Not a with-block: leaving one waits for every thread, deadline or not.
         pool = ThreadPoolExecutor(_STOP_PARALLEL, thread_name_prefix="dragon_native_stop")
         try:
