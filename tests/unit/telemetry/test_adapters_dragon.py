@@ -206,12 +206,13 @@ def test_adapter_stops_cleanly():
         loop.run_until_complete(_lifecycle())
         loop.close()
 
-        # Thread should exit within a few seconds of stop()
+        # stop() waits for the thread, which destroys its queue: left to its __del__ at exit, a
+        # Dragon queue's destroy can hang in a request to Global Services.
         if adapter._thread is not None:
-            adapter._thread.join(timeout=10.0)
             assert not adapter._thread.is_alive(), (
                 "DragonTelemetryAdapter daemon thread did not exit after stop()"
             )
+            assert adapter._queue is None
 
     finally:
         if original is None:

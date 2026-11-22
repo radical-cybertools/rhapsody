@@ -18,6 +18,7 @@ pytestmark = pytest.mark.result_contract
 NON_LINKING_BACKENDS = [
     ("rhapsody.backends.execution.concurrent", "ConcurrentExecutionBackend"),
     ("rhapsody.backends.execution.dragon", "DragonExecutionBackend"),
+    ("rhapsody.backends.execution.dragon_native", "DragonNativeExecutionBackend"),
     ("rhapsody.backends.execution.dask_parallel", "DaskExecutionBackend"),
     ("rhapsody.backends.execution.noop", "NoopExecutionBackend"),
     ("rhapsody.backends.execution.orbit", "OrbitExecutionBackend"),
