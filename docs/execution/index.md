@@ -174,11 +174,14 @@ Each backend declares whether it moves data between tasks through two independen
     with none, about 1 ms with 10,000, about 8 ms with 100,000 (Python 3.12), as with an AsyncFlow
     engine holding thousands of tasks in flight. `ConcurrentExecutionBackend(reuse_event_loop=True)`
     keeps one event loop per worker thread instead. After each task the backend still cancels the
-    tasks the function left running and reports their errors, without the walk. Async generators
-    a task leaves open are closed later, when garbage-collected; the loop's default executor
-    (`asyncio.to_thread`) lives until the backend shuts down; and an object bound to a loop that a
-    task keeps beyond its end stays usable on the same thread only. Sync functions never get a
-    loop, and a process pool ignores the option.
+    tasks the function left running and reports their errors, without the walk, and puts back the
+    loop's task factory, exception handler and debug flag if the task changed them; each task runs
+    in its own copy of the context. Async generators a task leaves open are closed later, when
+    garbage-collected; timers it leaves pending (`call_later`, `call_at`) run during a later task
+    on that thread if their time comes; the loop's default executor (`asyncio.to_thread`) lives
+    until the backend shuts down; and an object bound to a loop that a task keeps beyond its end
+    stays usable on the same thread only. Sync functions never get a loop, and a process pool
+    ignores the option.
 
 !!! note "Task Granularity"
     - AsyncFlow excels at dynamic, fine-grained task graphs

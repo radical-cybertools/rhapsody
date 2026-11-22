@@ -11,8 +11,8 @@
   option each worker thread keeps one loop; after each task the backend cancels the tasks the
   function left running and reports their errors, as `asyncio.run` does, without the walk, and
   `shutdown()` closes the loops. Off by default; sync functions never get a loop, and a process
-  pool ignores it. Async generators a task leaves open, the loop's default executor and
-  loop-bound objects a task keeps now outlive the task (see "Execution", "Performance
+  pool ignores it. Async generators and timers a task leaves open, the loop's default executor
+  and loop-bound objects a task keeps now outlive the task (see "Execution", "Performance
   Considerations").
 - **Telemetry (experimental): every backend has an emitter.** `backend.telemetry` is a no-op
   emitter (`enabled` is `False`) until the telemetry manager attaches the backend and hands it a
