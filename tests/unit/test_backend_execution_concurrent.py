@@ -262,6 +262,8 @@ async def test_a_function_shared_by_many_tasks_is_pickled_once_for_the_pool(
     def scale(x):
         return x * factor
 
+    # Start the pool first: starting it loads modules here, and a new module means a new pickle.
+    await process_backend._execute_function(ComputeTask(function=abs, args=[-1]))
     pickled = []
     dump = cloudpickle.CloudPickler.dump
 

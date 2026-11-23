@@ -903,6 +903,45 @@ async def test_shutdown_during_a_long_submit_cancels_what_it_has_not_built(backe
             assert states == ["CANCELED"]
 
 
+async def test_cancelling_a_task_not_reached_runs_the_callback_without_the_lock(
+    backend, monkeypatch
+):
+    """The backend's threads wait on that lock: a callback must never run while it is held."""
+    held = []
+    backend.register_callback(lambda task, state: held.append((state, backend._lock._is_owned())))
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(100)]
+    submit = asyncio.create_task(backend.submit_tasks(tasks))
+    await until(lambda: 0 < len(built) < len(tasks))
+    assert await backend.cancel_task(tasks[-1]["uid"]) is True
+    await submit
+    assert ("CANCELED", False) in held
+    assert all(not owned for _, owned in held)
+
+
+async def test_a_submit_that_fails_midway_reports_no_state_for_what_it_did_not_reach(
+    backend, monkeypatch
+):
+    """As before the batch let the loop run: the caller fails the batch's tasks with the error
+    (AsyncFlow does); a CANCELED of its own would give those tasks a second final state."""
+    seen = record_states(backend)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(100)]
+    submit_one = backend._submit_one
+
+    def failing(task):
+        if task is tasks[60]:
+            raise RuntimeError("routing failed")
+        submit_one(task)
+
+    monkeypatch.setattr(backend, "_submit_one", failing)
+    with pytest.raises(RuntimeError, match="routing failed"):
+        await backend.submit_tasks(tasks)
+    assert 0 < len(built) < len(tasks)
+    assert not [s for t, s in seen if s == "CANCELED"]
+    assert backend._unbuilt == []
+
+
 async def test_a_large_batch_of_results_is_delivered_in_slices(backend, monkeypatch):
     """Every result the relay had sent was handed to the callback in one loop callback."""
     delivered = []

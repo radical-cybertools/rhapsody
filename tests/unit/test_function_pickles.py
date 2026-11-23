@@ -141,6 +141,31 @@ def test_a_global_of_a_by_value_function_rebound_changed_or_added_is_seen():
     assert load(pickles.dumps(read))() == (2, "b", None)
 
 
+def test_values_replaced_twice_between_pickles_are_seen():
+    """The walk compares identities, so the objects it saw must stay alive while their pickle is
+    kept: otherwise a value replaced twice can take the first one's freed address. A float in a
+    list, an int in a dict and a float global, each replaced twice between two pickles."""
+    items = [1.5 * 1.0]
+    options = {"lr": 3 * 1000}
+    module = by_value_module("def read():\n    return LEVEL\n", LEVEL=0.5 * 1.0)
+
+    def values():
+        return items[0], options["lr"]
+
+    pickles = FunctionPickles()
+    for step in range(50):
+        load(pickles.dumps(values))
+        load(pickles.dumps(module["read"]))
+        items[0] = (step + 2.5) * 1.0
+        items[0] = (step + 7.5) * 1.0
+        options["lr"] = (step + 1) * 1001
+        options["lr"] = (step + 1) * 1003
+        module["LEVEL"] = (step + 0.25) * 1.0
+        module["LEVEL"] = (step + 0.75) * 1.0
+        assert load(pickles.dumps(values))() == (step + 7.5, (step + 1) * 1003)
+        assert load(pickles.dumps(module["read"]))() == step + 0.75
+
+
 def test_a_global_that_appears_after_the_first_pickle_is_seen():
     module = by_value_module("def read():\n    return LATER\n")
     read = module["read"]
@@ -249,6 +274,26 @@ def test_a_closure_wrapping_a_function_with_type_hints_is_kept():
     wrapped = wrap(f)
     assert pickles.dumps(wrapped) is pickles.dumps(wrapped)
     assert load(pickles.dumps(wrapped))() == 1
+
+
+def test_a_type_hint_naming_a_class_pickled_by_value_is_not_kept():
+    """Typing's generic forms hold their arguments; a class defined in a function is pickled by
+    value, and its namespace can change."""
+    import typing
+
+    class Local:
+        pass
+
+    def f(items: typing.List[Local]) -> typing.Optional[int]:  # noqa: UP006, UP045
+        return len(items)
+
+    pickles = FunctionPickles()
+    assert pickles.dumps(f) is not pickles.dumps(f)
+
+    def g(items: typing.List[int]) -> typing.Optional[str]:  # noqa: UP006, UP045
+        return None
+
+    assert pickles.dumps(g) is pickles.dumps(g)
 
 
 def test_a_walk_that_fails_falls_back_to_pickling_every_call(monkeypatch):
