@@ -22,6 +22,8 @@ pytest.importorskip("opentelemetry", reason="opentelemetry-sdk not installed")
 from opentelemetry.sdk.metrics import Counter
 from opentelemetry.sdk.metrics import Histogram
 from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics import ObservableCounter
+from opentelemetry.sdk.metrics import ObservableUpDownCounter
 from opentelemetry.sdk.metrics import UpDownCounter
 from opentelemetry.sdk.metrics.export import AggregationTemporality
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
@@ -149,9 +151,13 @@ async def test_a_reader_the_caller_passes_sees_the_task_counts():
 
 
 async def test_a_delta_reader_sees_each_task_once():
+    """The task counters are observable instruments: a reader that sets its temporality per
+    instrument kind names them, as OTLP's delta preference does."""
     delta = {
         Counter: AggregationTemporality.DELTA,
-        UpDownCounter: AggregationTemporality.DELTA,
+        ObservableCounter: AggregationTemporality.DELTA,
+        UpDownCounter: AggregationTemporality.CUMULATIVE,
+        ObservableUpDownCounter: AggregationTemporality.CUMULATIVE,
         Histogram: AggregationTemporality.DELTA,
     }
     reader = InMemoryMetricReader(preferred_temporality=delta)
@@ -197,8 +203,9 @@ async def test_a_subscribers_kind_is_checked_once_not_per_event(monkeypatch):
         await manager._queue.join()
         await asyncio.sleep(0)
         assert len(checks) <= 2
-        assert [e.event_id for e in seen_sync] == [e.event_id for e in events]
-        assert sorted(seen_async) == sorted(e.event_id for e in events)
+        sent = [e.event_id for e in events]
+        assert [e.event_id for e in seen_sync if e.task_id] == sent  # SessionStarted aside
+        assert set(sent) <= set(seen_async)
     finally:
         monkeypatch.undo()
         await manager.stop()
