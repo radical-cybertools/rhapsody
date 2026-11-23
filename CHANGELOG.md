@@ -4,6 +4,20 @@
 
 ### Added
 
+- **`DragonNativeExecutionBackend`** (backend name `dragon_native`) — a second
+  Dragon backend beside `DragonExecutionBackend`, on Dragon's `Process`,
+  `ProcessGroup`, `Policy` and `Queue`, without `dragon.workflows.batch`. It takes
+  the same task descriptions. Functions run in a persistent pool of workers, by
+  default one per physical core, pinned to their hosts and CPUs (placed functions
+  on a worker of that host, GPU tasks on a worker started for that GPU set),
+  executables as one native process each, and
+  `process_templates` as one process group, with the PMI chosen by `pmi`. Unlike a
+  Batch job, a group has no PMI by default. A relay process on the client's node
+  trades tasks and results with the client in batches, so a client process that
+  keeps its GIL busy still starts tasks quickly. See `docs/execution/dragon-native.md`.
+  `tests/integration/test-hpc/benchmarks/dragon_throughput.py` measures it with
+  `--with-rhapsody-dragon-native`, and `--workers_per_node` sets its pool size;
+  `tests/performance/dragon_native_busy_client.py` measures it next to a busy thread.
 - **Telemetry (experimental): every backend has an emitter.** `backend.telemetry` is a no-op
   emitter (`enabled` is `False`) until the telemetry manager attaches the backend and hands it a
   real one through the new `BaseBackend.register_emitter` / `DataBackend.register_emitter` hook
@@ -71,6 +85,37 @@
   status ERROR and the `error.type` attribute; the metrics are recorded as for a good batch.
 
 ### Fixed
+
+- **Telemetry under Dragon no longer keeps a core busy.** The Dragon telemetry adapter runs its
+  resource samplers as a Dragon `ProcessGroup`, and Dragon 0.15's group client watches the group's
+  exception queue in a thread that spins a whole core for as long as the group runs: every process
+  with RHAPSODY's telemetry on under Dragon carried one, and at interpreter exit, with telemetry
+  not stopped, the process never ended. The group now ignores errors on exit, so Dragon starts no
+  such thread; a sampler that fails costs only its node's readings, as before.
+- **Telemetry costs less CPU per task.** An application with tens of thousands of tasks per engine
+  sends six events per task through the telemetry manager (an AsyncFlow engine does), and each cost
+  more than it had to. The task counters and the running-tasks gauge are now tallied in the
+  instrumentation and read by observable instruments when metrics are collected, instead of one
+  instrument call per lifecycle event; each finished task still records its duration as it ends.
+  A subscriber's kind (coroutine function or not) is found once, when it subscribes, not for every
+  event; the checkpoint writer reuses one JSON encoder and each event class's field names; a task
+  span's final attributes are set in one call; and event ids come from a generator of their own
+  (seeded from `os.urandom`, seeded again in a forked child) instead of a system call per event.
+  `summary()`, `task_count()`, `task_spans()`, `read_traces()`, `read_metrics()` and the
+  checkpoint file give what they gave. One difference for a metric reader passed with
+  `metric_readers` that sets its temporality per instrument kind: the task counters are now
+  `ObservableCounter` and `ObservableUpDownCounter` instruments, so such a reader must name those
+  kinds to get them as deltas (OTLP's `DELTA` preference does).
+- **BEHAVIOUR CHANGE: `ConcurrentExecutionBackend` lets go of a task once it has reported the
+  task's final state.** It kept every task it ran in `tasks`, and each task's handler (an asyncio
+  task) in the task's `"future"`, so an engine on it kept every task, and in Python 3.12 each
+  `async def` function task cost more than the one before (`asyncio.run` walks every live asyncio
+  task). Now `tasks` holds only the tasks that have not ended, and a task that ended has no
+  `"future"`; its results stay in the task. `cancel_all_tasks()` returns the number of tasks that
+  were still running, not of every task the backend ran. A task cancelled before it started, a
+  later task with the same uid, and a handler that an eager task factory ran to its end inside
+  `submit_tasks` are handled too. The noop backend no longer keeps a finished asyncio task per
+  task under an eager task factory.
 
 - **`DragonVllmInferenceBackend`: a `queue.Empty` from `get_nowait()` no longer fails a whole batch** — the
   response loop called `empty()` and then `get_nowait()`. Dragon documents `empty()` as

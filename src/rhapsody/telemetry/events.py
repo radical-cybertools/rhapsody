@@ -14,18 +14,25 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import random
 import time
 from dataclasses import dataclass
 from dataclasses import field
 
+# Event ids come from a generator of their own, seeded from os.urandom: no system call per event,
+# and a task that seeds the random module cannot make ids repeat. A forked child seeds it again.
+_ids = random.Random()
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_ids.seed)
+# The version-4 and RFC 4122 variant bits of a UUID, as uuid.UUID(version=4) sets them.
+_UUID4_CLEAR = ~((0xF << 76) | (0x3 << 62))
+_UUID4_SET = (0x4 << 76) | (0x2 << 62)
+
 
 def _new_event_id() -> str:
-    # uuid4().hex without building a UUID object: random bytes with the version-4 and
-    # RFC 4122 variant bits set, so the id still parses as a UUID4.
-    b = bytearray(os.urandom(16))
-    b[6] = (b[6] & 0x0F) | 0x40
-    b[8] = (b[8] & 0x3F) | 0x80
-    return b.hex()
+    # uuid4().hex without building a UUID object: 128 random bits with the version-4 and RFC 4122
+    # variant bits set, so the id still parses as a UUID4.
+    return f"{(_ids.getrandbits(128) & _UUID4_CLEAR) | _UUID4_SET:032x}"
 
 
 def _now_wall() -> float:

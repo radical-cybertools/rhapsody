@@ -53,7 +53,7 @@ async def main():
     # Initialize inference backend for AI tasks
     inference_backend = await DragonVllmInferenceBackend(
         model=ModelConfig(
-            model_name="Qwen2.5-0.5B-Instruct",  # or a local snapshot path
+            model_name="HuggingFaceTB/SmolLM2-1.7B-Instruct",  # or a local snapshot path
             hf_token="...",
             tp_size=1,
         ),
@@ -123,7 +123,7 @@ from rhapsody.backends.ai.config import (
 
 inference_backend = await DragonVllmInferenceBackend(
     model=ModelConfig(
-        model_name="Qwen2.5-0.5B-Instruct",  # or a local snapshot path
+        model_name="HuggingFaceTB/SmolLM2-1.7B-Instruct",  # or a local snapshot path
         hf_token="...",
         tp_size=1,
         max_tokens=256,
