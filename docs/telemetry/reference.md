@@ -385,18 +385,20 @@ The task instrumentation (`rhapsody.telemetry.instrumentation.task`) records the
 
 | Instrument name | Type | Unit | Description |
 |---|---|---|---|
-| `tasks_submitted` | Counter | tasks | Total tasks submitted to the session |
-| `tasks_started` | Counter | tasks | Total tasks that transitioned to RUNNING |
-| `tasks_completed` | Counter | tasks | Total tasks that reached DONE |
-| `tasks_failed` | Counter | tasks | Total tasks that reached FAILED |
-| `tasks_canceled` | Counter | tasks | Total tasks that reached CANCELED |
-| `tasks_running` | UpDownCounter | tasks | Tasks currently in RUNNING state |
+| `tasks_submitted` | ObservableCounter | tasks | Total tasks submitted to the session |
+| `tasks_started` | ObservableCounter | tasks | Total tasks that transitioned to RUNNING |
+| `tasks_completed` | ObservableCounter | tasks | Total tasks that reached DONE |
+| `tasks_failed` | ObservableCounter | tasks | Total tasks that reached FAILED |
+| `tasks_canceled` | ObservableCounter | tasks | Total tasks that reached CANCELED |
+| `tasks_running` | ObservableUpDownCounter | tasks | Tasks currently in RUNNING state |
 | `task_duration_seconds` | Histogram | seconds | Per-task execution duration (RUNNING → DONE/FAILED) |
 | `node_cpu_utilization` | UpDownCounter | % | Current CPU % per node (last-seen delta tracking) |
 | `node_memory_utilization` | UpDownCounter | % | Current memory % per node |
 | `node_gpu_utilization` | UpDownCounter | % | Current GPU % per node |
 
 The *Unit* column describes the quantity; these instruments do not set an OpenTelemetry `unit` (a known limitation, kept for compatibility).
+
+The task counters and `tasks_running` are tallied by the instrumentation and read when metrics are collected (observable instruments), not updated per event: they give the same sums. A metric reader passed with `metric_readers` that sets its temporality per instrument kind must name `ObservableCounter` and `ObservableUpDownCounter` for them.
 
 All instruments carry `session_id` and `backend` as label dimensions. Task instruments additionally carry `executable` and `task_type`. They do not carry `task_id`: one series per task would grow without bound. Per-task identity is on the task spans.
 
