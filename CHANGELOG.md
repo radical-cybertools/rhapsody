@@ -77,6 +77,24 @@
 
 ### Fixed
 
+- **A task's function is pickled once, not once per task.** `DragonNativeExecutionBackend` (pool
+  tasks) and `ConcurrentExecutionBackend` on a process pool cloudpickled each task's function
+  again. For a function cloudpickle cannot import by name (a closure, a lambda, a function of
+  `__main__`), each pickle scans every loaded module, so in a process that has loaded a few
+  thousand modules a task wrapped in two closures cost about a millisecond of the event loop's
+  time. A function's pickle is now kept and given again while nothing it holds has changed: the
+  function and its code, closure, defaults, attributes and the globals its code reads, and the
+  functions, containers and cells among them, are the same objects with the same contents. A
+  function holding an object whose changes cannot be seen this way (an instance, a class or
+  module pickled by value) is pickled for every task, as before. The native backend still loads
+  a task's function and arguments on the worker as from one pickle, so an object both hold stays
+  one object. The native backend's worker messages changed with it: `(uid, fn_data, rest)`.
+- **`DragonNativeExecutionBackend` no longer holds the event loop for a whole batch.**
+  `submit_tasks` built every task of a batch in one go, and the result thread's batches of task
+  states were handed to the callback in one loop callback: a batch of a few thousand tasks held
+  the loop for seconds, and every other coroutine of the process with it. Both now let the loop
+  run every 20 ms. A task that a submit has not reached yet can be cancelled, and is cancelled at
+  shutdown.
 - **BEHAVIOUR CHANGE: `ConcurrentExecutionBackend` lets go of a task once it has reported the
   task's final state.** It kept every task it ran in `tasks`, and each task's handler (an asyncio
   task) in the task's `"future"`, so an engine on it kept every task, and in Python 3.12 each

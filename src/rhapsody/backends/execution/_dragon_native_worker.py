@@ -14,8 +14,10 @@ import contextlib
 import ctypes
 import heapq
 import inspect
+import io
 import itertools
 import os
+import pickle
 import queue
 import sys
 import tempfile
@@ -253,10 +255,12 @@ def run_task(token, fn, args, kwargs, out_path, err_path, inline):
 def worker_main(wid, inbox, results):
     """A pool worker: report ready, then run tasks from ``inbox`` until it receives ``None``.
 
-    Each inbox item is a pickled ``(uid, body)``, where ``body`` is a pickled
-    ``(token, fn, args, kwargs, out_path, err_path, inline)``: a body that cannot be unpickled here
-    (say, its function's module is missing on this node) still fails only its own task. Each result
-    is a pickled ``(DONE, wid, uid, ok, value, traceback, stdout, stderr)``.
+    Each inbox item is a pickled ``(uid, fn_data, rest)``: ``fn_data`` pickles the task's function,
+    and ``rest`` its ``(token, args, kwargs, out_path, err_path, inline)``, continuing that pickle,
+    so one unpickler loads the two as from one pickle. The client keeps a function's pickle while
+    the function stays the same, so many tasks can carry the same ``fn_data``. A call that cannot
+    be unpickled here (say, its function's module is missing on this node) still fails only its
+    own task. Each result is a pickled ``(DONE, wid, uid, ok, value, traceback, stdout, stderr)``.
     """
     import socket
 
@@ -265,15 +269,18 @@ def worker_main(wid, inbox, results):
         raw = inbox.get()
         if raw is None:
             return
-        uid, body = cloudpickle.loads(raw)
+        uid, fn_data, rest = cloudpickle.loads(raw)
         del raw
+        loader = pickle.Unpickler(io.BytesIO(fn_data + rest))  # noqa: S301 - the client's message
+        del fn_data, rest
         try:
-            token, fn, args, kwargs, out_path, err_path, inline = cloudpickle.loads(body)
+            fn = loader.load()
+            token, args, kwargs, out_path, err_path, inline = loader.load()
         except BaseException as exc:  # noqa: BLE001 - the error goes back to the client
-            del body
+            del loader
             send(results, (DONE, wid, uid, False, exc, traceback.format_exc(), "", ""), 4)
             continue
-        del body
+        del loader  # its memo holds everything it loaded
         ok, value, tb, out, err = run_task(token, fn, args, kwargs, out_path, err_path, inline)
         send(results, (DONE, wid, uid, ok, value, tb, out, err), 4)
         # Waiting for the next task, the worker keeps nothing of this one: a large result would
