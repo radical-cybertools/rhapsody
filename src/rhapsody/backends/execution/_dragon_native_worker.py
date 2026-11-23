@@ -273,11 +273,12 @@ def worker_main(wid, inbox, results):
         del raw
         loader = pickle.Unpickler(io.BytesIO(fn_data + rest))  # noqa: S301 - the client's message
         del fn_data, rest
+        fn = None
         try:
             fn = loader.load()
             token, args, kwargs, out_path, err_path, inline = loader.load()
         except BaseException as exc:  # noqa: BLE001 - the error goes back to the client
-            del loader
+            del loader, fn  # waiting for the next task, the worker keeps nothing of this one
             send(results, (DONE, wid, uid, False, exc, traceback.format_exc(), "", ""), 4)
             continue
         del loader  # its memo holds everything it loaded

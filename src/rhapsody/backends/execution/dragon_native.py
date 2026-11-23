@@ -2244,6 +2244,8 @@ class DragonNativeExecutionBackend(BaseBackend):
         # Whether those are cancelled when the call ends: at shutdown, or when the call is. After
         # another error the caller fails the batch's tasks, as before the batch let the loop run.
         cancel_rest = False
+        if not isinstance(tasks, list):
+            tasks = list(tasks)  # the rest of a batch is taken by slicing
         slice_end = time.monotonic() + _LOOP_SLICE
         try:
             for i, task in enumerate(tasks):
@@ -2251,7 +2253,10 @@ class DragonNativeExecutionBackend(BaseBackend):
                     if unbuilt is None:
                         unbuilt = {}
                         for rest in tasks[i:]:
-                            unbuilt.setdefault(rest["uid"], []).append(rest)
+                            waiting = unbuilt.setdefault(rest["uid"], [])
+                            # A task listed twice adds nothing the second time, as when built.
+                            if all(rest is not desc for desc in waiting):
+                                waiting.append(rest)
                         self._unbuilt.append(unbuilt)
                     self._flush_sends()
                     await asyncio.sleep(0)

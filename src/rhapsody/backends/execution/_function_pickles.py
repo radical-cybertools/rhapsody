@@ -10,11 +10,17 @@ framework built on AsyncFlow wraps it, takes about a millisecond to pickle, on t
 ``FunctionPickles`` keeps the pickle of each function it saw last and gives it again while the
 pickle would come out the same: while the function and everything a by-value pickle of it holds
 (its code, closure, defaults, attributes and the globals its code reads, and so on through the
-functions, containers and cells among them) are the same objects with the same contents, and
-``sys.modules`` and cloudpickle's by-value registry have not changed size. It checks that by
-walking those objects for every call, which costs microseconds, not the pickling. A function
-holding something whose changes the walk cannot see (an instance of a class, a class or module
-pickled by value) is pickled for every call, as before, and so is one that holds too much.
+functions, containers, cells and type hints among them) are the same objects with the same
+contents, and ``sys.modules`` and cloudpickle's by-value registry have not changed size. It checks
+that by walking those objects for every call, which costs microseconds, not the pickling. A
+function holding something whose changes the walk cannot see (an instance of a class, a class or
+module pickled by value) is pickled for every call, as before, and so is one that holds too much.
+
+A pickle is kept only once two pickles in a row of the same function, each between two walks that
+agree, come out the same. So a closure made for a single task is never kept, nor what it holds; and
+a value another thread changes while a pickle is taken, and changes back, is not kept either: no
+walk sees the value that pickle holds, but the next pickle differs from it (unless the same race
+happens during that pickle too).
 
 ``dumps_call`` pickles the rest of a call after the function, continuing the function pickle's
 memo, so that one unpickler loading both gives what one pickle of the two gave: an object the
@@ -26,11 +32,13 @@ from __future__ import annotations
 
 import collections
 import functools
+import hashlib
 import io
 import pickle
 import sys
 import threading
 import types
+import weakref
 from typing import Any
 
 import cloudpickle
@@ -77,6 +85,15 @@ _BASE_GLOBALS = ("__package__", "__name__", "__path__", "__file__")
 _ABSENT, _EMPTY, _NONE = 1, 2, 3
 # Deepest nesting a walk follows; deeper counts as more than it can see.
 _MAX_DEPTH = 64
+# What typing's forms hold, as they pickle it: generic aliases and Annotated, TypeVars.
+_TYPING_PARTS = (
+    "__origin__",
+    "__args__",
+    "__metadata__",
+    "__bound__",
+    "__constraints__",
+    "__default__",
+)
 
 
 class _UnseenError(Exception):
@@ -161,13 +178,11 @@ def _walk(fn: Any, budget: int, held: list | None = None) -> tuple:
         elif kind is types.UnionType:  # int | None: its arguments, no __origin__
             visit(obj.__args__)
         elif kind.__module__ == "typing":
-            # Type hints, in a function's annotations: their arguments can name any class.
-            origin = getattr(obj, "__origin__", None)
-            if origin is not None:
-                visit(origin)
-            args = getattr(obj, "__args__", None)
-            if type(args) is tuple:
-                visit(args)
+            # Type hints, in a function's annotations: what they name can be any class.
+            for name in _TYPING_PARTS:
+                part = getattr(obj, name, None)
+                if part is not None:
+                    visit(part)
         else:
             raise _UnseenError
 
@@ -234,7 +249,8 @@ class FunctionPickles:
 
     ``maxsize`` functions are kept, the least recently used dropped first; a pickle larger than
     ``max_bytes`` is never kept, nor is one of a function holding more than ``walk_budget``
-    objects. Safe to use from several threads.
+    objects. With ``confirm`` (the default) a pickle is kept once the next pickle of the same
+    function comes out the same; without, the first is kept. Safe to use from several threads.
     """
 
     def __init__(
@@ -243,12 +259,19 @@ class FunctionPickles:
         max_bytes: int = 1 << 20,
         walk_budget: int = 512,
         protocol: int = pickle.HIGHEST_PROTOCOL,
+        confirm: bool = True,
     ) -> None:
         self.maxsize = maxsize
         self.max_bytes = max_bytes
         self.walk_budget = walk_budget
         self.protocol = protocol
+        self.confirm = confirm
         self._kept: collections.OrderedDict[int, _Pickle] = collections.OrderedDict()
+        # The last pickle's digest of the functions not kept yet, by id: a weak reference, so a
+        # function made for one task, and what it holds, goes with its task.
+        self._last: collections.OrderedDict[int, tuple[weakref.ref, bytes]] = (
+            collections.OrderedDict()
+        )
         self._lock = threading.Lock()
 
     def __len__(self) -> int:
@@ -257,6 +280,7 @@ class FunctionPickles:
     def clear(self) -> None:
         with self._lock:
             self._kept.clear()
+            self._last.clear()
 
     def dumps(self, fn: Any) -> bytes:
         """``cloudpickle.dumps(fn)``, the kept pickle while it would come out the same."""
@@ -283,6 +307,7 @@ class FunctionPickles:
         key = id(fn)
         with self._lock:
             kept = self._kept.get(key)
+            last = self._last.get(key)
         if kept is not None and kept.fn is fn:
             if kept.modules == modules and kept.registry == registry:
                 if _walk_or_none(fn, self.walk_budget) == kept.walk:
@@ -290,21 +315,40 @@ class FunctionPickles:
                         if key in self._kept:
                             self._kept.move_to_end(key)
                     return kept
-        # Before pickling: a change made meanwhile makes the next walk differ.
+        last_digest = last[1] if last is not None and last[0]() is fn else None
+        # Walk only for a pickle that may be kept: the first of a function is not, when confirming.
+        may_keep = not self.confirm or last_digest is not None
         held: list = []
-        walk = _walk_or_none(fn, self.walk_budget, held)
+        walk = _walk_or_none(fn, self.walk_budget, held) if may_keep else None
         buffer = io.BytesIO()
         pickler = cloudpickle.CloudPickler(buffer, protocol=self.protocol)
         pickler.dump(fn)
         data = buffer.getvalue()
         memo = pickler.memo.copy()
         fresh = _Pickle(fn, data, memo, pickler.globals_ref, walk, held, modules, registry)
+        digest = hashlib.blake2b(data, digest_size=16).digest() if self.confirm else b""
+        # Kept if nothing changed while it was taken, and, confirming, it is the last one again.
+        keep = (
+            walk is not None
+            and len(data) <= self.max_bytes
+            and _walk_or_none(fn, self.walk_budget) == walk
+            and (not self.confirm or digest == last_digest)
+        )
         with self._lock:
-            if walk is not None and len(data) <= self.max_bytes:
+            if kept is not None and self._kept.get(key) is kept:
+                del self._kept[key]  # it no longer matches its function
+            if keep:
+                self._last.pop(key, None)
                 self._kept[key] = fresh
-                self._kept.move_to_end(key)
                 while len(self._kept) > self.maxsize:
                     self._kept.popitem(last=False)
-            elif self._kept.get(key) is kept:
-                self._kept.pop(key, None)
+            elif self.confirm:
+                try:
+                    self._last[key] = (weakref.ref(fn), digest)
+                except TypeError:  # an object without weak references: never kept
+                    self._last.pop(key, None)
+                else:
+                    self._last.move_to_end(key)
+                    while len(self._last) > 8 * self.maxsize:
+                        self._last.popitem(last=False)
         return fresh
