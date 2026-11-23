@@ -134,7 +134,11 @@ def _walk(fn: Any, budget: int) -> tuple:
                 out.append(_EMPTY)
             else:
                 visit(contents)
-        elif kind is types.ModuleType or isinstance(obj, type):
+        elif isinstance(obj, type):
+            # A built-in class cannot change (cloudpickle names some, as NoneType, its own way).
+            if obj.__module__ != "builtins" and not _should_pickle_by_reference(obj):
+                raise _UnseenError  # pickled by value: its namespace can change
+        elif kind is types.ModuleType:
             if not _should_pickle_by_reference(obj):
                 raise _UnseenError  # pickled by value: its namespace can change
         elif kind is types.BuiltinFunctionType:
@@ -149,8 +153,10 @@ def _walk(fn: Any, budget: int) -> tuple:
         elif kind is types.MethodType:
             visit(obj.__func__)
             visit(obj.__self__)
-        elif kind is types.GenericAlias or kind is types.UnionType:
+        elif kind is types.GenericAlias:
             visit(obj.__origin__)
+            visit(obj.__args__)
+        elif kind is types.UnionType:  # int | None: its arguments, no __origin__
             visit(obj.__args__)
         elif kind.__module__ == "typing":
             return  # type hints, in a function's annotations
@@ -186,6 +192,15 @@ def _walk(fn: Any, budget: int) -> tuple:
 
     visit(fn)
     return tuple(out)
+
+
+def _walk_or_none(fn: Any, budget: int) -> tuple | None:
+    """``_walk``, or None for a function that cannot be kept: one holding what a walk cannot see, or
+    one whose walk fails, which then only costs the cache, never the task."""
+    try:
+        return _walk(fn, budget)
+    except Exception:  # noqa: BLE001 - _UnseenError, or an object the walk did not expect
+        return None
 
 
 class _Pickle:
@@ -259,18 +274,13 @@ class FunctionPickles:
             kept = self._kept.get(key)
         if kept is not None and kept.fn is fn:
             if kept.modules == modules and kept.registry == registry:
-                try:
-                    if _walk(fn, self.walk_budget) == kept.walk:
-                        with self._lock:
-                            if key in self._kept:
-                                self._kept.move_to_end(key)
-                        return kept
-                except _UnseenError:
-                    pass
-        try:  # before pickling: a change made meanwhile makes the next walk differ
-            walk = _walk(fn, self.walk_budget)
-        except _UnseenError:
-            walk = None
+                if _walk_or_none(fn, self.walk_budget) == kept.walk:
+                    with self._lock:
+                        if key in self._kept:
+                            self._kept.move_to_end(key)
+                    return kept
+        # Before pickling: a change made meanwhile makes the next walk differ.
+        walk = _walk_or_none(fn, self.walk_budget)
         buffer = io.BytesIO()
         pickler = cloudpickle.CloudPickler(buffer, protocol=self.protocol)
         pickler.dump(fn)
