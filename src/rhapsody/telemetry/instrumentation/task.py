@@ -112,12 +112,11 @@ class TaskInstrumentation(Instrumentation):
         attributes = event.attributes
         executable = attributes.get("executable", "")
         task_type = attributes.get("task_type", "")
-        # OpenTelemetry takes a sequence as an attribute value (as a tuple): so does the key.
         key = (
             event.session_id,
             event.backend or "",
-            tuple(executable) if isinstance(executable, list) else executable,
-            tuple(task_type) if isinstance(task_type, list) else task_type,
+            _key_value(executable),
+            _key_value(task_type),
         )
         if key not in self._series:
             self._series[key] = {
@@ -182,13 +181,44 @@ class TaskInstrumentation(Instrumentation):
         }
 
 
+_PLAIN = (bool, str, int, float, bytes, type(None))
+
+
+def _key_value(value: Any) -> Any:
+    """An attribute value as part of a tally's key, equal where OpenTelemetry's values are equal.
+
+    As OpenTelemetry takes attribute values: plain values kept apart by kind (1 and True are two
+    series), sequences as tuples (a list and a tuple of the same items are one value), mappings item
+    by item, and anything else as its ``str()``.
+    """
+    kind = type(value)
+    if kind is str:
+        return value
+    if kind in _PLAIN:
+        return (kind.__name__, value)
+    if isinstance(value, (list, tuple)):
+        return ("sequence", *[_key_value(item) for item in value])
+    if isinstance(value, dict):
+        return ("mapping", *[(key, _key_value(item)) for key, item in value.items()])
+    return ("str", str(value))
+
+
 def _observer(tally: dict, series: dict) -> Callable[[Any], list]:
     """An observable instrument's callback: one observation per series of ``tally``."""
     from opentelemetry.metrics import Observation
 
     def observe(options: Any) -> list:
-        # The collection may run on a reader's thread: copy before reading.
-        return [Observation(value, series[key]) for key, value in list(tally.items())]
+        # The collection may run on a reader's thread while the dispatch loop adds a series: copy
+        # first, again if the dict changed under the copy (free-threaded Python raises then).
+        for _ in range(10):
+            try:
+                items = list(tally.items())
+                break
+            except RuntimeError:
+                continue
+        else:
+            items = []
+        return [Observation(value, series[key]) for key, value in items]
 
     return observe
 
