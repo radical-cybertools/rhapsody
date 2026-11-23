@@ -254,7 +254,11 @@ async def test_execute_function_regular_sync_function_in_process(process_backend
 async def test_a_function_shared_by_many_tasks_is_pickled_once_for_the_pool(
     process_backend, monkeypatch
 ):
-    """Each task cloudpickled its function again, on the event loop."""
+    """Each task cloudpickled its function again, on the event loop.
+
+    Now twice: a pickle is kept
+    once the next one comes out the same.
+    """
     import cloudpickle
 
     factor = 3
@@ -279,7 +283,7 @@ async def test_a_function_shared_by_many_tasks_is_pickled_once_for_the_pool(
         )
         assert state == "DONE"
         assert result_task["return_value"] == 3 * i
-    assert len(pickled) == 1
+    assert len(pickled) == 2
 
 
 @pytest.mark.asyncio

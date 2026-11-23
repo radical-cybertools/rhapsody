@@ -786,7 +786,8 @@ def dumps_of(monkeypatch, fn):
 
 async def test_a_function_shared_by_many_tasks_is_pickled_once(backend, monkeypatch):
     """Each task pickled its function by value again: for a closure, cloudpickle scans every loaded
-    module, about a millisecond a task in a process with a few thousand of them."""
+    module, about a millisecond a task in a process with a few thousand of them. Now twice: a pickle
+    is kept once the next one comes out the same."""
     rec = Recorder(backend)
     scale = make_scaler([3])
     pickled = dumps_of(monkeypatch, scale)
@@ -795,7 +796,7 @@ async def test_a_function_shared_by_many_tasks_is_pickled_once(backend, monkeypa
     for task in tasks:
         assert await rec.wait(task["uid"]) == ["DONE"]
     assert [t["return_value"] for t in tasks] == [3 * i for i in range(20)]
-    assert len(pickled) == 1
+    assert len(pickled) == 2
 
 
 async def test_a_task_runs_its_function_as_it_was_when_submitted(backend):
@@ -940,6 +941,47 @@ async def test_a_submit_that_fails_midway_reports_no_state_for_what_it_did_not_r
     assert 0 < len(built) < len(tasks)
     assert not [s for t, s in seen if s == "CANCELED"]
     assert backend._unbuilt == []
+
+
+async def test_a_long_submit_takes_any_iterable(backend, monkeypatch):
+    rec = Recorder(backend)
+    slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(30)]
+    await backend.submit_tasks(task for task in tasks)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+
+
+async def test_cancelling_a_long_submit_cancels_what_it_has_not_built(backend, monkeypatch):
+    seen = record_states(backend)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(100)]
+    submit = asyncio.create_task(backend.submit_tasks(tasks))
+    await until(lambda: 0 < len(built) < len(tasks))
+    submit.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await submit
+    for task in tasks:
+        states = [s for t, s in seen if t is task]
+        if task["uid"] in built:
+            await until(lambda task=task: [s for t, s in seen if t is task][-1] == "DONE")
+        else:
+            assert states == ["CANCELED"]
+
+
+async def test_a_task_listed_twice_and_cancelled_before_it_is_built_is_cancelled_once(
+    backend, monkeypatch
+):
+    """As before the batch let the loop run, the second listing of one task adds nothing."""
+    seen = record_states(backend)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(100)]
+    twice = tasks[-1]
+    submit = asyncio.create_task(backend.submit_tasks([*tasks, twice]))
+    await until(lambda: 0 < len(built) < len(tasks))
+    assert await backend.cancel_task(twice["uid"]) is True
+    await submit
+    assert [s for t, s in seen if t is twice] == ["CANCELED"]
 
 
 async def test_a_large_batch_of_results_is_delivered_in_slices(backend, monkeypatch):
