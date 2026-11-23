@@ -82,11 +82,12 @@
   again. For a function cloudpickle cannot import by name (a closure, a lambda, a function of
   `__main__`), each pickle scans every loaded module, so in a process that has loaded a few
   thousand modules a task wrapped in two closures cost about a millisecond of the event loop's
-  time. A function's pickle is now kept and given again while nothing it holds has changed: the
-  function and its code, closure, defaults, attributes and the globals its code reads, and the
-  functions, containers and cells among them, are the same objects with the same contents. A
-  function holding an object whose changes cannot be seen this way (an instance, a class or
-  module pickled by value) is pickled for every task, as before. The native backend still loads
+  time. A function's pickle is now kept, once a second pickle of it comes out the same, and given
+  again while nothing it holds has changed: the function and its code, closure, defaults,
+  attributes and the globals its code reads, and the functions, containers, cells and type hints
+  among them, are the same objects with the same contents. A function holding an object whose
+  changes cannot be seen this way (an instance, a class or module pickled by value) is pickled for
+  every task, as before, and a closure made for a single task is never kept. The native backend still loads
   a task's function and arguments on the worker as from one pickle, so an object both hold stays
   one object. The native backend's worker messages changed with it: `(uid, fn_data, rest)`.
 - **`DragonNativeExecutionBackend` no longer holds the event loop for a whole batch.**
