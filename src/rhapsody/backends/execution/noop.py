@@ -65,7 +65,9 @@ class NoopExecutionBackend(BaseBackend):
             self.tasks[uid] = task
             # Track the completion future so it can be cancelled via
             # cancel_task / cancel_all_tasks / shutdown.
-            self._futures[uid] = asyncio.create_task(self._complete(task))
+            future = asyncio.create_task(self._complete(task))
+            if not future.done():  # an eager task factory may have completed it already
+                self._futures[uid] = future
 
     async def _complete(self, task: dict) -> None:
         uid = task["uid"]
