@@ -2241,6 +2241,9 @@ class DragonNativeExecutionBackend(BaseBackend):
 
         # The tasks not reached yet, by uid, from the first time this call lets the loop run.
         unbuilt: dict[str, list[dict]] | None = None
+        # Whether those are cancelled when the call ends: at shutdown, or when the call is. After
+        # another error the caller fails the batch's tasks, as before the batch let the loop run.
+        cancel_rest = False
         slice_end = time.monotonic() + _LOOP_SLICE
         try:
             for i, task in enumerate(tasks):
@@ -2253,17 +2256,22 @@ class DragonNativeExecutionBackend(BaseBackend):
                     self._flush_sends()
                     await asyncio.sleep(0)
                     if self._backend_state == BackendMainStates.SHUTDOWN:
+                        cancel_rest = True
                         break
                     slice_end = time.monotonic() + _LOOP_SLICE
                 if unbuilt is not None and not _take(unbuilt, task):
                     continue  # cancelled while the loop ran
                 self._submit_one(task)
+        except asyncio.CancelledError:
+            cancel_rest = True
+            raise
         finally:
             if unbuilt is not None:
                 self._unbuilt[:] = [u for u in self._unbuilt if u is not unbuilt]
-                for descs in unbuilt.values():
-                    for desc in descs:
-                        self._callback_func(desc, "CANCELED")
+                if cancel_rest:
+                    for descs in unbuilt.values():
+                        for desc in descs:
+                            self._callback_func(desc, "CANCELED")
             self._flush_sends()
 
     def _submit_one(self, task: dict) -> None:
@@ -2316,24 +2324,27 @@ class DragonNativeExecutionBackend(BaseBackend):
         when the task is unknown or has finished.
         """
         unbuilt = [desc for waiting in self._unbuilt for desc in waiting.pop(uid, ())]
+        worker = None
+        started = False
         with self._lock:
             rec = self._tasks.pop(uid, None)
-            if rec is None:
-                for desc in unbuilt:
-                    self._callback_func(desc, "CANCELED")
-                return bool(unbuilt)
-            rec.cancelled = True
-            worker = None
-            if rec.state == "queued":
-                pending = self._pending[rec.key] if rec.kind == "pool" else self._proc_queue
-                with contextlib.suppress(ValueError):
-                    pending.remove(rec)
-            elif rec.kind == "pool":
-                worker, rec.worker = rec.worker, None
-                worker.state = "dead"
-                worker.task = None
-            rec.state = "done"
-            started = bool(rec.puids)
+            if rec is not None:
+                rec.cancelled = True
+                if rec.state == "queued":
+                    pending = self._pending[rec.key] if rec.kind == "pool" else self._proc_queue
+                    with contextlib.suppress(ValueError):
+                        pending.remove(rec)
+                elif rec.kind == "pool":
+                    worker, rec.worker = rec.worker, None
+                    worker.state = "dead"
+                    worker.task = None
+                rec.state = "done"
+                started = bool(rec.puids)
+        # Callbacks run without the lock, which the backend's threads wait on.
+        if rec is None:
+            for desc in unbuilt:
+                self._callback_func(desc, "CANCELED")
+            return bool(unbuilt)
         for desc in (rec.desc, *rec.repeats, *unbuilt):
             self._callback_func(desc, "CANCELED")
         if worker is not None:

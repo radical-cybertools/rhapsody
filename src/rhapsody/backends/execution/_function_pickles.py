@@ -83,13 +83,13 @@ class _UnseenError(Exception):
     """A function holds something whose changes a walk cannot see, or too much."""
 
 
-def _walk(fn: Any, budget: int) -> tuple:
+def _walk(fn: Any, budget: int, held: list | None = None) -> tuple:
     """The identities and sizes of everything a by-value pickle of ``fn`` holds, in a fixed order.
 
     Two walks of the same objects give equal tuples, and while the objects of the first walk are
     alive (so their ids cannot be reused), equal tuples mean the same objects with the same
-    contents. Raises ``_UnseenError`` for an object whose changes it cannot see, or after ``budget``
-    objects.
+    contents. ``held``, if given, gets every object the walk saw, to keep them alive. Raises
+    ``_UnseenError`` for an object whose changes it cannot see, or after ``budget`` objects.
     """
     out: list = []
     seen: set = set()
@@ -102,6 +102,8 @@ def _walk(fn: Any, budget: int) -> tuple:
         if oid in seen:
             return
         seen.add(oid)
+        if held is not None:
+            held.append(obj)
         left[0] -= 1
         if left[0] < 0 or depth[0] > _MAX_DEPTH:
             raise _UnseenError
@@ -159,7 +161,13 @@ def _walk(fn: Any, budget: int) -> tuple:
         elif kind is types.UnionType:  # int | None: its arguments, no __origin__
             visit(obj.__args__)
         elif kind.__module__ == "typing":
-            return  # type hints, in a function's annotations
+            # Type hints, in a function's annotations: their arguments can name any class.
+            origin = getattr(obj, "__origin__", None)
+            if origin is not None:
+                visit(origin)
+            args = getattr(obj, "__args__", None)
+            if type(args) is tuple:
+                visit(args)
         else:
             raise _UnseenError
 
@@ -194,11 +202,11 @@ def _walk(fn: Any, budget: int) -> tuple:
     return tuple(out)
 
 
-def _walk_or_none(fn: Any, budget: int) -> tuple | None:
+def _walk_or_none(fn: Any, budget: int, held: list | None = None) -> tuple | None:
     """``_walk``, or None for a function that cannot be kept: one holding what a walk cannot see, or
     one whose walk fails, which then only costs the cache, never the task."""
     try:
-        return _walk(fn, budget)
+        return _walk(fn, budget, held)
     except Exception:  # noqa: BLE001 - _UnseenError, or an object the walk did not expect
         return None
 
@@ -206,10 +214,13 @@ def _walk_or_none(fn: Any, budget: int) -> tuple | None:
 class _Pickle:
     """A function's pickle, with what continues it and what it was taken from."""
 
-    __slots__ = ("data", "fn", "globals_ref", "memo", "modules", "registry", "walk")
+    __slots__ = ("data", "fn", "globals_ref", "held", "memo", "modules", "registry", "walk")
 
-    def __init__(self, fn, data, memo, globals_ref, walk, modules, registry):
+    def __init__(self, fn, data, memo, globals_ref, walk, held, modules, registry):
         self.fn = fn
+        # Every object of the walk, alive while the pickle is kept: a value replaced in a list,
+        # dict or global could otherwise take a freed object's address and look unchanged.
+        self.held = held
         self.data = data
         self.memo = memo
         self.globals_ref = globals_ref
@@ -280,12 +291,14 @@ class FunctionPickles:
                             self._kept.move_to_end(key)
                     return kept
         # Before pickling: a change made meanwhile makes the next walk differ.
-        walk = _walk_or_none(fn, self.walk_budget)
+        held: list = []
+        walk = _walk_or_none(fn, self.walk_budget, held)
         buffer = io.BytesIO()
         pickler = cloudpickle.CloudPickler(buffer, protocol=self.protocol)
         pickler.dump(fn)
         data = buffer.getvalue()
-        fresh = _Pickle(fn, data, pickler.memo.copy(), pickler.globals_ref, walk, modules, registry)
+        memo = pickler.memo.copy()
+        fresh = _Pickle(fn, data, memo, pickler.globals_ref, walk, held, modules, registry)
         with self._lock:
             if walk is not None and len(data) <= self.max_bytes:
                 self._kept[key] = fresh
