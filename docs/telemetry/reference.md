@@ -398,7 +398,7 @@ The task instrumentation (`rhapsody.telemetry.instrumentation.task`) records the
 
 The *Unit* column describes the quantity; these instruments do not set an OpenTelemetry `unit` (a known limitation, kept for compatibility).
 
-The task counters and `tasks_running` are tallied by the instrumentation and read when metrics are collected (observable instruments), not updated per event: they give the same sums. A metric reader passed with `metric_readers` that sets its temporality per instrument kind must name `ObservableCounter` and `ObservableUpDownCounter` for them.
+The task counters and `tasks_running` are tallied by the instrumentation and read when metrics are collected (observable instruments), not updated per event: they give the same sums. So a metric reader passed with `metric_readers` that sets its temporality per instrument kind must name `ObservableCounter` and `ObservableUpDownCounter` for them; a delta reader gets a zero for a series that saw no task since its last collection; a cumulative series starts at the first collection that saw it; and exemplars, if recorded, come from the collecting caller's context.
 
 All instruments carry `session_id` and `backend` as label dimensions. Task instruments additionally carry `executable` and `task_type`. They do not carry `task_id`: one series per task would grow without bound. Per-task identity is on the task spans.
 
