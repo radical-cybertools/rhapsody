@@ -223,6 +223,48 @@ def test_a_new_module_in_sys_modules_drops_the_kept_pickle(monkeypatch):
     assert pickles.dumps(fn) is not first
 
 
+def test_a_closure_wrapping_a_function_with_type_hints_is_kept():
+    """functools.wraps copies the wrapped function's annotations onto the closure, so the walk
+    meets type hints: unions written with |, generic aliases, typing's own forms, strings."""
+    import functools
+    import typing
+
+    def f(
+        a: dict | None = None,
+        b: dict[str, int] | None = None,
+        c: typing.Optional[list[int]] = None,
+        *,
+        d: "str" = "",
+    ) -> int | None:
+        return 1
+
+    def wrap(func):
+        @functools.wraps(func)
+        def run(*args, **kwargs):
+            return func(*args, **kwargs)
+
+        return run
+
+    pickles = FunctionPickles()
+    wrapped = wrap(f)
+    assert pickles.dumps(wrapped) is pickles.dumps(wrapped)
+    assert load(pickles.dumps(wrapped))() == 1
+
+
+def test_a_walk_that_fails_falls_back_to_pickling_every_call(monkeypatch):
+    """Whatever the walk meets, the task is pickled: an error in the walk only costs the cache."""
+    from rhapsody.backends.execution import _function_pickles
+
+    def broken(fn, budget):
+        raise AttributeError("something the walk did not expect")
+
+    monkeypatch.setattr(_function_pickles, "_walk", broken)
+    pickles = FunctionPickles()
+    fn = make_adder(1)
+    assert pickles.dumps(fn) is not pickles.dumps(fn)
+    assert load(pickles.dumps(fn))(1) == 2
+
+
 def test_a_recursive_closure_is_pickled_and_kept():
     def make():
         def fact(n):
