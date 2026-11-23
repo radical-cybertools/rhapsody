@@ -272,3 +272,36 @@ async def test_checkpoint_event_lines_keep_every_field(tmp_path):
     ]
     assert completed["attributes"]["odd"] == "{1, 2}"  # what json cannot write, as str()
     assert completed["name"] == "TaskCompleted" and completed["span_id"] is not None
+
+
+def test_the_checkpoint_field_names_keep_no_event_class_alive():
+    """AsyncFlow defines an event class per engine; a long-lived service makes many engines."""
+    import gc
+    import weakref
+
+    from rhapsody.telemetry.events import define_event
+    from rhapsody.telemetry.manager import _field_names
+
+    resolved = define_event("asyncflow.TaskResolved")
+    assert _field_names(resolved)[0] == "event_id"
+    ref = weakref.ref(resolved)
+    del resolved
+    gc.collect()
+    assert ref() is None
+
+
+def test_task_counts_take_a_list_valued_attribute():
+    """OpenTelemetry takes a sequence as an attribute value; the tallies must too."""
+    reader = InMemoryMetricReader()
+    inst = TaskInstrumentation()
+    inst.instrument(_context(MeterProvider(metric_readers=[reader]).get_meter("test")))
+    attributes = {"executable": ["mpirun", "app"], "task_type": "executable"}
+    for event in (
+        _event(TaskSubmitted, "t1", attributes=attributes),
+        _event(TaskStarted, "t1", attributes=attributes),
+        _event(TaskCompleted, "t1", duration_seconds=1.0, attributes=attributes),
+    ):
+        inst.on_event(event)
+    totals = _totals(reader)
+    assert totals["tasks_submitted"] == 1 and totals["tasks_completed"] == 1
+    assert totals["tasks_running"] == 0
