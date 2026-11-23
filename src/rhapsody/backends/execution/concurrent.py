@@ -357,9 +357,28 @@ class ConcurrentExecutionBackend(BaseBackend):
         except Exception as e:
             self.logger.exception(f"Error handling task {task.get('uid')}: {e}")
             raise
+        finally:
+            self._release(task, asyncio.current_task())
+
+    def _release(self, task: dict, handler: asyncio.Task) -> None:
+        """Forget a task that has ended, and take its handler out of the task.
+
+        The caller keeps the task, and with it its results. The backend keeps neither the task
+        nor its handler: one that did would keep every task it ever ran. A task submitted again
+        while it ran, or another task with its uid, has taken its place and stays.
+        """
+        if task.get("future") is not handler:
+            return
+        del task["future"]
+        if self.tasks.get(task["uid"]) is task:
+            del self.tasks[task["uid"]]
 
     async def submit_tasks(self, tasks: list[dict[str, Any]]) -> list[asyncio.Task]:
-        """Submit tasks for execution."""
+        """Submit tasks for execution.
+
+        The backend keeps a task in ``tasks``, and its handler in the task's ``"future"``, until
+        the task ends.
+        """
         # Set backend state to RUNNING when tasks are submitted
         if self._backend_state != BackendMainStates.RUNNING:
             self._backend_state = BackendMainStates.RUNNING
@@ -370,9 +389,11 @@ class ConcurrentExecutionBackend(BaseBackend):
         for task in tasks:
             future = asyncio.create_task(self._handle_task(task))
             submitted_tasks.append(future)
+            if future.done():
+                continue  # an eager task factory ran it to its end: there is nothing to keep
 
             self.tasks[task["uid"]] = task
-            self.tasks[task["uid"]]["future"] = future
+            task["future"] = future
 
         return submitted_tasks
 
@@ -398,6 +419,8 @@ class ConcurrentExecutionBackend(BaseBackend):
                 await asyncio.wait([future])
                 # Set state on the task object itself before callback
                 self._callback_func(task, "CANCELED")
+                # A task cancelled before its handler started never ran the handler's release
+                self._release(task, future)
                 return True
         return False
 
@@ -408,11 +431,13 @@ class ConcurrentExecutionBackend(BaseBackend):
         for task in self.tasks.values():
             future = task["future"]
             if future.cancel():
-                cancelling.append(future)
+                cancelling.append((task, future))
             cancelled_count += 1
         self.tasks.clear()
         if cancelling:
-            await asyncio.wait(cancelling)
+            await asyncio.wait([future for _, future in cancelling])
+            for task, future in cancelling:
+                self._release(task, future)
         return cancelled_count
 
     async def shutdown(self) -> None:

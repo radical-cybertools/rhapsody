@@ -152,6 +152,10 @@ backend = await DaskExecutionBackend()
 from rhapsody.backends import DragonExecutionBackend
 backend = await DragonExecutionBackend()
 
+# Dragon HPC, on Dragon's native API
+from rhapsody.backends import DragonNativeExecutionBackend
+backend = await DragonNativeExecutionBackend()
+
 # Create workflow with chosen backend
 flow = await WorkflowEngine.create(backend=backend)
 ```
@@ -182,6 +186,10 @@ Each backend declares whether it moves data between tasks through two independen
     until the backend shuts down; and an object bound to a loop that a task keeps beyond its end
     stays usable on the same thread only. Sync functions never get a loop, and a process pool
     ignores the option.
+
+!!! tip "Two Dragon backends"
+    `DragonNativeExecutionBackend` takes the same tasks as `DragonExecutionBackend` and drives
+    Dragon's processes directly, without Batch. See [Dragon Native Backend](dragon-native.md).
 
 !!! note "Task Granularity"
     - AsyncFlow excels at dynamic, fine-grained task graphs
