@@ -1474,23 +1474,33 @@ async def test_a_function_process_that_exits_on_its_own_after_its_result_is_not_
 async def test_a_function_process_that_fails_after_its_result_stays_done_with_a_warning(
     backend, dragon, monkeypatch, caplog
 ):
-    """Once reported on its result, a later exit code does not change the task: it is logged."""
+    """Once reported on its result, a later exit code does not change the task: it is logged.
+
+    The process exits only once its task is DONE: a sleep was not always long enough, and a process
+    whose exit the watcher finds before its result is reported on its exit code. The watcher frees
+    the ranks before it logs the exit code, so the test waits for the warning itself.
+    """
     original = worker_module.run_function_process
+    reported = threading.Event()
 
     def crash_at_exit(*args):
         original(*args)
-        time.sleep(0.2)  # after the result has been reported
+        reported.wait(10)
         raise SystemExit(3)
 
     monkeypatch.setattr(worker_module, "run_function_process", crash_at_exit)
     rec = Recorder(backend)
     task = fn_task(square, 4, task_backend_specific_kwargs={"process_template": {}})
-    with caplog.at_level(logging.WARNING):
-        await backend.submit_tasks([task])
-        assert await rec.wait(task["uid"]) == ["DONE"]
-        assert task["return_value"] == 16
-        await until(lambda: backend._running_ranks == 0)
-    assert "exited with code 1 after its result" in caplog.text
+    try:
+        with caplog.at_level(logging.WARNING):
+            await backend.submit_tasks([task])
+            assert await rec.wait(task["uid"]) == ["DONE"]
+            reported.set()
+            assert task["return_value"] == 16
+            await until(lambda: "exited with code 1 after its result" in caplog.text)
+            await until(lambda: backend._running_ranks == 0)
+    finally:
+        reported.set()
 
 
 async def test_shutdown_lets_a_process_that_reported_its_result_exit_on_its_own(
