@@ -305,3 +305,53 @@ def test_task_counts_take_a_list_valued_attribute():
     totals = _totals(reader)
     assert totals["tasks_submitted"] == 1 and totals["tasks_completed"] == 1
     assert totals["tasks_running"] == 0
+
+
+def _points_of(reader, name):
+    data = reader.get_metrics_data()
+    return [
+        (dict(dp.attributes).get("executable"), dp.value)
+        for rm in data.resource_metrics
+        for sm in rm.scope_metrics
+        for m in sm.metrics
+        if m.name == name
+        for dp in m.data.data_points
+    ]
+
+
+def test_task_counts_take_any_attribute_value_and_keep_kinds_apart():
+    """As OpenTelemetry's own counters do: 1 and True are two series, a list and a tuple of the same
+    items one, and a mapping, a set or a nested list is counted too."""
+    reader = InMemoryMetricReader()
+    inst = TaskInstrumentation()
+    inst.instrument(_context(MeterProvider(metric_readers=[reader]).get_meter("test")))
+    values = (1, True, {"a": 1}, {1}, [["a"]], ("x", "y"), ["x", "y"])
+    for i, executable in enumerate(values):
+        attributes = {"executable": executable, "task_type": "function"}
+        inst.on_event(_event(TaskSubmitted, f"t{i}", attributes=attributes))
+    points = _points_of(reader, "tasks_submitted")
+    assert sum(value for _, value in points) == len(values)
+    assert len(points) == len(values) - 1  # the list and the tuple share a series
+    assert (("x", "y"), 2) in points
+    assert [value for executable, value in points if executable is True] == [1]
+    assert [value for executable, value in points if executable == 1 and executable is not True]
+
+
+def test_a_collection_survives_a_tally_changing_under_it():
+    """A reader on another thread collects while the dispatch loop adds series (free-threaded Python
+    raises then, where the GIL would not)."""
+    from rhapsody.telemetry.instrumentation.task import _observer
+
+    class Changing(dict):
+        calls = 0
+
+        def items(self):
+            Changing.calls += 1
+            if Changing.calls == 1:
+                raise RuntimeError("dictionary changed size during iteration")
+            return super().items()
+
+    key = ("s", "b", "x", "function")
+    tally = Changing({key: 2})
+    observations = _observer(tally, {key: {"executable": "x"}})(None)
+    assert [o.value for o in observations] == [2]
