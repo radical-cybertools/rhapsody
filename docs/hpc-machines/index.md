@@ -23,6 +23,8 @@ Each guide covers environment setup, module loading, job allocation, and working
 | [NCSA Delta](ncsa-delta.md) | NSF / NCSA | Cray MPICH, SSH launcher | Verified |
 | [NERSC Perlmutter — Scalable Execution](perlmutter-scalable.md) | DOE / NERSC | Cray libfabric + CUDA, SLURM launcher | Verified |
 | [NERSC Perlmutter — AI-HPC](perlmutter-ai-hpc.md) | DOE / NERSC | Cray libfabric + CUDA, SLURM launcher | Verified |
+| [Princeton StellarAI — Scalable Execution](stellarai-scalable.md) | Princeton / PPPL | Standard SLURM, SLURM launcher, TCP | Verified |
+| [Princeton StellarAI — AI-HPC](stellarai-ai-hpc.md) | Princeton / PPPL | NVIDIA B200 + CUDA, SLURM launcher, TCP | Verified |
 | [PSC Bridges-2](bridges2.md) | NSF / PSC | Standard SLURM, SSH launcher, TCP | Verified |
 | [Purdue Anvil](anvil.md) | NSF / ACCESS / Purdue | Cray MPICH, SSH launcher (HSTA) | Verified |
 

@@ -71,7 +71,7 @@ async def _make_vllm_backend(name: str, port: int, node_offset: int) -> DragonVl
     """
     return await DragonVllmInferenceBackend(
         model=ModelConfig(
-            model_name="Qwen/Qwen2.5-0.5B-Instruct",  # or the snapshot path on disk
+            model_name="HuggingFaceTB/SmolLM2-1.7B-Instruct",  # or the snapshot path on disk
             hf_token="",
             tp_size=1,
             gpu_memory_utilization=0.65,
