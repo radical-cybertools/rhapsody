@@ -77,6 +77,12 @@
 
 ### Fixed
 
+- **Telemetry under Dragon no longer keeps a core busy.** The Dragon telemetry adapter runs its
+  resource samplers as a Dragon `ProcessGroup`, and Dragon 0.15's group client watches the group's
+  exception queue in a thread that spins a whole core for as long as the group runs: every process
+  with RHAPSODY's telemetry on under Dragon carried one, and at interpreter exit, with telemetry
+  not stopped, the process never ended. The group now ignores errors on exit, so Dragon starts no
+  such thread; a sampler that fails costs only its node's readings, as before.
 - **Telemetry costs less CPU per task.** An application with tens of thousands of tasks per engine
   sends six events per task through the telemetry manager (an AsyncFlow engine does), and each cost
   more than it had to. The task counters and the running-tasks gauge are now tallied in the
