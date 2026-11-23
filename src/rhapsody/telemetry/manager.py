@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
+from typing import TypeGuard
 
 from rhapsody.telemetry.emitter import BackendEmitter
 from rhapsody.telemetry.events import BaseEvent
@@ -1598,7 +1599,7 @@ _OBSERVED_KEYS = (
 )
 
 
-def _number(value: Any) -> bool:
+def _number(value: Any) -> TypeGuard[float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
