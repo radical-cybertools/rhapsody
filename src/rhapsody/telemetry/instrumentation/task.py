@@ -110,18 +110,21 @@ class TaskInstrumentation(Instrumentation):
     def _key(self, event: BaseEvent) -> tuple:
         """The event's series: its attributes are kept once, under this key."""
         attributes = event.attributes
+        executable = attributes.get("executable", "")
+        task_type = attributes.get("task_type", "")
+        # OpenTelemetry takes a sequence as an attribute value (as a tuple): so does the key.
         key = (
             event.session_id,
             event.backend or "",
-            attributes.get("executable", ""),
-            attributes.get("task_type", ""),
+            tuple(executable) if isinstance(executable, list) else executable,
+            tuple(task_type) if isinstance(task_type, list) else task_type,
         )
         if key not in self._series:
             self._series[key] = {
-                "session_id": key[0],
-                "backend": key[1],
-                "executable": key[2],
-                "task_type": key[3],
+                "session_id": event.session_id,
+                "backend": event.backend or "",
+                "executable": executable,
+                "task_type": task_type,
             }
         return key
 

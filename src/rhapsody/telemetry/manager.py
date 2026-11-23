@@ -17,6 +17,7 @@ import functools
 import json
 import logging
 import time
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -50,9 +51,10 @@ logger = logging.getLogger(__name__)
 _STOP_SENTINEL = object()
 
 # The checkpoint's JSON lines: one encoder for all of them (json.dumps with default= makes one per
-# call), and each event class's field names, found once.
+# call), and each event class's field names, found once. Weak keys: AsyncFlow defines an event class
+# per engine, and a long-lived process may make many engines.
 _JSON = json.JSONEncoder(default=str)
-_FIELD_NAMES: dict[type, tuple[str, ...]] = {}
+_FIELD_NAMES: weakref.WeakKeyDictionary[type, tuple[str, ...]] = weakref.WeakKeyDictionary()
 
 
 def _field_names(cls: type) -> tuple[str, ...]:
@@ -147,6 +149,9 @@ class TelemetryManager:
         self._subscribers: list[Callable[[BaseEvent], Any]] = []
         # Each subscriber with whether it is a coroutine function, found once when it subscribes.
         self._subscriber_calls: list[tuple[Callable[[BaseEvent], Any], bool]] = []
+        # OpenTelemetry's context and trace modules, looked up in start() with the tracer.
+        self._otel_context: Any = None
+        self._otel_trace: Any = None
         self._adapters: list[TelemetryAdapter] = []
         # Backends that already have an adapter (by id), and whether the one
         # runtime-wide Dragon node poller exists — see attach_backend().
