@@ -17,11 +17,13 @@ import functools
 import json
 import logging
 import time
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
+from typing import TypeGuard
 
 from rhapsody.telemetry.emitter import BackendEmitter
 from rhapsody.telemetry.events import BaseEvent
@@ -48,6 +50,21 @@ logger = logging.getLogger(__name__)
 
 # Queued by stop() behind the backlog: the dispatch loop exits when it reaches it.
 _STOP_SENTINEL = object()
+
+# The checkpoint's JSON lines: one encoder for all of them (json.dumps with default= makes one per
+# call), and each event class's field names, found once. Weak keys: AsyncFlow defines an event class
+# per engine, and a long-lived process may make many engines.
+_JSON = json.JSONEncoder(default=str)
+_FIELD_NAMES: weakref.WeakKeyDictionary[type, tuple[str, ...]] = weakref.WeakKeyDictionary()
+
+
+def _field_names(cls: type) -> tuple[str, ...]:
+    names = _FIELD_NAMES.get(cls)
+    if names is None:
+        # fields() includes the init=False class-level fields (e.g. event_type), which
+        # vars()/__dict__ misses on frozen subclasses.
+        names = _FIELD_NAMES[cls] = tuple(f.name for f in dataclasses.fields(cls))
+    return names
 
 
 class SpanBuffer:
@@ -131,6 +148,11 @@ class TelemetryManager:
         # Events of the batch the dispatch loop is flushing: lost if the loop dies mid-batch.
         self._inflight = 0
         self._subscribers: list[Callable[[BaseEvent], Any]] = []
+        # Each subscriber with whether it is a coroutine function, found once when it subscribes.
+        self._subscriber_calls: list[tuple[Callable[[BaseEvent], Any], bool]] = []
+        # OpenTelemetry's context and trace modules, looked up in start() with the tracer.
+        self._otel_context: Any = None
+        self._otel_trace: Any = None
         self._adapters: list[TelemetryAdapter] = []
         # Backends that already have an adapter (by id), and whether the one
         # runtime-wide Dragon node poller exists — see attach_backend().
@@ -247,6 +269,11 @@ class TelemetryManager:
             self._tracer_provider.add_span_processor(proc)
 
         self._tracer = self._tracer_provider.get_tracer("rhapsody")
+        from opentelemetry import context as otel_context_mod
+        from opentelemetry import trace as otel_trace_mod
+
+        # emit() reads the caller's context for every TaskCreated: the modules, looked up once.
+        self._otel_context, self._otel_trace = otel_context_mod, otel_trace_mod
 
         # Open checkpoint file
         if self._checkpoint_path is not None:
@@ -438,9 +465,7 @@ class TelemetryManager:
             return
         self._queue.put_nowait(event)
         if self._tracer is not None and event.event_type == "TaskCreated":
-            from opentelemetry import context as _ctx
-            from opentelemetry import trace as _trace
-
+            _ctx, _trace = self._otel_context, self._otel_trace
             ctx = _ctx.get_current()
             if not _trace.get_current_span(ctx).get_span_context().is_valid:
                 ctx = self._session_ctx  # no caller span: the session is the parent
@@ -459,6 +484,7 @@ class TelemetryManager:
         MetricReader). See docs/telemetry/reference.md#known-limitations.
         """
         self._subscribers.append(callback)
+        self._subscriber_calls.append((callback, asyncio.iscoroutinefunction(callback)))
 
     def annotate_current_span(self, event: BaseEvent) -> None:
         """Add this event as a timestamped annotation on the currently active OTel span.
@@ -1282,11 +1308,12 @@ class TelemetryManager:
         if self._checkpoint_file is not None:
             self._write_batch(batch)
 
-        if self._subscribers:
+        subscribers = self._subscriber_calls
+        if subscribers:
             for event in batch:
-                for sub in self._subscribers:
+                for sub, is_coroutine in subscribers:
                     try:
-                        if asyncio.iscoroutinefunction(sub):
+                        if is_coroutine:
                             asyncio.create_task(sub(event))
                         else:
                             sub(event)
@@ -1299,15 +1326,13 @@ class TelemetryManager:
         lines = []
         for event in events:
             try:
-                # fields() + getattr: shallow copy that captures init=False class-level
-                # fields (e.g. event_type) which vars()/.__dict__ misses on frozen subclasses.
-                d = {f.name: getattr(event, f.name) for f in dataclasses.fields(event)}
+                d = {name: getattr(event, name) for name in _field_names(type(event))}
                 trace_id, span_id = self._span_ids_for_event(event)
                 d["trace_id"] = trace_id
                 d["span_id"] = span_id
                 d["name"] = event.event_type
                 d["section"] = "event"
-                lines.append(json.dumps(d, default=str))
+                lines.append(_JSON.encode(d))
             except Exception:
                 logger.debug("Failed to serialize event for checkpoint", exc_info=True)
         if lines:
@@ -1379,12 +1404,11 @@ class TelemetryManager:
                     context=self._session_ctx,
                     attributes=self._fallback_span_attributes(event, executable, task_type),
                 )
-            span.set_attribute("status", "completed")
-            span.set_attribute("executable", executable)
-            span.set_attribute("task_type", task_type)
+            attrs = {"status": "completed", "executable": executable, "task_type": task_type}
             if event.attributes.get("incomplete_lifecycle"):
-                span.set_attribute("incomplete_lifecycle", True)
-            _set_observed(span, event.attributes)
+                attrs["incomplete_lifecycle"] = True
+            _add_observed(attrs, event.attributes)
+            span.set_attributes(attrs)  # one call: one lock and one validation pass
             span.set_status(trace_mod.StatusCode.OK)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
@@ -1400,13 +1424,16 @@ class TelemetryManager:
                     context=self._session_ctx,
                     attributes=self._fallback_span_attributes(event, executable, task_type),
                 )
-            span.set_attribute("status", "failed")
-            span.set_attribute("error_type", error_type)
-            span.set_attribute("executable", executable)
-            span.set_attribute("task_type", task_type)
+            attrs = {
+                "status": "failed",
+                "error_type": error_type,
+                "executable": executable,
+                "task_type": task_type,
+            }
             if event.attributes.get("incomplete_lifecycle"):
-                span.set_attribute("incomplete_lifecycle", True)
-            _set_observed(span, event.attributes)
+                attrs["incomplete_lifecycle"] = True
+            _add_observed(attrs, event.attributes)
+            span.set_attributes(attrs)
             span.set_status(trace_mod.StatusCode.ERROR, error_type)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
@@ -1421,11 +1448,10 @@ class TelemetryManager:
                     context=self._session_ctx,
                     attributes=self._fallback_span_attributes(event, executable, task_type),
                 )
-            span.set_attribute("status", "canceled")
-            span.set_attribute("executable", executable)
-            span.set_attribute("task_type", task_type)
+            attrs = {"status": "canceled", "executable": executable, "task_type": task_type}
             if event.attributes.get("incomplete_lifecycle"):
-                span.set_attribute("incomplete_lifecycle", True)
+                attrs["incomplete_lifecycle"] = True
+            span.set_attributes(attrs)
             span.set_status(trace_mod.StatusCode.ERROR)
             span.end()
             self._completed_span_ctx[event.task_id] = span.get_span_context()
@@ -1573,7 +1599,7 @@ _OBSERVED_KEYS = (
 )
 
 
-def _number(value: Any) -> bool:
+def _number(value: Any) -> TypeGuard[float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
@@ -1607,11 +1633,11 @@ def _observed_attributes(task: dict) -> dict:
     return attrs
 
 
-def _set_observed(span: Any, attributes: dict) -> None:
-    """Copy the flattened ``observed`` attributes onto a terminal task span."""
+def _add_observed(attrs: dict, attributes: dict) -> None:
+    """Add the flattened ``observed`` attributes to a terminal task span's ``attrs``."""
     for key in _OBSERVED_KEYS:
         if key in attributes:
-            span.set_attribute(key, attributes[key])
+            attrs[key] = attributes[key]
 
 
 def _task_executable(task: dict) -> str:

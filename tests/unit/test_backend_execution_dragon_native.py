@@ -1493,20 +1493,82 @@ async def test_a_function_process_that_fails_after_its_result_stays_done_with_a_
     assert "exited with code 1 after its result" in caplog.text
 
 
-async def test_shutdown_stops_a_process_that_outlived_its_result(dragon, tmp_path, monkeypatch):
-    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, kill_grace=30.0)
+async def test_shutdown_lets_a_process_that_reported_its_result_exit_on_its_own(
+    dragon, tmp_path, monkeypatch
+):
+    """Shutdown used to kill at once a process that had reported its result but was still exiting,
+    and then reap what it left.
+
+    A process killed while it waited on processes of its own left
+    Global Services joins it could not answer, and Dragon 0.15.0 ended the runtime when those
+    processes exited. Now the process gets ``kill_grace`` to exit on its own, and one that does is
+    neither killed nor reaped.
+    """
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, kill_grace=5.0)
     be._work_dir = str(tmp_path)
     await be
     gate, _ = lingering(monkeypatch)
+    kills = []
+    kill = dragon_native.process_kill
+    monkeypatch.setattr(
+        dragon_native, "process_kill", lambda puid, **kw: (kills.append(puid), kill(puid, **kw))
+    )
     rec = Recorder(be)
     task = fn_task(square, 2, task_backend_specific_kwargs={"process_template": {}})
     try:
         await be.submit_tasks([task])
         assert await rec.wait(task["uid"]) == ["DONE"]
         proc = process_of(dragon, task["uid"])
-        assert not proc.done.is_set()
+        threading.Timer(0.5, gate.set).start()  # its teardown ends half a second into shutdown
+        t0 = time.monotonic()
         await be.shutdown()
-        assert proc.done.is_set()
+        took = time.monotonic() - t0
+        assert proc.done.is_set() and proc.code == 0
+        assert proc.puid not in kills and dragon.reaped == []
+        assert 0.4 <= took < 5.0
+    finally:
+        gate.set()
+
+
+async def test_shutdown_kills_a_process_that_outlives_its_grace(
+    dragon, tmp_path, monkeypatch, caplog
+):
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, kill_grace=0.5)
+    be._work_dir = str(tmp_path)
+    await be
+    gate, _ = lingering(monkeypatch)
+    monkeypatch.setattr(be, "_after_result", lambda rec, timer: None)  # no kill during the run
+    rec = Recorder(be)
+    task = fn_task(square, 2, task_backend_specific_kwargs={"process_template": {}})
+    try:
+        await be.submit_tasks([task])
+        assert await rec.wait(task["uid"]) == ["DONE"]
+        proc = process_of(dragon, task["uid"])
+        with caplog.at_level(logging.WARNING):
+            await be.shutdown()
+        assert proc.done.is_set() and proc.code in (-signal.SIGTERM, -signal.SIGKILL)
+        assert "did not exit" in caplog.text
+    finally:
+        gate.set()
+
+
+async def test_a_process_that_exited_by_its_grace_is_not_killed(backend, dragon, monkeypatch):
+    """The watcher may not have seen the exit yet when the grace ends: the process is checked
+    first, since signalling one that is exiting is what Dragon handles worst."""
+    gate, _ = lingering(monkeypatch)
+    monkeypatch.setattr(backend, "_poll_exits", lambda puids: [])  # the watcher sees nothing
+    kills = []
+    monkeypatch.setattr(dragon_native, "process_kill", lambda puid, **kw: kills.append(puid))
+    rec = Recorder(backend)
+    task = fn_task(square, 2, task_backend_specific_kwargs={"process_template": {}})
+    try:
+        await backend.submit_tasks([task])
+        assert await rec.wait(task["uid"]) == ["DONE"]
+        gate.set()  # it exits within its grace
+        proc = process_of(dragon, task["uid"])
+        await until(proc.done.is_set)
+        await asyncio.sleep(backend._kill_grace + 0.5)
+        assert kills == []
     finally:
         gate.set()
 

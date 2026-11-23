@@ -257,6 +257,13 @@ MPI, so set `"pmi": "none"` for jobs that don't: it logs neither warning.
   then kills what the tasks left, and the queues are destroyed eight at a time. A process that
   outlives its SIGKILL by 20 s, and whatever is left after 120 s, is logged and left for Dragon to
   end with the runtime. The last log line of `shutdown()` gives the seconds of each step.
+- **A process already reported on its result gets `kill_grace` to exit at shutdown.** Such a
+  process may still be tearing down, waiting on processes of its own. Killed then, it leaves
+  Global Services joins it can no longer receive, and when those processes exit, Dragon 0.15.0
+  fails to answer them and ends the runtime. So shutdown waits up to `kill_grace` for it, without
+  a signal; one that exits is neither killed nor reaped, and one that does not is stopped as above,
+  with a warning. During the run, such a process is checked before its kill too, and one that has
+  exited is left alone.
 - **Bad placements fail only their task.** Hosts and GPU ids in a `placement` or a `policy` are
   checked against Dragon's nodes before anything is submitted: Dragon aborts the whole runtime on
   an unknown host and silently drops unknown GPU ids.
