@@ -94,8 +94,6 @@ class TaskStateManager:
                     )
                 else:
                     self._task_futures[uid].set_result(task)
-                # update_task() will never see this task again to release it
-                return self._task_futures.pop(uid)
 
         return self._task_futures[uid]
 
@@ -129,6 +127,7 @@ class Session:
         """
         self.uid = uid or f"rhapsody.session.{uuid.uuid4().hex[:8]}"
         self.work_dir = work_dir or os.getcwd()
+        self._tasks: dict[str, BaseTask | dict] = {}
         self._state_manager = TaskStateManager()
         self._telemetry: TelemetryManager | None = None
         # Scheduled ResourceLayout emissions (keeps task references alive), and the
@@ -164,6 +163,9 @@ class Session:
             # empty, unused one. Registered only for inclusion in
             # Session.close()/telemetry.
             logger.debug(f"Registered data backend '{backend.name}' with Session '{self.uid}'")
+            # Data backends get an emitter too (no resource adapter, no layout).
+            if self._telemetry is not None:
+                self._attach_telemetry(backend)
             return
 
         backend._work_dir = os.path.join(self.work_dir, self.uid)
@@ -213,6 +215,7 @@ class Session:
         futures = []
         for task in tasks:
             uid = task["uid"]
+            self._tasks[uid] = task
 
             # Create and bind future
             fut = self._state_manager.get_wait_future(uid, task)
@@ -317,7 +320,7 @@ class Session:
         metric_readers: list | None = None,
         resource: object | None = None,
         drain_on_stop: bool = True,
-        retained: int | None = None,
+        retained: int | None = 10_000,
     ) -> TelemetryManager:
         """Enable and start telemetry collection for this session in one call.
 
@@ -357,11 +360,11 @@ class Session:
                                     however long that takes. When False, events still
                                     queued at close are discarded with a warning, so
                                     shutdown is fast (e.g. close to a job walltime).
-            retained:               Keep only the most recent ``retained`` events and
-                                    finished spans in memory (for long-lived sessions);
-                                    ``summary()`` durations, ``task_spans()`` and
-                                    ``read_traces()`` then cover only those.
-                                    None (default) keeps all.
+            retained:               Keep the spans and events of about the last ``retained``
+                                    tasks in memory; ``task_spans()``, ``read_traces()`` and
+                                    ``export_as_otlp()`` cover only those. ``summary()``,
+                                    metrics, the checkpoint file and span processors cover
+                                    every task. None keeps all.
 
         Returns:
             The active :class:`~rhapsody.telemetry.manager.TelemetryManager`.
@@ -384,7 +387,7 @@ class Session:
         )
         self._state_manager._telemetry_observer = self._telemetry._on_task_state_change
 
-        for backend in self._exec_backends.values():
+        for backend in self.backends.values():
             self._attach_telemetry(backend)
 
         await self._telemetry.start()
@@ -396,8 +399,8 @@ class Session:
 
         return self._telemetry
 
-    def _attach_telemetry(self, backend: BaseBackend) -> None:
-        """Attach the backend's resource telemetry adapter (a no-op if it already has one)."""
+    def _attach_telemetry(self, backend: BaseBackend | DataBackend) -> None:
+        """Hand the backend its emitter and attach its resource telemetry adapter, if any."""
         self._telemetry.attach_backend(
             backend,
             session_id=self.uid,

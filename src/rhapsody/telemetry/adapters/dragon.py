@@ -36,12 +36,14 @@ Requirements
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import queue as stdlib_queue
 import threading
 import time
 from typing import TYPE_CHECKING
+from typing import Any
 
 from rhapsody.telemetry.adapters.base import TelemetryAdapter
 from rhapsody.telemetry.events import ResourceUpdate
@@ -51,6 +53,11 @@ if TYPE_CHECKING:
     from rhapsody.telemetry.manager import TelemetryManager
 
 logger = logging.getLogger(__name__)
+
+# Seconds stop() waits for the collector thread to clean up: its workers, queue and event.
+_STOP_WAIT = 10.0
+# Longest wait of the read loop on the queue, so it sees a stop soon whatever the interval.
+_READ_WAIT = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +280,7 @@ class DragonTelemetryAdapter(TelemetryAdapter):
         self._running = False
         self._node_id = os.uname().nodename
         self._group = None  # Dragon ProcessGroup — set in _collect_loop, used in stop()
+        self._queue: Any = None  # the workers' result queue, while the collector thread has it
 
     def start(self) -> None:
         if self._running:
@@ -299,8 +307,23 @@ class DragonTelemetryAdapter(TelemetryAdapter):
         self._thread.start()
 
     def stop(self) -> None:
+        """Stop the collector and wait, up to ``_STOP_WAIT`` seconds, for it to clean up.
+
+        The cleanup happens in ``_collect_loop`` after its loop: the workers stop, then the queue
+        and the event are destroyed. Left to their ``__del__`` at interpreter exit, a Dragon
+        queue's destroy can hang there in a request to Global Services.
+        """
         self._running = False
-        # ProcessGroup cleanup happens inside _collect_loop() after the while loop exits.
+        q, thread = self._queue, self._thread
+        if q is not None:
+            with contextlib.suppress(Exception):
+                q.put(None, timeout=1.0)  # wakes the read loop at once
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=_STOP_WAIT)
+            if thread.is_alive():
+                logger.warning(
+                    "DragonTelemetryAdapter: its thread did not stop within %s s", _STOP_WAIT
+                )
 
     # ------------------------------------------------------------------
     # Internal
@@ -328,6 +351,7 @@ class DragonTelemetryAdapter(TelemetryAdapter):
 
             result_queue = DragonQueue(maxsize=max(len(policies) * 40, 400))
             _shutdown_event = DragonEvent()
+            self._queue = result_queue
         except Exception:
             logger.warning(
                 "DragonTelemetryAdapter: Dragon Queue/Event creation failed — adapter is a no-op",
@@ -359,6 +383,7 @@ class DragonTelemetryAdapter(TelemetryAdapter):
                 "DragonTelemetryAdapter: ProcessGroup spawn failed — adapter is a no-op",
                 exc_info=True,
             )
+            self._release(result_queue, _shutdown_event)
             return
 
         # 4. Read loop — emit ResourceUpdate at most once per interval per node
@@ -366,12 +391,14 @@ class DragonTelemetryAdapter(TelemetryAdapter):
 
         while self._running:
             try:
-                data = result_queue.get(timeout=self._interval)
+                data = result_queue.get(timeout=min(self._interval, _READ_WAIT))
             except stdlib_queue.Empty:
                 continue
             except Exception:
                 logger.debug("DragonTelemetryAdapter: queue read error", exc_info=True)
                 continue
+            if data is None:  # stop()
+                break
 
             host = data.get("host", self._node_id)
             now = time.time()
@@ -445,3 +472,14 @@ class DragonTelemetryAdapter(TelemetryAdapter):
             grp.close()
         except Exception:
             logger.debug("DragonTelemetryAdapter: ProcessGroup cleanup error", exc_info=True)
+        finally:
+            self._release(result_queue, _shutdown_event)
+
+    def _release(self, result_queue, shutdown_event) -> None:
+        """Destroy the result queue and the event now, while the runtime can still do it."""
+        self._queue = None
+        for obj in (result_queue, shutdown_event):
+            try:
+                obj.destroy()
+            except Exception:
+                logger.debug("DragonTelemetryAdapter: could not destroy %r", obj, exc_info=True)

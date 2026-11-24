@@ -282,6 +282,7 @@ def test_backend_registry_backend_path_parsing():
 _RUNTIME_SENTINELS = [
     ("dask", "rhapsody.backends.execution.dask_parallel", "dask"),
     ("dragon", "rhapsody.backends.execution.dragon", "Batch"),
+    ("dragon_native", "rhapsody.backends.execution.dragon_native", "Process"),
     ("radical_pilot", "rhapsody.backends.execution.radical_pilot", "rp"),
     ("orbit", "rhapsody.backends.execution.orbit", "EndpointRuntime"),
 ]

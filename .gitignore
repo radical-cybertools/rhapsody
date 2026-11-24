@@ -227,6 +227,10 @@ pip-audit.json
 
 # Rhapsody artifacts
 rhapsody.session.*
+rhapsody.data.session.*
+
+* DataBackend output
+*.rdb
 
 # Telemetry output
 *.png

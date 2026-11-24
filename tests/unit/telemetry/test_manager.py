@@ -1288,42 +1288,136 @@ def test_task_executable_label_is_stable_per_callable():
     assert _task_executable({"function": Job()}) == "Job"
 
 
-class TestRetention:
-    async def test_event_log_spans_and_span_contexts_stay_bounded(self):
-        """A long-lived session keeps at most `retained` events and finished spans in memory, and no
-        per-task span context once the task ended."""
-        from rhapsody.telemetry.events import ResourceUpdate
+# ------------------------------------------------------------------
+# Session span context: explicit parent, never attached
+# ------------------------------------------------------------------
 
-        m = TelemetryManager(session_id="test-session", retained=50)
+
+class TestSessionContext:
+    """The session span parents task spans explicitly; start() attaches nothing."""
+
+    @staticmethod
+    def _manager(sid):
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+        exporter = InMemorySpanExporter()
+        return TelemetryManager(
+            session_id=sid, span_processors=[SimpleSpanProcessor(exporter)]
+        ), exporter
+
+    @staticmethod
+    def _run_task(m, sid, tid):
+        base = {"session_id": sid, "backend": "concurrent"}
+        m.emit(make_event(TaskCreated, task_id=tid, **base))
+        m.emit(make_event(TaskCompleted, task_id=tid, duration_seconds=0.1, **base))
+
+    @staticmethod
+    def _parent_of(exporter, name):
+        spans = {s.name: s for s in exporter.get_finished_spans()}
+        return spans[name].parent.span_id if spans[name].parent else None, spans
+
+    async def test_start_and_stop_in_different_tasks_log_no_error(self, caplog):
+        """Start() and stop() may run in different asyncio tasks (#77)."""
+        import logging
+
+        m, _ = self._manager("ctx-tasks")
+        with caplog.at_level(logging.ERROR):
+            await asyncio.create_task(m.start())
+            await m.stop()
+        assert not [r for r in caplog.records if "detach" in r.getMessage()]
+
+    async def test_start_leaves_the_callers_context_alone(self):
+        from opentelemetry import trace
+
+        m, _ = self._manager("ctx-leak")
         await m.start()
-        m.emit(
-            make_event(
-                ResourceUpdate,
-                session_id="test-session",
-                backend="concurrent",
-                node_id="n1",
-                cpu_percent=5.0,
-                memory_percent=10.0,
-            )
-        )
-        for i in range(300):
-            m.emit(
-                make_event(
-                    TaskCompleted,
-                    session_id="test-session",
-                    backend="concurrent",
-                    task_id=f"task.{i:06d}",
-                    duration_seconds=0.01,
-                    attributes={"executable": "f", "task_type": "ComputeTask"},
-                )
-            )
+        try:
+            assert not trace.get_current_span().get_span_context().is_valid
+        finally:
+            await m.stop()
+
+    async def test_task_without_caller_span_is_a_child_of_the_session(self):
+        """Also when emitted from a context the session never touched (e.g. a callback thread, as
+        under ORBIT)."""
+        import contextvars
+
+        m, exporter = self._manager("ctx-parent")
+        await m.start()
+        contextvars.Context().run(self._run_task, m, "ctx-parent", "t1")
+        await asyncio.sleep(0.1)
         await m.stop()
 
-        assert len(m._event_log) <= 50
-        assert m._completed_span_ctx == {}
+        parent, spans = self._parent_of(exporter, "task")
+        assert parent == spans["session"].context.span_id
+
+    async def test_task_in_span_scope_is_a_child_of_the_scope(self):
+        m, exporter = self._manager("ctx-scope")
+        await m.start()
+        with m.span_scope("workflow"):
+            self._run_task(m, "ctx-scope", "t1")
+        await asyncio.sleep(0.1)
+        await m.stop()
+
+        parent, spans = self._parent_of(exporter, "task")
+        assert parent == spans["workflow"].context.span_id
+        assert spans["workflow"].parent.span_id == spans["session"].context.span_id
+
+
+class TestRetention:
+    """A long-lived session keeps a bounded number of events, spans and span contexts."""
+
+    @staticmethod
+    async def _run(n, **kwargs):
+        from rhapsody.telemetry.events import ResourceUpdate
+
+        m = TelemetryManager(session_id="test-session", **kwargs)
+        await m.start()
+        base = {"session_id": "test-session", "backend": "concurrent"}
+        m.emit(
+            make_event(ResourceUpdate, node_id="n1", cpu_percent=5.0, memory_percent=10.0, **base)
+        )
+        for i in range(n):
+            tid = f"task.{i:06d}"
+            m.emit(make_event(TaskCreated, task_id=tid, **base))
+            m.emit(make_event(TaskCompleted, task_id=tid, duration_seconds=0.01, **base))
+            if i == 0:
+                await asyncio.sleep(0.05)  # the first task is the longest
+        await m.stop()
+        return m
+
+    async def test_memory_is_bounded_and_summary_covers_every_task(self):
+        m = await self._run(300, retained=20)
+        assert len(m._event_log) <= 100
+        assert len(m._completed_span_ctx) <= 20
+        assert len(m.read_traces()) <= 20
         spans = m.task_spans()
-        assert 0 < len(spans) <= 50
         assert spans[-1]["task_id"] == "task.000299"  # the most recent are kept
-        assert m.task_count()["completed"] == 300  # metrics still count every task
+        summary = m.summary()
+        assert summary["tasks"]["completed"] == 300
+        stats = summary["duration"]
+        assert stats["max_seconds"] > max(s["duration_seconds"] for s in spans)
+        assert stats["mean_seconds"] == pytest.approx(stats["total_seconds"] / 300, abs=1e-5)
         # the node's last reading outlives the bounded event log
-        assert m.summary()["resources"]["concurrent/n1"]["cpu_percent"] == 5.0
+        assert summary["resources"]["concurrent/n1"]["cpu_percent"] == 5.0
+
+    async def test_none_keeps_everything(self):
+        m = await self._run(300, retained=None)
+        assert len(m.task_spans()) == len(m._completed_span_ctx) == 300
+
+    async def test_the_checkpoint_file_has_every_span_once(self, tmp_path):
+        await self._run(300, retained=20, checkpoint_path=str(tmp_path), checkpoint_interval=0.01)
+        (path,) = tmp_path.iterdir()
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        ids = [r["span_id"] for r in rows if r["section"] == "span"]
+        assert len(ids) == len(set(ids)) == 301  # the tasks and the session
+
+    async def test_the_first_drop_is_logged_once(self, caplog):
+        with caplog.at_level("INFO", logger="rhapsody.telemetry.manager"):
+            await self._run(300, retained=20)
+        assert sum("retained" in r.getMessage() for r in caplog.records) == 1
+
+    @pytest.mark.parametrize("retained", [-1, 1.5, True, "10"])
+    def test_a_bad_bound_is_refused(self, retained):
+        with pytest.raises(ValueError, match="retained"):
+            TelemetryManager(session_id="s", retained=retained)

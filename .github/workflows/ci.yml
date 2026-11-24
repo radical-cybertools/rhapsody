@@ -47,8 +47,15 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,dask,radical_pilot]"
+          pip install -e ".[dev,telemetry,dask,radical_pilot]"
           pip install -e ".[dragon]" || echo "Dragon not available for Python ${{ matrix.python-version }}, skipping"
 
       - name: Run tests
+        # The telemetry tests skip themselves without opentelemetry-sdk; here a missing SDK must
+        # fail the run instead (see tests/unit/telemetry/conftest.py).
+        env:
+          RHAPSODY_REQUIRE_TELEMETRY: "1"
         run: make test-ci
+
+      - name: Allocation-shape tests (Dragon on all, half and one of the runner's CPUs)
+        run: make test-allocation-shapes
