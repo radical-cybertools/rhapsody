@@ -30,7 +30,7 @@ async def main():
     # Initialize backends
     hpc_backend = await DragonExecutionBackend(name="hpc")
     ai_backend = await DragonVllmInferenceBackend(
-        name="vllm", model=ModelConfig(model_name="Qwen2.5-7B", hf_token="...", tp_size=1)
+        name="vllm", model=ModelConfig(model_name="HuggingFaceTB/SmolLM2-1.7B-Instruct", hf_token="...", tp_size=1)
     )
 
     # Create session with multiple backends

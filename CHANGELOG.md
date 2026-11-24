@@ -96,6 +96,26 @@
   the loop for seconds, and every other coroutine of the process with it. Both now let the loop
   run every 20 ms. A task that a submit has not reached yet can be cancelled, and is cancelled at
   shutdown.
+- **Telemetry under Dragon no longer keeps a core busy.** The Dragon telemetry adapter runs its
+  resource samplers as a Dragon `ProcessGroup`, and Dragon 0.15's group client watches the group's
+  exception queue in a thread that spins a whole core for as long as the group runs: every process
+  with RHAPSODY's telemetry on under Dragon carried one, and at interpreter exit, with telemetry
+  not stopped, the process never ended. The group now ignores errors on exit, so Dragon starts no
+  such thread; a sampler that fails costs only its node's readings, as before.
+- **Telemetry costs less CPU per task.** An application with tens of thousands of tasks per engine
+  sends six events per task through the telemetry manager (an AsyncFlow engine does), and each cost
+  more than it had to. The task counters and the running-tasks gauge are now tallied in the
+  instrumentation and read by observable instruments when metrics are collected, instead of one
+  instrument call per lifecycle event; each finished task still records its duration as it ends.
+  A subscriber's kind (coroutine function or not) is found once, when it subscribes, not for every
+  event; the checkpoint writer reuses one JSON encoder and each event class's field names; a task
+  span's final attributes are set in one call; and event ids come from a generator of their own
+  (seeded from `os.urandom`, seeded again in a forked child) instead of a system call per event.
+  `summary()`, `task_count()`, `task_spans()`, `read_traces()`, `read_metrics()` and the
+  checkpoint file give what they gave. One difference for a metric reader passed with
+  `metric_readers` that sets its temporality per instrument kind: the task counters are now
+  `ObservableCounter` and `ObservableUpDownCounter` instruments, so such a reader must name those
+  kinds to get them as deltas (OTLP's `DELTA` preference does).
 - **BEHAVIOUR CHANGE: `ConcurrentExecutionBackend` lets go of a task once it has reported the
   task's final state.** It kept every task it ran in `tasks`, and each task's handler (an asyncio
   task) in the task's `"future"`, so an engine on it kept every task, and in Python 3.12 each
