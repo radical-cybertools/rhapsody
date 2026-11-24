@@ -427,7 +427,10 @@ class DragonNativeExecutionBackend(BaseBackend):
             its unplaced tasks, its process slots and the placements it accepts. Several clients
             of one multi-node runtime, one per node, can each pass their own node, so that each
             pool stays on its client's node instead of every client starting workers everywhere.
-            A host that is not a Dragon node raises ``ValueError`` when the backend starts.
+            A process task with no placement, and each template of a ``process_templates`` group
+            with none, goes to those nodes in turn, the client's first; without ``hosts`` Dragon
+            places them anywhere in the runtime. A host that is not a Dragon node raises
+            ``ValueError`` when the backend starts.
         name: Backend name.
     """
 
@@ -465,6 +468,7 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._gpu_workers_per_set = gpu_workers_per_set
         self._max_process_ranks_arg = max_process_ranks
         self._hosts = list(dict.fromkeys(hosts)) if hosts is not None else None
+        self._turns = itertools.count()  # the next of the hosts for an unplaced process task
         self._inline_stdio = inline_stdio
         self._kill_grace = kill_grace
         self._worker_start_timeout = worker_start_timeout
@@ -1993,6 +1997,15 @@ class DragonNativeExecutionBackend(BaseBackend):
             return template_policy
         return placement_policy
 
+    def _within_hosts(self, policy):
+        """With ``hosts``, a process with no policy gets one of those nodes, in turn.
+
+        Dragon would otherwise place it on any node of the runtime.
+        """
+        if policy is not None or self._hosts is None:
+            return policy
+        return self._host_policy(self._host_order[next(self._turns) % len(self._host_order)])
+
     def _pool_key(self, template, placement_policy, uid: str) -> tuple | None:
         """The pool key ``(host, gpus)`` of a function task, or None if it needs its own process."""
         if template is None:
@@ -2121,6 +2134,7 @@ class DragonNativeExecutionBackend(BaseBackend):
             rec.is_function = is_function
             template = dict(template or {})
             policy = self._choose_policy(template.get("policy"), placement_policy, uid)
+            policy = self._within_hosts(policy)
             proc_kwargs, out, err = self._process_kwargs(rec, template, policy, fn, args, capture)
             if is_function:
                 proc_kwargs["target"] = _worker.run_function_process
@@ -2138,7 +2152,9 @@ class DragonNativeExecutionBackend(BaseBackend):
                     f"task {uid}: a process_templates entry asks for {nranks} processes"
                 )
             cfg = dict(cfg or {})
-            policy = self._choose_policy(cfg.get("policy"), placement_policy, uid)
+            policy = self._within_hosts(
+                self._choose_policy(cfg.get("policy"), placement_policy, uid)
+            )
             tmpl_kwargs, out, err = self._process_kwargs(rec, cfg, policy, fn, args, capture)
             if is_function:
                 tmpl_kwargs["target"] = _worker.run_group_member

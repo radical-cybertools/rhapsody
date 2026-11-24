@@ -634,6 +634,59 @@ async def test_a_placement_outside_hosts_fails_only_its_task(dragon, tmp_path):
         await be.shutdown()
 
 
+async def test_hosts_keep_unplaced_process_tasks_on_those_nodes(dragon, tmp_path):
+    """Process and group tasks with no placement go to the backend's hosts in turn, the client's
+    first; a placed one keeps its own host."""
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n1", "n0"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        process = {"process_template": {}}
+        recs = [
+            be.build_task(fn_task(square, 2, task_backend_specific_kwargs=process)),
+            be.build_task(exe_task("true")),
+            be.build_task(
+                fn_task(
+                    square, 3, task_backend_specific_kwargs={"process_template": {"cwd": "/tmp"}}
+                )
+            ),
+        ]
+        assert [r.kind for r in recs] == ["process"] * 3
+        assert [r.proc.policy.host_name for r in recs] == ["n0", "n1", "n0"]
+        group = be.build_task(
+            exe_task("true", task_backend_specific_kwargs={"process_templates": [(2, {}), (1, {})]})
+        )
+        assert [t.kwargs["policy"].host_name for _, t in group.templates] == ["n1", "n0"]
+        placed = {"process_template": {"cwd": "/tmp", **on("n1")["process_template"]}}
+        rec = be.build_task(fn_task(square, 4, task_backend_specific_kwargs=placed))
+        assert rec.proc.policy.host_name == "n1"
+    finally:
+        await be.shutdown()
+
+
+async def test_hosts_of_one_node_keep_every_process_task_there(dragon, tmp_path):
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n1"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        assert be.build_task(exe_task("true")).proc.policy.host_name == "n1"
+        rec = Recorder(be)
+        task = exe_task("true")
+        await be.submit_tasks([task])
+        assert await rec.wait(task["uid"]) == ["DONE"]
+        # the relay stays on the client's node; the workers and the task's process run on n1
+        assert {p.host for p in dragon.started if p.target is not worker_module.relay_main} == {
+            "n1"
+        }
+    finally:
+        await be.shutdown()
+
+
+async def test_without_hosts_an_unplaced_process_task_is_dragons_to_place(backend):
+    rec = backend.build_task(exe_task("true"))
+    assert rec.proc.policy is None
+
+
 async def test_an_unknown_host_fails_the_start(dragon):
     be = DragonNativeExecutionBackend(inline_stdio=False, hosts=["n0", "nowhere"])
     with pytest.raises(ValueError, match="nowhere"):
