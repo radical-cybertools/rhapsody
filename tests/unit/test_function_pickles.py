@@ -595,15 +595,16 @@ def test_a_hint_that_names_a_class_by_string_is_not_kept():
 
 
 def test_the_kept_pickles_stay_under_a_total_size():
-    pickles = FunctionPickles(confirm=False, max_total_bytes=3000)
-    blobs = [b"x" * 1000 for _ in range(3)]
     fns = []
-    for blob in blobs:
+    for blob in [b"x" * 1000 for _ in range(3)]:
 
         def size(blob=blob):
             return len(blob)
 
         fns.append(size)
-        pickles.dumps(size)
+    one = len(cloudpickle.dumps(fns[0]))
+    pickles = FunctionPickles(confirm=False, max_total_bytes=int(2.5 * one))
+    for fn in fns:
+        pickles.dumps(fn)
     assert len(pickles) == 2  # the oldest went first
     assert pickles.dumps(fns[2]) is pickles.dumps(fns[2])
