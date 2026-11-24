@@ -87,15 +87,24 @@
   attributes and the globals its code reads, and the functions, containers, cells and type hints
   among them, are the same objects with the same contents. A function holding an object whose
   changes cannot be seen this way (an instance, a class or module pickled by value) is pickled for
-  every task, as before, and a closure made for a single task is never kept. The native backend still loads
-  a task's function and arguments on the worker as from one pickle, so an object both hold stays
-  one object. The native backend's worker messages changed with it: `(uid, fn_data, rest)`.
+  every task, as before, at about the cost of `cloudpickle.dumps`, and a closure made for a
+  single task is never kept. The native backend still loads a task's function and arguments on the
+  worker as from one pickle, so an object both hold stays one object.
+- **BEHAVIOUR CHANGE: the native backend's worker message is `(uid, fn_data, rest)`.** It was
+  `(uid, body)`: a worker and a client of different versions cannot run each other's tasks.
 - **`DragonNativeExecutionBackend` no longer holds the event loop for a whole batch.**
   `submit_tasks` built every task of a batch in one go, and the result thread's batches of task
   states were handed to the callback in one loop callback: a batch of a few thousand tasks held
   the loop for seconds, and every other coroutine of the process with it. Both now let the loop
   run every 20 ms. A task that a submit has not reached yet can be cancelled, and is cancelled at
   shutdown.
+- **BEHAVIOUR CHANGE: `DragonNativeExecutionBackend.cancel_task` returns `True` for a task of a
+  batch still being submitted**, and reports it CANCELED; it returned `False` for a task the
+  backend had not built yet.
+- **BEHAVIOUR CHANGE: `DragonNativeExecutionBackend.submit_tasks` calls can interleave.** Two
+  concurrent calls now build their tasks in turns, 20 ms at a time. A call cancelled midway leaves
+  the tasks it already built running and reports the rest CANCELED; after any other error the
+  caller fails the batch, as before.
 - **Telemetry under Dragon no longer keeps a core busy.** The Dragon telemetry adapter runs its
   resource samplers as a Dragon `ProcessGroup`, and Dragon 0.15's group client watches the group's
   exception queue in a thread that spins a whole core for as long as the group runs: every process
