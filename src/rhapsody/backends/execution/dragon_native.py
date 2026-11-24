@@ -2274,10 +2274,16 @@ class DragonNativeExecutionBackend(BaseBackend):
             if unbuilt is not None:
                 self._unbuilt[:] = [u for u in self._unbuilt if u is not unbuilt]
                 if cancel_rest:
-                    for descs in unbuilt.values():
-                        for desc in descs:
-                            self._callback_func(desc, "CANCELED")
+                    self._cancel_unbuilt([d for descs in unbuilt.values() for d in descs])
             self._flush_sends()
+
+    def _cancel_unbuilt(self, descs: list[dict]) -> None:
+        """Report CANCELED for tasks a submit never built; a callback that raises stops none."""
+        for desc in descs:
+            try:
+                self._callback_func(desc, "CANCELED")
+            except Exception:
+                self.logger.exception(f"Callback failed for {desc.get('uid')} (CANCELED)")
 
     def _submit_one(self, task: dict) -> None:
         """Build and route one task, or join it to the unfinished task of its uid."""
@@ -2347,8 +2353,7 @@ class DragonNativeExecutionBackend(BaseBackend):
                 started = bool(rec.puids)
         # Callbacks run without the lock, which the backend's threads wait on.
         if rec is None:
-            for desc in unbuilt:
-                self._callback_func(desc, "CANCELED")
+            self._cancel_unbuilt(unbuilt)
             return bool(unbuilt)
         for desc in (rec.desc, *rec.repeats, *unbuilt):
             self._callback_func(desc, "CANCELED")
