@@ -479,3 +479,131 @@ def test_dumps_call_with_a_function_pickled_for_every_call():
     data, rest = pickles.dumps_call(read, ((1,),))
     loaded, ((extra,),) = load_call(data, rest)
     assert loaded(extra) == 5
+
+
+# ----------------------------------------------------------------------------
+# What a function the cache does not keep costs (review of the first version)
+# ----------------------------------------------------------------------------
+
+
+class Tool:
+    """A class of this module: its instances' methods are pickled by value per call."""
+
+    def __init__(self, factor):
+        self.factor = factor
+
+    def scale(self, x):
+        return x * self.factor
+
+
+def over_instance(tool):
+    def scale(x):
+        return tool.scale(x)
+
+    return scale
+
+
+def kinds():
+    """Each kind of task function: (name, factory giving the function of the n-th task)."""
+    shared = wrapped_twice(make_adder(1))
+    tool = Tool(3)
+    bound = tool.scale
+    closure = over_instance(tool)
+    return [
+        ("in two closures", lambda n: shared, lambda f, n: f({"x": n}) == n + 1),
+        ("bound method", lambda n: bound, lambda f, n: f(n) == 3 * n),
+        ("closure over an instance", lambda n: closure, lambda f, n: f(n) == 3 * n),
+        ("a new closure per task", lambda n: make_adder(n), lambda f, n: f(1) == n + 1),
+        ("by reference", lambda n: square, lambda f, n: f(n) == n * n),
+    ]
+
+
+@pytest.mark.parametrize("kind", range(5), ids=[k[0] for k in kinds()])
+def test_every_kind_of_function_loads_with_its_call_through_one_unpickler(kind):
+    name, make, check = kinds()[kind]
+    pickles = FunctionPickles()
+    for n in range(4):  # a first pickle, a second (kept if it can be), and the kept one
+        data, rest = pickles.dumps_call(make(n), ("token", (n,), {"n": n}))
+        fn, (token, args, kwargs) = load_call(data, rest)
+        assert token == "token" and args == (n,) and kwargs == {"n": n}
+        assert check(fn, n)
+
+
+def test_a_call_that_misses_the_cache_takes_one_pickler(monkeypatch):
+    """A miss pickled the function, copied the memo, then made a second pickler for the
+    rest of the call: about half again the time of one pickle, for nothing."""
+    made = []
+    init = cloudpickle.CloudPickler.__init__
+
+    def counting(self, *args, **kwargs):
+        made.append(self)
+        init(self, *args, **kwargs)
+
+    monkeypatch.setattr(cloudpickle.CloudPickler, "__init__", counting)
+    pickles = FunctionPickles()
+    for name, make, _ in kinds():
+        for n in range(4):
+            made.clear()
+            pickles.dumps_call(make(n), ("token", (n,), {}))
+            assert len(made) == 1, (name, n)
+
+
+def test_a_function_the_walk_cannot_see_is_not_walked_again(monkeypatch):
+    from rhapsody.backends.execution import _function_pickles
+
+    walks = []
+    walk = _function_pickles._walk
+
+    def counting(fn, budget, held=None):
+        walks.append(fn)
+        return walk(fn, budget, held)
+
+    monkeypatch.setattr(_function_pickles, "_walk", counting)
+    pickles = FunctionPickles()
+    closure = over_instance(Tool(2))
+    for n in range(6):
+        load_call(*pickles.dumps_call(closure, (n,)))
+    assert len(walks) <= 1
+
+
+def test_a_miss_keeps_an_object_shared_by_the_function_and_its_arguments():
+    """Kept or not, the function and the rest of the call load as from one pickle."""
+    tool = Tool(5)
+    closure = over_instance(tool)
+    pickles = FunctionPickles()
+    for _ in range(3):
+        data, rest = pickles.dumps_call(closure, (tool,))
+        fn, (arg,) = load_call(data, rest)
+        assert arg is fn.__closure__[0].cell_contents
+
+
+def test_a_hint_that_names_a_class_by_string_is_not_kept():
+    """A ForwardRef caches its evaluation (typing.get_type_hints), which no walk sees: the kept
+    pickle would then differ from a fresh one."""
+    import typing
+
+    class Foo:
+        pass
+
+    def task(a: typing.Optional["Foo"] = None):  # noqa: UP045
+        return a
+
+    pickles = FunctionPickles(confirm=False)
+    first = pickles.dumps(task)
+    typing.get_type_hints(task, localns={"Foo": Foo})
+    assert pickles.dumps(task) is not first
+
+
+def test_the_kept_pickles_stay_under_a_total_size():
+    pickles = FunctionPickles(confirm=False, max_total_bytes=3000)
+    blobs = [b"x" * 1000 for _ in range(3)]
+    fns = []
+    for blob in blobs:
+
+        def size(blob=blob):
+            return len(blob)
+
+        fns.append(size)
+        pickles.dumps(size)
+    assert len(pickles) == 2  # the oldest went first
+    assert pickles.dumps(fns[2]) is pickles.dumps(fns[2])

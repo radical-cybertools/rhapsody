@@ -984,6 +984,30 @@ async def test_a_task_listed_twice_and_cancelled_before_it_is_built_is_cancelled
     assert [s for t, s in seen if t is twice] == ["CANCELED"]
 
 
+async def test_a_callback_that_raises_does_not_stop_the_other_cancels(backend, monkeypatch):
+    """At shutdown, the tasks a submit has not reached are cancelled one by one: a callback that
+    raised skipped the rest, and replaced how the submit ended."""
+    seen = []
+
+    def raising_once(task, state):
+        seen.append((task, state))
+        if state == "CANCELED" and sum(s == "CANCELED" for _, s in seen) == 1:
+            raise RuntimeError("callback failed")
+
+    backend.register_callback(raising_once)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(blocked) for _ in range(100)]
+    submit = asyncio.create_task(backend.submit_tasks(tasks))
+    await until(lambda: 0 < len(built) < len(tasks))
+    await backend.shutdown()
+    await submit  # ends as it would have: no error of the callback's
+    GATE.set()
+    unbuilt = [t for t in tasks if t["uid"] not in built]
+    assert unbuilt
+    for task in unbuilt:
+        assert [s for t, s in seen if t is task] == ["CANCELED"]
+
+
 async def test_a_large_batch_of_results_is_delivered_in_slices(backend, monkeypatch):
     """Every result the relay had sent was handed to the callback in one loop callback."""
     delivered = []
