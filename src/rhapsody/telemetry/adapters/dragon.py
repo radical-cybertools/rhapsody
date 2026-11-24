@@ -364,7 +364,10 @@ class DragonTelemetryAdapter(TelemetryAdapter):
             from dragon.native.process import ProcessTemplate  # noqa: PLC0415
             from dragon.native.process_group import ProcessGroup  # noqa: PLC0415
 
-            grp = ProcessGroup(restart=False, pmi=None)
+            # ignore_error_on_exit: a sampler that fails costs only its node's readings. Without it,
+            # Dragon 0.15's client watches the group's exception queue in a thread whose poll returns
+            # at once, and that thread spins a whole core for as long as the group runs.
+            grp = ProcessGroup(restart=False, ignore_error_on_exit=True, pmi=None)
             for policy in policies:
                 grp.add_process(
                     nproc=1,
