@@ -98,6 +98,9 @@ class FakeDragon:
         self.in_flight = 0
         self.peak = 0
         self.latency = 0.0
+        # Cleared, an executable that ended reports its exit only once it is set again.
+        self.exits = threading.Event()
+        self.exits.set()
         dragon = self
 
         @contextlib.contextmanager
@@ -188,9 +191,12 @@ class FakeDragon:
                     self.popen = subprocess.Popen(
                         [self.target, *self.args], env=env, cwd=self.cwd, stdout=out, stderr=out
                     )
-                    threading.Thread(
-                        target=lambda: self._exit(self.popen.wait()), daemon=True
-                    ).start()
+                    threading.Thread(target=self._wait_exit, daemon=True).start()
+
+            def _wait_exit(self):
+                code = self.popen.wait()
+                dragon.exits.wait()
+                self._exit(code)
 
             def _run_python(self):
                 try:
@@ -1740,23 +1746,33 @@ async def test_a_function_process_that_exits_on_its_own_after_its_result_is_not_
 async def test_a_function_process_that_fails_after_its_result_stays_done_with_a_warning(
     backend, dragon, monkeypatch, caplog
 ):
-    """Once reported on its result, a later exit code does not change the task: it is logged."""
+    """Once reported on its result, a later exit code does not change the task: it is logged.
+
+    The process exits only once its task is DONE: a sleep was not always long enough, and a process
+    whose exit the watcher finds before its result is reported on its exit code. The watcher frees
+    the ranks before it logs the exit code, so the test waits for the warning itself.
+    """
     original = worker_module.run_function_process
+    reported = threading.Event()
 
     def crash_at_exit(*args):
         original(*args)
-        time.sleep(0.2)  # after the result has been reported
+        reported.wait(10)
         raise SystemExit(3)
 
     monkeypatch.setattr(worker_module, "run_function_process", crash_at_exit)
     rec = Recorder(backend)
     task = fn_task(square, 4, task_backend_specific_kwargs={"process_template": {}})
-    with caplog.at_level(logging.WARNING):
-        await backend.submit_tasks([task])
-        assert await rec.wait(task["uid"]) == ["DONE"]
-        assert task["return_value"] == 16
-        await until(lambda: backend._running_ranks == 0)
-    assert "exited with code 1 after its result" in caplog.text
+    try:
+        with caplog.at_level(logging.WARNING):
+            await backend.submit_tasks([task])
+            assert await rec.wait(task["uid"]) == ["DONE"]
+            reported.set()
+            assert task["return_value"] == 16
+            await until(lambda: "exited with code 1 after its result" in caplog.text)
+            await until(lambda: backend._running_ranks == 0)
+    finally:
+        reported.set()
 
 
 async def test_shutdown_lets_a_process_that_reported_its_result_exit_on_its_own(
@@ -2216,14 +2232,19 @@ async def test_process_tasks_keep_requests_to_global_services_few(dragon, tmp_pa
     try:
         rec = Recorder(be)
         dragon.peak = 0
-        tasks = [exe_task("/bin/sleep", "0.5") for _ in range(128)]
+        # All 128 run before any ends: on a busy machine, starting 128 processes takes longer than
+        # a short one runs, and the first ones would be gone before the last ones were watched.
+        dragon.exits.clear()
+        tasks = [exe_task("true") for _ in range(128)]
         await be.submit_tasks(tasks)
         await until(lambda: len(be._watched) == 128, 20)
+        dragon.exits.set()
         for task in tasks:
             assert await rec.wait(task["uid"], 30) == ["DONE"]
         assert 0 < dragon.peak <= dragon_native._PROC_THREADS + 2
         assert be._running_ranks == 0 and be._watched == {}
     finally:
+        dragon.exits.set()
         await be.shutdown()
 
 
