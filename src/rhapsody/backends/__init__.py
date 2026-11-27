@@ -38,13 +38,6 @@ except ImportError:
     pass
 
 try:
-    from .execution import RadicalExecutionBackend  # noqa: F401
-
-    __all__.append("RadicalExecutionBackend")
-except ImportError:
-    pass
-
-try:
     from .execution import DragonExecutionBackend  # noqa: F401
 
     __all__.append("DragonExecutionBackend")

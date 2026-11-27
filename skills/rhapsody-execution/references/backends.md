@@ -160,29 +160,6 @@ Examples: `$RHAPSODY_REPO/examples/01-workload-async-gather.py` and `02-workload
 
 ---
 
-## RadicalExecutionBackend: RADICAL-Pilot
-
-```python
-from rhapsody.backends import RadicalExecutionBackend
-
-backend = await RadicalExecutionBackend(
-    resources={"resource": "local.localhost", "runtime": 30, "cores": 8},  # pilot description
-)
-```
-
-**Constructor:**
-- `resources`: a RADICAL-Pilot pilot description, e.g. `resource`, `runtime` in minutes, `cores`, `gpus`, plus queue and project fields for HPC targets;
-- `raptor_config`: masters and workers; this is required for **function** tasks;
-- `name`: default `"radical_pilot"`.
-
-**Per-task keys:** `task_backend_specific_kwargs` becomes a `radical.pilot.TaskDescription`, e.g. `ranks`, `cores_per_rank`, `gpus_per_rank`, `pre_exec`.
-
-**Data staging:** tasks run in separate sandboxes, so this backend supports data linking between them.
-
-Install: `pip install "rhapsody-py[radical_pilot]"`. Resource names come from RADICAL-Pilot's resource configuration for the target machine.
-
----
-
 ## OrbitExecutionBackend: remote execution through a broker
 
 ```python

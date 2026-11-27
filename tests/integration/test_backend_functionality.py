@@ -49,12 +49,8 @@ def get_available_backends_for_mode() -> list[str]:
         # Only Dragon backends
         return [name for name in available if name == "dragon" or name.startswith("dragon_")]
     elif mode == "regular":
-        # Exclude Dragon and radical_pilot (both require dedicated HPC infrastructure)
-        return [
-            name
-            for name in available
-            if name not in {"dragon", "radical_pilot"} and not name.startswith("dragon_")
-        ]
+        # Exclude Dragon (requires dedicated HPC infrastructure)
+        return [name for name in available if name != "dragon" and not name.startswith("dragon_")]
     else:  # mode == "all"
         # All available backends
         return available

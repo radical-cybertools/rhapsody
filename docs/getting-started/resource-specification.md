@@ -445,3 +445,29 @@ Limits:
   `TimeoutError` of its own.
 - A task cancelled with `cancel_task()` reports nothing. A Dragon `timeout` ends as FAILED and
   still reports: the launcher passes the signal to the command and reaps it.
+
+### Coming from RADICAL-Pilot
+
+`RadicalExecutionBackend` was removed. For HPC runs, use `DragonExecutionBackend`. The main
+differences:
+
+- **Where the program runs.** RADICAL-Pilot submitted a pilot job from your workstation or a
+  login node. With Dragon, you request the allocation from the batch scheduler yourself and
+  start your application inside it with `dragon app.py`. The pilot description
+  (`resource`, `runtime`, `cores`, ...) is gone; size the backend with
+  `batch_kwargs={"num_nodes": N}`.
+- **Per-task keys.** `task_backend_specific_kwargs` no longer becomes a
+  `radical.pilot.TaskDescription`. Use a `process_template` or `process_templates` instead:
+
+| RADICAL-Pilot `TaskDescription` key | Dragon equivalent |
+|---|---|
+| `ranks: N` | `"process_templates": [(N, {})]`, plus `"pmi"` for MPI jobs (see [MPI jobs](#mpi-jobs-pmi-and-timeout)) |
+| `cores_per_rank` | `Policy(cpu_affinity=[...])` in each template's `"policy"` |
+| `gpus_per_rank` | `Policy(gpu_affinity=[...])` in each template's `"policy"` (see [GPU affinity](#gpu-affinity-with-policy)) |
+| `pre_exec` | No separate key: put the setup in the command, e.g. `executable="/bin/bash"`, `arguments=["-c", "module load x && ./app"]`, or set variables with the template's `"env"` |
+| Task sandbox | The template's `"cwd"` |
+| `raptor_config` for function tasks | Not needed: Dragon runs `ComputeTask(function=...)` directly |
+
+- **Data staging.** RADICAL-Pilot gave each task its own sandbox and linked or staged files
+  between them. Dragon tasks share the filesystem, so a task reads another task's output
+  from its path. No built-in backend declares the data-linking capabilities.
