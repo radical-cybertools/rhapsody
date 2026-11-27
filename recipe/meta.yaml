@@ -43,9 +43,9 @@ about:
     RHAPSODY executes heterogeneous HPC-AI workflows with dynamic task
     graphs on high-performance computing infrastructures, running
     services (e.g. inference servers) alongside tasks. Execution
-    backends (Dask, RADICAL-Pilot, Dragon) are optional;
+    backends (Dask, Dragon) are optional;
     this package ships the core. Backend dependencies are installed
-    separately, e.g. `conda install dask radical.pilot` or
+    separately, e.g. `conda install dask` or
     `pip install dragonhpc` for the Dragon backend.
   license: MIT
   license_file: LICENSE.md
