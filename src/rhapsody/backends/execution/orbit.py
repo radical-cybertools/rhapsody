@@ -202,8 +202,9 @@ class OrbitExecutionBackend(BaseBackend):
         self._batch_lock = asyncio.Lock()
         self._send_lock = asyncio.Lock()
         self._flush_handle: asyncio.TimerHandle | None = None
-        # Background (timer-triggered) flush tasks, awaited on shutdown so a
-        # batch that is mid-send is never dropped.
+        # Background send tasks (timer-triggered flushes and immediate
+        # submits), awaited on shutdown so a batch that is mid-send is never
+        # dropped.
         self._inflight_flushes: set[asyncio.Task] = set()
 
         # -- profiling --
@@ -677,8 +678,11 @@ class OrbitExecutionBackend(BaseBackend):
         buffer reaches ``batch_limit``.  This turns many small individual
         submissions into fewer bulk HTTP requests.
 
-        When batching is disabled (batch_window == 0), delegates directly
-        to ``RhapsodyClient.submit_tasks()``.
+        When batching is disabled (batch_window == 0), each call is sent
+        right away, but as a background task: this returns once the tasks are
+        registered, and a failed send reports the tasks FAILED through the
+        callback instead of raising here.  A slow or lost endpoint therefore
+        never holds the caller (asyncflow's run loop awaits this method).
         """
         if not self._initialized:
             await self._async_init()
@@ -706,10 +710,12 @@ class OrbitExecutionBackend(BaseBackend):
             if prof:
                 prof.prof("task_submit", uid=task["uid"])
 
-        # No batching — submit immediately
+        # No batching — send now, but in the background, through the same
+        # serialized path as a timer flush: the caller (asyncflow's run loop)
+        # must not wait while a slow or lost endpoint holds the request.  A
+        # failed send marks the tasks FAILED (see _send_batch).
         if self._batch_window <= 0:
-            task_dicts = [dict(t) for t in tasks]
-            await asyncio.to_thread(self._rh.submit_tasks, task_dicts)
+            self._spawn_send(self._send_batch([dict(t) for t in tasks]))
             return
 
         # Batching — collect and, if the buffer is now full, flush inline.
@@ -736,12 +742,20 @@ class OrbitExecutionBackend(BaseBackend):
         The task is tracked in ``_inflight_flushes`` so ``shutdown`` can await
         an in-progress send instead of dropping the batch.
         """
-        task = asyncio.ensure_future(self._locked_flush())
+        self._spawn_send(self._locked_flush())
+
+    def _spawn_send(self, coro) -> None:
+        """Run a send as a tracked background task.
+
+        Tracked in ``_inflight_flushes`` so ``shutdown`` can await it.  Sends
+        are serialized and ordered by ``_send_lock``.
+        """
+        task = asyncio.ensure_future(coro)
         self._inflight_flushes.add(task)
         task.add_done_callback(self._on_flush_done)
 
     def _on_flush_done(self, task: asyncio.Task) -> None:
-        """Untrack a finished background flush and retrieve its exception.
+        """Untrack a finished background send and retrieve its exception.
 
         ``_send_batch`` already logs the failure and marks tasks FAILED; we
         retrieve the exception here only so asyncio does not emit a spurious
@@ -751,7 +765,7 @@ class OrbitExecutionBackend(BaseBackend):
         if not task.cancelled():
             exc = task.exception()
             if exc is not None:
-                self.logger.debug("background batch flush failed: %s", exc)
+                self.logger.debug("background send failed: %s", exc)
 
     async def _locked_flush(self):
         """Detach the buffered batch under the batch lock, then send it unlocked."""
@@ -798,9 +812,9 @@ class OrbitExecutionBackend(BaseBackend):
             try:
                 await asyncio.to_thread(self._rh.submit_tasks, batch)
             except Exception as exc:
-                # A timer-triggered flush runs as a detached background task; an
-                # unhandled error here would leave the batch's tasks hung
-                # forever.  Fail them explicitly so the failure reaches the
+                # Timer flushes and immediate submits run as detached background
+                # tasks; an unhandled error here would leave the batch's tasks
+                # hung forever.  Fail them explicitly so the failure reaches the
                 # client (and re-raise for the inline buffer-full caller).
                 self.logger.error("Failed to submit batch of %d tasks: %s", len(batch), exc)
                 for t in batch:
@@ -873,9 +887,11 @@ class OrbitExecutionBackend(BaseBackend):
             # Never let a flush failure skip client cleanup below.
             self.logger.warning("Failed to flush pending tasks during shutdown: %s", e)
 
-        # Wait for any timer-triggered flush already in flight so its batch is
-        # sent before we tear down the clients.
-        if self._inflight_flushes:
+        # Wait for every background send (timer flush or immediate submit)
+        # still in flight so its batch is sent before we tear down the
+        # clients.  Loop: a send spawned while we wait must not run against
+        # the closed client.
+        while self._inflight_flushes:
             await asyncio.gather(*list(self._inflight_flushes), return_exceptions=True)
 
         # Let output fetches for already-DONE executables finish while the
