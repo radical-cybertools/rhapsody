@@ -548,7 +548,8 @@ def test_a_call_that_misses_the_cache_takes_one_pickler(monkeypatch):
             assert len(made) == 1, (name, n)
 
 
-def test_a_function_the_walk_cannot_see_is_not_walked_again(monkeypatch):
+def counting_walks(monkeypatch):
+    """Count the walks of what a function holds: the list each walked function goes to."""
     from rhapsody.backends.execution import _function_pickles
 
     walks = []
@@ -559,6 +560,11 @@ def test_a_function_the_walk_cannot_see_is_not_walked_again(monkeypatch):
         return walk(fn, budget, held)
 
     monkeypatch.setattr(_function_pickles, "_walk", counting)
+    return walks
+
+
+def test_a_function_the_walk_cannot_see_is_not_walked_again(monkeypatch):
+    walks = counting_walks(monkeypatch)
     pickles = FunctionPickles()
     closure = over_instance(Tool(2))
     for n in range(6):
@@ -608,3 +614,81 @@ def test_the_kept_pickles_stay_under_a_total_size():
         pickles.dumps(fn)
     assert len(pickles) == 2  # the oldest went first
     assert pickles.dumps(fns[2]) is pickles.dumps(fns[2])
+
+
+def test_a_pickle_two_threads_keep_at_once_counts_once_toward_the_total(monkeypatch):
+    """Both kept their pickle of one function.
+
+    The second replaced the first without taking its size off the total, and the total then dropped
+    pickles it had room for.
+    """
+    from rhapsody.backends.execution import _function_pickles
+
+    fn, other = make_adder(1), make_adder(2)
+    one = len(cloudpickle.dumps(fn))
+    pickles = FunctionPickles(confirm=False, max_total_bytes=int(2.5 * one))
+    walk = _function_pickles._walk
+    race = [True]
+
+    def walk_while_another_thread_keeps_fn(f, budget, held=None):
+        if race[0] and held is None:  # the walk that checks the pickle just taken
+            race[0] = False
+            pickles.dumps(fn)  # meanwhile, another thread takes and keeps its own pickle of fn
+        return walk(f, budget, held)
+
+    monkeypatch.setattr(_function_pickles, "_walk", walk_while_another_thread_keeps_fn)
+    pickles.dumps(fn)
+    pickles.dumps(other)
+    assert len(pickles) == 2
+
+
+def test_a_function_too_large_to_keep_is_not_walked_again(monkeypatch):
+    """Its pickle is never kept, yet every task walked what it holds, twice, and hashed the
+    pickle: a 2 MB pickle cost 4.7 ms a task, against 2.8 ms on main."""
+    walks = counting_walks(monkeypatch)
+    blob = b"x" * 4096
+
+    def size():
+        return len(blob)
+
+    pickles = FunctionPickles(max_bytes=1024)
+    for _ in range(4):
+        fn, rest = load_call(*pickles.dumps_call(size, ("token",)))
+        assert fn() == 4096 and rest == ("token",)
+    assert walks == []
+    assert len(pickles) == 0
+
+
+def test_a_function_that_changes_before_every_call_is_not_walked_for_every_call(monkeypatch):
+    """No two pickles in a row agree, so none is kept, yet every task walked what the function
+    holds, twice: 55 us a task on main became 118 us."""
+    walks = counting_walks(monkeypatch)
+    config = {"step": 0}
+
+    def step():
+        return config["step"]
+
+    pickles = FunctionPickles()
+    for n in range(8):
+        config["step"] = n
+        fn, rest = load_call(*pickles.dumps_call(step, ("token",)))
+        assert fn() == n and rest == ("token",)
+    assert len(walks) <= 1
+    assert len(pickles) == 0
+
+
+def test_a_function_that_settles_after_changing_is_kept_again():
+    """A function that changed before every call is still kept once it stops changing."""
+    config = {"step": 0}
+
+    def step():
+        return config["step"]
+
+    pickles = FunctionPickles()
+    for n in range(4):
+        config["step"] = n
+        pickles.dumps(step)
+    for _ in range(3):
+        assert load(pickles.dumps(step))() == 3
+    assert len(pickles) == 1
+    assert pickles.dumps(step) is pickles.dumps(step)

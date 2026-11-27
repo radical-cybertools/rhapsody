@@ -705,6 +705,21 @@ async def test_in_a_session_a_repeat_leaves_the_first_tasks_future_alone(backend
     assert first["return_value"] == "released"
 
 
+async def test_a_function_whose_pickle_is_over_a_megabyte_runs(backend):
+    """Its message is pickled another way, through a file: pickle.dumps copied it slowly."""
+    rec = Recorder(backend)
+    blob = b"x" * (2 << 20)
+
+    def size(n):
+        return len(blob) + n
+
+    tasks = [fn_task(size, n) for n in range(3)]
+    await backend.submit_tasks(tasks)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert [t["return_value"] for t in tasks] == [len(blob) + n for n in range(3)]
+
+
 async def test_unpicklable_result_fails_only_its_task(backend):
     rec = Recorder(backend)
     bad, good = fn_task(lambda: threading.Lock()), fn_task(square, 2)
@@ -1033,6 +1048,40 @@ async def test_a_large_batch_of_results_is_delivered_in_slices(backend, monkeypa
     assert 0 < len(delivered) < len(tasks)
     await until(lambda: len(delivered) == len(tasks))
     assert delivered == [t["uid"] for t in tasks]
+
+
+class CallbackExit(BaseException):
+    """Not an Exception, as a CancelledError is not: the loop reports it and goes on."""
+
+
+async def test_a_callback_that_raises_a_base_exception_does_not_hold_later_results(backend):
+    """The flush stayed marked as scheduled when none was: no later state reached the callback
+    until shutdown."""
+    loop = asyncio.get_running_loop()
+    errors = []
+    loop.set_exception_handler(lambda loop, context: errors.append(context.get("exception")))
+    tasks = [fn_task(square, i) for i in range(4)]
+    delivered = []
+
+    def callback(task, state):
+        if task is tasks[0]:
+            raise CallbackExit()
+        delivered.append(task["uid"])
+
+    backend.register_callback(callback)
+    changes = [
+        (types.SimpleNamespace(uid=t["uid"], desc=t, repeats=[]), "DONE", {"return_value": 0})
+        for t in tasks
+    ]
+    try:
+        backend._emit_all(changes[:2])
+        await until(lambda: errors)
+        backend._emit_all(changes[2:])
+        await until(lambda: len(delivered) == 3)
+    finally:
+        loop.set_exception_handler(None)
+    assert delivered == [t["uid"] for t in tasks[1:]]
+    assert isinstance(errors[0], CallbackExit)
 
 
 def calls_sys_exit():
@@ -2334,6 +2383,33 @@ async def test_cancel_running_pool_task_kills_and_replaces_its_worker(backend, d
     after = fn_task(square, 6, placement={"host": w.host})
     await backend.submit_tasks([after])
     assert await rec.wait(after["uid"]) == ["DONE"]
+
+
+async def test_a_cancel_whose_callback_raises_still_stops_the_task_and_cancels_its_repeat(
+    backend, dragon
+):
+    """The CANCELED callbacks ran unguarded, before the worker was stopped.
+
+    One that raised left the repeat with no final state, and the task running on a worker marked
+    dead and never replaced.
+    """
+    seen = []
+
+    def raising_once(task, state):
+        seen.append((task, state))
+        if state == "CANCELED" and sum(s == "CANCELED" for _, s in seen) == 1:
+            raise RuntimeError("callback failed")
+
+    backend.register_callback(raising_once)
+    first = fn_task(blocked)
+    repeat = dict(fn_task(square, 2), uid=first["uid"])
+    await backend.submit_tasks([first, repeat])
+    w = backend._tasks[first["uid"]].worker
+    proc = w.proc
+    assert await backend.cancel_task(first["uid"]) is True
+    assert [s for t, s in seen if t is repeat] == ["RUNNING", "CANCELED"]
+    await until(lambda: proc.code == -signal.SIGKILL)
+    await until(lambda: len(dragon.workers()) == 5 and backend._live_by_key[w.key] == 2)
 
 
 async def test_pool_timeout_fails_the_task_and_kills_its_worker(backend):
