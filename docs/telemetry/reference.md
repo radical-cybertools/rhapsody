@@ -683,7 +683,7 @@ This section is for people who write a backend or add telemetry for a new domain
 
 ### Why backends do not call OTel
 
-RHAPSODY does not own the execution events of the runtimes behind its backends (Dragon, Dask, RADICAL-Pilot, ...). A backend is a translation layer: it turns what its runtime reports into RHAPSODY's normalized task lifecycle and into **plain data**. Recording that data in one place gives every runtime the same names, lifecycle and JSONL output, and keeps OpenTelemetry out of every backend. OTel *at the source* belongs to the owner of the source (for example Dragon enabling vLLM tracing). Where RHAPSODY owns the source, as in the inference batcher, a later step of the telemetry refactor (Tier 1) lets such code use the OTel API through the session's providers; the data and the names stay the same.
+RHAPSODY does not own the execution events of the runtimes behind its backends (Dragon, Dask, Orbit, ...). A backend is a translation layer: it turns what its runtime reports into RHAPSODY's normalized task lifecycle and into **plain data**. Recording that data in one place gives every runtime the same names, lifecycle and JSONL output, and keeps OpenTelemetry out of every backend. OTel *at the source* belongs to the owner of the source (for example Dragon enabling vLLM tracing). Where RHAPSODY owns the source, as in the inference batcher, a later step of the telemetry refactor (Tier 1) lets such code use the OTel API through the session's providers; the data and the names stay the same.
 
 So a backend never imports OpenTelemetry and never sees the `TelemetryManager`. It reports through an *emitter*, and an *instrumentation* turns the data into spans and metrics.
 

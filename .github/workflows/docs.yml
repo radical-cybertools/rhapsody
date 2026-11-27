@@ -15,7 +15,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-and-deploy:
+  # Build and deploy run as separate jobs. deploy-pages looks up the
+  # "github-pages" artifact through the API, which can miss an artifact
+  # uploaded a moment earlier in the same job. A separate job also lets
+  # "Re-run failed jobs" retry the deploy without uploading a second
+  # artifact, which deploy-pages rejects.
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -46,6 +51,11 @@ jobs:
         with:
           path: ./site
 
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

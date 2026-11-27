@@ -11,7 +11,7 @@ the backend's ``register_emitter`` hook. Until then, and whenever telemetry is o
 
 A backend uses only this handle. It never sees the ``TelemetryManager`` and never imports
 OpenTelemetry. RHAPSODY does not own the execution events of the runtimes behind its backends
-(Dragon, Dask, RADICAL-Pilot, ...), so a backend translates what the runtime reports into plain
+(Dragon, Dask, Orbit, ...), so a backend translates what the runtime reports into plain
 data; the instrumentation for that backend's domain turns it into spans and metrics. See
 docs/telemetry/reference.md ("Why backends do not call OTel").
 
@@ -79,7 +79,7 @@ class BackendEmitter:
 
     TELEMETRY-LIMITATION(L17): ``emit()`` must be called on the event-loop thread, because the
     manager's queue (``asyncio.Queue.put_nowait``) is not thread-safe. Backends whose callbacks run
-    in worker threads (Dask, RADICAL-Pilot) would need to marshal onto the loop first.
+    in worker threads (Dask) would need to marshal onto the loop first.
     Why not now: the only emitting backend, the vLLM batcher, runs on the loop.
     Planned: Tier 1 of the telemetry refactor (the OTel API is thread-safe) or a
     ``call_soon_threadsafe`` hop in the emitter. See docs/telemetry/reference.md#known-limitations.
