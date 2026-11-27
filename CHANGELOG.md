@@ -194,6 +194,11 @@
   without a parent. The ambient session span also leaked into the caller's OTel context. The
   session span is now never attached: it is the explicit parent of task and scope spans that
   have no caller span.
+- **Telemetry: function tasks labelled `executable="None"`** — a `ComputeTask` built with
+  `function=` also stores `executable=None`, and the telemetry label took the executable whenever
+  the key was present. Every function task's events, task spans and task metrics carried
+  `executable="None"`. The label now skips a `None` executable and uses the function's name, as
+  it already did for task dicts without an `executable` key.
 
 ## [0.7.0] 2026-11-09
 
