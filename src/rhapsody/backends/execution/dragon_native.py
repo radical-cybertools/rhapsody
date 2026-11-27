@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import heapq
+import io
 import itertools
 import logging
 import os
+import pickle
 import queue
 import resource
 import shutil
@@ -54,8 +57,11 @@ DRAGON_NATIVE_INIT_ERROR = None
 
 try:
     import cloudpickle
+
+    from ._function_pickles import FunctionPickles
 except ImportError:  # pragma: no cover - Dragon depends on cloudpickle
     cloudpickle = None
+    FunctionPickles = None
 
 try:
     from dragon.globalservices.process import kill as process_kill
@@ -112,6 +118,13 @@ _SEND_TIMEOUT = 10.0
 # each failure up to the maximum.
 _RETRY_FIRST = 0.01
 _RETRY_MAX = 1.0
+# Seconds submit_tasks builds tasks, and a flush of the outbox runs callbacks, before they let the
+# asyncio loop run: a batch of thousands of tasks held the loop for seconds, and every coroutine of
+# the process with it.
+_LOOP_SLICE = 0.02
+# Bytes from which a pool task's message is pickled through a file, as cloudpickle.dumps does:
+# pickle.dumps copied a 2 MB message four times as slowly, and was as quick below 1 MB.
+_LARGE_MESSAGE = 1 << 20
 # Seconds a put on the relay's queue may wait for a free slot, on the asyncio loop at worst. A full
 # queue or memory pool does not wait longer: the batch is retried from the timer thread.
 _CONTROL_PUT_WAIT = 0.01
@@ -354,6 +367,20 @@ def _load_value(msg: tuple) -> tuple:
     return tuple(fields)
 
 
+def _take(unbuilt: dict[str, list[dict]], task: dict) -> bool:
+    """Take ``task`` from the tasks a submit has not reached yet; False if it was cancelled
+    there."""
+    waiting = unbuilt.get(task["uid"])
+    if waiting:
+        for i, desc in enumerate(waiting):
+            if desc is task:
+                del waiting[i]
+                if not waiting:
+                    del unbuilt[task["uid"]]
+                return True
+    return False
+
+
 def _read_and_remove(path: str | None) -> str:
     if not path:
         return ""
@@ -422,6 +449,16 @@ class DragonNativeExecutionBackend(BaseBackend):
         pmi: The PMI of every ``process_templates`` group whose task sets none: ``"pmix"``,
             ``"cray"``, ``"none"`` or a Dragon ``PMIBackend``. An unknown name raises
             ``ValueError`` before anything starts.
+        hosts: The Dragon nodes this backend uses, by hostname. Defaults to all of the runtime's
+            nodes. With a list, the backend acts as if the runtime had only those nodes: its pool,
+            its unplaced tasks, its process slots and the placements it accepts. Several clients
+            of one multi-node runtime, one per node, can each pass their own node, so that each
+            pool stays on its client's node instead of every client starting workers everywhere.
+            A process task whose policy names no node goes to those nodes in turn, the client's
+            first (one with its GPUs, if its policy has GPU affinity), and so does each template
+            of a ``process_templates`` group, its ranks in blocks over them; without ``hosts``
+            Dragon places them anywhere in the runtime. A host that is not a Dragon node raises
+            ``ValueError`` when the backend starts.
         name: Backend name.
     """
 
@@ -440,11 +477,18 @@ class DragonNativeExecutionBackend(BaseBackend):
         worker_start_timeout: float = 300.0,
         pmi: str | PMIBackend | None = None,
         name: str | None = "dragon_native",
+        hosts: list[str] | None = None,
     ):
         if Process is None:
             raise RuntimeError(DRAGON_NATIVE_INIT_ERROR)
         if workers_per_node is not None and workers_per_node < 0:
             raise ValueError("workers_per_node must be >= 0")
+        if hosts is not None:
+            hosts = [] if isinstance(hosts, str) else list(dict.fromkeys(hosts))
+            if not hosts or not all(isinstance(h, str) and h for h in hosts):
+                raise ValueError(
+                    "hosts must be a non-empty list of hostnames, or None for all nodes"
+                )
         if gpu_workers_per_set < 1:
             raise ValueError("gpu_workers_per_set must be >= 1")
         _group_pmi(pmi)
@@ -455,6 +499,8 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._workers_per_node = workers_per_node
         self._gpu_workers_per_set = gpu_workers_per_set
         self._max_process_ranks_arg = max_process_ranks
+        self._hosts = hosts
+        self._turns = itertools.count()  # the next of the hosts for an unplaced process
         self._inline_stdio = inline_stdio
         self._kill_grace = kill_grace
         self._worker_start_timeout = worker_start_timeout
@@ -475,6 +521,8 @@ class DragonNativeExecutionBackend(BaseBackend):
         # Filled by _start(): Dragon host name -> {"cpus", "gpus", "h_uid"}; client host first.
         self._nodes: dict[str, dict] = {}
         self._hosts_by_huid: dict[int, str] = {}
+        # Every node of the runtime, hosts= or not: where a task's leftovers are reaped.
+        self._runtime_hosts_by_huid: dict[int, str] = {}
         self._host_order: list[str] = []
         self._client_host: str | None = None
         self._results: Any = None
@@ -524,9 +572,14 @@ class DragonNativeExecutionBackend(BaseBackend):
         self._caught_up = 0.0
 
         self._outbox_lock = threading.Lock()
-        self._outbox: list = []
+        self._outbox: deque = deque()
         # The loop a flush of the outbox is scheduled on, if one is.
         self._flush_loop: asyncio.AbstractEventLoop | None = None
+        # Tasks of submit_tasks calls that let the loop run before they reached them, by uid:
+        # cancel_task cancels them there.
+        self._unbuilt: list[dict[str, list[dict]]] = []
+        # Pool tasks' functions, each pickled once while it stays the same.
+        self._functions = FunctionPickles() if FunctionPickles is not None else None
 
         self._stop_event = threading.Event()
         # Seconds each step of the last shutdown took.
@@ -601,7 +654,17 @@ class DragonNativeExecutionBackend(BaseBackend):
                 "h_uid": node.h_uid,
             }
             self._hosts_by_huid[node.h_uid] = node.hostname
-        self._host_order = [self._client_host] + [h for h in self._nodes if h != self._client_host]
+        self._runtime_hosts_by_huid = dict(self._hosts_by_huid)
+        if self._hosts is not None:
+            unknown = [h for h in self._hosts if h not in self._nodes]
+            if unknown:
+                raise ValueError(
+                    f"hosts {unknown} are not Dragon nodes; nodes: {sorted(self._nodes)}"
+                )
+            self._nodes = {h: self._nodes[h] for h in self._hosts}
+            self._hosts_by_huid = {info["h_uid"]: h for h, info in self._nodes.items()}
+        first = [self._client_host] if self._client_host in self._nodes else []
+        self._host_order = first + [h for h in self._nodes if h != self._client_host]
         total_cpus = sum(len(n["cpus"]) or n["num_cpus"] for n in self._nodes.values())
         self._max_process_ranks = self._max_process_ranks_arg or max(1, total_cpus)
 
@@ -1832,7 +1895,7 @@ class DragonNativeExecutionBackend(BaseBackend):
         hosts = set()
         for puid in puids:
             with contextlib.suppress(Exception):
-                hosts.add(self._hosts_by_huid.get(Process(None, ident=puid).h_uid))
+                hosts.add(self._runtime_hosts_by_huid.get(Process(None, ident=puid).h_uid))
         try:
             exited, _ = multi_join(puids, timeout=self._kill_grace, join_all=True)
         except Exception:
@@ -1902,20 +1965,40 @@ class DragonNativeExecutionBackend(BaseBackend):
                     self._flush_loop = None
             self.logger.warning(f"Event loop closed; holding {len(changes)} task state(s)")
 
-    def _flush_outbox(self) -> None:
-        """Apply queued state changes and run the callback.
+    def _flush_outbox(self, whole: bool = False) -> None:
+        """Apply queued state changes and run the callback, in order.
 
-        Runs on the asyncio loop.
+        Runs on the asyncio loop, for ``_LOOP_SLICE`` seconds at most unless ``whole``: what is
+        left goes to the loop's next pass, so a large batch of results does not hold the loop.
         """
-        with self._outbox_lock:
-            items, self._outbox = self._outbox, []
-            self._flush_loop = None
-        for desc, state, fields in items:
+        deadline = None if whole else time.monotonic() + _LOOP_SLICE
+        while True:
+            with self._outbox_lock:
+                if not self._outbox:
+                    self._flush_loop = None
+                    return
+                desc, state, fields = self._outbox.popleft()
             desc.update(fields)
             try:
                 self._callback_func(desc, state)
             except Exception:
                 self.logger.exception(f"Callback failed for {desc.get('uid')} ({state})")
+            except BaseException:
+                # The rest goes on in another pass: a flush left marked as scheduled while none is
+                # would hold every later state.
+                try:
+                    asyncio.get_running_loop().call_soon(self._flush_outbox)
+                except RuntimeError:
+                    with self._outbox_lock:
+                        self._flush_loop = None
+                raise
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+        # The flush stays scheduled (_flush_loop is still set): _emit_all adds to it, not another.
+        try:
+            asyncio.get_running_loop().call_soon(self._flush_outbox)
+        except RuntimeError:  # not on a loop: deliver the rest now
+            self._flush_outbox(whole=True)
 
     # ------------------------------------------------------------------
     # Task translation
@@ -1929,13 +2012,12 @@ class DragonNativeExecutionBackend(BaseBackend):
         if policy.placement == Policy.Placement.HOST_NAME:
             host = policy.host_name
             if host not in self._nodes:
-                raise ValueError(
-                    f"task {uid}: host {host!r} is not a Dragon node; nodes: {sorted(self._nodes)}"
-                )
+                raise self._not_ours(uid, f"host {host!r}", host)
         elif policy.placement == Policy.Placement.HOST_ID:
             host = self._hosts_by_huid.get(policy.host_id)
             if host is None:
-                raise ValueError(f"task {uid}: host id {policy.host_id} is not a Dragon node")
+                runtime_host = self._runtime_hosts_by_huid.get(policy.host_id)
+                raise self._not_ours(uid, f"host id {policy.host_id}", runtime_host)
         gpus = set(policy.gpu_affinity or ())
         if not gpus:
             return
@@ -1944,6 +2026,14 @@ class DragonNativeExecutionBackend(BaseBackend):
             where = f"Dragon node {host!r}" if host else "any Dragon node"
             listed = {h: self._nodes[h]["gpus"] for h in hosts}
             raise ValueError(f"task {uid}: GPUs {sorted(gpus)} are not on {where}; GPUs: {listed}")
+
+    def _not_ours(self, uid: str, what: str, host: str | None) -> ValueError:
+        """The error for a placement on a node the backend does not use."""
+        if host in self._runtime_hosts_by_huid.values():
+            return ValueError(
+                f"task {uid}: {what} is not one of this backend's hosts {self._hosts}"
+            )
+        return ValueError(f"task {uid}: {what} is not a Dragon node; nodes: {sorted(self._nodes)}")
 
     def _placement_policy(self, placement: dict | None, uid: str):
         """Translate AsyncFlow's ``placement`` into a host-name policy, or None.
@@ -1973,6 +2063,54 @@ class DragonNativeExecutionBackend(BaseBackend):
             self._check_policy(template_policy, uid)
             return template_policy
         return placement_policy
+
+    def _free_hosts(self, policy) -> list[str] | None:
+        """The hosts for a process whose policy names no node, or None to keep its policy.
+
+        Only with ``hosts``: Dragon places such a process anywhere in the runtime (``LOCAL``,
+        ``ANYWHERE`` and ``DEFAULT`` all mean that), so it gets one of the hosts instead, and one
+        with its GPUs if it has GPU affinity. ``_check_policy`` has made sure that one has them.
+        """
+        if self._hosts is None:
+            return None
+        if policy is None:
+            return self._host_order
+        if policy.placement in (Policy.Placement.HOST_NAME, Policy.Placement.HOST_ID):
+            return None
+        gpus = set(policy.gpu_affinity or ())
+        return [h for h in self._host_order if gpus <= set(self._nodes[h]["gpus"])]
+
+    def _on_host(self, policy, host: str):
+        """``policy`` on ``host``, its CPU and GPU affinity kept."""
+        if policy is None:
+            return self._host_policy(host)
+        return dataclasses.replace(policy, placement=Policy.Placement.HOST_NAME, host_name=host)
+
+    def _within_hosts(self, policy):
+        """With ``hosts``, a process whose policy names no node goes to the next of the hosts."""
+        hosts = self._free_hosts(policy)
+        if hosts is None:
+            return policy
+        return self._on_host(policy, hosts[next(self._turns) % len(hosts)])
+
+    def _spread(self, policy, nranks: int) -> list[tuple[int, Any]]:
+        """A group template's ranks as ``(ranks, policy)`` blocks, one per host.
+
+        With ``hosts`` and a policy that names no node, the ranks go to the hosts in equal blocks
+        (the first hosts take one more when they don't divide evenly), starting with the next of
+        the hosts; a template of one rank goes to the next host alone. Otherwise the template
+        stays whole.
+        """
+        hosts = self._free_hosts(policy)
+        if hosts is None:
+            return [(nranks, policy)]
+        first = next(self._turns)
+        blocks = min(nranks, len(hosts))
+        size, extra = divmod(nranks, blocks)
+        return [
+            (size + (i < extra), self._on_host(policy, hosts[(first + i) % len(hosts)]))
+            for i in range(blocks)
+        ]
 
     def _pool_key(self, template, placement_policy, uid: str) -> tuple | None:
         """The pool key ``(host, gpus)`` of a function task, or None if it needs its own process."""
@@ -2093,8 +2231,19 @@ class DragonNativeExecutionBackend(BaseBackend):
                 if capture:
                     out = os.path.join(self._work_dir, f"{uid}.stdout")
                     err = os.path.join(self._work_dir, f"{uid}.stderr")
-                body = cloudpickle.dumps((token, fn, args, kwargs, out, err, self._inline_stdio))
-                rec.payload = cloudpickle.dumps((uid, body))
+                # The function's pickle is the one kept while it stays the same; the rest of the call
+                # continues it, so the worker loads both as from one pickle. The uid travels apart,
+                # so a call the worker cannot load fails only its task.
+                fn_data, rest = self._functions.dumps_call(
+                    fn, (token, args, kwargs, out, err, self._inline_stdio)
+                )
+                message = (uid, fn_data, rest)
+                if len(fn_data) + len(rest) < _LARGE_MESSAGE:
+                    rec.payload = pickle.dumps(message, protocol=pickle.HIGHEST_PROTOCOL)
+                else:
+                    buffer = io.BytesIO()
+                    pickle.Pickler(buffer, protocol=pickle.HIGHEST_PROTOCOL).dump(message)
+                    rec.payload = buffer.getvalue()
                 return rec
 
         if templates is None:
@@ -2102,6 +2251,7 @@ class DragonNativeExecutionBackend(BaseBackend):
             rec.is_function = is_function
             template = dict(template or {})
             policy = self._choose_policy(template.get("policy"), placement_policy, uid)
+            policy = self._within_hosts(policy)
             proc_kwargs, out, err = self._process_kwargs(rec, template, policy, fn, args, capture)
             if is_function:
                 proc_kwargs["target"] = _worker.run_function_process
@@ -2120,11 +2270,14 @@ class DragonNativeExecutionBackend(BaseBackend):
                 )
             cfg = dict(cfg or {})
             policy = self._choose_policy(cfg.get("policy"), placement_policy, uid)
-            tmpl_kwargs, out, err = self._process_kwargs(rec, cfg, policy, fn, args, capture)
-            if is_function:
-                tmpl_kwargs["target"] = _worker.run_group_member
-                tmpl_kwargs["args"] = (fn, args, kwargs, out, err)
-            rec.templates.append((nranks, ProcessTemplate(**tmpl_kwargs)))
+            for block, block_policy in self._spread(policy, nranks):
+                tmpl_kwargs, out, err = self._process_kwargs(
+                    rec, cfg, block_policy, fn, args, capture
+                )
+                if is_function:
+                    tmpl_kwargs["target"] = _worker.run_group_member
+                    tmpl_kwargs["args"] = (fn, args, kwargs, out, err)
+                rec.templates.append((block, ProcessTemplate(**tmpl_kwargs)))
             rec.ranks += nranks
         # Dragon 0.15.0's ProcessGroup.start() never returns for a group with no members.
         if not rec.templates:
@@ -2183,6 +2336,10 @@ class DragonNativeExecutionBackend(BaseBackend):
         future per uid, so failing the repeat would fail the first task's future. The uid decides:
         a repeat with another function or executable joins too, with a warning. Once the task has
         ended, its uid runs again.
+
+        A long batch lets the event loop run every ``_LOOP_SLICE`` seconds. A task it has not
+        reached by then can be cancelled (``cancel_task``); one it has not reached at shutdown is
+        cancelled.
         """
         if self._backend_state == BackendMainStates.SHUTDOWN:
             raise RuntimeError("Cannot submit during shutdown")
@@ -2192,78 +2349,131 @@ class DragonNativeExecutionBackend(BaseBackend):
             self._backend_state = BackendMainStates.RUNNING
         self._loop = asyncio.get_running_loop()
 
-        for task in tasks:
-            with self._lock:
-                running = self._tasks.get(task["uid"])
-                joins = False
-                if running is not None:
-                    joins = all(task is not d for d in (running.desc, *running.repeats))
-                    if joins:
-                        running.repeats.append(task)
-            if running is not None:
-                # Its final state goes through the loop, after this RUNNING.
-                if joins:
-                    first = running.desc
-                    if task.get("function") is not first.get("function") or task.get(
-                        "executable"
-                    ) != first.get("executable"):
-                        self.logger.warning(
-                            f"Task {task['uid']} repeats the uid of an unfinished task with "
-                            "another function or executable. It joins that task and does not run."
-                        )
-                    else:
-                        self.logger.debug(
-                            f"Task {task['uid']} joins the unfinished task of its uid"
-                        )
-                    self._callback_func(task, "RUNNING")
-                continue
+        # The tasks not reached yet, by uid, from the first time this call lets the loop run.
+        unbuilt: dict[str, list[dict]] | None = None
+        # Whether those are cancelled when the call ends: at shutdown, or when the call is. After
+        # another error the caller fails the batch's tasks, as before the batch let the loop run.
+        cancel_rest = False
+        if not isinstance(tasks, list):
+            tasks = list(tasks)  # the rest of a batch is taken by slicing
+        slice_end = time.monotonic() + _LOOP_SLICE
+        try:
+            for i, task in enumerate(tasks):
+                if i and time.monotonic() >= slice_end:
+                    if unbuilt is None:
+                        unbuilt = {}
+                        for rest in tasks[i:]:
+                            waiting = unbuilt.setdefault(rest["uid"], [])
+                            # A task listed twice adds nothing the second time, as when built.
+                            if all(rest is not desc for desc in waiting):
+                                waiting.append(rest)
+                        self._unbuilt.append(unbuilt)
+                    self._flush_sends()
+                    await asyncio.sleep(0)
+                    if self._backend_state == BackendMainStates.SHUTDOWN:
+                        cancel_rest = True
+                        break
+                    slice_end = time.monotonic() + _LOOP_SLICE
+                if unbuilt is not None and not _take(unbuilt, task):
+                    continue  # cancelled while the loop ran
+                self._submit_one(task)
+        except asyncio.CancelledError:
+            cancel_rest = True
+            raise
+        finally:
+            if unbuilt is not None:
+                self._unbuilt[:] = [u for u in self._unbuilt if u is not unbuilt]
+                if cancel_rest:
+                    self._report_canceled([d for descs in unbuilt.values() for d in descs])
+            self._flush_sends()
+
+    def _report_canceled(self, descs: list[dict]) -> None:
+        """Report CANCELED for each task; a callback that raises stops none of the others."""
+        for desc in descs:
             try:
-                rec = self.build_task(task)
-            except Exception as exc:
-                self.logger.error(f"Failed to create task {task.get('uid')}: {exc}", exc_info=True)
-                task["exception"] = exc
-                task["stdout"] = ""
-                task["stderr"] = str(exc)
-                self._callback_func(task, "FAILED")
-                continue
-            self._callback_func(task, "RUNNING")
-            with self._lock:
-                self._tasks[rec.uid] = rec
-                if rec.kind == "pool":
-                    self._route(rec)
+                self._callback_func(desc, "CANCELED")
+            except Exception:
+                self.logger.exception(f"Callback failed for {desc.get('uid')} (CANCELED)")
+
+    def _submit_one(self, task: dict) -> None:
+        """Build and route one task, or join it to the unfinished task of its uid."""
+        with self._lock:
+            running = self._tasks.get(task["uid"])
+            joins = False
+            if running is not None:
+                joins = all(task is not d for d in (running.desc, *running.repeats))
+                if joins:
+                    running.repeats.append(task)
+        if running is not None:
+            # Its final state goes through the loop, after this RUNNING.
+            if joins:
+                first = running.desc
+                if task.get("function") is not first.get("function") or task.get(
+                    "executable"
+                ) != first.get("executable"):
+                    self.logger.warning(
+                        f"Task {task['uid']} repeats the uid of an unfinished task with "
+                        "another function or executable. It joins that task and does not run."
+                    )
                 else:
-                    self._admit_process(rec)
-        self._flush_sends()
+                    self.logger.debug(f"Task {task['uid']} joins the unfinished task of its uid")
+                self._callback_func(task, "RUNNING")
+            return
+        try:
+            rec = self.build_task(task)
+        except Exception as exc:
+            self.logger.error(f"Failed to create task {task.get('uid')}: {exc}", exc_info=True)
+            task["exception"] = exc
+            task["stdout"] = ""
+            task["stderr"] = str(exc)
+            self._callback_func(task, "FAILED")
+            return
+        self._callback_func(task, "RUNNING")
+        with self._lock:
+            self._tasks[rec.uid] = rec
+            if rec.kind == "pool":
+                self._route(rec)
+            else:
+                self._admit_process(rec)
 
     async def cancel_task(self, uid: str) -> bool:
         """Cancel a task: a queued one is dropped, a running one is killed.
 
         A pool task's worker gets SIGKILL and is replaced; a process task gets SIGTERM, then
-        SIGKILL after ``kill_grace``. The task's leftover children are killed too. Returns False
+        SIGKILL after ``kill_grace``. The task's leftover children are killed too. A task that a
+        submit_tasks call letting the loop run has not reached yet is dropped from it. Returns False
         when the task is unknown or has finished.
         """
+        unbuilt = [desc for waiting in self._unbuilt for desc in waiting.pop(uid, ())]
+        worker = None
+        started = False
         with self._lock:
             rec = self._tasks.pop(uid, None)
-            if rec is None:
-                return False
-            rec.cancelled = True
-            worker = None
-            if rec.state == "queued":
-                pending = self._pending[rec.key] if rec.kind == "pool" else self._proc_queue
-                with contextlib.suppress(ValueError):
-                    pending.remove(rec)
-            elif rec.kind == "pool":
-                worker, rec.worker = rec.worker, None
-                worker.state = "dead"
-                worker.task = None
-            rec.state = "done"
-            started = bool(rec.puids)
-        for desc in (rec.desc, *rec.repeats):
-            self._callback_func(desc, "CANCELED")
-        if worker is not None:
-            self._ops.submit(self._retire_worker, worker, rec.token)
-        elif rec.kind != "pool" and started:
-            self._ops.submit(self._kill_process_task, rec)
+            if rec is not None:
+                rec.cancelled = True
+                if rec.state == "queued":
+                    pending = self._pending[rec.key] if rec.kind == "pool" else self._proc_queue
+                    with contextlib.suppress(ValueError):
+                        pending.remove(rec)
+                elif rec.kind == "pool":
+                    worker, rec.worker = rec.worker, None
+                    worker.state = "dead"
+                    worker.task = None
+                rec.state = "done"
+                started = bool(rec.puids)
+        # Callbacks run without the lock, which the backend's threads wait on.
+        if rec is None:
+            self._report_canceled(unbuilt)
+            return bool(unbuilt)
+        # A callback that raises stops neither the other CANCELED states nor the task, which is
+        # stopped even after a BaseException: its worker is already marked dead.
+        try:
+            self._report_canceled([rec.desc, *rec.repeats, *unbuilt])
+        finally:
+            if worker is not None:
+                self._ops.submit(self._retire_worker, worker, rec.token)
+            elif rec.kind != "pool" and started:
+                self._ops.submit(self._kill_process_task, rec)
         return True
 
     async def shutdown(self) -> None:
@@ -2274,7 +2484,9 @@ class DragonNativeExecutionBackend(BaseBackend):
         self.logger.info("Shutting down DragonNativeExecutionBackend")
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._stop)
-        self._flush_outbox()
+        self._flush_outbox(whole=True)
+        if self._functions is not None:
+            self._functions.clear()
         phases = ", ".join(f"{name} {s:.2f}" for name, s in self._stop_phases.items())
         self.logger.info(f"DragonNativeExecutionBackend shutdown complete, in s: {phases}")
 

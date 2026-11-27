@@ -52,6 +52,16 @@ Install it with the `dragon` extra, and start your script with the Dragon launch
   a worker started, on demand, with `gpu_affinity` set to exactly those GPUs (`gpu_workers_per_set`
   of them, default 1), so Dragon sets the vendor's visible-devices variable once, at worker start.
   Workers stay up for the backend's life. On a host, tasks placed there go before unplaced ones.
+- **Pickling and the loop.** A pool task's function is cloudpickled for its first two tasks, and
+  once both pickles come out the same, that pickle is given again while nothing it holds has
+  changed (its code, closure, defaults, attributes and the globals its code reads); a function
+  holding an object of a class is pickled for every task, and so is one that changes before every
+  task or whose pickle has been over 1 MB. Each task pickles
+  only its arguments, continuing the function's pickle, so the worker loads both as from one
+  pickle. `submit_tasks` lets the asyncio loop run every 20 ms while it builds a large batch, and
+  the callback gets the backend's state changes for at most 20 ms per pass of the loop: neither
+  holds the loop for a whole batch. A task a submit has not reached yet can be cancelled, and is
+  cancelled at shutdown.
 - **The relay.** A relay process on the client's node puts each task on its worker's inbox and
   takes each result off the result queue, and the client trades batches with it: the tasks it gave
   to workers in one pass, and the results that came while it handled the last batch. On its own
@@ -296,6 +306,36 @@ Task events, metrics and spans come from the `Session`, as for every backend. No
 from the same `DragonTelemetryAdapter` as for `DragonExecutionBackend`: it starts its own process
 group on the runtime's nodes and does not use Batch. See [Telemetry](../telemetry/index.md).
 
+## Several clients on one runtime: `hosts`
+
+A runtime of several nodes can serve several clients, each with a backend of its own. By default
+each backend uses every node: each one starts `workers_per_node` workers on every node, so N clients
+start N pools on each node. `hosts` limits a backend to some nodes, by hostname:
+
+```python
+from dragon.native.machine import current
+
+backend = await DragonNativeExecutionBackend(workers_per_node=32, hosts=[current().hostname])
+```
+
+The backend then acts as if the runtime had only those nodes:
+- its pool starts on them, and its unplaced function tasks run there;
+- a process task whose policy names no node (no policy, or one with only CPU or GPU affinity, or
+  placement `LOCAL`, `ANYWHERE` or `DEFAULT`) goes to those nodes in turn, the client's node first,
+  and to one that has its GPUs if it asks for some. It keeps its CPU and GPU affinity. Without
+  `hosts`, Dragon places it anywhere in the runtime;
+- a template of a `process_templates` group whose policy names no node has its ranks spread over
+  those nodes in blocks, one per node: 8 ranks over 2 nodes are 4 on each. A template of one rank
+  goes to the next node;
+- a task placed on another node fails, alone, before Dragon sees it;
+- `max_process_ranks` defaults to those nodes' CPUs, and `topology()` lists only them.
+
+The relay and the result queue stay on the client's node, whether or not it is one of `hosts`. A
+host that is not a node of the runtime raises `ValueError` when the backend starts.
+
+`hosts` does not reach telemetry: the `DragonTelemetryAdapter` samples every node of the runtime,
+so N clients with telemetry on start N samplers on each node.
+
 ## What it does not do yet
 
 - **A result store.** Results travel inline on the queue; there is no DDict for large values.
@@ -323,6 +363,7 @@ group on the runtime's nodes and does not use Batch. See [Telemetry](../telemetr
 | `kill_grace` | 2.0 s | SIGTERM to SIGKILL for process tasks |
 | `worker_start_timeout` | 300 s | time allowed for the pool to start, and for each replacement or GPU worker to be ready |
 | `pmi` | `None` | PMI of every `process_templates` group whose task sets none |
+| `hosts` | every node | the nodes the backend uses, by hostname: see [Several clients on one runtime](#several-clients-on-one-runtime-hosts) |
 
 `num_workers` is the number of live CPU workers over all nodes: fewer than at start once a
 replacement has failed to start. `topology()` lists each node's CPUs and GPUs.

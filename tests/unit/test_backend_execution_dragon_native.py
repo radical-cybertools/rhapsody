@@ -592,6 +592,271 @@ async def test_default_pool_on_a_node_with_no_cpu_list(dragon, monkeypatch):
         await be.shutdown()
 
 
+async def test_hosts_keep_the_pool_and_unplaced_tasks_on_those_nodes(dragon, tmp_path):
+    """A client on n0 that passes hosts=["n1"] starts workers on n1 only, and runs there."""
+    be = DragonNativeExecutionBackend(workers_per_node=2, inline_stdio=False, hosts=["n1"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        assert {w.policy.host_name for w in dragon.workers()} == {"n1"}
+        assert be.num_workers == 2
+        assert [t["id"] for t in be.topology()] == ["n1"]
+        assert be._results.policy.host_name == "n0"  # results still come back to the client
+        rec = Recorder(be)
+        held = [fn_task(blocked) for _ in range(2)]
+        await be.submit_tasks(held)
+        assert [be._tasks[t["uid"]].worker.host for t in held] == ["n1", "n1"]
+        GATE.set()
+        tasks = [fn_task(square, i) for i in range(3)]
+        await be.submit_tasks(tasks)
+        for task in held + tasks:
+            assert await rec.wait(task["uid"]) == ["DONE"]
+        assert [t["return_value"] for t in tasks] == [0, 1, 4]
+    finally:
+        await be.shutdown()
+
+
+async def test_hosts_with_the_clients_node_put_it_first(dragon, tmp_path):
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n1", "n0"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        assert be._host_order == ["n0", "n1"]
+    finally:
+        await be.shutdown()
+
+
+async def test_a_placement_outside_hosts_fails_only_its_task(dragon, tmp_path):
+    """With hosts=["n0"], n1 is not one of the backend's nodes: a task placed there fails."""
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n0"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        rec = Recorder(be)
+        bad = fn_task(square, 3, task_backend_specific_kwargs=on("n1"))
+        good = fn_task(square, 2)
+        await be.submit_tasks([bad, good])
+        assert [s for u, s, _ in rec.records if u == bad["uid"]] == ["FAILED"]
+        assert "not one of this backend's hosts" in str(bad["exception"])
+        assert await rec.wait(good["uid"]) == ["DONE"]
+    finally:
+        await be.shutdown()
+
+
+async def test_hosts_keep_unplaced_process_tasks_on_those_nodes(dragon, tmp_path):
+    """Process and group tasks with no placement go to the backend's hosts in turn, the client's
+    first; a placed one keeps its own host."""
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n1", "n0"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        process = {"process_template": {}}
+        recs = [
+            be.build_task(fn_task(square, 2, task_backend_specific_kwargs=process)),
+            be.build_task(exe_task("true")),
+            be.build_task(
+                fn_task(
+                    square, 3, task_backend_specific_kwargs={"process_template": {"cwd": "/tmp"}}
+                )
+            ),
+        ]
+        assert [r.kind for r in recs] == ["process"] * 3
+        assert [r.proc.policy.host_name for r in recs] == ["n0", "n1", "n0"]
+        group = be.build_task(
+            exe_task("true", task_backend_specific_kwargs={"process_templates": [(2, {}), (1, {})]})
+        )
+        # the 2-rank template in blocks over both hosts, from the next one; the 1-rank one whole
+        assert [(n, t.kwargs["policy"].host_name) for n, t in group.templates] == [
+            (1, "n1"),
+            (1, "n0"),
+            (1, "n0"),
+        ]
+        assert group.ranks == 3
+        placed = {"process_template": {"cwd": "/tmp", **on("n1")["process_template"]}}
+        rec = be.build_task(fn_task(square, 4, task_backend_specific_kwargs=placed))
+        assert rec.proc.policy.host_name == "n1"
+    finally:
+        await be.shutdown()
+
+
+async def test_hosts_of_one_node_keep_every_process_task_there(dragon, tmp_path):
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n1"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        assert be.build_task(exe_task("true")).proc.policy.host_name == "n1"
+        rec = Recorder(be)
+        task = exe_task("true")
+        await be.submit_tasks([task])
+        assert await rec.wait(task["uid"]) == ["DONE"]
+        # the relay stays on the client's node; the workers and the task's process run on n1
+        assert {p.host for p in dragon.started if p.target is not worker_module.relay_main} == {
+            "n1"
+        }
+    finally:
+        await be.shutdown()
+
+
+async def test_without_hosts_an_unplaced_process_task_is_dragons_to_place(backend):
+    rec = backend.build_task(exe_task("true"))
+    assert rec.proc.policy is None
+
+
+async def test_an_unknown_host_fails_the_start(dragon):
+    be = DragonNativeExecutionBackend(inline_stdio=False, hosts=["n0", "nowhere"])
+    with pytest.raises(ValueError, match="nowhere"):
+        await be
+    assert not dragon.workers()
+
+
+@pytest.mark.parametrize("hosts", ["n0", [], (h for h in []), [""], ["n0", 1]])
+def test_hosts_must_be_a_non_empty_list(dragon, hosts):
+    with pytest.raises(ValueError, match="hosts"):
+        DragonNativeExecutionBackend(hosts=hosts)
+
+
+def test_hosts_drop_repeats_and_take_any_iterable(dragon):
+    assert DragonNativeExecutionBackend(hosts=("n1", "n0", "n1"))._hosts == ["n1", "n0"]
+
+
+async def test_hosts_give_a_node_to_a_policy_that_names_none(dragon, tmp_path):
+    """With hosts=["n1"], a policy with only CPU affinity, or LOCAL or ANYWHERE placement, which
+    Dragon would place anywhere, goes to n1 and keeps its CPU affinity."""
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n1"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        for policy in (
+            FakePolicy(cpu_affinity=[4]),
+            FakePolicy(placement=FakePlacement.LOCAL, cpu_affinity=[5]),
+            FakePolicy(placement=FakePlacement.ANYWHERE),
+        ):
+            given = be.build_task(
+                exe_task(
+                    "true", task_backend_specific_kwargs={"process_template": {"policy": policy}}
+                )
+            ).proc.policy
+            assert (given.placement, given.host_name) == (FakePlacement.HOST_NAME, "n1")
+            assert given.cpu_affinity == policy.cpu_affinity
+        assert policy.placement == FakePlacement.ANYWHERE  # the task's own policy is not changed
+        rec = Recorder(be)
+        task = fn_task(
+            square,
+            5,
+            task_backend_specific_kwargs={
+                "process_template": {"policy": FakePolicy(cpu_affinity=[4])}
+            },
+        )
+        await be.submit_tasks([task])
+        assert await rec.wait(task["uid"]) == ["DONE"]
+        assert task["return_value"] == 25
+        assert {p.host for p in dragon.started if p.target is not worker_module.relay_main} == {
+            "n1"
+        }
+    finally:
+        await be.shutdown()
+
+
+async def test_hosts_send_a_gpu_policy_that_names_no_node_to_a_host_with_those_gpus(
+    dragon, tmp_path
+):
+    """Only n0 has GPUs: with hosts=["n0", "n1"], GPU tasks go to n0 every time, in turn or not."""
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n0", "n1"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        gpu = {"process_template": {"policy": FakePolicy(gpu_affinity=[1])}}
+        given = [
+            be.build_task(exe_task("true", task_backend_specific_kwargs=gpu)) for _ in range(2)
+        ]
+        assert [(r.proc.policy.host_name, r.proc.policy.gpu_affinity) for r in given] == [
+            ("n0", [1]),
+            ("n0", [1]),
+        ]
+        group = be.build_task(
+            exe_task(
+                "true",
+                task_backend_specific_kwargs={"process_templates": [(2, gpu["process_template"])]},
+            )
+        )
+        assert [(n, t.kwargs["policy"].host_name) for n, t in group.templates] == [(2, "n0")]
+    finally:
+        await be.shutdown()
+
+
+async def test_hosts_refuse_gpus_found_only_on_another_node(dragon, tmp_path):
+    """With hosts=["n1"], n0's GPUs are not the backend's: a task that asks for them fails."""
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n1"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        gpu = {"process_template": {"policy": FakePolicy(gpu_affinity=[0])}}
+        with pytest.raises(ValueError, match="GPUs"):
+            be.build_task(fn_task(square, 1, task_backend_specific_kwargs=gpu))
+        with pytest.raises(ValueError, match="GPUs"):
+            be.build_task(exe_task("true", task_backend_specific_kwargs=gpu))
+    finally:
+        await be.shutdown()
+
+
+async def test_hosts_check_placements_by_host_id_and_name(dragon, tmp_path):
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n1"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+
+        def by_id(h_uid):
+            policy = FakePolicy(placement=FakePlacement.HOST_ID, host_id=h_uid)
+            return exe_task(
+                "true", task_backend_specific_kwargs={"process_template": {"policy": policy}}
+            )
+
+        assert be.build_task(by_id(11)).proc.policy.host_id == 11
+        with pytest.raises(ValueError, match="host id 10 is not one of this backend's hosts"):
+            be.build_task(by_id(10))
+        with pytest.raises(ValueError, match="host id 99 is not a Dragon node"):
+            be.build_task(by_id(99))
+        with pytest.raises(ValueError, match="'n0' is not one of this backend's hosts"):
+            be.build_task(exe_task("true", task_backend_specific_kwargs=on("n0")))
+        with pytest.raises(ValueError, match="'nowhere' is not a Dragon node"):
+            be.build_task(exe_task("true", task_backend_specific_kwargs=on("nowhere")))
+    finally:
+        await be.shutdown()
+
+
+async def test_hosts_spread_a_group_templates_ranks_in_blocks(dragon, tmp_path):
+    """8 ranks over 2 hosts are 4 on each; 5 are 3 and 2, from the next host; a placed template
+    stays whole; CPU affinity is kept; max_process_ranks counts the hosts' CPUs only."""
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n0", "n1"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+
+        def group(*templates):
+            rec = be.build_task(
+                exe_task(
+                    "true", task_backend_specific_kwargs={"process_templates": list(templates)}
+                )
+            )
+            return [(n, t.kwargs["policy"].host_name) for n, t in rec.templates], rec
+
+        assert group((8, {}))[0] == [(4, "n0"), (4, "n1")]
+        assert group((5, {}))[0] == [(3, "n1"), (2, "n0")]
+        assert group((3, on("n1")["process_template"]))[0] == [(3, "n1")]  # takes no turn
+        blocks, rec = group((2, {"policy": FakePolicy(cpu_affinity=[0])}))
+        assert blocks == [(1, "n0"), (1, "n1")]
+        assert [t.kwargs["policy"].cpu_affinity for _, t in rec.templates] == [[0], [0]]
+        assert rec.ranks == 2
+    finally:
+        await be.shutdown()
+    one = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n1"])
+    await one
+    try:
+        assert one._max_process_ranks == 4
+    finally:
+        await one.shutdown()
+
+
 async def test_each_inbox_is_on_its_workers_node_and_results_on_the_clients(backend):
     """Inbox queues sit on their worker's node; the result queue sits on the client's node."""
     for w in backend._workers.values():
@@ -705,6 +970,21 @@ async def test_in_a_session_a_repeat_leaves_the_first_tasks_future_alone(backend
     assert first["return_value"] == "released"
 
 
+async def test_a_function_whose_pickle_is_over_a_megabyte_runs(backend):
+    """Its message is pickled another way, through a file: pickle.dumps copied it slowly."""
+    rec = Recorder(backend)
+    blob = b"x" * (2 << 20)
+
+    def size(n):
+        return len(blob) + n
+
+    tasks = [fn_task(size, n) for n in range(3)]
+    await backend.submit_tasks(tasks)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert [t["return_value"] for t in tasks] == [len(blob) + n for n in range(3)]
+
+
 async def test_unpicklable_result_fails_only_its_task(backend):
     rec = Recorder(backend)
     bad, good = fn_task(lambda: threading.Lock()), fn_task(square, 2)
@@ -767,6 +1047,306 @@ async def test_function_a_worker_cannot_load_fails_only_its_task(backend):
     assert await rec.wait(bad["uid"]) == ["FAILED"]
     assert "cannot rebuild" in str(bad["exception"])
     assert await rec.wait(good["uid"]) == ["DONE"]
+
+
+def make_scaler(factor):
+    def scale(x):
+        return x * factor[0]
+
+    return scale
+
+
+def dumps_of(monkeypatch, fn):
+    """Record the objects cloudpickle pickles that are ``fn`` or hold it at their top level."""
+    found = []
+    dump = cloudpickle.CloudPickler.dump
+
+    def recording_dump(self, obj):
+        if obj is fn or (isinstance(obj, tuple) and any(item is fn for item in obj)):
+            found.append(obj)
+        return dump(self, obj)
+
+    monkeypatch.setattr(cloudpickle.CloudPickler, "dump", recording_dump)
+    return found
+
+
+async def test_a_function_shared_by_many_tasks_is_pickled_once(backend, monkeypatch):
+    """Each task pickled its function by value again: for a closure, cloudpickle scans every loaded
+    module, about a millisecond a task in a process with a few thousand of them. Now twice: a pickle
+    is kept once the next one comes out the same."""
+    rec = Recorder(backend)
+    scale = make_scaler([3])
+    pickled = dumps_of(monkeypatch, scale)
+    tasks = [fn_task(scale, i) for i in range(20)]
+    await backend.submit_tasks(tasks)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert [t["return_value"] for t in tasks] == [3 * i for i in range(20)]
+    assert len(pickled) == 2
+
+
+async def test_a_task_runs_its_function_as_it_was_when_submitted(backend):
+    rec = Recorder(backend)
+    factor = [2]
+    scale = make_scaler(factor)
+    first = fn_task(scale, 5)
+    await backend.submit_tasks([first])
+    factor[0] = 3
+    second = fn_task(scale, 5)
+    await backend.submit_tasks([second])
+    for task in (first, second):
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert (first["return_value"], second["return_value"]) == (10, 15)
+
+
+def make_box_writer():
+    box = []
+
+    def put(given, x):
+        box.append(x)
+        return given is box, list(box)
+
+    return put, box
+
+
+async def test_an_argument_the_function_also_holds_stays_one_object(backend):
+    """The function and its arguments still unpickle as from one pickle."""
+    rec = Recorder(backend)
+    put, box = make_box_writer()
+    tasks = [fn_task(put, box, 1), fn_task(put, box, 2)]  # the second from the kept pickle
+    await backend.submit_tasks(tasks)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert [t["return_value"] for t in tasks] == [(True, [1]), (True, [2])]
+
+
+def slow_builds(monkeypatch, backend, seconds=0.002):
+    """Make each task take ``seconds`` to build; return the uids built so far."""
+    built = []
+    build = backend.build_task
+
+    def slow_build(task):
+        time.sleep(seconds)
+        built.append(task["uid"])
+        return build(task)
+
+    monkeypatch.setattr(backend, "build_task", slow_build)
+    return built
+
+
+async def test_a_long_submit_lets_the_event_loop_run(backend, monkeypatch):
+    """A batch was built in one go: a generation of a few thousand tasks held the loop for
+    seconds, and every other coroutine of the process with it."""
+    rec = Recorder(backend)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(100)]
+    seen = []
+
+    async def watch():
+        while len(built) < len(tasks):
+            seen.append(len(built))
+            await asyncio.sleep(0)
+
+    watcher = asyncio.create_task(watch())
+    await backend.submit_tasks(tasks)
+    await watcher
+    assert any(0 < n < len(tasks) for n in seen)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+
+
+async def test_cancelling_a_task_a_submit_has_not_reached_yet(backend, monkeypatch):
+    seen = record_states(backend)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(100)]
+    last = tasks[-1]
+    repeat = dict(fn_task(square, 0), uid=last["uid"])
+    submit = asyncio.create_task(backend.submit_tasks([*tasks, repeat]))
+    await until(lambda: 0 < len(built) < len(tasks))
+    assert await backend.cancel_task(last["uid"]) is True
+    await submit
+    assert last["uid"] not in built
+    assert [s for t, s in seen if t is last] == ["CANCELED"]
+    assert [s for t, s in seen if t is repeat] == ["CANCELED"]
+    await until(lambda: sum(s == "DONE" for _, s in seen) == len(tasks) - 1)
+    assert await backend.cancel_task(last["uid"]) is False
+
+
+async def test_shutdown_during_a_long_submit_cancels_what_it_has_not_built(backend, monkeypatch):
+    seen = record_states(backend)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(blocked) for _ in range(100)]
+    submit = asyncio.create_task(backend.submit_tasks(tasks))
+    await until(lambda: 0 < len(built) < len(tasks))
+    await backend.shutdown()
+    await submit
+    GATE.set()
+    assert len(built) < len(tasks)
+    for task in tasks:
+        states = [s for t, s in seen if t is task]
+        if task["uid"] in built:
+            assert states[0] == "RUNNING" and states[-1] in ("CANCELED", "DONE")
+        else:
+            assert states == ["CANCELED"]
+
+
+async def test_cancelling_a_task_not_reached_runs_the_callback_without_the_lock(
+    backend, monkeypatch
+):
+    """The backend's threads wait on that lock: a callback must never run while it is held."""
+    held = []
+    backend.register_callback(lambda task, state: held.append((state, backend._lock._is_owned())))
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(100)]
+    submit = asyncio.create_task(backend.submit_tasks(tasks))
+    await until(lambda: 0 < len(built) < len(tasks))
+    assert await backend.cancel_task(tasks[-1]["uid"]) is True
+    await submit
+    assert ("CANCELED", False) in held
+    assert all(not owned for _, owned in held)
+
+
+async def test_a_submit_that_fails_midway_reports_no_state_for_what_it_did_not_reach(
+    backend, monkeypatch
+):
+    """As before the batch let the loop run: the caller fails the batch's tasks with the error
+    (AsyncFlow does); a CANCELED of its own would give those tasks a second final state."""
+    seen = record_states(backend)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(100)]
+    submit_one = backend._submit_one
+
+    def failing(task):
+        if task is tasks[60]:
+            raise RuntimeError("routing failed")
+        submit_one(task)
+
+    monkeypatch.setattr(backend, "_submit_one", failing)
+    with pytest.raises(RuntimeError, match="routing failed"):
+        await backend.submit_tasks(tasks)
+    assert 0 < len(built) < len(tasks)
+    assert not [s for t, s in seen if s == "CANCELED"]
+    assert backend._unbuilt == []
+
+
+async def test_a_long_submit_takes_any_iterable(backend, monkeypatch):
+    rec = Recorder(backend)
+    slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(30)]
+    await backend.submit_tasks(task for task in tasks)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+
+
+async def test_cancelling_a_long_submit_cancels_what_it_has_not_built(backend, monkeypatch):
+    seen = record_states(backend)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(100)]
+    submit = asyncio.create_task(backend.submit_tasks(tasks))
+    await until(lambda: 0 < len(built) < len(tasks))
+    submit.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await submit
+    for task in tasks:
+        states = [s for t, s in seen if t is task]
+        if task["uid"] in built:
+            await until(lambda task=task: [s for t, s in seen if t is task][-1] == "DONE")
+        else:
+            assert states == ["CANCELED"]
+
+
+async def test_a_task_listed_twice_and_cancelled_before_it_is_built_is_cancelled_once(
+    backend, monkeypatch
+):
+    """As before the batch let the loop run, the second listing of one task adds nothing."""
+    seen = record_states(backend)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(100)]
+    twice = tasks[-1]
+    submit = asyncio.create_task(backend.submit_tasks([*tasks, twice]))
+    await until(lambda: 0 < len(built) < len(tasks))
+    assert await backend.cancel_task(twice["uid"]) is True
+    await submit
+    assert [s for t, s in seen if t is twice] == ["CANCELED"]
+
+
+async def test_a_callback_that_raises_does_not_stop_the_other_cancels(backend, monkeypatch):
+    """At shutdown, the tasks a submit has not reached are cancelled one by one: a callback that
+    raised skipped the rest, and replaced how the submit ended."""
+    seen = []
+
+    def raising_once(task, state):
+        seen.append((task, state))
+        if state == "CANCELED" and sum(s == "CANCELED" for _, s in seen) == 1:
+            raise RuntimeError("callback failed")
+
+    backend.register_callback(raising_once)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(blocked) for _ in range(100)]
+    submit = asyncio.create_task(backend.submit_tasks(tasks))
+    await until(lambda: 0 < len(built) < len(tasks))
+    await backend.shutdown()
+    await submit  # ends as it would have: no error of the callback's
+    GATE.set()
+    unbuilt = [t for t in tasks if t["uid"] not in built]
+    assert unbuilt
+    for task in unbuilt:
+        assert [s for t, s in seen if t is task] == ["CANCELED"]
+
+
+async def test_a_large_batch_of_results_is_delivered_in_slices(backend, monkeypatch):
+    """Every result the relay had sent was handed to the callback in one loop callback."""
+    delivered = []
+
+    def slow_callback(task, state):
+        time.sleep(0.002)
+        delivered.append(task["uid"])
+
+    backend.register_callback(slow_callback)
+    tasks = [fn_task(square, i) for i in range(100)]
+    changes = []
+    for task in tasks:
+        rec = types.SimpleNamespace(uid=task["uid"], desc=task, repeats=[])
+        changes.append((rec, "DONE", {"return_value": 0}))
+    backend._emit_all(changes)
+    backend._flush_outbox()
+    assert 0 < len(delivered) < len(tasks)
+    await until(lambda: len(delivered) == len(tasks))
+    assert delivered == [t["uid"] for t in tasks]
+
+
+class CallbackExit(BaseException):
+    """Not an Exception, as a CancelledError is not: the loop reports it and goes on."""
+
+
+async def test_a_callback_that_raises_a_base_exception_does_not_hold_later_results(backend):
+    """The flush stayed marked as scheduled when none was: no later state reached the callback
+    until shutdown."""
+    loop = asyncio.get_running_loop()
+    errors = []
+    loop.set_exception_handler(lambda loop, context: errors.append(context.get("exception")))
+    tasks = [fn_task(square, i) for i in range(4)]
+    delivered = []
+
+    def callback(task, state):
+        if task is tasks[0]:
+            raise CallbackExit()
+        delivered.append(task["uid"])
+
+    backend.register_callback(callback)
+    changes = [
+        (types.SimpleNamespace(uid=t["uid"], desc=t, repeats=[]), "DONE", {"return_value": 0})
+        for t in tasks
+    ]
+    try:
+        backend._emit_all(changes[:2])
+        await until(lambda: errors)
+        backend._emit_all(changes[2:])
+        await until(lambda: len(delivered) == 3)
+    finally:
+        loop.set_exception_handler(None)
+    assert delivered == [t["uid"] for t in tasks[1:]]
+    assert isinstance(errors[0], CallbackExit)
 
 
 def calls_sys_exit():
@@ -2068,6 +2648,54 @@ async def test_cancel_running_pool_task_kills_and_replaces_its_worker(backend, d
     after = fn_task(square, 6, placement={"host": w.host})
     await backend.submit_tasks([after])
     assert await rec.wait(after["uid"]) == ["DONE"]
+
+
+async def test_a_cancel_whose_callback_raises_still_stops_the_task_and_cancels_its_repeat(
+    backend, dragon
+):
+    """The CANCELED callbacks ran unguarded, before the worker was stopped.
+
+    One that raised left the repeat with no final state, and the task running on a worker marked
+    dead and never replaced.
+    """
+    seen = []
+
+    def raising_once(task, state):
+        seen.append((task, state))
+        if state == "CANCELED" and sum(s == "CANCELED" for _, s in seen) == 1:
+            raise RuntimeError("callback failed")
+
+    backend.register_callback(raising_once)
+    first = fn_task(blocked)
+    repeat = dict(fn_task(square, 2), uid=first["uid"])
+    await backend.submit_tasks([first, repeat])
+    w = backend._tasks[first["uid"]].worker
+    proc = w.proc
+    assert await backend.cancel_task(first["uid"]) is True
+    assert [s for t, s in seen if t is repeat] == ["RUNNING", "CANCELED"]
+    await until(lambda: proc.code == -signal.SIGKILL)
+    await until(lambda: len(dragon.workers()) == 5 and backend._live_by_key[w.key] == 2)
+
+
+async def test_a_cancel_whose_callback_raises_a_base_exception_still_stops_the_task(
+    backend, dragon
+):
+    """The worker is marked dead before the callbacks run: one that raised a BaseException left
+    it running the task, never replaced."""
+
+    def raising(task, state):
+        if state == "CANCELED":
+            raise CallbackExit()
+
+    backend.register_callback(raising)
+    task = fn_task(blocked)
+    await backend.submit_tasks([task])
+    w = backend._tasks[task["uid"]].worker
+    proc = w.proc
+    with pytest.raises(CallbackExit):
+        await backend.cancel_task(task["uid"])
+    await until(lambda: proc.code == -signal.SIGKILL)
+    await until(lambda: len(dragon.workers()) == 5 and backend._live_by_key[w.key] == 2)
 
 
 async def test_pool_timeout_fails_the_task_and_kills_its_worker(backend):

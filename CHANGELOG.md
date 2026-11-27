@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+
+## [0.8.0] 2026-11-28
+
 ### Added
 
 - **`DragonNativeExecutionBackend`** (backend name `dragon_native`) — a second
@@ -18,6 +21,11 @@
   `tests/integration/test-hpc/benchmarks/dragon_throughput.py` measures it with
   `--with-rhapsody-dragon-native`, and `--workers_per_node` sets its pool size;
   `tests/performance/dragon_native_busy_client.py` measures it next to a busy thread.
+- **`DragonNativeExecutionBackend(hosts=[...])`** limits a backend to some of the runtime's
+  nodes, by hostname: its pool, its unplaced tasks (process tasks and group templates whose policy
+  names no node included, a template's ranks in blocks over the nodes), its process slots and the
+  placements it accepts. Several clients of one multi-node runtime can each keep their pool on
+  their own node. Telemetry still samples every node.
 - **Telemetry (experimental): every backend has an emitter.** `backend.telemetry` is a no-op
   emitter (`enabled` is `False`) until the telemetry manager attaches the backend and hands it a
   real one through the new `BaseBackend.register_emitter` / `DataBackend.register_emitter` hook
@@ -100,6 +108,46 @@
 
 ### Fixed
 
+- **A cancelled command stops its process** — `cancel_task()` on
+  `ConcurrentExecutionBackend` reported `CANCELED` while the task's command ran on to
+  the end, with whatever it was using. The backend now sends SIGTERM to the command and
+  the processes it started, and SIGKILL to what is left after `term_grace` seconds (5
+  by default), and reports `CANCELED` once they have stopped, so `cancel_task()` can
+  take up to that long to return. Each command runs in its own session, because killing
+  a shell alone leaves its children running: a signal sent to the process group of the
+  caller, such as Ctrl-C in a terminal, no longer reaches commands directly.
+  `shutdown()` and `asyncio.run()` stop them instead. `shutdown()` now waits for the
+  commands, and a repeated `cancel_task()` no longer reports the task twice.
+- **A task's function is pickled once, not once per task.** `DragonNativeExecutionBackend` (pool
+  tasks) and `ConcurrentExecutionBackend` on a process pool cloudpickled each task's function
+  again. For a function cloudpickle cannot import by name (a closure, a lambda, a function of
+  `__main__`), each pickle scans every loaded module, so in a process that has loaded a few
+  thousand modules a task wrapped in two closures cost about a millisecond of the event loop's
+  time. A function's pickle is now kept, once a second pickle of it comes out the same, and given
+  again while nothing it holds has changed: the function and its code, closure, defaults,
+  attributes and the globals its code reads, and the functions, containers, cells and type hints
+  among them, are the same objects with the same contents. A function holding an object whose
+  changes cannot be seen this way (an instance, a class or module pickled by value) is pickled for
+  every task, as before, at about the cost of `cloudpickle.dumps`, and so is a function that
+  changes before every task or whose pickle has been over 1 MB. A closure made for a single task is
+  never kept. The native backend still loads a task's function and arguments on the
+  worker as from one pickle, so an object both hold stays one object.
+- **BEHAVIOUR CHANGE: the native backend's worker message is `(uid, fn_data, rest)`.** It was
+  `(uid, body)`: a worker and a client of different versions cannot run each other's tasks.
+- **`DragonNativeExecutionBackend` no longer holds the event loop for a whole batch.**
+  `submit_tasks` built every task of a batch in one go, and the result thread's batches of task
+  states were handed to the callback in one loop callback: a batch of a few thousand tasks held
+  the loop for seconds, and every other coroutine of the process with it. Both now let the loop
+  run every 20 ms. A task that a submit has not reached yet can be cancelled, and is cancelled at
+  shutdown.
+- **BEHAVIOUR CHANGE: `DragonNativeExecutionBackend.cancel_task` returns `True` for a task of a
+  batch still being submitted**, and reports it CANCELED; it returned `False` for a task the
+  backend had not built yet. A CANCELED callback that raises an `Exception` is now logged, and the
+  other CANCELED states and the cancel itself go on; `cancel_task` used to raise it to its caller.
+- **BEHAVIOUR CHANGE: `DragonNativeExecutionBackend.submit_tasks` calls can interleave.** Two
+  concurrent calls now build their tasks in turns, 20 ms at a time. A call cancelled midway leaves
+  the tasks it already built running and reports the rest CANCELED; after any other error the
+  caller fails the batch, as before.
 - **Telemetry under Dragon no longer keeps a core busy.** The Dragon telemetry adapter runs its
   resource samplers as a Dragon `ProcessGroup`, and Dragon 0.15's group client watches the group's
   exception queue in a thread that spins a whole core for as long as the group runs: every process
@@ -226,16 +274,6 @@
 
 ### Fixed
 
-- **A cancelled command stops its process** — `cancel_task()` on
-  `ConcurrentExecutionBackend` reported `CANCELED` while the task's command ran on to
-  the end, with whatever it was using. The backend now sends SIGTERM to the command and
-  the processes it started, and SIGKILL to what is left after `term_grace` seconds (5
-  by default), and reports `CANCELED` once they have stopped, so `cancel_task()` can
-  take up to that long to return. Each command runs in its own session, because killing
-  a shell alone leaves its children running: a signal sent to the process group of the
-  caller, such as Ctrl-C in a terminal, no longer reaches commands directly.
-  `shutdown()` and `asyncio.run()` stop them instead. `shutdown()` now waits for the
-  commands, and a repeated `cancel_task()` no longer reports the task twice.
 - **Telemetry dropped events on `stop()`** — `stop()` gave the event backlog a
   fixed 5 s to drain and then dropped the rest, logging only that the drain had
   not finished: a 100k-task session lost 59% of its task events. It now queues
