@@ -310,14 +310,21 @@ backend = await DragonNativeExecutionBackend(workers_per_node=32, hosts=[current
 
 The backend then acts as if the runtime had only those nodes:
 - its pool starts on them, and its unplaced function tasks run there;
-- a process task with no placement, and each template of a `process_templates` group with none,
-  goes to those nodes in turn, the client's node first. Without `hosts`, Dragon places them
-  anywhere in the runtime;
-- a task placed on another node fails, alone, as a task placed on a host the runtime lacks;
+- a process task whose policy names no node (no policy, or one with only CPU or GPU affinity, or
+  placement `LOCAL`, `ANYWHERE` or `DEFAULT`) goes to those nodes in turn, the client's node first,
+  and to one that has its GPUs if it asks for some. It keeps its CPU and GPU affinity. Without
+  `hosts`, Dragon places it anywhere in the runtime;
+- a template of a `process_templates` group whose policy names no node has its ranks spread over
+  those nodes in blocks, one per node: 8 ranks over 2 nodes are 4 on each. A template of one rank
+  goes to the next node;
+- a task placed on another node fails, alone, before Dragon sees it;
 - `max_process_ranks` defaults to those nodes' CPUs, and `topology()` lists only them.
 
 The relay and the result queue stay on the client's node, whether or not it is one of `hosts`. A
 host that is not a node of the runtime raises `ValueError` when the backend starts.
+
+`hosts` does not reach telemetry: the `DragonTelemetryAdapter` samples every node of the runtime,
+so N clients with telemetry on start N samplers on each node.
 
 ## What it does not do yet
 

@@ -603,11 +603,14 @@ async def test_hosts_keep_the_pool_and_unplaced_tasks_on_those_nodes(dragon, tmp
         assert [t["id"] for t in be.topology()] == ["n1"]
         assert be._results.policy.host_name == "n0"  # results still come back to the client
         rec = Recorder(be)
+        held = [fn_task(blocked) for _ in range(2)]
+        await be.submit_tasks(held)
+        assert [be._tasks[t["uid"]].worker.host for t in held] == ["n1", "n1"]
+        GATE.set()
         tasks = [fn_task(square, i) for i in range(3)]
         await be.submit_tasks(tasks)
-        for task in tasks:
+        for task in held + tasks:
             assert await rec.wait(task["uid"]) == ["DONE"]
-        assert {be._tasks[t["uid"]].worker.host for t in tasks if t["uid"] in be._tasks} <= {"n1"}
         assert [t["return_value"] for t in tasks] == [0, 1, 4]
     finally:
         await be.shutdown()
@@ -634,7 +637,7 @@ async def test_a_placement_outside_hosts_fails_only_its_task(dragon, tmp_path):
         good = fn_task(square, 2)
         await be.submit_tasks([bad, good])
         assert [s for u, s, _ in rec.records if u == bad["uid"]] == ["FAILED"]
-        assert "not a Dragon node" in str(bad["exception"])
+        assert "not one of this backend's hosts" in str(bad["exception"])
         assert await rec.wait(good["uid"]) == ["DONE"]
     finally:
         await be.shutdown()
@@ -662,7 +665,13 @@ async def test_hosts_keep_unplaced_process_tasks_on_those_nodes(dragon, tmp_path
         group = be.build_task(
             exe_task("true", task_backend_specific_kwargs={"process_templates": [(2, {}), (1, {})]})
         )
-        assert [t.kwargs["policy"].host_name for _, t in group.templates] == ["n1", "n0"]
+        # the 2-rank template in blocks over both hosts, from the next one; the 1-rank one whole
+        assert [(n, t.kwargs["policy"].host_name) for n, t in group.templates] == [
+            (1, "n1"),
+            (1, "n0"),
+            (1, "n0"),
+        ]
+        assert group.ranks == 3
         placed = {"process_template": {"cwd": "/tmp", **on("n1")["process_template"]}}
         rec = be.build_task(fn_task(square, 4, task_backend_specific_kwargs=placed))
         assert rec.proc.policy.host_name == "n1"
@@ -700,10 +709,152 @@ async def test_an_unknown_host_fails_the_start(dragon):
     assert not dragon.workers()
 
 
-@pytest.mark.parametrize("hosts", ["n0", []])
+@pytest.mark.parametrize("hosts", ["n0", [], (h for h in []), [""], ["n0", 1]])
 def test_hosts_must_be_a_non_empty_list(dragon, hosts):
     with pytest.raises(ValueError, match="hosts"):
         DragonNativeExecutionBackend(hosts=hosts)
+
+
+def test_hosts_drop_repeats_and_take_any_iterable(dragon):
+    assert DragonNativeExecutionBackend(hosts=("n1", "n0", "n1"))._hosts == ["n1", "n0"]
+
+
+async def test_hosts_give_a_node_to_a_policy_that_names_none(dragon, tmp_path):
+    """With hosts=["n1"], a policy with only CPU affinity, or LOCAL or ANYWHERE placement, which
+    Dragon would place anywhere, goes to n1 and keeps its CPU affinity."""
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n1"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        for policy in (
+            FakePolicy(cpu_affinity=[4]),
+            FakePolicy(placement=FakePlacement.LOCAL, cpu_affinity=[5]),
+            FakePolicy(placement=FakePlacement.ANYWHERE),
+        ):
+            given = be.build_task(
+                exe_task(
+                    "true", task_backend_specific_kwargs={"process_template": {"policy": policy}}
+                )
+            ).proc.policy
+            assert (given.placement, given.host_name) == (FakePlacement.HOST_NAME, "n1")
+            assert given.cpu_affinity == policy.cpu_affinity
+        assert policy.placement == FakePlacement.ANYWHERE  # the task's own policy is not changed
+        rec = Recorder(be)
+        task = fn_task(
+            square,
+            5,
+            task_backend_specific_kwargs={
+                "process_template": {"policy": FakePolicy(cpu_affinity=[4])}
+            },
+        )
+        await be.submit_tasks([task])
+        assert await rec.wait(task["uid"]) == ["DONE"]
+        assert task["return_value"] == 25
+        assert {p.host for p in dragon.started if p.target is not worker_module.relay_main} == {
+            "n1"
+        }
+    finally:
+        await be.shutdown()
+
+
+async def test_hosts_send_a_gpu_policy_that_names_no_node_to_a_host_with_those_gpus(
+    dragon, tmp_path
+):
+    """Only n0 has GPUs: with hosts=["n0", "n1"], GPU tasks go to n0 every time, in turn or not."""
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n0", "n1"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        gpu = {"process_template": {"policy": FakePolicy(gpu_affinity=[1])}}
+        given = [
+            be.build_task(exe_task("true", task_backend_specific_kwargs=gpu)) for _ in range(2)
+        ]
+        assert [(r.proc.policy.host_name, r.proc.policy.gpu_affinity) for r in given] == [
+            ("n0", [1]),
+            ("n0", [1]),
+        ]
+        group = be.build_task(
+            exe_task(
+                "true",
+                task_backend_specific_kwargs={"process_templates": [(2, gpu["process_template"])]},
+            )
+        )
+        assert [(n, t.kwargs["policy"].host_name) for n, t in group.templates] == [(2, "n0")]
+    finally:
+        await be.shutdown()
+
+
+async def test_hosts_refuse_gpus_found_only_on_another_node(dragon, tmp_path):
+    """With hosts=["n1"], n0's GPUs are not the backend's: a task that asks for them fails."""
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n1"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+        gpu = {"process_template": {"policy": FakePolicy(gpu_affinity=[0])}}
+        with pytest.raises(ValueError, match="GPUs"):
+            be.build_task(fn_task(square, 1, task_backend_specific_kwargs=gpu))
+        with pytest.raises(ValueError, match="GPUs"):
+            be.build_task(exe_task("true", task_backend_specific_kwargs=gpu))
+    finally:
+        await be.shutdown()
+
+
+async def test_hosts_check_placements_by_host_id_and_name(dragon, tmp_path):
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n1"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+
+        def by_id(h_uid):
+            policy = FakePolicy(placement=FakePlacement.HOST_ID, host_id=h_uid)
+            return exe_task(
+                "true", task_backend_specific_kwargs={"process_template": {"policy": policy}}
+            )
+
+        assert be.build_task(by_id(11)).proc.policy.host_id == 11
+        with pytest.raises(ValueError, match="host id 10 is not one of this backend's hosts"):
+            be.build_task(by_id(10))
+        with pytest.raises(ValueError, match="host id 99 is not a Dragon node"):
+            be.build_task(by_id(99))
+        with pytest.raises(ValueError, match="'n0' is not one of this backend's hosts"):
+            be.build_task(exe_task("true", task_backend_specific_kwargs=on("n0")))
+        with pytest.raises(ValueError, match="'nowhere' is not a Dragon node"):
+            be.build_task(exe_task("true", task_backend_specific_kwargs=on("nowhere")))
+    finally:
+        await be.shutdown()
+
+
+async def test_hosts_spread_a_group_templates_ranks_in_blocks(dragon, tmp_path):
+    """8 ranks over 2 hosts are 4 on each; 5 are 3 and 2, from the next host; a placed template
+    stays whole; CPU affinity is kept; max_process_ranks counts the hosts' CPUs only."""
+    be = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n0", "n1"])
+    be._work_dir = str(tmp_path)
+    await be
+    try:
+
+        def group(*templates):
+            rec = be.build_task(
+                exe_task(
+                    "true", task_backend_specific_kwargs={"process_templates": list(templates)}
+                )
+            )
+            return [(n, t.kwargs["policy"].host_name) for n, t in rec.templates], rec
+
+        assert group((8, {}))[0] == [(4, "n0"), (4, "n1")]
+        assert group((5, {}))[0] == [(3, "n1"), (2, "n0")]
+        assert group((3, on("n1")["process_template"]))[0] == [(3, "n1")]  # takes no turn
+        blocks, rec = group((2, {"policy": FakePolicy(cpu_affinity=[0])}))
+        assert blocks == [(1, "n0"), (1, "n1")]
+        assert [t.kwargs["policy"].cpu_affinity for _, t in rec.templates] == [[0], [0]]
+        assert rec.ranks == 2
+    finally:
+        await be.shutdown()
+    one = DragonNativeExecutionBackend(workers_per_node=1, inline_stdio=False, hosts=["n1"])
+    await one
+    try:
+        assert one._max_process_ranks == 4
+    finally:
+        await one.shutdown()
 
 
 async def test_each_inbox_is_on_its_workers_node_and_results_on_the_clients(backend):
