@@ -1,4 +1,4 @@
-.PHONY: help install lint format test test-all test-unit test-unit-no-dragon test-unit-dragon test-integration test-quick test-regular test-dragon-only test-ci check setup-pre-commit
+.PHONY: help install lint format test test-all test-unit test-unit-no-dragon test-unit-dragon test-integration test-quick test-regular test-dragon-only test-ci test-allocation-shapes check setup-pre-commit
 .DEFAULT_GOAL := help
 
 # Python executable - override with PYTHON variable if needed
@@ -57,7 +57,7 @@ test-unit-no-dragon:  ## Run unit tests excluding Dragon (uses regular pytest, f
 
 test-unit-dragon:  ## Run Dragon unit tests (requires 'dragon pytest', may hang other tests)
 	@echo "Running Dragon unit tests with dragon pytest..."
-	@dragon $(PYTHON) -m pytest tests/unit/test_backend_execution_dragon.py tests/unit/test_backend_data_dragon.py tests/unit/telemetry/test_adapters_dragon.py -xvs
+	@dragon $(PYTHON) -m pytest tests/unit/test_backend_execution_dragon.py tests/unit/test_backend_execution_dragon_native.py tests/unit/test_backend_data_dragon.py tests/unit/telemetry/test_adapters_dragon.py -xvs
 
 test-integration:  ## Run all integration tests (non-Dragon + Dragon)
 test-integration: test-integration-no-dragon test-integration-dragon
@@ -83,7 +83,7 @@ test-regular:  ## Run all regular tests (excludes Dragon tests, uses pytest)
 test-dragon-only:  ## Run Dragon tests only (requires 'dragon' launcher)
 	@echo "Running Dragon tests..."
 	@if command -v dragon >/dev/null 2>&1; then \
-		dragon $(PYTHON) -m pytest tests/unit/test_backend_execution_dragon.py tests/unit/test_backend_data_dragon.py -xvs; \
+		dragon $(PYTHON) -m pytest tests/unit/test_backend_execution_dragon.py tests/unit/test_backend_execution_dragon_native.py tests/unit/test_backend_data_dragon.py -xvs; \
 	else \
 		echo "Dragon launcher not available. Install Dragon and run with 'dragon' command."; \
 		exit 1; \
@@ -98,6 +98,9 @@ test-ci:  ## CI test - regular tests + Dragon tests when the dragon launcher is 
 	else \
 		echo "Dragon launcher not available on this Python version, skipping Dragon tests."; \
 	fi
+
+test-allocation-shapes:  ## Dragon tests on all, half and one of the CPUs this process may use
+	@PYTHON=$(PYTHON) bash tests/integration/run_allocation_shapes.sh
 
 test-dask:  ## Run Dask backend tests only
 	@echo "Running Dask tests..."

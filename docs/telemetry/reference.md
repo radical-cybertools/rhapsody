@@ -13,6 +13,8 @@ All telemetry originates as **frozen Python dataclasses** (`BaseEvent` subclasse
 - **Identified** — every event carries a unique `event_id` (UUID4 hex), a `session_id`, and a `backend` name.
 - **OTel-enriched** in the JSONL file — the serializer adds `trace_id` and `span_id` fields that link the event to the correct OTel span.
 
+Backends can emit events too, through their emitter (see [Backends, emitters and instrumentations](#backends-emitters-and-instrumentations)): their `event_type` is a namespaced name such as `rhapsody.inference.BatchDone`, not a class name.
+
 ---
 
 ## Base fields (all events)
@@ -20,7 +22,7 @@ All telemetry originates as **frozen Python dataclasses** (`BaseEvent` subclasse
 | Field | Type | Description |
 |---|---|---|
 | `event_id` | `str` | UUID4 hex, unique per event |
-| `event_type` | `str` | Discriminator string (matches the class name) |
+| `event_type` | `str` | Discriminator string (the class name; for events emitted by a backend, its namespaced name, e.g. `rhapsody.inference.BatchDone`) |
 | `event_time` | `float` | Wall-clock time the event occurred (`time.time()`) |
 | `emit_time` | `float` | Wall-clock time of queue insertion (`time.time()`) |
 | `session_id` | `str` | Owning session identifier |
@@ -289,6 +291,9 @@ To get CPU/memory for a specific GPU node, join `per_gpu` events to the `per_nod
 | `disk_read/write_bytes` | `per_node` only | ✅ (delta) | ✅ (delta, first poll = null) | ✅ (delta) |
 | `net_sent/recv_bytes` | `per_node` only | ✅ (delta) | ❌ | ✅ (delta) |
 
+The Dragon column holds for every Dragon backend, `DragonNativeExecutionBackend` included: they share
+one adapter, which polls the runtime's nodes once per session.
+
 ---
 
 ## Custom events — `define_event()`
@@ -376,28 +381,139 @@ Checkpoint = define_event(
 
 ## OTel metrics instruments
 
-The `TelemetryManager` registers the following instruments on a `rhapsody` meter:
+The task instrumentation (`rhapsody.telemetry.instrumentation.task`) records the following instruments on the `rhapsody` meter scope, from the task and resource events of every backend:
 
 | Instrument name | Type | Unit | Description |
 |---|---|---|---|
-| `tasks_submitted` | Counter | tasks | Total tasks submitted to the session |
-| `tasks_started` | Counter | tasks | Total tasks that transitioned to RUNNING |
-| `tasks_completed` | Counter | tasks | Total tasks that reached DONE |
-| `tasks_failed` | Counter | tasks | Total tasks that reached FAILED |
-| `tasks_canceled` | Counter | tasks | Total tasks that reached CANCELED |
-| `tasks_running` | UpDownCounter | tasks | Tasks currently in RUNNING state |
+| `tasks_submitted` | ObservableCounter | tasks | Total tasks submitted to the session |
+| `tasks_started` | ObservableCounter | tasks | Total tasks that transitioned to RUNNING |
+| `tasks_completed` | ObservableCounter | tasks | Total tasks that reached DONE |
+| `tasks_failed` | ObservableCounter | tasks | Total tasks that reached FAILED |
+| `tasks_canceled` | ObservableCounter | tasks | Total tasks that reached CANCELED |
+| `tasks_running` | ObservableUpDownCounter | tasks | Tasks currently in RUNNING state |
 | `task_duration_seconds` | Histogram | seconds | Per-task execution duration (RUNNING → DONE/FAILED) |
 | `node_cpu_utilization` | UpDownCounter | % | Current CPU % per node (last-seen delta tracking) |
 | `node_memory_utilization` | UpDownCounter | % | Current memory % per node |
 | `node_gpu_utilization` | UpDownCounter | % | Current GPU % per node |
 
+The *Unit* column describes the quantity; these instruments do not set an OpenTelemetry `unit` (a known limitation, kept for compatibility).
+
+The task counters and `tasks_running` are tallied by the instrumentation and read when metrics are collected (observable instruments), not updated per event: they give the same sums. So a metric reader passed with `metric_readers` that sets its temporality per instrument kind must name `ObservableCounter` and `ObservableUpDownCounter` for them; a delta reader gets a zero for a series that saw no task since its last collection; a cumulative series starts at the first collection that saw it; and exemplars, if recorded, come from the collecting caller's context.
+
 All instruments carry `session_id` and `backend` as label dimensions. Task instruments additionally carry `executable` and `task_type`. They do not carry `task_id`: one series per task would grow without bound. Per-task identity is on the task spans.
+
+---
+
+## Inference telemetry (experimental)
+
+!!! warning "Experimental"
+    The inference telemetry and its attribute names follow the OpenTelemetry GenAI semantic conventions, which are still in development (limitation L8). Names and attributes may change.
+
+When a `DragonVllmInferenceBackend` is part of a session or workflow engine with telemetry started, RHAPSODY records, for every batch the backend sends to Dragon:
+
+- one **batch span** (`chat {model}`) with the batch's real start and end times, linked to the tasks of the batch;
+- **per-task attributes** on the task spans (batch id, prompt count, queue wait, timeouts);
+- **histograms and counters** for queue wait, batch duration, Dragon's model time, requests, prompts, timed-out prompts and batches.
+
+Nothing needs to be enabled besides telemetry itself (`await session.start_telemetry()` or `await flow.start_telemetry()`) and `pip install 'rhapsody-py[telemetry]'` (`opentelemetry-sdk>=1.30`, the first release with histogram bucket advice).
+
+```
+DragonVllmInferenceBackend ──emit──▶ rhapsody.inference.BatchStarted / BatchDone / BatchFailed   (plain data)
+                                          │ routed by backend name
+                                          ▼
+                       InferenceInstrumentation (OpenTelemetry API only)
+                                          │
+                       ┌──────────────────┴──────────────────┐
+                 `chat {model}` span + task attributes      histograms + counters
+```
+
+### Events
+
+The backend reports a start event and an end event per batch through its emitter. They are ordinary RHAPSODY events: they reach `subscribe()` callbacks and the JSONL file like any other. Their own `task_id` is `None`, so their `trace_id`/`span_id` in the JSONL file resolve to the session span.
+
+`rhapsody.inference.BatchStarted` is emitted right before the batch is sent to Dragon (`event_time` is the dispatch time):
+
+| Field | Type | Description |
+|---|---|---|
+| `batch_id` | `int` | Counts up from 1 for this backend |
+| `model` | `str` | The configured model name (may be a path, L14) |
+| `batch_prompts` | `int` | Prompts in the batch |
+| `batch_requests` | `int` | Requests in the batch (an AITask or one `generate()` call is one request) |
+| `batch_trigger` | `str` | `"size"` when the batch reached `max_batch_size` requests, else `"deadline"` |
+| `task_ids` | `list[str]` | UIDs of the AITasks in the batch |
+
+A batch ends with one of two events, emitted when its responses are in (`event_time` is the real end), before the tasks are reported DONE or FAILED. At most one is emitted per started batch: a batch cancelled while in flight (for example when the backend shuts down) gets neither.
+
+- `rhapsody.inference.BatchDone`: every prompt of the batch was answered.
+- `rhapsody.inference.BatchFailed`: some prompt got no response within the batch deadline, or Dragon answered a prompt with an exception object, or the batch processor itself failed (for example `query()` raised). It carries the same fields as `BatchDone` plus `error_type`.
+
+Both carry:
+
+| Field | Type | Description |
+|---|---|---|
+| `batch_id`, `model`, `batch_trigger`, `batch_prompts`, `batch_requests` | | As above, repeated so the event stands alone |
+| `batch_duration_s` | `float` | Time from sending the batch until its last response (for a batch that failed in the batch processor: until the failure) |
+| `timed_out_prompts` | `int` | Prompts that got no response within the batch deadline |
+| `error_type` | `str` (only on `BatchFailed`) | Class name of the first failure in prompt order, for example `"TimeoutError"` or the class of an exception Dragon answered with; for a failure of the batch processor, the class of that exception. Never the message, which can contain prompt text |
+| `dragon_model_duration_s` | `float` (optional) | Dragon's model inference time of the batch, from the first response (Dragon rounds it to 0.01 s) |
+| `dragon_worker_host` | `str` (optional) | Host name of the Dragon worker, from the first response |
+| `requests` | `list[dict]` | One row per request: `task_id` (`None` for `generate()` and HTTP requests), `prompt_count`, `queue_duration_s`, `timed_out_prompts` |
+
+A request's **source** is derived: `task` when its row has a `task_id`, `api` otherwise. `BatchDone` and `BatchFailed` carry one row per request, so they are part of the JSONL file and of the in-memory event log. On a real run (1004 requests in batches of 32, task ids like `task.000001`) the JSONL file held about 130 bytes per request for the end event (measured when it was still one event named `BatchEnded`) and about 35 bytes per request for the task-id list of `BatchStarted`; the in-memory event log held about 260 bytes per request (measured in a synthetic test on 1024-request batches).
+
+### Metrics
+
+Recorded on the `rhapsody.instrumentation.inference` meter scope. No instrument carries a task or batch id. A counter or histogram with no events has no data point.
+
+| Instrument | Type | Unit | Attributes | Description |
+|---|---|---|---|---|
+| `rhapsody.inference.request.queue.duration` | Histogram | `s` | base + `rhapsody.inference.request.source` | Time a request waited in the batcher queue before its batch was sent |
+| `rhapsody.inference.batch.duration` | Histogram | `s` | base | Time from sending a batch until its last response |
+| `rhapsody.inference.model.duration` | Histogram | `s` | base | Dragon's model time per batch; recorded only when Dragon reports a value above 0 |
+| `rhapsody.inference.requests` | Counter | `{request}` | base + source | Requests batched |
+| `rhapsody.inference.prompts` | Counter | `{prompt}` | base + source | Prompts batched |
+| `rhapsody.inference.timed_out.prompts` | Counter | `{prompt}` | base + source | Prompts that got no response within the batch deadline |
+| `rhapsody.inference.batches` | Counter | `{batch}` | base + `rhapsody.inference.batch.trigger` | Batches sent to Dragon |
+
+*base* is `session_id`, `backend` and `gen_ai.request.model`. The three histograms use the advisory bucket bounds 0.01, 0.02, 0.04 ... 327.68 seconds (10 ms doubling, 16 bounds).
+
+### Reading it
+
+```python
+telemetry = await session.start_telemetry(checkpoint_path="./telemetry/")
+# ... run AITasks ...
+await session.close()  # data stays readable after the session closed
+
+for rm in telemetry.read_metrics().resource_metrics:
+    for sm in rm.scope_metrics:
+        if sm.scope.name == "rhapsody.instrumentation.inference":
+            for metric in sm.metrics:
+                print(metric.name, [dp.attributes for dp in metric.data.data_points])
+
+batches = [s for s in telemetry.read_traces() if s.name.startswith("chat")]
+```
+
+To forward the data to an OTel backend, pass a `MetricReader` or `SpanProcessor` to `start_telemetry()` (see [Integrations](integrations.md)).
+
+A runnable example that prints the batches, the per-task attributes and the metrics of a real inference run is `examples/telemetry/01-inference-telemetry.py` in the repository (launch command in the README next to it).
+
+### Privacy
+
+Events, spans and metrics carry numbers, ids, the model name (which can be a filesystem path, L14) and the Dragon worker's host name. They never carry prompt or response text; a test checks every payload the backend emits.
+
+### What is not available
+
+- Aggregated inference metrics produced by Dragon Telemetry (owned by another group).
+- A live queue depth and running totals between batches (limitation L16): only what the batch events carry is recorded.
+- Token counts: Dragon computes them but does not forward them.
+- Trace context into Dragon and vLLM (limitation L2): vLLM's own spans, if Dragon enables them, are separate traces.
+- Batches still in flight when the session closes: `session.close()` stops telemetry before it shuts the backends down, so such a batch emits no `BatchDone` or `BatchFailed`, its metrics are lost and its span ends without batch data.
 
 ---
 
 ## OTel span structure
 
-RHAPSODY emits two span types, both in the `"rhapsody"` tracer scope:
+RHAPSODY emits three span types. The session and task spans are in the `"rhapsody"` tracer scope; the inference batch span is in `"rhapsody.instrumentation.inference"`:
 
 ### Session span (`name="session"`)
 
@@ -428,6 +544,32 @@ task span
 ```
 
 The span covers the full task lifecycle from registration to terminal state. To get pure execution time, use the `task_duration_seconds` OTel histogram metric, which is recorded from `TaskStarted` → terminal state.
+
+### Inference batch span (`name="chat {model}"`)
+
+One span per batch sent by a `DragonVllmInferenceBackend` (experimental). The name is `chat` when the model is unknown.
+
+```
+chat span   (kind CLIENT)
+├── parent:  session span
+├── links:   at most 128 task spans that were open when the batch was sent (L7)
+├── attributes:
+│     session_id, backend
+│     gen_ai.operation.name        = "chat"
+│     gen_ai.request.model
+│     rhapsody.inference.batch.id
+│     rhapsody.inference.batch.size       prompts in the batch
+│     rhapsody.inference.batch.requests   requests in the batch (the real count, whatever the link cap)
+│     rhapsody.inference.batch.trigger    "size" | "deadline"
+│     rhapsody.inference.dragon.model.duration   (when Dragon reports it)
+│     rhapsody.inference.dragon.worker.host      (when Dragon reports it)
+│     error.type = the error_type of BatchFailed        (when the batch failed)
+│     rhapsody.inference.timed_out_prompts              (when prompts timed out)
+├── status:  ERROR "N prompts timed out" or "batch failed" for a BatchFailed, or "batch did not finish" when the batch never ended
+└── time:    the real dispatch time → the real time of the last response
+```
+
+The batch span is not parented to a task, because a batch can serve tasks of several workflows; the span enrichers (such as AsyncFlow's `workflow_id`) are not applied to it. When the batch ends, each AITask span in it gets these attributes: `gen_ai.request.model`, `rhapsody.inference.batch.id`, `rhapsody.inference.prompt_count`, `rhapsody.inference.request.queue.duration` and, if its prompts timed out, `error.type` (`TimeoutError`) and `rhapsody.inference.timed_out_prompts`. A prompt that Dragon answered with an exception object fails its task and the batch (`BatchFailed`), but it is not counted separately in the telemetry: only `error_type` names it.
 
 ### Trace–span correlation in the JSONL file
 
@@ -512,6 +654,89 @@ The returned string is valid OTLP JSON and can be:
 
 ---
 
+## Backends, emitters and instrumentations
+
+This section is for people who write a backend or add telemetry for a new domain. It is experimental.
+
+### Why backends do not call OTel
+
+RHAPSODY does not own the execution events of the runtimes behind its backends (Dragon, Dask, RADICAL-Pilot, ...). A backend is a translation layer: it turns what its runtime reports into RHAPSODY's normalized task lifecycle and into **plain data**. Recording that data in one place gives every runtime the same names, lifecycle and JSONL output, and keeps OpenTelemetry out of every backend. OTel *at the source* belongs to the owner of the source (for example Dragon enabling vLLM tracing). Where RHAPSODY owns the source, as in the inference batcher, a later step of the telemetry refactor (Tier 1) lets such code use the OTel API through the session's providers; the data and the names stay the same.
+
+So a backend never imports OpenTelemetry and never sees the `TelemetryManager`. It reports through an *emitter*, and an *instrumentation* turns the data into spans and metrics.
+
+```
+backend (plain data)  ──emitter──▶  TelemetryManager (generic host)  ──routes by backend──▶  instrumentation (OTel API)
+```
+
+### Emitting from a backend
+
+Every backend, execution, AI or data, has `self.telemetry`:
+
+- It is a no-op emitter (`enabled` is `False`) until the `TelemetryManager` attaches the backend, which happens when a session or workflow engine with telemetry attaches it. The manager then calls the backend's `register_emitter(emitter)` hook, the counterpart of `register_callback`. The default stores the emitter in `self.telemetry`; override the hook to react and call `super().register_emitter(emitter)`. A backend therefore never checks for `None`.
+- Today only the vLLM backend emits. The Concurrent, Dask and Dragon execution backends have the emitter but do not use it; their resource telemetry still comes from the adapters.
+
+```python
+if self.telemetry.enabled:  # skip building the attributes when telemetry is off
+    self.telemetry.emit(
+        "rhapsody.myservice.RequestServed",  # namespaced name: it must contain a "."
+        {"count": 3},  # plain numbers and strings, never prompt or response text
+        event_time=time.time(),  # optional: when it really happened (default: now)
+        task_id=None,  # optional: the task the event belongs to
+    )
+```
+
+Rules:
+
+- The name must contain a `.` (otherwise `ValueError`); the convention is `rhapsody.<domain>.<Event>`.
+- Events emitted while the manager is not running are dropped.
+- Hand the attributes over and do not change them afterwards.
+- Call `emit()` from the event-loop thread (limitation L17).
+- Never put prompt or response text in the attributes.
+- A pickled backend comes back with a no-op emitter.
+
+`Emitter`, `NoopEmitter` and `BackendEmitter` live in `rhapsody.telemetry.emitter` (not re-exported from `rhapsody.telemetry`).
+
+### Writing an instrumentation
+
+An instrumentation is the only place that knows a telemetry domain: metric names, units, span attributes. It uses the OpenTelemetry **API** only, through the meter and tracer the host hands it. A backend names its domain with the class attribute `telemetry_domain`; a registry maps the name to the class.
+
+```python
+from rhapsody.telemetry.instrumentation import Instrumentation
+from rhapsody.telemetry.instrumentation import register_instrumentation
+
+
+class MyServiceInstrumentation(Instrumentation):
+    scope_name = "rhapsody.instrumentation.myservice"
+
+    def instrument(self, ctx):
+        # Called at start (and again after a restart): create ALL instruments here
+        # and reset ALL per-session state.
+        self._served = ctx.meter.create_counter(
+            "myservice.requests.served", unit="{request}", description="Requests served"
+        )
+
+    def on_event(self, event):
+        # The host routes by backend name, so you also receive the backend's other
+        # events (task events, for example): ignore the ones you do not own.
+        if event.event_type != "rhapsody.myservice.RequestServed":
+            return
+        self._served.add(event.attributes.get("count", 1), {"backend": event.backend})
+
+
+register_instrumentation("myservice", MyServiceInstrumentation)
+```
+
+On the backend side, set `telemetry_domain = "myservice"` and emit as above.
+
+- `register_instrumentation(domain, cls)` must run **before** the backend is attached. `cls` can also be a `"module:ClassName"` string, which is imported on first use.
+- The `InstrumentationContext` that `instrument()` receives has `meter` and `tracer` (scoped to `scope_name`), `session_id`, `backend_name`, `session_span_context()`, `task_span(task_id)` (the task's open span, or `None`) and `span_context_for(task_id)`.
+- `uninstrument()` (optional) is called before the providers shut down, for example to end spans that are still open.
+- Instrumentations are keyed by backend name (limitation L15). An unknown domain, or the built-in `task` domain, logs a warning and is ignored.
+- The task and resource metrics are recorded by a built-in default instrumentation that sees every event, whatever its backend.
+- A failing `instrument()` is logged with its traceback and the instrumentation gets no events; the session carries on. A failing `on_event` warns once per backend and instrumentation, then logs at debug level.
+
+---
+
 ## JSONL checkpoint format
 
 Each line in the `.telemetry.jsonl` file is a JSON object with a `"section"` discriminator:
@@ -526,3 +751,22 @@ Each line in the `.telemetry.jsonl` file is a JSON object with a `"section"` dis
 ```
 
 The file is written line-buffered, so it is readable during a live run.
+
+## Known limitations
+
+Each limitation has a `TELEMETRY-LIMITATION(<id>)` comment at the place in the code where it applies: in the RHAPSODY source, except L9, which is in the radical.asyncflow source. References such as B2, T3, T9 or A1 are items of the maintainers' issue report for this work, not GitHub issues, and Tier 1, 2 and 3 are the steps of the planned telemetry refactor: Tier 1 injects the OpenTelemetry providers so that RHAPSODY-owned code can use the API directly, Tier 2 moves the resource metrics and the JSONL file onto OpenTelemetry mechanisms, Tier 3 removes the event bus. The numbering has gaps (L1, L6, L10, L11, L12 and L13 are not used): those limitations were dropped or fixed while the work was in progress, and ids are not reused.
+
+| Id | Limitation | Planned |
+|---|---|---|
+| L2 | No trace context is passed to Dragon or vLLM. If Dragon enables vLLM's native tracing, its spans form separate traces that can only be matched to the batch span by time, model and host. | Tier 1 + a Dragon feature request (accept and forward `traceparent`, enable vLLM tracing) |
+| L3 | The JSONL metric snapshot sums data points across all attributes (T9), so series split by attribute are added together in the file. `read_metrics()` keeps the dimensions. | Tier 2 |
+| L4 | Task spans start and end at the time the dispatch loop processes the event, not at the event's own time (T3), so they can be offset from spans an instrumentation records with real times. | Tier 3 (Tier 2 partially) |
+| L5 | `subscribe()` callbacks receive events only. OTel metrics recorded by an instrumentation are available through `read_metrics()` or a metric reader, not as events. | Tier 3 |
+| L7 | The batch span links to at most 128 of the batch's task spans (the SDK keeps 128 links per span by default, `OTEL_SPAN_LINK_COUNT_LIMIT`); the real request count is on the span as `rhapsody.inference.batch.requests`. | Configuration |
+| L8 | The inference attributes follow the OpenTelemetry GenAI semantic conventions, which are still in development and may change; `gen_ai.provider.name` is not set (vLLM has no registered value). | Follow the conventions when they stabilize |
+| L9 | AsyncFlow always emits `TaskFailed` with `error_type="unknown"`, even when the task carries an exception (issue A1; AsyncFlow-owned). RHAPSODY's `Session` uses the exception's type. An inference timeout is still marked by `error.type` on the task span. | AsyncFlow: use the exception's type |
+| L14 | `gen_ai.request.model` is the configured model name and may be a local filesystem path. | Documented only |
+| L15 | Instrumentations are keyed by backend name: two backends of one session with the same name share one slot, and the later one is ignored. `Session` and `WorkflowEngine` key their backends by name, so a same-name backend replaces the earlier one there; instrumentations follow the same rule. | None needed |
+| L16 | Only what the batch events carry is recorded: there is no live queue depth and no cumulative totals between batches (the vLLM batcher is one sequential loop, one batch in flight at a time). | Tier 1 (the emitter handle gains `.meter`) |
+| L17 | `Emitter.emit()` (the handle every backend gets as `backend.telemetry`) must be called on the event-loop thread, because the event queue is not thread-safe: from another thread an event may be delivered late (only when the loop next wakes) or not safely. A backend whose callbacks run in worker threads would have to hop onto the loop first. The vLLM batcher runs on the loop. | Tier 1 of the telemetry refactor, or a `call_soon_threadsafe` hop in the emitter |
+| L18 | The OTLP export (`export_as_otlp`) writes OTel `SpanKind` values that are off by one from OTLP (CLIENT is 2 in OTel, 3 in OTLP), hardcodes the scope `rhapsody` and drops span links, so an exported inference batch span (CLIENT) is labeled as SERVER and loses its links (issue T19). | Tier 2 |
