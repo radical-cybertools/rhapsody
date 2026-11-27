@@ -55,7 +55,8 @@ Install it with the `dragon` extra, and start your script with the Dragon launch
 - **Pickling and the loop.** A pool task's function is cloudpickled for its first two tasks, and
   once both pickles come out the same, that pickle is given again while nothing it holds has
   changed (its code, closure, defaults, attributes and the globals its code reads); a function
-  holding an object of a class is pickled for every task. Each task pickles
+  holding an object of a class is pickled for every task, and so is one that changes before every
+  task or whose pickle is over 1 MB. Each task pickles
   only its arguments, continuing the function's pickle, so the worker loads both as from one
   pickle. `submit_tasks` lets the asyncio loop run every 20 ms while it builds a large batch, and
   the callback gets the backend's state changes for at most 20 ms per pass of the loop: neither

@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import heapq
+import io
 import itertools
 import logging
 import os
@@ -120,6 +121,9 @@ _RETRY_MAX = 1.0
 # asyncio loop run: a batch of thousands of tasks held the loop for seconds, and every coroutine of
 # the process with it.
 _LOOP_SLICE = 0.02
+# Bytes from which a pool task's message is pickled through a file, as cloudpickle.dumps does:
+# pickle.dumps copied a 2 MB message four times as slowly, and was as quick below 1 MB.
+_LARGE_MESSAGE = 1 << 20
 # Seconds a put on the relay's queue may wait for a free slot, on the asyncio loop at worst. A full
 # queue or memory pool does not wait longer: the batch is retried from the timer thread.
 _CONTROL_PUT_WAIT = 0.01
@@ -1947,6 +1951,15 @@ class DragonNativeExecutionBackend(BaseBackend):
                 self._callback_func(desc, state)
             except Exception:
                 self.logger.exception(f"Callback failed for {desc.get('uid')} ({state})")
+            except BaseException:
+                # The rest goes on in another pass: a flush left marked as scheduled while none is
+                # would hold every later state.
+                try:
+                    asyncio.get_running_loop().call_soon(self._flush_outbox)
+                except RuntimeError:
+                    with self._outbox_lock:
+                        self._flush_loop = None
+                raise
             if deadline is not None and time.monotonic() >= deadline:
                 break
         # The flush stays scheduled (_flush_loop is still set): _emit_all adds to it, not another.
@@ -2137,7 +2150,13 @@ class DragonNativeExecutionBackend(BaseBackend):
                 fn_data, rest = self._functions.dumps_call(
                     fn, (token, args, kwargs, out, err, self._inline_stdio)
                 )
-                rec.payload = pickle.dumps((uid, fn_data, rest), protocol=pickle.HIGHEST_PROTOCOL)
+                message = (uid, fn_data, rest)
+                if len(fn_data) + len(rest) < _LARGE_MESSAGE:
+                    rec.payload = pickle.dumps(message, protocol=pickle.HIGHEST_PROTOCOL)
+                else:
+                    buffer = io.BytesIO()
+                    pickle.Pickler(buffer, protocol=pickle.HIGHEST_PROTOCOL).dump(message)
+                    rec.payload = buffer.getvalue()
                 return rec
 
         if templates is None:
@@ -2274,11 +2293,11 @@ class DragonNativeExecutionBackend(BaseBackend):
             if unbuilt is not None:
                 self._unbuilt[:] = [u for u in self._unbuilt if u is not unbuilt]
                 if cancel_rest:
-                    self._cancel_unbuilt([d for descs in unbuilt.values() for d in descs])
+                    self._report_canceled([d for descs in unbuilt.values() for d in descs])
             self._flush_sends()
 
-    def _cancel_unbuilt(self, descs: list[dict]) -> None:
-        """Report CANCELED for tasks a submit never built; a callback that raises stops none."""
+    def _report_canceled(self, descs: list[dict]) -> None:
+        """Report CANCELED for each task; a callback that raises stops none of the others."""
         for desc in descs:
             try:
                 self._callback_func(desc, "CANCELED")
@@ -2353,10 +2372,10 @@ class DragonNativeExecutionBackend(BaseBackend):
                 started = bool(rec.puids)
         # Callbacks run without the lock, which the backend's threads wait on.
         if rec is None:
-            self._cancel_unbuilt(unbuilt)
+            self._report_canceled(unbuilt)
             return bool(unbuilt)
-        for desc in (rec.desc, *rec.repeats, *unbuilt):
-            self._callback_func(desc, "CANCELED")
+        # A callback that raises stops neither the other CANCELED states nor the task.
+        self._report_canceled([rec.desc, *rec.repeats, *unbuilt])
         if worker is not None:
             self._ops.submit(self._retire_worker, worker, rec.token)
         elif rec.kind != "pool" and started:

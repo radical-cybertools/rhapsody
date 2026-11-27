@@ -87,8 +87,9 @@
   attributes and the globals its code reads, and the functions, containers, cells and type hints
   among them, are the same objects with the same contents. A function holding an object whose
   changes cannot be seen this way (an instance, a class or module pickled by value) is pickled for
-  every task, as before, at about the cost of `cloudpickle.dumps`, and a closure made for a
-  single task is never kept. The native backend still loads a task's function and arguments on the
+  every task, as before, at about the cost of `cloudpickle.dumps`, and so is a function that
+  changes before every task or whose pickle is over 1 MB. A closure made for a single task is
+  never kept. The native backend still loads a task's function and arguments on the
   worker as from one pickle, so an object both hold stays one object.
 - **BEHAVIOUR CHANGE: the native backend's worker message is `(uid, fn_data, rest)`.** It was
   `(uid, body)`: a worker and a client of different versions cannot run each other's tasks.

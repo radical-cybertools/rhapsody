@@ -20,7 +20,10 @@ A pickle is kept only once two pickles in a row of the same function, each betwe
 agree, come out the same. So a closure made for a single task is never kept, nor what it holds; and
 a value another thread changes while a pickle is taken, and changes back, is not kept either: no
 walk sees the value that pickle holds, but the next pickle differs from it (unless the same race
-happens during that pickle too).
+happens during that pickle too). After a pickle that differs from the last, the function is walked
+again only once two pickles in a row agree, so one that changes before every call costs about what
+pickling it does. A function whose pickle is larger than ``max_bytes`` is pickled for every call
+with no walk.
 
 ``dumps_call`` pickles the rest of a call after the function, continuing the function pickle's
 memo, so that one unpickler loading both gives what one pickle of the two gave: an object the
@@ -275,9 +278,11 @@ class FunctionPickles:
     """Pickles of the functions seen last, each given again while it would come out the same.
 
     ``maxsize`` functions are kept, the least recently used dropped first, and no more than
-    ``max_total_bytes`` of pickles; a pickle larger than ``max_bytes`` is never kept, nor is one of
-    a function holding more than ``walk_budget`` objects. With ``confirm`` (the default) a pickle is
-    kept once the next pickle of the same function comes out the same; without, the first is kept.
+    ``max_total_bytes`` of pickles; a function whose pickle is larger than ``max_bytes`` is never
+    kept, nor walked again, nor is one holding more than ``walk_budget`` objects. With ``confirm``
+    (the default) a pickle is kept once the next pickle of the same function comes out the same,
+    and after a pickle that differs from the last, once two more in a row agree; without, the first
+    is kept.
     A function that cannot be kept costs about what ``cloudpickle.dumps`` does. Safe to use from
     several threads.
     """
@@ -300,8 +305,9 @@ class FunctionPickles:
         self._kept: collections.OrderedDict[int, _Pickle] = collections.OrderedDict()
         self._kept_bytes = 0
         # By id, with a weak reference, so a function made for one task, and what it holds, goes
-        # with its task: the last pickle's size and hash of a function not kept yet, and the
-        # functions whose walk cannot see what they hold, never walked again.
+        # with its task: the last pickle's size and hash of a function not kept yet, with whether
+        # to walk the next one, and the functions never kept (the walk cannot see what they hold,
+        # or the pickle is too large), never walked again.
         self._last: collections.OrderedDict[int, tuple[weakref.ref, tuple]] = (
             collections.OrderedDict()
         )
@@ -340,8 +346,11 @@ class FunctionPickles:
             pickler.dump(rest)
             return data, buffer.getvalue()
         # A fresh pickle of fn: the same pickler goes on with the rest, one stream split in two.
+        # The buffer starts again for the rest: writing after the function's pickle copied it.
+        buffer.seek(0)
+        buffer.truncate()
         pickler.dump(rest)
-        return data, buffer.getvalue()[len(data) :]
+        return data, buffer.getvalue()
 
     def _pickle(self, fn: Any) -> tuple:
         """``(kept, None, None, data)`` for the kept pickle, else ``(None, pickler, buffer, data)``
@@ -365,21 +374,28 @@ class FunctionPickles:
             if kept is not None:
                 self._drop(key, kept)
             return None, pickler, buffer, buffer.getvalue()
-        last_mark = last[1] if last is not None and last[0]() is fn else None
-        # Walk only for a pickle that may be kept: the first of a function is not, when confirming.
-        may_keep = not self.confirm or last_mark is not None
+        last_mark, settled = last[1] if last is not None and last[0]() is fn else (None, False)
+        # Walk only for a pickle that may be kept. Confirming, that is one that may come out as the
+        # last did: not the first of a function, nor one after a change, until two agree again.
+        may_keep = not self.confirm or settled
         held: list = []
         walk = _walk_or_none(fn, self.walk_budget, held) if may_keep else None
         modules, registry = len(sys.modules), _registry_size()
         pickler.dump(fn)
         data = buffer.getvalue()
+        if len(data) > self.max_bytes:  # never kept: not walked, nor checked, again
+            with self._lock:
+                if kept is not None and self._kept.get(key) is kept:
+                    self._drop_locked(key)
+                self._last.pop(key, None)
+                self._remember(self._unseen, key, fn, None)
+            return None, pickler, buffer, data
         mark = (len(data), hash(data)) if self.confirm else None
-        # Kept if nothing changed while it was taken, and, confirming, it is the last one again.
+        # Kept if, confirming, it is the last one again, and nothing changed while it was taken.
         keep = (
             walk is not None
-            and len(data) <= self.max_bytes
-            and _walk_or_none(fn, self.walk_budget) == walk
             and (not self.confirm or mark == last_mark)
+            and _walk_or_none(fn, self.walk_budget) == walk
         )
         with self._lock:
             if kept is not None and self._kept.get(key) is kept:
@@ -397,6 +413,8 @@ class FunctionPickles:
                     modules,
                     registry,
                 )
+                if key in self._kept:  # another thread kept its pickle meanwhile: this replaces it
+                    self._drop_locked(key)
                 self._kept[key] = fresh
                 self._kept_bytes += len(data)
                 while self._kept and (
@@ -407,7 +425,8 @@ class FunctionPickles:
                 self._last.pop(key, None)
                 self._remember(self._unseen, key, fn, None)
             elif self.confirm:
-                self._remember(self._last, key, fn, mark)
+                # The next pickle is walked if this one was the first or came out as the last did.
+                self._remember(self._last, key, fn, (mark, last_mark is None or mark == last_mark))
         return None, pickler, buffer, data
 
     def _remember(self, table: collections.OrderedDict, key: int, fn: Any, value: Any) -> None:
