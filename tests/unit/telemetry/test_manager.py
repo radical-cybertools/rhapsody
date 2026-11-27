@@ -1362,3 +1362,62 @@ class TestSessionContext:
         parent, spans = self._parent_of(exporter, "task")
         assert parent == spans["workflow"].context.span_id
         assert spans["workflow"].parent.span_id == spans["session"].context.span_id
+
+
+class TestRetention:
+    """A long-lived session keeps a bounded number of events, spans and span contexts."""
+
+    @staticmethod
+    async def _run(n, **kwargs):
+        from rhapsody.telemetry.events import ResourceUpdate
+
+        m = TelemetryManager(session_id="test-session", **kwargs)
+        await m.start()
+        base = {"session_id": "test-session", "backend": "concurrent"}
+        m.emit(
+            make_event(ResourceUpdate, node_id="n1", cpu_percent=5.0, memory_percent=10.0, **base)
+        )
+        for i in range(n):
+            tid = f"task.{i:06d}"
+            m.emit(make_event(TaskCreated, task_id=tid, **base))
+            m.emit(make_event(TaskCompleted, task_id=tid, duration_seconds=0.01, **base))
+            if i == 0:
+                await asyncio.sleep(0.05)  # the first task is the longest
+        await m.stop()
+        return m
+
+    async def test_memory_is_bounded_and_summary_covers_every_task(self):
+        m = await self._run(300, retained=20)
+        assert len(m._event_log) <= 100
+        assert len(m._completed_span_ctx) <= 20
+        assert len(m.read_traces()) <= 20
+        spans = m.task_spans()
+        assert spans[-1]["task_id"] == "task.000299"  # the most recent are kept
+        summary = m.summary()
+        assert summary["tasks"]["completed"] == 300
+        stats = summary["duration"]
+        assert stats["max_seconds"] > max(s["duration_seconds"] for s in spans)
+        assert stats["mean_seconds"] == pytest.approx(stats["total_seconds"] / 300, abs=1e-5)
+        # the node's last reading outlives the bounded event log
+        assert summary["resources"]["concurrent/n1"]["cpu_percent"] == 5.0
+
+    async def test_none_keeps_everything(self):
+        m = await self._run(300, retained=None)
+        assert len(m.task_spans()) == len(m._completed_span_ctx) == 300
+
+    async def test_the_checkpoint_file_has_every_span_once(self, tmp_path):
+        await self._run(300, retained=20, checkpoint_path=str(tmp_path), checkpoint_interval=0.01)
+        (path,) = tmp_path.iterdir()
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        ids = [r["span_id"] for r in rows if r["section"] == "span"]
+        assert len(ids) == len(set(ids)) == 301  # the tasks and the session
+
+    async def test_the_first_drop_is_logged_once(self, caplog):
+        with caplog.at_level("INFO", logger="rhapsody.telemetry.manager"):
+            await self._run(300, retained=20)
+        assert sum("retained" in r.getMessage() for r in caplog.records) == 1
+
+    @pytest.mark.parametrize("retained", [-1, 1.5, True, "10"])
+    def test_a_bad_bound_is_refused(self, retained):
+        with pytest.raises(ValueError, match="retained"):
+            TelemetryManager(session_id="s", retained=retained)

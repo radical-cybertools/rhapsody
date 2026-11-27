@@ -69,7 +69,7 @@ async def run(kind, n, chunk, wait_mode, telemetry):
     backend = await (BatchNoopBackend(name="batch") if kind == "batch" else NoopExecutionBackend())
     session = Session([backend])
     if telemetry:
-        await session.start_telemetry(resource_poll_interval=3600)
+        await session.start_telemetry(resource_poll_interval=3600, retained=None)
     tel = session._telemetry
 
     if wait_mode == "chain":

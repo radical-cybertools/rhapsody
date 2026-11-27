@@ -40,6 +40,12 @@
 
 ### Changed
 
+- **BEHAVIOUR CHANGE: telemetry keeps the spans and events of about the last 10,000 tasks in
+  memory** (`Session.start_telemetry(retained=10_000)`, `TelemetryManager(retained=...)`), so a
+  long-lived session no longer grows with every task. `task_spans()`, `read_traces()` and
+  `export_as_otlp()` cover only those; `retained=None` keeps all, as before. `summary()`, metrics,
+  span processors and the checkpoint file still cover every task. The checkpoint file now has
+  each span once, as it ends, instead of every span again at each interval.
 - **The `telemetry` extra needs `opentelemetry-sdk>=1.30.0`** (was 1.20), only for the histogram
   bucket advice of the inference durations.
 

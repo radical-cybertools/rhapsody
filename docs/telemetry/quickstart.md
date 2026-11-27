@@ -209,12 +209,13 @@ This produces a multi-panel PNG (shown in [Integrations — Real Run Visualizati
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `resource_poll_interval` | `float` | `5.0` | Seconds between resource metric polls |
-| `checkpoint_interval` | `float \| None` | `None` | Seconds between periodic metric+span flushes. `None` = flush only at session end |
+| `checkpoint_interval` | `float \| None` | `None` | Seconds between periodic metric snapshots and file flushes; spans are written as they end. `None` = only at session end |
 | `checkpoint_path` | `str \| None` | `None` | Directory for the JSONL file. `None` = no file output |
 | `span_processors` | `list \| None` | `None` | OTel `SpanProcessor` instances (e.g. `BatchSpanProcessor(OTLPSpanExporter())`) added alongside RHAPSODY's internal `SpanBuffer`. Callers own exporter construction. |
 | `metric_readers` | `list \| None` | `None` | OTel `MetricReader` instances (e.g. `PeriodicExportingMetricReader(OTLPMetricExporter())`) added alongside RHAPSODY's internal `InMemoryMetricReader`. |
 | `resource` | `Resource \| None` | `None` | OTel `Resource` override. `None` = `Resource.create()` reads `OTEL_SERVICE_NAME` / `OTEL_RESOURCE_ATTRIBUTES` from the environment automatically. |
 | `drain_on_stop` | `bool` | `True` | `True` = `session.close()` processes every queued telemetry event before shutting down, however long that takes. `False` = events still queued at close are discarded with a warning, for a fast shutdown (e.g. close to a job walltime). |
+| `retained` | `int \| None` | `10000` | Keep the spans and events of about the last `retained` tasks in memory. `task_spans()`, `read_traces()` and `export_as_otlp()` cover only those; `summary()`, metrics, the checkpoint file and span processors cover every task. `None` keeps all, about 5 KB per task. |
 
 To access the manager after the initial call use `session.get_telemetry()`.
 
