@@ -2412,6 +2412,27 @@ async def test_a_cancel_whose_callback_raises_still_stops_the_task_and_cancels_i
     await until(lambda: len(dragon.workers()) == 5 and backend._live_by_key[w.key] == 2)
 
 
+async def test_a_cancel_whose_callback_raises_a_base_exception_still_stops_the_task(
+    backend, dragon
+):
+    """The worker is marked dead before the callbacks run: one that raised a BaseException left
+    it running the task, never replaced."""
+
+    def raising(task, state):
+        if state == "CANCELED":
+            raise CallbackExit()
+
+    backend.register_callback(raising)
+    task = fn_task(blocked)
+    await backend.submit_tasks([task])
+    w = backend._tasks[task["uid"]].worker
+    proc = w.proc
+    with pytest.raises(CallbackExit):
+        await backend.cancel_task(task["uid"])
+    await until(lambda: proc.code == -signal.SIGKILL)
+    await until(lambda: len(dragon.workers()) == 5 and backend._live_by_key[w.key] == 2)
+
+
 async def test_pool_timeout_fails_the_task_and_kills_its_worker(backend):
     rec = Recorder(backend)
     procs = [w.proc for w in backend._workers.values()]
