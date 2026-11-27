@@ -19,8 +19,11 @@ from ..constants import StateMapper
 
 try:
     import cloudpickle
+
+    from ._function_pickles import FunctionPickles
 except ImportError:
     cloudpickle = None
+    FunctionPickles = None
 
 
 def _get_logger() -> logging.Logger:
@@ -63,6 +66,8 @@ class ConcurrentExecutionBackend(BaseBackend):
             )
 
         self.executor = executor
+        # A process pool's tasks' functions, each pickled once while it stays the same.
+        self._functions = FunctionPickles() if isinstance(executor, ProcessPoolExecutor) else None
         self.tasks: dict[str, asyncio.Task] = {}
         self._callback_func: Callable = lambda t, s: None
         self._initialized = False
@@ -160,9 +165,9 @@ class ConcurrentExecutionBackend(BaseBackend):
         args = task.get("args", [])
         kwargs = task.get("kwargs", {})
 
-        # Serialize the async function
+        # Serialize the function: the kept pickle while it stays the same
         if isinstance(self.executor, ProcessPoolExecutor):
-            func = cloudpickle.dumps(func)
+            func = self._functions.dumps(func)
             exec_wrapper = self._run_in_process
         else:
             exec_wrapper = self._run_in_thread
@@ -423,6 +428,8 @@ class ConcurrentExecutionBackend(BaseBackend):
 
         await self.cancel_all_tasks()
         self.executor.shutdown(wait=True)
+        if self._functions is not None:
+            self._functions.clear()
         self.logger.info("Concurrent execution backend shutdown complete")
 
     def build_task(self, uid, task_desc, task_specific_kwargs):

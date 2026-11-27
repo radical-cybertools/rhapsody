@@ -251,6 +251,55 @@ async def test_execute_function_regular_sync_function_in_process(process_backend
 
 
 @pytest.mark.asyncio
+async def test_a_function_shared_by_many_tasks_is_pickled_once_for_the_pool(
+    process_backend, monkeypatch
+):
+    """Each task cloudpickled its function again, on the event loop.
+
+    Now twice: a pickle is kept
+    once the next one comes out the same.
+    """
+    import cloudpickle
+
+    factor = 3
+
+    def scale(x):
+        return x * factor
+
+    # Start the pool first: starting it loads modules here, and a new module means a new pickle.
+    await process_backend._execute_function(ComputeTask(function=abs, args=[-1]))
+    pickled = []
+    dump = cloudpickle.CloudPickler.dump
+
+    def recording_dump(self, obj):
+        if obj is scale:
+            pickled.append(obj)
+        return dump(self, obj)
+
+    monkeypatch.setattr(cloudpickle.CloudPickler, "dump", recording_dump)
+    for i in range(5):
+        result_task, state = await process_backend._execute_function(
+            ComputeTask(function=scale, args=[i])
+        )
+        assert state == "DONE"
+        assert result_task["return_value"] == 3 * i
+    assert len(pickled) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_pool_runs_a_function_as_it_was_when_submitted(process_backend):
+    factor = [2]
+
+    def scale(x):
+        return x * factor[0]
+
+    first, _ = await process_backend._execute_function(ComputeTask(function=scale, args=[5]))
+    factor[0] = 3
+    second, _ = await process_backend._execute_function(ComputeTask(function=scale, args=[5]))
+    assert (first["return_value"], second["return_value"]) == (10, 15)
+
+
+@pytest.mark.asyncio
 async def test_execute_function_async_function_in_process(process_backend):
     """_execute_function still works for async functions in a ProcessPoolExecutor (regression)."""
 

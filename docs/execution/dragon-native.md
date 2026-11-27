@@ -52,6 +52,16 @@ Install it with the `dragon` extra, and start your script with the Dragon launch
   a worker started, on demand, with `gpu_affinity` set to exactly those GPUs (`gpu_workers_per_set`
   of them, default 1), so Dragon sets the vendor's visible-devices variable once, at worker start.
   Workers stay up for the backend's life. On a host, tasks placed there go before unplaced ones.
+- **Pickling and the loop.** A pool task's function is cloudpickled for its first two tasks, and
+  once both pickles come out the same, that pickle is given again while nothing it holds has
+  changed (its code, closure, defaults, attributes and the globals its code reads); a function
+  holding an object of a class is pickled for every task, and so is one that changes before every
+  task or whose pickle has been over 1 MB. Each task pickles
+  only its arguments, continuing the function's pickle, so the worker loads both as from one
+  pickle. `submit_tasks` lets the asyncio loop run every 20 ms while it builds a large batch, and
+  the callback gets the backend's state changes for at most 20 ms per pass of the loop: neither
+  holds the loop for a whole batch. A task a submit has not reached yet can be cancelled, and is
+  cancelled at shutdown.
 - **The relay.** A relay process on the client's node puts each task on its worker's inbox and
   takes each result off the result queue, and the client trades batches with it: the tasks it gave
   to workers in one pass, and the results that came while it handled the last batch. On its own
