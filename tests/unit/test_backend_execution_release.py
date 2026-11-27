@@ -72,9 +72,9 @@ def recorder():
     return _Recorder()
 
 
-@pytest.fixture
-async def backend(recorder):
-    backend = await ConcurrentExecutionBackend()
+@pytest.fixture(params=[False, True], ids=["plain", "observe_peaks"])
+async def backend(recorder, request):
+    backend = await ConcurrentExecutionBackend(observe_peaks=request.param)
     backend.register_callback(recorder)
     yield backend
     await backend.shutdown()
