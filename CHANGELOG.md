@@ -18,6 +18,11 @@
   `tests/integration/test-hpc/benchmarks/dragon_throughput.py` measures it with
   `--with-rhapsody-dragon-native`, and `--workers_per_node` sets its pool size;
   `tests/performance/dragon_native_busy_client.py` measures it next to a busy thread.
+- **`DragonNativeExecutionBackend(hosts=[...])`** limits a backend to some of the runtime's
+  nodes, by hostname: its pool, its unplaced tasks (process tasks and group templates whose policy
+  names no node included, a template's ranks in blocks over the nodes), its process slots and the
+  placements it accepts. Several clients of one multi-node runtime can each keep their pool on
+  their own node. Telemetry still samples every node.
 - **Telemetry (experimental): every backend has an emitter.** `backend.telemetry` is a no-op
   emitter (`enabled` is `False`) until the telemetry manager attaches the backend and hands it a
   real one through the new `BaseBackend.register_emitter` / `DataBackend.register_emitter` hook
