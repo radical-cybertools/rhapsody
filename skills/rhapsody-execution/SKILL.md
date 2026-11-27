@@ -68,7 +68,7 @@ python scripts/rhapsody_env.py --api    # live signatures of Session, tasks, bac
 
 Install what is missing:
 - `pip install rhapsody-py` (Python >= 3.11);
-- add extras as needed: `[dask]`, `[dragon]`, `[radical_pilot]`, `[orbit]`, `[telemetry]`.
+- add extras as needed: `[dask]`, `[dragon]`, `[orbit]`, `[telemetry]`.
 
 ### 2. Choose a backend
 
@@ -77,7 +77,6 @@ Install what is missing:
 | Laptop, one node, debugging, CI | `ConcurrentExecutionBackend` (threads; processes for CPU-bound Python) | `python app.py` |
 | An existing or new Dask cluster (local, batch scheduler, Kubernetes) | `DaskExecutionBackend` | `python app.py` |
 | Multi-node HPC allocation, many tasks, MPI jobs, GPU placement | `DragonExecutionBackend` | `dragon app.py` |
-| Pilot-based HPC execution | `RadicalExecutionBackend` | `python app.py` |
 | Resources reachable only through a broker or endpoint | `OrbitExecutionBackend` | `python app.py` |
 
 Constructor arguments and per-task options for each backend are in
