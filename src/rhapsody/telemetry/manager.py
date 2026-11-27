@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import Callable
+from typing import TypeGuard
 
 from rhapsody.telemetry.emitter import BackendEmitter
 from rhapsody.telemetry.events import BaseEvent
@@ -1094,6 +1095,7 @@ class TelemetryManager:
                     "task_type": task_type,
                     "incomplete_lifecycle": True,
                 }
+            attrs.update(_observed_attributes(task))
             self.emit(
                 make_event(
                     TaskCompleted,
@@ -1126,6 +1128,7 @@ class TelemetryManager:
                     "error_type": error_type,
                     "incomplete_lifecycle": True,
                 }
+            attrs.update(_observed_attributes(task))
             self.emit(
                 make_event(
                     TaskFailed,
@@ -1404,6 +1407,7 @@ class TelemetryManager:
             attrs = {"status": "completed", "executable": executable, "task_type": task_type}
             if event.attributes.get("incomplete_lifecycle"):
                 attrs["incomplete_lifecycle"] = True
+            _add_observed(attrs, event.attributes)
             span.set_attributes(attrs)  # one call: one lock and one validation pass
             span.set_status(trace_mod.StatusCode.OK)
             span.end()
@@ -1428,6 +1432,7 @@ class TelemetryManager:
             }
             if event.attributes.get("incomplete_lifecycle"):
                 attrs["incomplete_lifecycle"] = True
+            _add_observed(attrs, event.attributes)
             span.set_attributes(attrs)
             span.set_status(trace_mod.StatusCode.ERROR, error_type)
             span.end()
@@ -1566,6 +1571,73 @@ class TelemetryManager:
 # ------------------------------------------------------------------
 # Module-level helper
 # ------------------------------------------------------------------
+
+
+# task["observed"] (``observe_peaks``) flattened for events and spans, memory in bytes. The names
+# follow the per-task usage of radical-cybertools/rhapsody#103 where they mean the same thing.
+_OBSERVED_BYTES = (
+    ("host_mem", "memory_peak_bytes"),
+    ("host_mem_max", "memory_peak_rank_max_bytes"),
+    ("host_mem_growth", "memory_growth_bytes"),
+    ("gpu_mem", "gpu_memory_peak_bytes"),
+)
+_OBSERVED_AS_IS = (
+    ("cpu_seconds", "cpu_seconds"),
+    ("started", "exec_start"),
+    ("ended", "exec_end"),
+    ("host", "exec_host"),
+    ("ranks", "ranks"),
+    ("killed", "killed_signal"),
+    ("timed_out", "timed_out"),
+)
+_OBSERVED_KEYS = (
+    *(name for _, name in _OBSERVED_BYTES),
+    *(name for _, name in _OBSERVED_AS_IS),
+    "exec_hosts",
+    "cpu_loadavg",
+    "resource_usage_scope",
+)
+
+
+def _number(value: Any) -> TypeGuard[float]:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _observed_attributes(task: dict) -> dict:
+    """Flatten ``task["observed"]`` into terminal-event attributes; memory in bytes.
+
+    ``cpu_loadavg`` is the average number of busy cores over the task's run (``cpu_seconds`` over
+    the window). ``resource_usage_scope`` is ``"job"`` when the figures cover the task alone and
+    ``"worker"`` when they were taken in a pool worker the task shared with earlier tasks
+    (``observed["approximate"]``).
+    """
+    observed = task.get("observed")
+    if not isinstance(observed, dict):
+        return {}
+    attrs: dict = {}
+    for key, name in _OBSERVED_BYTES:
+        if _number(observed.get(key)):
+            attrs[name] = int(observed[key] * (1 << 30))
+    for key, name in _OBSERVED_AS_IS:
+        value = observed.get(key)
+        if value is not None and (_number(value) or isinstance(value, (str, bool))):
+            attrs[name] = value
+    hosts = observed.get("hosts")
+    if isinstance(hosts, list) and hosts:
+        attrs["exec_hosts"] = [str(h) for h in hosts]
+    cpu, started, ended = (observed.get(k) for k in ("cpu_seconds", "started", "ended"))
+    if _number(cpu) and _number(started) and _number(ended) and ended > started:
+        attrs["cpu_loadavg"] = cpu / (ended - started)
+    if attrs:
+        attrs["resource_usage_scope"] = "worker" if observed.get("approximate") else "job"
+    return attrs
+
+
+def _add_observed(attrs: dict, attributes: dict) -> None:
+    """Add the flattened ``observed`` attributes to a terminal task span's ``attrs``."""
+    for key in _OBSERVED_KEYS:
+        if key in attributes:
+            attrs[key] = attributes[key]
 
 
 def _task_executable(task: dict) -> str:
