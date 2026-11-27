@@ -93,9 +93,10 @@
   stay as a backend-neutral extension point; no built-in backend declares them now.
 
 - **`radical.prof` profiling in `OrbitExecutionBackend`** — the optional, undeclared
-  `radical.prof` import (the radical.utils-style `Profiler`) and its `task_submit`,
-  `task_batch_flush` and `task_complete` events are removed. Orbit task execution is
-  unchanged.
+  `radical.prof` import (a standalone profiling package, not on PyPI) and its
+  `task_submit`, `task_batch_flush` and `task_complete` events are removed. radical.orbit's
+  `examples/analyze_rhapsody.py` reads these events and will be updated on the Orbit side.
+  Orbit task execution is unchanged.
 
 ### Fixed
 
