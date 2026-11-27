@@ -77,11 +77,15 @@
 
 ### Removed
 
-- **RADICAL-Pilot backend** — `RadicalExecutionBackend`
-  (`rhapsody.backends.execution.radical_pilot`) and its tests are removed, along with the
-  `radical_pilot` extra, its `rhapsody.backends` entry point, the `radical_pilot` pytest
-  marker, the `make test-rp` target and the RADICAL-Pilot sections of the docs and skills.
-  `discover_backends()` and `BackendRegistry` no longer report a `radical_pilot` backend.
+- **BREAKING CHANGE: RADICAL-Pilot backend** — `RadicalExecutionBackend`
+  (`rhapsody.backends.execution.radical_pilot`) and its tests are removed, with no
+  deprecation period, along with the `radical_pilot` extra, its `rhapsody.backends` entry
+  point, the `radical_pilot` pytest marker, the `make test-rp` target and the RADICAL-Pilot
+  sections of the docs and skills. `discover_backends()` and `BackendRegistry` no longer
+  report a `radical_pilot` backend: `from rhapsody.backends import RadicalExecutionBackend`
+  now raises `ImportError`, `get_backend("radical_pilot")` raises
+  `ValueError("Backend 'radical_pilot' not found ...")`, and
+  `pip install "rhapsody-py[radical_pilot]"` no longer installs RADICAL-Pilot.
   For HPC execution, use `DragonExecutionBackend`. The data-linking hooks on `BaseBackend`
   (`supports_implicit_data_linking`, `supports_explicit_data_linking`,
   `link_implicit_data_deps`, `link_explicit_data_deps`) stay as a backend-neutral extension
