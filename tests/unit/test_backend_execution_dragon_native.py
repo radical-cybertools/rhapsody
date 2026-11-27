@@ -970,6 +970,21 @@ async def test_in_a_session_a_repeat_leaves_the_first_tasks_future_alone(backend
     assert first["return_value"] == "released"
 
 
+async def test_a_function_whose_pickle_is_over_a_megabyte_runs(backend):
+    """Its message is pickled another way, through a file: pickle.dumps copied it slowly."""
+    rec = Recorder(backend)
+    blob = b"x" * (2 << 20)
+
+    def size(n):
+        return len(blob) + n
+
+    tasks = [fn_task(size, n) for n in range(3)]
+    await backend.submit_tasks(tasks)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert [t["return_value"] for t in tasks] == [len(blob) + n for n in range(3)]
+
+
 async def test_unpicklable_result_fails_only_its_task(backend):
     rec = Recorder(backend)
     bad, good = fn_task(lambda: threading.Lock()), fn_task(square, 2)
@@ -1032,6 +1047,306 @@ async def test_function_a_worker_cannot_load_fails_only_its_task(backend):
     assert await rec.wait(bad["uid"]) == ["FAILED"]
     assert "cannot rebuild" in str(bad["exception"])
     assert await rec.wait(good["uid"]) == ["DONE"]
+
+
+def make_scaler(factor):
+    def scale(x):
+        return x * factor[0]
+
+    return scale
+
+
+def dumps_of(monkeypatch, fn):
+    """Record the objects cloudpickle pickles that are ``fn`` or hold it at their top level."""
+    found = []
+    dump = cloudpickle.CloudPickler.dump
+
+    def recording_dump(self, obj):
+        if obj is fn or (isinstance(obj, tuple) and any(item is fn for item in obj)):
+            found.append(obj)
+        return dump(self, obj)
+
+    monkeypatch.setattr(cloudpickle.CloudPickler, "dump", recording_dump)
+    return found
+
+
+async def test_a_function_shared_by_many_tasks_is_pickled_once(backend, monkeypatch):
+    """Each task pickled its function by value again: for a closure, cloudpickle scans every loaded
+    module, about a millisecond a task in a process with a few thousand of them. Now twice: a pickle
+    is kept once the next one comes out the same."""
+    rec = Recorder(backend)
+    scale = make_scaler([3])
+    pickled = dumps_of(monkeypatch, scale)
+    tasks = [fn_task(scale, i) for i in range(20)]
+    await backend.submit_tasks(tasks)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert [t["return_value"] for t in tasks] == [3 * i for i in range(20)]
+    assert len(pickled) == 2
+
+
+async def test_a_task_runs_its_function_as_it_was_when_submitted(backend):
+    rec = Recorder(backend)
+    factor = [2]
+    scale = make_scaler(factor)
+    first = fn_task(scale, 5)
+    await backend.submit_tasks([first])
+    factor[0] = 3
+    second = fn_task(scale, 5)
+    await backend.submit_tasks([second])
+    for task in (first, second):
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert (first["return_value"], second["return_value"]) == (10, 15)
+
+
+def make_box_writer():
+    box = []
+
+    def put(given, x):
+        box.append(x)
+        return given is box, list(box)
+
+    return put, box
+
+
+async def test_an_argument_the_function_also_holds_stays_one_object(backend):
+    """The function and its arguments still unpickle as from one pickle."""
+    rec = Recorder(backend)
+    put, box = make_box_writer()
+    tasks = [fn_task(put, box, 1), fn_task(put, box, 2)]  # the second from the kept pickle
+    await backend.submit_tasks(tasks)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+    assert [t["return_value"] for t in tasks] == [(True, [1]), (True, [2])]
+
+
+def slow_builds(monkeypatch, backend, seconds=0.002):
+    """Make each task take ``seconds`` to build; return the uids built so far."""
+    built = []
+    build = backend.build_task
+
+    def slow_build(task):
+        time.sleep(seconds)
+        built.append(task["uid"])
+        return build(task)
+
+    monkeypatch.setattr(backend, "build_task", slow_build)
+    return built
+
+
+async def test_a_long_submit_lets_the_event_loop_run(backend, monkeypatch):
+    """A batch was built in one go: a generation of a few thousand tasks held the loop for
+    seconds, and every other coroutine of the process with it."""
+    rec = Recorder(backend)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(100)]
+    seen = []
+
+    async def watch():
+        while len(built) < len(tasks):
+            seen.append(len(built))
+            await asyncio.sleep(0)
+
+    watcher = asyncio.create_task(watch())
+    await backend.submit_tasks(tasks)
+    await watcher
+    assert any(0 < n < len(tasks) for n in seen)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+
+
+async def test_cancelling_a_task_a_submit_has_not_reached_yet(backend, monkeypatch):
+    seen = record_states(backend)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(100)]
+    last = tasks[-1]
+    repeat = dict(fn_task(square, 0), uid=last["uid"])
+    submit = asyncio.create_task(backend.submit_tasks([*tasks, repeat]))
+    await until(lambda: 0 < len(built) < len(tasks))
+    assert await backend.cancel_task(last["uid"]) is True
+    await submit
+    assert last["uid"] not in built
+    assert [s for t, s in seen if t is last] == ["CANCELED"]
+    assert [s for t, s in seen if t is repeat] == ["CANCELED"]
+    await until(lambda: sum(s == "DONE" for _, s in seen) == len(tasks) - 1)
+    assert await backend.cancel_task(last["uid"]) is False
+
+
+async def test_shutdown_during_a_long_submit_cancels_what_it_has_not_built(backend, monkeypatch):
+    seen = record_states(backend)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(blocked) for _ in range(100)]
+    submit = asyncio.create_task(backend.submit_tasks(tasks))
+    await until(lambda: 0 < len(built) < len(tasks))
+    await backend.shutdown()
+    await submit
+    GATE.set()
+    assert len(built) < len(tasks)
+    for task in tasks:
+        states = [s for t, s in seen if t is task]
+        if task["uid"] in built:
+            assert states[0] == "RUNNING" and states[-1] in ("CANCELED", "DONE")
+        else:
+            assert states == ["CANCELED"]
+
+
+async def test_cancelling_a_task_not_reached_runs_the_callback_without_the_lock(
+    backend, monkeypatch
+):
+    """The backend's threads wait on that lock: a callback must never run while it is held."""
+    held = []
+    backend.register_callback(lambda task, state: held.append((state, backend._lock._is_owned())))
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(100)]
+    submit = asyncio.create_task(backend.submit_tasks(tasks))
+    await until(lambda: 0 < len(built) < len(tasks))
+    assert await backend.cancel_task(tasks[-1]["uid"]) is True
+    await submit
+    assert ("CANCELED", False) in held
+    assert all(not owned for _, owned in held)
+
+
+async def test_a_submit_that_fails_midway_reports_no_state_for_what_it_did_not_reach(
+    backend, monkeypatch
+):
+    """As before the batch let the loop run: the caller fails the batch's tasks with the error
+    (AsyncFlow does); a CANCELED of its own would give those tasks a second final state."""
+    seen = record_states(backend)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(100)]
+    submit_one = backend._submit_one
+
+    def failing(task):
+        if task is tasks[60]:
+            raise RuntimeError("routing failed")
+        submit_one(task)
+
+    monkeypatch.setattr(backend, "_submit_one", failing)
+    with pytest.raises(RuntimeError, match="routing failed"):
+        await backend.submit_tasks(tasks)
+    assert 0 < len(built) < len(tasks)
+    assert not [s for t, s in seen if s == "CANCELED"]
+    assert backend._unbuilt == []
+
+
+async def test_a_long_submit_takes_any_iterable(backend, monkeypatch):
+    rec = Recorder(backend)
+    slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(30)]
+    await backend.submit_tasks(task for task in tasks)
+    for task in tasks:
+        assert await rec.wait(task["uid"]) == ["DONE"]
+
+
+async def test_cancelling_a_long_submit_cancels_what_it_has_not_built(backend, monkeypatch):
+    seen = record_states(backend)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(100)]
+    submit = asyncio.create_task(backend.submit_tasks(tasks))
+    await until(lambda: 0 < len(built) < len(tasks))
+    submit.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await submit
+    for task in tasks:
+        states = [s for t, s in seen if t is task]
+        if task["uid"] in built:
+            await until(lambda task=task: [s for t, s in seen if t is task][-1] == "DONE")
+        else:
+            assert states == ["CANCELED"]
+
+
+async def test_a_task_listed_twice_and_cancelled_before_it_is_built_is_cancelled_once(
+    backend, monkeypatch
+):
+    """As before the batch let the loop run, the second listing of one task adds nothing."""
+    seen = record_states(backend)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(square, i) for i in range(100)]
+    twice = tasks[-1]
+    submit = asyncio.create_task(backend.submit_tasks([*tasks, twice]))
+    await until(lambda: 0 < len(built) < len(tasks))
+    assert await backend.cancel_task(twice["uid"]) is True
+    await submit
+    assert [s for t, s in seen if t is twice] == ["CANCELED"]
+
+
+async def test_a_callback_that_raises_does_not_stop_the_other_cancels(backend, monkeypatch):
+    """At shutdown, the tasks a submit has not reached are cancelled one by one: a callback that
+    raised skipped the rest, and replaced how the submit ended."""
+    seen = []
+
+    def raising_once(task, state):
+        seen.append((task, state))
+        if state == "CANCELED" and sum(s == "CANCELED" for _, s in seen) == 1:
+            raise RuntimeError("callback failed")
+
+    backend.register_callback(raising_once)
+    built = slow_builds(monkeypatch, backend)
+    tasks = [fn_task(blocked) for _ in range(100)]
+    submit = asyncio.create_task(backend.submit_tasks(tasks))
+    await until(lambda: 0 < len(built) < len(tasks))
+    await backend.shutdown()
+    await submit  # ends as it would have: no error of the callback's
+    GATE.set()
+    unbuilt = [t for t in tasks if t["uid"] not in built]
+    assert unbuilt
+    for task in unbuilt:
+        assert [s for t, s in seen if t is task] == ["CANCELED"]
+
+
+async def test_a_large_batch_of_results_is_delivered_in_slices(backend, monkeypatch):
+    """Every result the relay had sent was handed to the callback in one loop callback."""
+    delivered = []
+
+    def slow_callback(task, state):
+        time.sleep(0.002)
+        delivered.append(task["uid"])
+
+    backend.register_callback(slow_callback)
+    tasks = [fn_task(square, i) for i in range(100)]
+    changes = []
+    for task in tasks:
+        rec = types.SimpleNamespace(uid=task["uid"], desc=task, repeats=[])
+        changes.append((rec, "DONE", {"return_value": 0}))
+    backend._emit_all(changes)
+    backend._flush_outbox()
+    assert 0 < len(delivered) < len(tasks)
+    await until(lambda: len(delivered) == len(tasks))
+    assert delivered == [t["uid"] for t in tasks]
+
+
+class CallbackExit(BaseException):
+    """Not an Exception, as a CancelledError is not: the loop reports it and goes on."""
+
+
+async def test_a_callback_that_raises_a_base_exception_does_not_hold_later_results(backend):
+    """The flush stayed marked as scheduled when none was: no later state reached the callback
+    until shutdown."""
+    loop = asyncio.get_running_loop()
+    errors = []
+    loop.set_exception_handler(lambda loop, context: errors.append(context.get("exception")))
+    tasks = [fn_task(square, i) for i in range(4)]
+    delivered = []
+
+    def callback(task, state):
+        if task is tasks[0]:
+            raise CallbackExit()
+        delivered.append(task["uid"])
+
+    backend.register_callback(callback)
+    changes = [
+        (types.SimpleNamespace(uid=t["uid"], desc=t, repeats=[]), "DONE", {"return_value": 0})
+        for t in tasks
+    ]
+    try:
+        backend._emit_all(changes[:2])
+        await until(lambda: errors)
+        backend._emit_all(changes[2:])
+        await until(lambda: len(delivered) == 3)
+    finally:
+        loop.set_exception_handler(None)
+    assert delivered == [t["uid"] for t in tasks[1:]]
+    assert isinstance(errors[0], CallbackExit)
 
 
 def calls_sys_exit():
@@ -2333,6 +2648,54 @@ async def test_cancel_running_pool_task_kills_and_replaces_its_worker(backend, d
     after = fn_task(square, 6, placement={"host": w.host})
     await backend.submit_tasks([after])
     assert await rec.wait(after["uid"]) == ["DONE"]
+
+
+async def test_a_cancel_whose_callback_raises_still_stops_the_task_and_cancels_its_repeat(
+    backend, dragon
+):
+    """The CANCELED callbacks ran unguarded, before the worker was stopped.
+
+    One that raised left the repeat with no final state, and the task running on a worker marked
+    dead and never replaced.
+    """
+    seen = []
+
+    def raising_once(task, state):
+        seen.append((task, state))
+        if state == "CANCELED" and sum(s == "CANCELED" for _, s in seen) == 1:
+            raise RuntimeError("callback failed")
+
+    backend.register_callback(raising_once)
+    first = fn_task(blocked)
+    repeat = dict(fn_task(square, 2), uid=first["uid"])
+    await backend.submit_tasks([first, repeat])
+    w = backend._tasks[first["uid"]].worker
+    proc = w.proc
+    assert await backend.cancel_task(first["uid"]) is True
+    assert [s for t, s in seen if t is repeat] == ["RUNNING", "CANCELED"]
+    await until(lambda: proc.code == -signal.SIGKILL)
+    await until(lambda: len(dragon.workers()) == 5 and backend._live_by_key[w.key] == 2)
+
+
+async def test_a_cancel_whose_callback_raises_a_base_exception_still_stops_the_task(
+    backend, dragon
+):
+    """The worker is marked dead before the callbacks run: one that raised a BaseException left
+    it running the task, never replaced."""
+
+    def raising(task, state):
+        if state == "CANCELED":
+            raise CallbackExit()
+
+    backend.register_callback(raising)
+    task = fn_task(blocked)
+    await backend.submit_tasks([task])
+    w = backend._tasks[task["uid"]].worker
+    proc = w.proc
+    with pytest.raises(CallbackExit):
+        await backend.cancel_task(task["uid"])
+    await until(lambda: proc.code == -signal.SIGKILL)
+    await until(lambda: len(dragon.workers()) == 5 and backend._live_by_key[w.key] == 2)
 
 
 async def test_pool_timeout_fails_the_task_and_kills_its_worker(backend):
