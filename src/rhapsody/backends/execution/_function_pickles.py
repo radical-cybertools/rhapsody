@@ -16,14 +16,14 @@ that by walking those objects for every call, which costs microseconds, not the 
 function holding something whose changes the walk cannot see (an instance of a class, a class or
 module pickled by value) is pickled for every call, as before, and so is one that holds too much.
 
-A pickle is kept only once two pickles in a row of the same function, each between two walks that
-agree, come out the same. So a closure made for a single task is never kept, nor what it holds; and
+A pickle is kept only once it comes out as the last pickle of the same function did, and the walks
+just before and after it agree. So a closure made for a single task is never kept, nor what it holds; and
 a value another thread changes while a pickle is taken, and changes back, is not kept either: no
 walk sees the value that pickle holds, but the next pickle differs from it (unless the same race
 happens during that pickle too). After a pickle that differs from the last, the function is walked
 again only once two pickles in a row agree, so one that changes before every call costs about what
-pickling it does. A function whose pickle is larger than ``max_bytes`` is pickled for every call
-with no walk.
+pickling it does. A function whose pickle has been larger than ``max_bytes`` is pickled for every
+call from then on, with no walk.
 
 ``dumps_call`` pickles the rest of a call after the function, continuing the function pickle's
 memo, so that one unpickler loading both gives what one pickle of the two gave: an object the
@@ -278,8 +278,8 @@ class FunctionPickles:
     """Pickles of the functions seen last, each given again while it would come out the same.
 
     ``maxsize`` functions are kept, the least recently used dropped first, and no more than
-    ``max_total_bytes`` of pickles; a function whose pickle is larger than ``max_bytes`` is never
-    kept, nor walked again, nor is one holding more than ``walk_budget`` objects. With ``confirm``
+    ``max_total_bytes`` of pickles; a function whose pickle has been larger than ``max_bytes`` is
+    never kept, nor walked again, nor is one holding more than ``walk_budget`` objects. With ``confirm``
     (the default) a pickle is kept once the next pickle of the same function comes out the same,
     and after a pickle that differs from the last, once two more in a row agree; without, the first
     is kept.

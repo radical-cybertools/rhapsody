@@ -2374,12 +2374,15 @@ class DragonNativeExecutionBackend(BaseBackend):
         if rec is None:
             self._report_canceled(unbuilt)
             return bool(unbuilt)
-        # A callback that raises stops neither the other CANCELED states nor the task.
-        self._report_canceled([rec.desc, *rec.repeats, *unbuilt])
-        if worker is not None:
-            self._ops.submit(self._retire_worker, worker, rec.token)
-        elif rec.kind != "pool" and started:
-            self._ops.submit(self._kill_process_task, rec)
+        # A callback that raises stops neither the other CANCELED states nor the task, which is
+        # stopped even after a BaseException: its worker is already marked dead.
+        try:
+            self._report_canceled([rec.desc, *rec.repeats, *unbuilt])
+        finally:
+            if worker is not None:
+                self._ops.submit(self._retire_worker, worker, rec.token)
+            elif rec.kind != "pool" and started:
+                self._ops.submit(self._kill_process_task, rec)
         return True
 
     async def shutdown(self) -> None:

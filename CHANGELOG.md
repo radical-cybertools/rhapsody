@@ -88,7 +88,7 @@
   among them, are the same objects with the same contents. A function holding an object whose
   changes cannot be seen this way (an instance, a class or module pickled by value) is pickled for
   every task, as before, at about the cost of `cloudpickle.dumps`, and so is a function that
-  changes before every task or whose pickle is over 1 MB. A closure made for a single task is
+  changes before every task or whose pickle has been over 1 MB. A closure made for a single task is
   never kept. The native backend still loads a task's function and arguments on the
   worker as from one pickle, so an object both hold stays one object.
 - **BEHAVIOUR CHANGE: the native backend's worker message is `(uid, fn_data, rest)`.** It was
@@ -101,7 +101,8 @@
   shutdown.
 - **BEHAVIOUR CHANGE: `DragonNativeExecutionBackend.cancel_task` returns `True` for a task of a
   batch still being submitted**, and reports it CANCELED; it returned `False` for a task the
-  backend had not built yet.
+  backend had not built yet. A CANCELED callback that raises an `Exception` is now logged, and the
+  other CANCELED states and the cancel itself go on; `cancel_task` used to raise it to its caller.
 - **BEHAVIOUR CHANGE: `DragonNativeExecutionBackend.submit_tasks` calls can interleave.** Two
   concurrent calls now build their tasks in turns, 20 ms at a time. A call cancelled midway leaves
   the tasks it already built running and reports the rest CANCELED; after any other error the
