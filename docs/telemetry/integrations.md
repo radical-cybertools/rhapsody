@@ -151,6 +151,7 @@ class SLAMonitor:
             self.violations.append({
                 "task_id":    event.task_id,
                 "error_type": event.error_type,
+                "message":    event.attributes.get("error_message"),
                 "backend":    event.backend,
             })
 
