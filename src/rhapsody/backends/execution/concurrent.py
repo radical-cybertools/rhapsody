@@ -16,6 +16,7 @@ from typing import Callable
 from ..base import BaseBackend
 from ..constants import BackendMainStates
 from ..constants import StateMapper
+from ._thread_loops import ThreadLoops
 
 try:
     import cloudpickle
@@ -43,7 +44,15 @@ class ConcurrentExecutionBackend(BaseBackend):
     term_grace: float = 5.0
     kill_wait: float = 1.0
 
-    def __init__(self, executor: Executor = None, name: str = "concurrent"):
+    def __init__(
+        self, executor: Executor = None, name: str = "concurrent", reuse_event_loop: bool = False
+    ):
+        """``reuse_event_loop``: on a thread pool, run async function tasks on one event loop per
+        worker thread instead of ``asyncio.run`` per task (see
+        ``rhapsody.backends.execution._thread_loops``).
+
+        Off by default. Sync functions never get a loop, and a process pool ignores the option.
+        """
         super().__init__(name=name)
 
         self.logger = _get_logger()
@@ -63,6 +72,13 @@ class ConcurrentExecutionBackend(BaseBackend):
             )
 
         self.executor = executor
+        self.reuse_event_loop = reuse_event_loop
+        # one loop per worker thread, if asked for, on a thread pool only
+        self._thread_loops: ThreadLoops | None = (
+            ThreadLoops()
+            if reuse_event_loop and not isinstance(executor, ProcessPoolExecutor)
+            else None
+        )
         self.tasks: dict[str, asyncio.Task] = {}
         self._callback_func: Callable = lambda t, s: None
         self._initialized = False
@@ -154,6 +170,13 @@ class ConcurrentExecutionBackend(BaseBackend):
             return asyncio.run(func(*args, **kwargs))
         return func(*args, **kwargs)
 
+    def _run_on_thread_loop(self, func, args, kwargs):
+        """Execute function (sync or async) in an executor thread; an async one on the thread's own
+        event loop."""
+        if asyncio.iscoroutinefunction(func):
+            return self._thread_loops.run(func(*args, **kwargs))
+        return func(*args, **kwargs)
+
     async def _execute_function(self, task: dict) -> tuple[dict, str]:
         """Execute async function task in Process/Thread PoolExecutor."""
         func = task["function"]
@@ -164,6 +187,8 @@ class ConcurrentExecutionBackend(BaseBackend):
         if isinstance(self.executor, ProcessPoolExecutor):
             func = cloudpickle.dumps(func)
             exec_wrapper = self._run_in_process
+        elif self._thread_loops is not None:
+            exec_wrapper = self._run_on_thread_loop
         else:
             exec_wrapper = self._run_in_thread
 
@@ -423,6 +448,9 @@ class ConcurrentExecutionBackend(BaseBackend):
 
         await self.cancel_all_tasks()
         self.executor.shutdown(wait=True)
+        if self._thread_loops is not None:
+            # the worker threads have finished: close their loops, off this loop
+            await asyncio.to_thread(self._thread_loops.close)
         self.logger.info("Concurrent execution backend shutdown complete")
 
     def build_task(self, uid, task_desc, task_specific_kwargs):
